@@ -2,6 +2,15 @@
 
 These notes cover `agent-durable/`; paths are repo-relative; the root `CLAUDE.md` has the repo-wide rules.
 
+## Database access
+
+The rule is in the root CLAUDE.md, "Database access (#5295)". Today `gate/` and
+`credentials.py` write and read `ai_*` tables directly, and the clusters Deployment (0
+replicas) still mounts the owner database URL and the KEK, although it runs no worker.
+Under the rule agent-durable holds no database secret: any Python workload it gets reaches
+data through CRUD routes with a service credential (#5299), and the Deployment loses the
+secret (eh-homelab/clusters#3182).
+
 ## Commands
 The Python agent parts (`agent-durable/`, Python 3.14; the `agent-durable` CI job, #1056):
 

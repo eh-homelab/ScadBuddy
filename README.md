@@ -477,7 +477,8 @@ and each caller reads its current one from a view of its own and unseals it with
 KEK, so **each caller needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. Settings → System →
 Service credentials lists, rotates and revokes them.
 
-**Each caller's own database role (#5210).** Like the render worker's
+**Each caller's own database role (#5210).** This is today's state, not the target
+(see the next paragraph). Like the render worker's
 `scadbuddy_render` (below), each caller should connect as a role of its own, so it holds
 exactly the tables it touches and its credential's view, never the API's settings
 store or another caller's credential:
@@ -498,6 +499,16 @@ API started is granted on the API's next start. A worker on its own role never
 migrates: it waits until the API has migrated and granted it. The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role and `scadbuddy_projects` read
 of them (`agent/src/db/grants.ts`).
+
+On 2026-11-05 the render, print and projects workers connected as their own roles, and
+the agent sidecar and the agent workers still connected as the owner. **The target
+(#5295) replaces these roles.** A role per caller in one database is not a boundary, so
+only the CRUD service (the API) will hold a database secret. Every other caller becomes an
+HTTP client of it with its service credential, and loses its role and grant list: the
+workers in #5298, the agent in #5299. Then #5297 authenticates `/api/v1/internal/*`,
+#5296 moves untrusted template code out of pods with a database secret, and
+eh-homelab/clusters#3182 limits Postgres to the CRUD service. Who holds what today, and
+the zones: [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
 
 **The rollout** (spec §9.1), each step its own manifest change in
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters):
