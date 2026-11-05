@@ -862,9 +862,12 @@ class Lifecycle:
         """The rollout's repair (spec 2026-11-02 §4.1): an item with a design whose copy
         is not its current revision's, because a build before revisions wrote it (no
         current revision) or edited it (a reference or colours its revision lacks), gets
-        its next revision made from the copy (`_revise` with ``repair``). Anything else
-        is returned as it is, writing nothing."""
+        its next revision made from the copy (`_revise` with ``repair``). Anything else,
+        and an item of an ended order or a settled item (whose record stays as it was), is
+        returned as it is, writing nothing."""
         if item.kind == "custom" or item.reference is None:
+            return item
+        if order.status in ENDED or item.status in SETTLED:
             return item
         if item.current_revision_id is not None:
             current = self.store.revision(item.current_revision_id, conn=conn)

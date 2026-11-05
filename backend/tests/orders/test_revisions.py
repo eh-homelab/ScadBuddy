@@ -544,6 +544,14 @@ def test_an_unrevised_item_is_test_printed_without_a_quote_first(shop: Shop) -> 
     assert shop.kinds(order).count("revision.repaired") == 1
 
 
+def test_an_ended_order_is_not_repaired(shop: Shop) -> None:
+    order, item = _unrevised(shop)
+    shop.lifecycle.cancel_order(order.id, BY)
+    assert shop.lifecycle.ensure_revision(order.id, item.id, BY).current_revision_id is None
+    assert shop.rows.revisions(item.id) == []
+    assert "revision.repaired" not in shop.kinds(order)
+
+
 def test_a_copy_changed_behind_its_revision_is_the_next_revision_before_a_send(
     shop: Shop,
 ) -> None:
