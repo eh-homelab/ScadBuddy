@@ -59,7 +59,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath, presetPath } from '../lib/deeplink'
-import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAGS, filterModels, tagCounts } from '../lib/catalogueQuery'
+import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAG_FILTER_CHARS, MAX_TAG_FILTERS, filterModels, tagCounts } from '../lib/catalogueQuery'
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
@@ -1470,10 +1470,14 @@ function catalogueFilters(params: URLSearchParams): CatalogueQuery {
   }
 }
 
-/** The 422 `GET /models` and `GET /model-facets` answer for more `tag`s than `TagFilter` takes, as sent. */
+/** The 422 `GET /models` and `GET /model-facets` answer for `tag`s past what `TagFilter` takes, as sent. */
 function tooManyTags(params: URLSearchParams) {
-  return params.getAll('tag').length > MAX_TAGS
-    ? HttpResponse.json({ detail: `at most ${MAX_TAGS} tags` }, { status: 422 })
+  const tags = params.getAll('tag')
+  return tags.length > MAX_TAG_FILTERS || tags.some((tag) => [...tag].length > MAX_TAG_FILTER_CHARS)
+    ? HttpResponse.json(
+        { detail: `at most ${MAX_TAG_FILTERS} tags, each at most ${MAX_TAG_FILTER_CHARS} characters` },
+        { status: 422 },
+      )
     : undefined
 }
 

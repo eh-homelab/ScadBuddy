@@ -249,7 +249,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
-import { fold, unmatchable } from '../lib/catalogueQuery'
+import { unmatchable } from '../lib/catalogueQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
 import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
@@ -335,9 +335,8 @@ export interface ModelFilters {
 function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
   const query = new URLSearchParams()
   if (q.trim()) query.set('q', q.trim())
-  // One spelling of each tag as folded: the backend folds both sides, so the others
-  // select the same models, and its `MAX_TAGS` cap counts the list as sent (#5292 review).
-  for (const tag of new Map(tags.map((tag) => [fold(tag), tag])).values()) query.append('tag', tag)
+  // As typed: the route folds them, and the browser cannot fold as it does (#5305 review).
+  for (const tag of new Set(tags)) query.append('tag', tag)
   if (origin !== 'all') query.set('origin', origin)
   return query
 }
@@ -1261,8 +1260,7 @@ export const api = {
     const every = await request<ModelFacets>(`/model-facets?${modelFilterParams({ ...filters, tags: [] })}`, {
       signal,
     })
-    const tags = [...new Map(filters.tags.map((tag) => [fold(tag), tag])).values()]
-    return { total: every.total, matched: 0, tags: tags.map((tag) => ({ tag, count: 0 })) }
+    return { total: every.total, matched: 0, tags: [...new Set(filters.tags)].map((tag) => ({ tag, count: 0 })) }
   },
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),

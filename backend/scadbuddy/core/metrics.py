@@ -21,6 +21,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from prometheus_client.metrics import MetricWrapperBase
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = [
@@ -73,7 +74,9 @@ RENDER_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 240, 480, 900)
 #: A native slice: the slicer queue's wait (up to two hours) and four `slice_plate`
 #: attempts of up to 30 minutes, past `RENDER_BUCKETS`' 15 minutes (Task 14/15 review M3).
 SLICE_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 16200)
-HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+#: Up to 120 s (#2293): list routes took 10 to 16 s and a save with its polling ~37 s,
+#: and past the top finite bucket a quantile reads as that bucket.
+HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120)
 
 #: Which process the metrics are for: the API, or one of `python -m scadbuddy.worker`'s
 #: queues (the render worker, ``--queue bambuddy``, ``--queue projects``).
@@ -96,7 +99,9 @@ _LISTENING = frozenset({"events_received", "events_resyncs", "event_log_pruned"}
 
 #: The attributes each worker role registers (#664): only what that worker sets, so its
 #: /metrics never carries the API's series as constant zeros (`scadbuddy_render_store_up
-#: 0` fires ScadBuddyRenderStoreUnreadable). The API registers every series.
+#: 0` fires ScadBuddyRenderStoreUnreadable). The API registers every series. When a
+#: worker starts setting a ``metrics.<attribute>``, add the attribute to its role here, or
+#: that worker never exports it.
 ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
     "render": _WORKER_COMMON
     | {
@@ -528,7 +533,7 @@ class Metrics:
         if role != "api":
             keep = ROLE_SERIES[role]
             for name, value in vars(self).items():
-                if isinstance(value, Counter | Gauge | Histogram) and name not in keep:
+                if isinstance(value, MetricWrapperBase) and name not in keep:
                     r.unregister(value)
 
     @contextmanager

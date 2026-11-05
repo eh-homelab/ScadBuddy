@@ -5,6 +5,8 @@ import {
   DEFAULT_QUERY,
   MAX_SEARCH_CHARS,
   MAX_TAG_CHARS,
+  MAX_TAG_FILTER_CHARS,
+  MAX_TAG_FILTERS,
   MAX_TAGS,
   type CatalogueQuery,
   clearFilters,
@@ -189,16 +191,16 @@ describe('tagCounts', () => {
   })
 })
 
-describe('unmatchable (#5288 review)', () => {
-  it('is true for tags no model can carry all of: too many, or one too long', () => {
-    expect(unmatchable(Array.from({ length: MAX_TAGS + 1 }, (_, n) => `t${n}`))).toBe(true)
-    expect(unmatchable(['x'.repeat(MAX_TAG_CHARS + 1)])).toBe(true)
+describe('unmatchable (#5305 review)', () => {
+  it('is true past what GET /models takes, as sent: too many tags, or one too long', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAG_FILTERS + 1 }, (_, n) => `t${n}`))).toBe(true)
+    expect(unmatchable(['x'.repeat(MAX_TAG_FILTER_CHARS + 1)])).toBe(true)
   })
 
-  it('counts tags that fold alike once, and a tag in code points as the backend does', () => {
-    expect(unmatchable([...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0'])).toBe(false)
-    // 60 code points, 120 UTF-16 units: the backend takes it.
-    expect(unmatchable(['😀'.repeat(60)])).toBe(false)
+  it('leaves tags past the caps of a model to the route, which answers none', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAGS + 1 }, (_, n) => `t${n}`))).toBe(false)
+    // In code points, as the backend counts: 400 of them, 800 UTF-16 units.
+    expect(unmatchable(['😀'.repeat(MAX_TAG_FILTER_CHARS)])).toBe(false)
   })
 })
 

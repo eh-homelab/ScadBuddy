@@ -24,6 +24,29 @@ CLAUDE.md of its own, which Claude Code reads when it works on files there:
 - `deploy/CLAUDE.md`: the Grafana dashboards.
 - `plugins/CLAUDE.md`: ScadBuddy's Claude plugin.
 
+## Database access (#5295)
+
+Only the CRUD service (today's API process) gets SQL access. No untrusted code can ever
+reach the database. Every other process (the render, print and projects workers, the
+agent services, agent-durable) is an HTTP client of the CRUD service, with a short-lived
+service credential (PR #5211). The owner decided this on 2026-11-05.
+
+- Never add a new database client, a read or write of another service's tables, or a
+  cross grant. A role per caller in one database is not a boundary: a table owner's
+  triggers, rules, defaults and builtin-shadowing functions run with the other role's
+  privileges (the review of PR #5287, closed).
+- Never run untrusted code (template Python, openscad, Claude Code tools, plugin code) in
+  a pod that holds a database secret.
+- New data that crosses services goes through a CRUD route that requires a service
+  credential from its first PR.
+
+Today's code still breaks the rule: seven processes hold a Postgres secret, the agent
+and the API share tables through grants, and template Python runs in the render worker's
+pod. Do the work in this order: #5298 (the workers), #5299 (the agent), #5297 (authenticate
+`/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of pods with a database
+secret), then eh-homelab/clusters#3182 (the network). The evidence and the zones are in
+[docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
+
 ## Commands (what CI runs)
 
 Each area's commands are in its own CLAUDE.md (see "Where the notes are").

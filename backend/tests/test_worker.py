@@ -23,7 +23,7 @@ import httpx
 import psycopg
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Summary
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.deployment.v1 import (
@@ -2163,6 +2163,19 @@ def test_every_role_names_only_metrics_that_exist() -> None:
                 role,
                 name,
             )
+
+
+def test_a_worker_never_exports_a_collector_of_another_type() -> None:
+    """A later `Summary`, `Info` or `Enum` attribute stays off a worker's scrape too (#664)."""
+
+    class WithSummary(Metrics):
+        def __init__(self, registry: CollectorRegistry, role: MetricsRole) -> None:
+            self.extra = Summary("scadbuddy_test_extra_seconds", "Not a role's.", registry=registry)
+            super().__init__(registry, role=role)
+
+    for role in ROLE_SERIES:
+        exposed = _families(WithSummary(CollectorRegistry(), role).exposition().decode())
+        assert "scadbuddy_test_extra_seconds" not in exposed, role
 
 
 def test_the_api_exports_every_series() -> None:
