@@ -237,7 +237,7 @@ export function costsOf(orderId: string): OrderCosts | null {
   const charges = state.charges.filter((c) => c.order_id === order.id && c.kind !== 'tax').reduce((s, c) => s + c.amount_minor, 0)
   const open = items.filter((i) => i.status !== 'cancelled')
   const revenue =
-    order.status === 'cancelled'
+    order.status === 'cancelled' || (items.length > 0 && open.length === 0)
       ? 0
       : items.length && open.every((i) => i.revenue_minor != null)
         ? items.reduce((s, i) => s + (i.revenue_minor ?? 0), 0) + charges

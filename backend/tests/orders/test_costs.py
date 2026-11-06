@@ -316,6 +316,36 @@ async def test_a_test_print_counts_toward_the_cost(shop: Shop, pool: PgPool) -> 
     assert costs.items[0].prints_minor == 8
 
 
+async def test_the_price_book_weighs_slots_equally_with_no_slot_grams(
+    shop: Shop, pool: PgPool
+) -> None:
+    order, item = shop.accepted(quantity=1)  # a manual quote: no slot grams anywhere
+    cheap = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#111111", cost_per_kg="20")
+    )
+    dear = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#222222", cost_per_kg="40")
+    )
+    slots = [
+        ColourSlot(slot=0, colour="#ff0000", filament_id=cheap.id),
+        ColourSlot(slot=1, colour="#00ff00", filament_id=dear.id),
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            (Jsonb([s.model_dump() for s in slots]), item.id),
+        )
+    attempt(shop, order, item, "succeeded", 1, 10.0, 94)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # 10 g at the two filaments' mean, 30 a kilogram: 30 cents.
+    assert at.filament_minor == 30
+    assert "filament" in at.estimated
+
+
 async def test_the_price_book_is_weighted_by_each_colour_slots_grams(
     shop: Shop, pool: PgPool
 ) -> None:
@@ -530,6 +560,27 @@ async def test_a_cancelled_order_is_charged_nothing_its_charges_included(shop: S
     assert costs.items[0].revenue_minor == 0
     assert (costs.charges_minor, costs.revenue_minor, costs.cost_minor) == (500, 0, 30)
     assert (costs.margin_minor, costs.margin_state) == (-30, "loss")
+
+
+async def test_an_order_whose_every_item_is_cancelled_is_charged_nothing(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    shop.lifecycle.edit_order(
+        order.id,
+        BY,
+        OrderEdit(charges=[ChargeInput(kind="shipping", label="Post", amount_minor=500)]),
+    )
+    shop.lifecycle.accept_order(order.id, BY)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    current = shop.rows.order(order.id)
+    assert current is not None and current.status != "cancelled"  # the order stays open
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    assert costs.revenue_minor == 0
+    assert costs.margin_state != "ok"
 
 
 async def test_a_custom_item_costs_only_its_entries(shop: Shop) -> None:

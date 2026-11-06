@@ -27,7 +27,8 @@ cost is only its entries), nor does a cancelled one, which was never made.
 **Charged and margin** (§5). An item is charged its accepted quote's total, nothing once
 it or its order is cancelled, and has no charged figure without an accepted quote. The
 order is charged its items' plus every charge but ``tax``, once every item not cancelled
-has a charged figure; a cancelled order is charged nothing, its charges included.
+has a charged figure; a cancelled order, or one whose every item is cancelled, is charged
+nothing, its charges included.
 Margin is charged less cost; a ``loss`` below zero, else ``unknown`` when a part is unknown,
 else ``thin`` below ``orders_thin_margin_percent``, else ``ok``.
 
@@ -539,8 +540,9 @@ def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | No
     charges = sum(c.amount_minor for c in store.charges(order.id) if c.kind != "tax")
     open_items = [i for i in items if i.status != "cancelled"]
     revenue: Money | None = None
-    if order.status == "cancelled":
-        # The job fell through: what it cost shows as a loss, whatever was charged (§5).
+    if order.status == "cancelled" or (items and not open_items):
+        # The job fell through, the order cancelled or every item: what it cost shows as a
+        # loss, whatever was charged (§5).
         revenue = 0
     elif items and all(i.revenue_minor is not None for i in open_items):
         revenue = sum(i.revenue_minor or 0 for i in items) + charges

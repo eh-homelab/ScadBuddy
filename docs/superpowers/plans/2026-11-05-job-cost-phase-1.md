@@ -17,7 +17,7 @@
 - A rate setting needs the order's currency to be the shop's `orders_currency`; otherwise that part is `unknown`.
 - Settings are stored in Postgres and env-seeded (`SCADBUDDY_<FIELD>`), `live`.
 - Migrations are a new timestamped file; nothing else is edited.
-- #5280 merged during the build: the read passes `purpose=None`, so test prints count; no column is added to `order_item_fulfilments`.
+- #5280 merged during the build: the read takes every attempt of every purpose (`OrderStore.order_fulfilments`, one query per order), so test prints count; no column is added to `order_item_fulfilments`.
 - Time and cost entries are added and deleted in every order status, on hold included.
 - Every new API operation has an agent tool or a `coverage.ts` entry.
 
