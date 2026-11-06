@@ -276,6 +276,7 @@ class FlowStore:
         point: int,
         request_id: str,
         reset: Callable[[], Coroutine[Any, Any, str]],
+        responder: str | None = None,
     ) -> Run | None:
         """Reset the run's execution `replaced` to event `point` with `reset` (which
         answers the new execution's run id), and move the row with it, holding the row's
@@ -289,7 +290,10 @@ class FlowStore:
         A Reset that landed although this call failed (the RPC timed out, or the worker
         died before the commit) leaves the row rolled back while the new execution
         writes to it. The retry's `reset` answers the same execution (Temporal dedupes
-        on the request id), and what that execution recorded is kept as it is."""
+        on the request id), and what that execution recorded is kept as it is.
+
+        `responder` (who asked) is for `RemoteFlowStore`, whose API names it in the
+        Reset's reason; here `reset` names it already."""
         loop = asyncio.get_running_loop()
 
         def call() -> str:

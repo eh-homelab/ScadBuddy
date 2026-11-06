@@ -60,10 +60,10 @@ def crud_app(
 
 @asynccontextmanager
 async def served_flow_store(
-    store: FlowStore, *, client: Client | None = None
+    store: FlowStore, *, client: Client | None = None, **options: Any
 ) -> AsyncIterator[RemoteFlowStore]:
     """`RemoteFlowStore` over `crud_app` on a local port, its credential minted in process
-    on `store`'s schema."""
+    on `store`'s schema; `options` are the `CrudClient`'s."""
     credentials = ServiceCredentialStore(store._pool)
     app = crud_app(store, credentials, client=client)
     await listener.start(app, 0)
@@ -71,6 +71,7 @@ async def served_flow_store(
         f"http://127.0.0.1:{listener.crud_listener_port(app)}",
         "projects",
         ServiceAuth(InProcessProvider("projects", lambda: credentials)),
+        **options,
     )
     try:
         yield RemoteFlowStore(crud)

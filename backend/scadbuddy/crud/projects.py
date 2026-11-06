@@ -18,7 +18,12 @@ from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import Decision, Proposal, Run
-from scadbuddy.flows.store import HopMovedError, ResetBeforeFloorError, ResetSupersededError
+from scadbuddy.flows.store import (
+    RESET_CALL_S,
+    HopMovedError,
+    ResetBeforeFloorError,
+    ResetSupersededError,
+)
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, Hop, HopRecord, ProjectionWrite
 
 BASE = f"/api/v1{PREFIX}/projects"
@@ -26,6 +31,9 @@ BASE = f"/api/v1{PREFIX}/projects"
 HOP_MOVED = "hop_moved"
 RESET_SUPERSEDED = "reset-superseded"
 RESET_BEFORE_FLOOR = "reset-before-floor"
+#: A Reset's request: the route holds the run's lock for up to `RESET_CALL_S` while
+#: Temporal answers, then writes the row.
+RESET_REQUEST_S = RESET_CALL_S + 10.0
 
 
 def _part(value: str) -> str:
@@ -36,8 +44,10 @@ class RemoteFlowStore:
     def __init__(self, client: CrudClient) -> None:
         self._client = client
 
-    async def _send(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
-        return await self._client.request(method, f"{BASE}{path}", json=json)
+    async def _send(
+        self, method: str, path: str, *, json: Any = None, timeout: float | None = None
+    ) -> httpx.Response:
+        return await self._client.request(method, f"{BASE}{path}", json=json, timeout=timeout)
 
     async def _found(self, path: str) -> Any:
         """The answer's body; None for a 404 of the route (the row is missing)."""
@@ -86,12 +96,22 @@ class RemoteFlowStore:
         point: int,
         request_id: str,
         reset: Callable[[], Coroutine[Any, Any, str]],
+        responder: str | None = None,
     ) -> Run | None:
         """`FlowStore.reset_run`, but the API makes Temporal's Reset under the row's lock
-        (D6), with what `reset` would send: `reset` itself is not called."""
-        body = {"replaced": replaced, "point": point, "request_id": request_id}
+        (D6), with what `reset` would send: `reset` itself is not called. One request
+        waits out the Reset (`RESET_REQUEST_S`), rather than retrying while it holds the
+        lock."""
+        body = {
+            "replaced": replaced,
+            "point": point,
+            "request_id": request_id,
+            "responder": responder,
+        }
         try:
-            response = await self._send("POST", f"/runs/{_part(run_id)}/reset", json=body)
+            response = await self._send(
+                "POST", f"/runs/{_part(run_id)}/reset", json=body, timeout=RESET_REQUEST_S
+            )
         except CrudRefusedError as error:
             reason = error.problem.get("reason")
             if error.status == 409 and reason == RESET_SUPERSEDED:

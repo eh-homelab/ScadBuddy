@@ -811,6 +811,7 @@ def flow_kinds(
         # The operation's own id: a retried run resets once, and the row records it to
         # tell that retry from another Reset.
         reset_id = str(activity.info().workflow_id)
+        responder = str(request.get("responder") or "browser")
 
         async def reset() -> str:
             return await reset_execution(
@@ -819,7 +820,7 @@ def flow_kinds(
                 replaced=replaced,
                 point=event_id,
                 request_id=reset_id,
-                reason=f"flow reset by {request.get('responder') or 'browser'}",
+                reason=f"flow reset by {responder}",
             )
 
         try:
@@ -830,6 +831,7 @@ def flow_kinds(
                 point=event_id,
                 request_id=reset_id,
                 reset=reset,
+                responder=responder,
             )
         except ResetBeforeFloorError as err:
             raise _before_floor(err.floor) from None

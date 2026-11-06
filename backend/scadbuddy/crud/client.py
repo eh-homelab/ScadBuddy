@@ -19,6 +19,8 @@ A render, print or projects worker holds no database secret: it calls
   callers.
 - Every retry sends the same ``Idempotency-Key``; `activity_key` builds a key that is
   the same on every attempt of one Temporal activity.
+- ``timeout`` on a request replaces the client's per-request timeout for a route that
+  answers later by design (a flow Reset waits on Temporal under the run's lock).
 """
 
 from __future__ import annotations
@@ -167,12 +169,14 @@ class _Base:
         self._clock = clock
 
     @staticmethod
-    def _kwargs(json: Any, key: str | None) -> dict[str, Any]:
+    def _kwargs(json: Any, key: str | None, timeout: float | None) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         if json is not None:
             kwargs["json"] = json
         if key is not None:
             kwargs["headers"] = {IDEMPOTENCY_HEADER: key}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         return kwargs
 
 
@@ -204,7 +208,13 @@ class CrudClient(_Base):
         await self._http.aclose()
 
     async def request(
-        self, method: str, path: str, *, json: Any = None, idempotency_key: str | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        idempotency_key: str | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         call = _Call(self, path)
         while True:
@@ -212,7 +222,7 @@ class CrudClient(_Base):
             fresh = self._build() if call.take_fresh_connection() else None
             try:
                 response = await (fresh or self._http).request(
-                    method, path, **self._kwargs(json, idempotency_key)
+                    method, path, **self._kwargs(json, idempotency_key, timeout)
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)
@@ -260,7 +270,13 @@ class CrudSyncClient(_Base):
         self._http.close()
 
     def request(
-        self, method: str, path: str, *, json: Any = None, idempotency_key: str | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        idempotency_key: str | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         call = _Call(self, path)
         while True:
@@ -268,7 +284,7 @@ class CrudSyncClient(_Base):
             fresh = self._build() if call.take_fresh_connection() else None
             try:
                 response = (fresh or self._http).request(
-                    method, path, **self._kwargs(json, idempotency_key)
+                    method, path, **self._kwargs(json, idempotency_key, timeout)
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)

@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import status
 from pydantic import BaseModel
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
@@ -36,6 +37,21 @@ HOP_MOVED = "hop_moved"
 RESET_SUPERSEDED = "reset-superseded"
 #: A Reset refused because its point is before the entries the row keeps.
 RESET_BEFORE_FLOOR = "reset-before-floor"
+#: A Reset Temporal refused for good; any other failure of its call is a 5xx, retried.
+RESET_REFUSED = "reset-refused"
+#: The gRPC statuses that no retry of the same Reset mends.
+RESET_REFUSALS = frozenset(
+    {
+        RPCStatusCode.INVALID_ARGUMENT,
+        RPCStatusCode.NOT_FOUND,
+        RPCStatusCode.ALREADY_EXISTS,
+        RPCStatusCode.PERMISSION_DENIED,
+        RPCStatusCode.FAILED_PRECONDITION,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.UNIMPLEMENTED,
+        RPCStatusCode.UNAUTHENTICATED,
+    }
+)
 
 router = crud_router("projects")
 
@@ -71,6 +87,8 @@ class ResetWrite(BaseModel):
     replaced: str
     point: int
     request_id: str
+    #: Who asked, for the Reset's reason; absent from a worker before it was sent.
+    responder: str | None = None
 
 
 class Tiers(BaseModel):
@@ -135,8 +153,8 @@ async def reset_run(run_id: str, body: ResetWrite, flows: FlowsDep) -> Run | Non
             replaced=body.replaced,
             point=body.point,
             request_id=body.request_id,
-            # The operation's id: its row names who asked.
-            reason=f"flow reset by operation {body.request_id}",
+            # Without a responder, the operation's id: its row names who asked.
+            reason=f"flow reset by {body.responder or f'operation {body.request_id}'}",
         )
 
     try:
@@ -160,6 +178,15 @@ async def reset_run(run_id: str, body: ResetWrite, flows: FlowsDep) -> Run | Non
             str(err),
             reason=RESET_BEFORE_FLOOR,
             floor=err.floor,
+        ) from None
+    except RPCError as err:
+        if err.status not in RESET_REFUSALS:
+            raise  # a 5xx: the worker tries again within its budget
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Temporal refused the Reset: {err.message}",
+            reason=RESET_REFUSED,
+            grpc_status=err.status.name,
         ) from None
 
 
