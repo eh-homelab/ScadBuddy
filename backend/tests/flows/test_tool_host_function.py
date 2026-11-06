@@ -624,8 +624,9 @@ async def _outlast_heartbeat() -> None:
         return
     assert info.workflow_id is not None
     handle = activity.client().get_workflow_handle(info.workflow_id, run_id=info.workflow_run_id)
+    deadline = asyncio.timeout(_HEARTBEAT_TIMEOUT_WAIT_S)
     try:
-        async with asyncio.timeout(_HEARTBEAT_TIMEOUT_WAIT_S):
+        async with deadline:
             while True:
                 described = await handle.describe()
                 if not any(
@@ -635,6 +636,9 @@ async def _outlast_heartbeat() -> None:
                     return
                 await asyncio.sleep(0.05)
     except TimeoutError:
+        # Only the deadline's own expiry; a TimeoutError from describe() keeps its traceback.
+        if not deadline.expired():
+            raise
         message = (
             f"heartbeat timeout never fired for activity {info.activity_id}"
             f" (attempt {info.attempt}) within {_HEARTBEAT_TIMEOUT_WAIT_S} s"
