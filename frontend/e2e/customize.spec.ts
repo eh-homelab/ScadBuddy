@@ -78,6 +78,49 @@ test.describe('customizer', () => {
     expect(await tablist.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   })
 
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`grows the group tab list with its wrapped rows, no tab over another or over the parameters (#5121, ${viewport.width}px)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport)
+      await page.goto('/m/name-keychain')
+      const tablist = page.getByRole('tablist', { name: 'Parameter groups' })
+      await expect(tablist.getByRole('tab')).toHaveCount(3)
+      // Narrow enough that each tab takes a row of its own, as the bookmark's eight groups
+      // wrap in the real panel.
+      await tablist.evaluate((element) => element.setAttribute('style', 'width: 90px'))
+
+      const layout = await tablist.evaluate((element) => {
+        const box = (el: typeof element) => {
+          const { left, top, right, bottom } = el.getBoundingClientRect()
+          return { left, top, right, bottom }
+        }
+        return {
+          list: box(element),
+          tabs: [...element.querySelectorAll('[role=tab]')].map(box),
+          next: element.nextElementSibling ? box(element.nextElementSibling) : null,
+        }
+      })
+      const rows = new Set(layout.tabs.map((tab) => Math.round(tab.top)))
+      expect(rows.size).toBeGreaterThan(1)
+      for (const [i, a] of layout.tabs.entries()) {
+        // Every row inside the list, so the list's border sits below the last one.
+        expect(a.top).toBeGreaterThanOrEqual(layout.list.top - 0.5)
+        expect(a.bottom).toBeLessThanOrEqual(layout.list.bottom + 0.5)
+        for (const b of layout.tabs.slice(i + 1)) {
+          const apart = a.right <= b.left + 0.5 || b.right <= a.left + 0.5 || a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5
+          expect(apart, 'two group tabs overlap').toBe(true)
+        }
+      }
+      // The parameters start below the tabs, not under them.
+      expect(layout.next).not.toBeNull()
+      expect(layout.next!.top).toBeGreaterThanOrEqual(layout.list.bottom - 0.5)
+    })
+  }
+
   test('keeps the previous preview while the next render runs', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toContainText('64.1')

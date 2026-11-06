@@ -127,7 +127,11 @@ export function ParameterPanel({
             aria-label="Parameter groups"
             // #942 — wrapped onto rows, never scrolled: a template with many groups (Dollhouse
             // Kit has 15) hid most of them past an edge with no scrollbar, fade or arrow.
-            className="h-auto w-full shrink-0 flex-wrap justify-start gap-x-1 gap-y-1 border-b px-2 pt-1.5 pb-1.5"
+            // #5121 — the list's height must grow with its rows. A bare `h-auto` lost to the
+            // shared list's `group-data-horizontal/tabs:h-8` (the more specific rule), so the
+            // list stayed one row tall and the wrapped rows lay over the parameters. The row
+            // gap and bottom padding clear the active tab's underline, 5px below the tab.
+            className="w-full shrink-0 flex-wrap justify-start gap-x-1 gap-y-2 border-b px-2 pt-1.5 pb-2 group-data-horizontal/tabs:h-auto"
           >
             {tabs.map((group) => {
               // #2444 — a tab holding a value nothing can render is marked, so the field that
