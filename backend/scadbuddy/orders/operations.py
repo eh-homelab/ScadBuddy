@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import aclosing
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -25,6 +25,7 @@ from fastapi import Response, status
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import (
@@ -49,7 +50,7 @@ from scadbuddy.orders.bambuddy import download_sliced, quote_preview_job, start_
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
-from scadbuddy.orders.printing import print_check, print_item
+from scadbuddy.orders.printing import print_check, print_item, test_print_check
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import item_project
 from scadbuddy.orders.quote import (
@@ -60,6 +61,7 @@ from scadbuddy.orders.quote import (
     quote_check,
     quote_run,
 )
+from scadbuddy.orders.spools import item_plan
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
@@ -267,13 +269,17 @@ class _Renders:
 
 
 def print_body(
-    request: Mapping[str, Any], copies: int, project_id: int | None = None
+    request: Mapping[str, Any],
+    copies: int,
+    project_id: int | None = None,
+    filament_plan: Mapping[str, Any] | None = None,
 ) -> PrintRunRequest:
     """The print run's request for one ``order_item_print`` (its operation's
     ``request``): §5.4's quantity still to print, of the whole output (a quote is the
     whole output's price), keyed by the operation so a retry or a re-send repeats its
     run. ``project_id`` is the item's Bambuddy project (§8.1), which files the print in
-    place of any project or folder the request named."""
+    place of any project or folder the request named; ``filament_plan`` the check's
+    filled plan (§5.4 "Spools"), in place of the request's."""
     body: dict[str, Any] = {
         **request["request"],
         "copies": copies,
@@ -281,6 +287,8 @@ def print_body(
         "plate_ids": None,
         "request_id": request["request_id"],
     }
+    if filament_plan is not None:
+        body["filament_plan"] = filament_plan
     if project_id is not None:
         body = {**body, "project_id": project_id, "folder_id": None}
     return PrintRunRequest.model_validate(body)
@@ -310,6 +318,24 @@ async def existing_run(
         )
     # Closed since the read above: it recorded its row, or it printed nothing.
     return await runs.store.find(key, has_request_id=True)
+
+
+async def claimed_run(
+    runs: PrintCommands,
+    subject: PrintSubject,
+    request: Mapping[str, Any],
+    copies: int,
+    projects: Sequence[int | None],
+    filament_plan: Mapping[str, Any] | None = None,
+) -> PrintRun | None:
+    """The run an ``order_item_print`` request made, keyed with any of ``projects``
+    (:func:`existing_run` for each, in order) and the check's ``filament_plan``."""
+    for project_id in projects:
+        body = print_body(request, copies, project_id, filament_plan)
+        run = await existing_run(runs, subject, body)
+        if run is not None:
+            return run
+    return None
 
 
 def order_kinds(core: Core, components: Components) -> list[OperationKind]:
@@ -365,24 +391,74 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         return dumped
 
     async def item_print_check(request: dict[str, Any]) -> dict[str, Any]:
-        """§5.4's refusals (``orders/printing.py`` ``print_check``), then the printer the
-        run would refuse, as a quote's check refuses it."""
+        """§5.4's refusals (``orders/printing.py`` ``print_check``; a test print's,
+        ``test_print_check``, when the request names its ``revision_id``), then the
+        printer the run would refuse, as a quote's check refuses it."""
         orders = components.get(ORDERS)
         body = PrintRunRequest.model_validate(request["request"])
-        checked = await print_check(
-            orders.store,
-            core.outputs,
-            core.store.blobs,
-            request["order_id"],
-            request["item_id"],
-            schema_of=lambda reference: reference_schema(core, reference),
-        )
+        revision_id = request.get("revision_id")
+        if revision_id is not None:
+            checked = await test_print_check(
+                orders.lifecycle,
+                core.outputs,
+                core.store.blobs,
+                request["order_id"],
+                request["item_id"],
+                revision_id,
+                schema_of=lambda reference: reference_schema(core, reference),
+                by=Actor.model_validate(request["by"]),
+            )
+        else:
+            checked = await print_check(
+                orders.store,
+                core.outputs,
+                core.store.blobs,
+                request["order_id"],
+                request["item_id"],
+                schema_of=lambda reference: reference_schema(core, reference),
+            )
         if body.printer is not None:
             settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
                 body.printer, body.printer_id, settings, components.get(PRINTERS).store
             )
+        # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
+        # so a refusal writes nothing, and recorded with it so a retry keys its run as
+        # the first try did. On the native path the plan is the request's.
+        if not await native_run(body):
+            printer_id = body.printer_id
+            if printer_id is None and body.printer is not None:
+                row = await asyncio.to_thread(components.get(PRINTERS).store.get, body.printer)
+                printer_id = None if row is None else row.bambuddy_printer_id
+            plan = await item_plan(
+                orders.store,
+                orders.integrations,
+                request["item_id"],
+                body.filament_plan,
+                printer_id,
+            )
+            if plan is not None:
+                checked["filament_plan"] = plan.model_dump(mode="json")
         return checked
+
+    async def native_run(body: PrintRunRequest) -> bool:
+        """Whether ``body``'s print takes the native path (no Bambuddy). A printer the
+        route refuses is not native here: the run refuses it itself, in its own words."""
+        settings = await asyncio.to_thread(core.settings_store.load)
+        if not native_backends(settings):
+            return False
+        printers = components.get(PRINTERS)
+        try:
+            route = await run_route(
+                settings,
+                printers.store,
+                printers.reports,
+                printer=body.printer,
+                printer_id=body.printer_id,
+            )
+        except ApiError:
+            return False
+        return route.native
 
     async def item_project_of(request: dict[str, Any]) -> int | None:
         """The item's Bambuddy project (§8.1), ensured before anything is claimed, so a
@@ -418,11 +494,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             raise ApiError(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "Bambuddy could not make the item's project; the print is tried again",
+                # Transient (`is_transient`), or the operation would never try it again.
+                type_=UNAVAILABLE_PROBLEM,
             ) from error
 
     async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The item claimed, then its print started as the print route starts one
-        (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``)."""
+        (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
+        a test print of the request's ``revision_id`` when it names one."""
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
@@ -433,20 +512,37 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
         subject = PrintSubject.output(output_id)
         project_id = await item_project_of(request)
+        store = components.get(ORDERS).store
+        # The check's filled plan (§5.4 "Spools"); one checked before it has none.
+        plan = checked.get("filament_plan")
 
-        def body(copies: int) -> PrintRunRequest:
-            return print_body(request, copies, project_id)
+        async def keyed() -> tuple[bool, list[int | None]]:
+            """Whether the claim recorded its project, and the projects its run may be
+            keyed with (#5263). A claim recorded the one it was made with, which a retry
+            keeps even once a deleted project is made again. One from before recorded
+            none: its run was keyed with no project (before #5231) or with the item's."""
+            recorded = await asyncio.to_thread(store.claim_project, request["request_id"])
+            if recorded is not None and recorded[0]:
+                return True, [recorded[1]]
+            return False, list(dict.fromkeys([project_id, None]))
 
         async def existing(copies: int) -> PrintRun | None:
-            return await existing_run(core.print_runs, subject, body(copies))
+            _, projects = await keyed()
+            return await claimed_run(core.print_runs, subject, request, copies, projects, plan)
 
         async def start(copies: int) -> PrintRun:
+            recorded, projects = await keyed()
+            if not recorded:
+                # A claim from before #5263, retried: its run may be under either key.
+                found = await claimed_run(core.print_runs, subject, request, copies, projects, plan)
+                if found is not None:
+                    return found
             run = await accept_run(
                 core.print_runs,
                 Response(),
                 subject=subject,
                 slug=checked["slug"],
-                request=body(copies),
+                request=print_body(request, copies, projects[0], plan),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
             )
@@ -464,6 +560,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             request_id=request["request_id"],
             sliced_sha256=checked["sliced_sha256"],
             sliced_blob_key=checked["sliced_blob_key"],
+            project_id=project_id,
+            revision_id=request.get("revision_id"),
         )
         dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped
@@ -480,6 +578,21 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if item is None or item.order_id != order.id:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
+                )
+        # A request recorded before attempts had files names none (#4251).
+        fulfilment_id = request.get("fulfilment_id")
+        if fulfilment_id is not None:
+            attempt = await asyncio.to_thread(store.fulfilment, fulfilment_id)
+            if attempt is None or attempt.order_item_id != item_id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item"
+                )
+        revision_id = request.get("revision_id")
+        if revision_id is not None:
+            revision = await asyncio.to_thread(store.revision, revision_id)
+            if revision is None or revision.item_id != item_id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no revision {revision_id!r} of that item"
                 )
         return {}
 
@@ -522,6 +635,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     sha256=request["file"],
                     blob_key=key,
                     caption=request["caption"],
+                    fulfilment_id=request.get("fulfilment_id"),
+                    revision_id=request.get("revision_id"),
                 )
             )
         except LifecycleError as error:
@@ -544,7 +659,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
     async def copy_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The archive's file pulled once into the claim store, kept as its blob and
-        recorded as the item's attachment (``orders/archives.py`` ``copy_in``)."""
+        recorded as the attempt's attachment, listed under its item
+        (``orders/archives.py`` ``copy_in``)."""
         orders = components.get(ORDERS)
         try:
             attachment = await copy_in(

@@ -34,8 +34,8 @@ const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
 const attachmentRole = z
-  .enum(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
-  .describe('Why the file is kept')
+  .enum(['reference', 'issue', 'finished', 'packed', 'timelapse', 'render', 'test_print', 'other'])
+  .describe("Why the file is kept; `render` and `test_print` only on a design revision's file")
 const attachmentCaption = z.string().max(1000)
 const money = z.number().int().describe('Integer minor units (cents, pence) in the order\'s currency')
 const datetime = z.string().datetime({ offset: true })
@@ -86,6 +86,12 @@ const attempt = z
     started_at: datetime.optional(),
     finished_at: datetime.optional(),
     notes: z.string().default(''),
+    archive_id: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("A Bambuddy archive (a print) this attempt is; its time and grams are copied from it. Read on a record only. Refused with `archive_claimed` when another attempt already has it"),
   })
   .strict()
 const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int().min(1) }).strict()
@@ -273,19 +279,41 @@ export const orderTools: Tool[] = [
     }),
     risk: 'read',
     routes: ['GET /api/v1/orders'],
-    handler: async (query, { backend }) => json(await ok(backend.GET('/api/v1/orders', { params: { query } }), 'list orders')),
+    // The route takes `status` repeated (#5276); the tool names one.
+    handler: async ({ status, ...query }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders', { params: { query: { ...query, ...(status ? { status: [status] } : {}) } } }), 'list orders')),
   }),
   defineTool({
     name: 'order_get',
     label: 'Read an order',
     description:
-      'One order whole: its status, number and addresses, its line items with their quotes and fulfilment ' +
-      'attempts, charges, payments, shipments and totals.',
+      'One order whole: its status, number and addresses, its line items with their quotes, design `revisions` ' +
+      'and fulfilment attempts (every attempt has a `purpose`: `production`, or `test` for a revision\'s test print), ' +
+      'charges, payments, shipments and totals.',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}'],
     handler: async ({ order_id }, { backend }) =>
       json(await ok(backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }), `get order ${order_id}`)),
+  }),
+  defineTool({
+    name: 'order_costs',
+    label: "Read an order's real cost",
+    description:
+      "An order's real cost (#4251): per item, its accepted quote's seconds, grams and filament cost for the " +
+      "item's quantity beside every attempt's actual seconds and grams, failed attempts included, the grams " +
+      "priced at the quote's own price per gram (a manual quote prices none). `bambuddy_cost` is Bambuddy's own " +
+      'cost of an attempt, shown and never in any sum.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/costs'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/costs', { params: { path: { order_id } } }),
+          `get the costs of order ${order_id}`,
+        ),
+      ),
   }),
   defineTool({
     name: 'order_create',
@@ -373,10 +401,12 @@ export const orderTools: Tool[] = [
       'source (no `output_id`, `slug`, `commit` or `inputs`), for design work, a fee, packaging or a part made ' +
       'elsewhere. Its price is recorded, not accepted: the item is quoted until order_item_accept_quote accepts it. ' +
       '`requires_printing` (default ' +
-      'false) marks one that still has to be made. `sku` is the shop\'s stock code, on either kind.',
+      'false) marks one that still has to be made. ' +
+      '`kind: "request"` adds a design request: a `title` and `notes` only, no source and no price; its first ' +
+      'revision (order_item_revision_add) gives it its design. `sku` is the shop\'s stock code, on any kind.',
     input: z.object({
       order_id: orderId,
-      kind: z.enum(['model', 'custom']).optional().describe('`model` (the default) or `custom`'),
+      kind: z.enum(['model', 'custom', 'request']).optional().describe('`model` (the default), `custom` or `request`'),
       output_id: ID.optional(),
       ...reference.shape,
       quantity: z.number().int().min(1).default(1),
@@ -384,7 +414,7 @@ export const orderTools: Tool[] = [
         .string()
         .max(200)
         .optional()
-        .describe("Defaults to the template's name; a custom item needs one"),
+        .describe("Defaults to the template's name; a custom or request item needs one"),
       notes: z.string().default(''),
       sku: z.string().max(100).optional(),
       unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
@@ -393,7 +423,7 @@ export const orderTools: Tool[] = [
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/items'],
     title: ({ order_id, slug, output_id, kind, title }) =>
-      `Add ${kind === 'custom' ? (title ?? 'a custom item') : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
+      `Add ${kind === 'custom' || kind === 'request' ? (title ?? `a ${kind} item`) : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
     handler: async ({ order_id, ...body }, { backend }) =>
       json(
         await ok(
@@ -407,6 +437,62 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_item_revision_add',
+    label: 'Add a design revision to an order line item',
+    description:
+      "Record a new design revision of a line item (storefront spec §4): a `reference` (slug, commit, inputs) or an " +
+      "`output_id`, with the `filaments` per slot and a `note` for the customer. A request item's first revision gives " +
+      'it its design. A new revision supersedes a sent, unanswered one and drops the item\'s quotes. It is a draft ' +
+      'until order_item_revision_send sends it to the customer.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      reference: reference.optional(),
+      output_id: ID.optional(),
+      filaments: z.record(z.string(), ID.nullable()).optional().describe('A filament id (or null) per slot'),
+      note: z.string().max(4000).optional(),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions'],
+    title: ({ order_id, item_id }) => `Add a design revision to item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, reference, output_id, filaments, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions', {
+            params: { path: { order_id, item_id } },
+            body: {
+              note: note ?? '',
+              ...(reference === undefined ? {} : { reference }),
+              ...(output_id === undefined ? {} : { output_id }),
+              ...(filaments === undefined ? {} : { filaments }),
+            },
+          }),
+          `add a revision to item ${item_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_revision_send',
+    label: 'Send a design revision to the customer',
+    description:
+      "Send a design revision to the customer for their answer. Outward: it commits the shop to the customer. The " +
+      "customer's answer is recorded by a person, never by an agent.",
+    input: z.object({ order_id: orderId, item_id: itemId, revision_id: ID.describe("A revision id, as order_get lists an item's `revisions`") }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/send'],
+    summarize: ({ order_id, item_id, revision_id }) =>
+      `Send revision ${revision_id} of item ${item_id} (order ${order_id}) to the customer`,
+    handler: async ({ order_id, item_id, revision_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/send', {
+            params: { path: { order_id, item_id, revision_id } },
+          }),
+          `send revision ${revision_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_item_update',
     label: 'Edit an order line item',
     description:
@@ -415,7 +501,8 @@ export const orderTools: Tool[] = [
       '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
       'order_item_accept_quote). A `reference` or ' +
       '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
-      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead).',
+      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead). ' +
+      '`approval` sets how the customer approves the item: the design first, or design and price together.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -427,6 +514,10 @@ export const orderTools: Tool[] = [
       sku: z.string().max(100).nullable().optional(),
       unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
       requires_printing: z.boolean().optional(),
+      approval: z
+        .enum(['design_first', 'together'])
+        .optional()
+        .describe('`design_first`: the customer approves the design before the price; `together`: both at once'),
       delete: z.boolean().default(false),
     }),
     risk: 'write',
@@ -595,7 +686,10 @@ export const orderTools: Tool[] = [
       'a print whose end could not be read is settled with order_item_fulfil. Refused with `requote_needed` (no ' +
       "accepted quote, the item's output gone, or a slice quote whose sliced file is gone or changed: quote it " +
       'again), `item_not_approved` (printing already), `item_made` (its attempts made its quantity: accept them), ' +
-      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. Outward: it prints.',
+      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. With Bambuddy, a slot whose ' +
+      "filament the item names and the plan leaves out takes that filament's spool loaded on the printer, else the " +
+      'shelf spool with most left (never one loaded in another printer); `needs_spool_choice` names the slots with ' +
+      "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. Outward: it prints.",
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -603,21 +697,36 @@ export const orderTools: Tool[] = [
       printer: sliceQuote.shape.printer,
       filament_plan: sliceQuote.shape.filament_plan,
       choices: printChoices,
+      test_revision_id: ID.optional().describe(
+        "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
+          'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
+      ),
     }),
     risk: 'outward',
-    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/print'],
-    summarize: ({ order_id, item_id, printer, printer_id }) =>
-      `Print item ${item_id} of order ${order_id}` +
+    routes: [
+      'POST /api/v1/orders/{order_id}/items/{item_id}/print',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
+    ],
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id }) =>
+      `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
       (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : ''),
-    handler: async ({ order_id, item_id, ...request }, ctx) =>
+    handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
-        await command(ctx, `print item ${item_id}`, (headers) =>
-          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/print', {
-            params: { path: { order_id, item_id } },
-            body: request as never,
-            headers,
-          }),
-        ),
+        test_revision_id !== undefined
+          ? await command(ctx, `test print revision ${test_revision_id}`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print', {
+                params: { path: { order_id, item_id, revision_id: test_revision_id } },
+                body: request as never,
+                headers,
+              }),
+            )
+          : await command(ctx, `print item ${item_id}`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/print', {
+                params: { path: { order_id, item_id } },
+                body: request as never,
+                headers,
+              }),
+            ),
       ),
   }),
   defineTool({
@@ -627,7 +736,7 @@ export const orderTools: Tool[] = [
       "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers to copy: its " +
       '`finish_photos` and whether it has a `timelapse`. Reading them copies what they say onto the attempt once ' +
       'its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`). `linked` is false without ' +
-      'Bambuddy; an attempt by hand, or one Bambuddy has not linked an archive to yet, has none.',
+      'Bambuddy; an attempt by hand naming no archive, or one Bambuddy has not linked an archive to yet, has none.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -650,7 +759,7 @@ export const orderTools: Tool[] = [
     label: "Copy a print's photo or timelapse into an order",
     description:
       "Copy an attempt's Bambuddy archive's finish photo (`finished_photo`, its latest unless `name` names one of " +
-      "order_attempt_archives' `finish_photos`) or its `timelapse` into the line item's files (#4253), with the role " +
+      "order_attempt_archives' `finish_photos`) or its `timelapse` onto the attempt, listed under its line item (#4253, #4251), with the role " +
       '`finished` or `timelapse`; the same bytes again answer with the file already there. Refused with ' +
       '`not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` (pull it off the ' +
       'printer first).',
@@ -813,6 +922,12 @@ export const orderTools: Tool[] = [
       .object({
         order_id: orderId,
         item_id: itemId.optional().describe('Attach to this line item; the order itself when left out'),
+        fulfilment_id: ID.optional().describe(
+          "Attach to this fulfilment attempt of `item_id` (a print's photo, its timelapse); beside `revision_id`, the test attempt the file shows",
+        ),
+        revision_id: ID.optional().describe(
+          "Attach to this design revision of `item_id`: its `render`, the photo of a `test_print`, or a `reference`",
+        ),
         workspace_path: workspacePathInput,
         workspace_sha256: workspaceShaInput,
         filename: z.string().min(1).max(255).optional().describe("e.g. \"finished.jpg\"; the workspace file's own name by default"),
@@ -821,13 +936,27 @@ export const orderTools: Tool[] = [
       })
       .strict(),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/attachments', 'POST /api/v1/orders/{order_id}/items/{item_id}/attachments'],
-    title: ({ order_id, item_id, filename, workspace_path }) =>
-      `Attach ${filename ?? workspace_path} to ${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
-    handler: async ({ order_id, item_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+    routes: [
+      'POST /api/v1/orders/{order_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/attachments',
+    ],
+    title: ({ order_id, item_id, fulfilment_id, revision_id, filename, workspace_path }) =>
+      `Attach ${filename ?? workspace_path} to ${revision_id ? `revision ${revision_id} of ` : fulfilment_id ? `attempt ${fulfilment_id} of ` : ''}${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
+    handler: async (
+      { order_id, item_id, fulfilment_id, revision_id, workspace_path, workspace_sha256, filename, role, caption },
+      ctx,
+    ) => {
+      if ((fulfilment_id !== undefined || revision_id !== undefined) && item_id === undefined)
+        throw new ToolError('an attempt or a revision is attached to with its item_id')
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'order_attach')
       const name = filename ?? uploadName(info.path)
-      const fields = { ...(role === undefined ? {} : { role }), ...(caption === undefined ? {} : { caption }) }
+      const fields = {
+        ...(role === undefined ? {} : { role }),
+        ...(caption === undefined ? {} : { caption }),
+        ...(revision_id !== undefined && fulfilment_id !== undefined ? { fulfilment_id } : {}),
+      }
       const body = { file: name, role: role ?? null, caption: caption ?? null }
       const part = { name: 'file', filename: name, type: info.mediaType }
       const answer = await command(ctx, `attach ${name} to ${item_id ? `item ${item_id}` : `order ${order_id}`}`, (headers) =>
@@ -837,7 +966,19 @@ export const orderTools: Tool[] = [
               body,
               ...uploadInit(ctx, info, part, headers, fields),
             })
-          : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
+          : revision_id !== undefined
+            ? ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/attachments', {
+                params: { path: { order_id, item_id, revision_id } },
+                body: { ...body, fulfilment_id: fulfilment_id ?? null },
+                ...uploadInit(ctx, info, part, headers, fields),
+              })
+          : fulfilment_id !== undefined
+            ? ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments', {
+                params: { path: { order_id, item_id, fulfilment_id } },
+                body,
+                ...uploadInit(ctx, info, part, headers, fields),
+              })
+            : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
               params: { path: { order_id, item_id } },
               body,
               ...uploadInit(ctx, info, part, headers, fields),

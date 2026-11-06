@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: lost-reply-before-resending
+expected_outcome: |
+  Says not to resend on the strength of a null progress read: the run is a durable workflow and the HTTP reply is what was lost. Names concrete checks first: the printer's current subtask_name / state (Bambuddy GET /printers/1/status or MQTT), expecting a job named scadbuddy-<run8>-p1 once slicing (a couple of minutes) finishes, and the run's Temporal history (print- workflow for subject library:1000000050) via the forensics skill. Explains that a resend while the first job is running is refused with ERROR STATE and prints nothing, but still creates a failed run record and a stray sliced file; and that if nothing started, a resend is safe.

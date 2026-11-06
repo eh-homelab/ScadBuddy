@@ -67,9 +67,19 @@ def media_kinds(state: AppState) -> list[OperationKind]:
     async def upload_check(request: dict[str, Any]) -> dict[str, Any]:
         await exists_check(request)
         listed = await asyncio.to_thread(state.catalogue.list_media, request["slug"])
-        if len(listed) >= MAX_MEDIA_ITEMS:
+        if len(listed) < MAX_MEDIA_ITEMS:
+            return {}
+        # A second Add to model of a held photo keeps the copy, so it is not refused
+        # (#5318). The run gets the copy's id and does not read the files again.
+        source = request.get("source_revision_id")
+        held = None
+        if source is not None:
+            held = await asyncio.to_thread(
+                state.catalogue.source_copy_id, request["slug"], source, request["file"]
+            )
+        if held is None:
             raise _too_many()
-        return {}
+        return {"source_copy_id": held}
 
     def _staged(name: str, staged: Path) -> Path:
         """``staged``, linked to the claim ``name``."""
@@ -82,7 +92,7 @@ def media_kinds(state: AppState) -> list[OperationKind]:
             ) from None
         return staged
 
-    def _add(request: dict[str, Any]) -> ModelRecord:
+    def _add(request: dict[str, Any], checked: dict[str, Any]) -> ModelRecord:
         slug = request["slug"]
         # A directory, whose mtime is its own: a link shares the claim's, which the
         # staging sweep would take for an upload killed an hour ago while this run
@@ -102,7 +112,18 @@ def media_kinds(state: AppState) -> list[OperationKind]:
                     kind="image",
                     extension=request["poster_extension"],
                 )
-            return state.catalogue.add_media(slug, upload, request["caption"], poster)
+            return state.catalogue.add_media(
+                slug,
+                upload,
+                request["caption"],
+                poster,
+                source_commit=request.get("source_commit"),
+                source_revision_id=request.get("source_revision_id"),
+                # The claim is named by the file's sha256: an item made from this
+                # revision with these bytes is kept, not added again (#5318).
+                source_sha256=request["file"],
+                source_copy_id=checked.get("source_copy_id"),
+            )
         except ModelNotFoundError:
             raise media_api.no_model(slug) from None
         except TooManyMediaError:
@@ -113,7 +134,7 @@ def media_kinds(state: AppState) -> list[OperationKind]:
     async def upload_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         # A git commit, and a move of up to a gigabyte: a cancel waits for both to land
         # (review 3e final M3).
-        record = await to_thread_to_end(partial(_add, request))
+        record = await to_thread_to_end(partial(_add, request, checked))
         return _changed(request["slug"], record)
 
     def _patch(slug: str, item_id: str, caption: str) -> ModelRecord:

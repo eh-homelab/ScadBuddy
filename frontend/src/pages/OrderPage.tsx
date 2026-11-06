@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
+import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
+import { OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
@@ -405,6 +407,14 @@ export function OrderPage() {
           </CardContent>
         </Card>
 
+        {order.accepted_at && (
+          <Card size="sm">
+            <CardContent>
+              <OrderCosts orderId={order.id} />
+            </CardContent>
+          </Card>
+        )}
+
         <section className="flex flex-col gap-1" aria-label="Audit line">
           <h2 className="text-sm font-medium">History</h2>
           {events.data && events.data.length > 0 ? (
@@ -452,6 +462,8 @@ function ItemDrawer({
   const [unfulfilling, setUnfulfilling] = useState(false)
   const unfulfilBlocked = unfulfilAllowed ? unfulfilBlock(order, detail.shipments, item) : UNFULFIL_OFF
   const custom = item.kind === 'custom'
+  // The order read lists test prints too (#5280); only production attempts make the item.
+  const production = item.fulfilments.filter((f) => f.purpose === 'production')
   const itemProject = detail.projects?.find((p) => p.item_id === item.id)
   const unit = unitPrice(item)
   const unitText = unit ? toMajor(unit.minor, order.minor_exponent) : ''
@@ -650,6 +662,7 @@ function ItemDrawer({
           </>
         )}
       </dl>
+      <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {custom ? (
         // #4954 — a custom item's price is the field above: its quotes are shown only.
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} onChanged={onChanged} />
@@ -658,12 +671,13 @@ function ItemDrawer({
       )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
       <PrintItem order={order} item={item} onChanged={onChanged} />
-      <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
+      <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={production} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       <OrderAttachments
         orderId={order.id}
         itemId={item.id}
-        attachments={detail.attachments.filter((a) => a.item_id === item.id)}
+        attachments={detail.attachments.filter((a) => a.item_id === item.id && !a.revision_id)}
         deliveredId={item.delivered_attachment_id ?? null}
+        attempts={production}
         onChanged={onChanged}
       />
       {error && (

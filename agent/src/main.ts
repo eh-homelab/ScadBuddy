@@ -1,3 +1,9 @@
+import { pendingInput } from './routes/pendingInput.js'
+import { pendingNotices, NotificationDispatcher } from './notify/dispatcher.js'
+import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
+import { PushStore } from './notify/pushStore.js'
+import { ChannelStore } from './notify/channels.js'
+import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
@@ -49,6 +55,7 @@ import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
+import { fetchGrantKey, fetchGrantMinter } from './tools/fetchGrant.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
@@ -215,6 +222,20 @@ const database = config.databaseUrl
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
           )
         }
+        const push = await new PushStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
+        if (push.rewrapped || push.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${push.rewrapped} Web Push key(s)` +
+              (push.failed ? `; ${push.failed} could not be opened with the previous key` : ''),
+          )
+        }
+        const channels = await new ChannelStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
+        if (channels.rewrapped || channels.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${channels.rewrapped} notification channel token(s)` +
+              (channels.failed ? `; ${channels.failed} could not be opened with the previous key` : ''),
+          )
+        }
         const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
         if (grants.rewrapped || grants.failed) {
           console.log(
@@ -283,6 +304,8 @@ const backend = createBackendClient(
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+// The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
+const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
 // Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
 // replicas make for a tab connected here (#4780).
@@ -329,6 +352,8 @@ const toolServices: ToolServices = {
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
   // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
+  // An approved one-off fetch off the asset allowlist's grant (#959): needs the KEK.
+  ...(kek.ok ? { fetchGrant: fetchGrantMinter(fetchGrantKey(kek.kek)) } : {}),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
@@ -1102,6 +1127,31 @@ const commands =
       })
     : undefined
 
+// Web Push (#815 §3, notify/): each request waiting on the person (an approval, a question
+// or an attention request) pushed once to every subscribed browser,
+// so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
+// runs on each pending-input change and once the database is ready.
+const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
+// The out-of-browser channels (#815, notify/channels.ts): their tokens are sealed too.
+const notifyChannels = role.http && database && kek.ok ? new ChannelStore(database.sql, kek.kek) : undefined
+const pushDispatcher =
+  pushStore && sessions
+    ? new NotificationDispatcher({
+        store: pushStore,
+        notices: async (owner) => pendingNotices(await pendingInput(sessions, owner)),
+        // RFC 8292 §2.1: who the push service may contact about these messages.
+        subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
+        // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).
+        hosts: async () => pushHostsOf(await settings?.get<unknown>(SETTING_PUSH_HOSTS)),
+        channels: notifyChannels,
+        publicUrl: config.publicUrl,
+      })
+    : undefined
+if (pushDispatcher && database) {
+  pendingChanges?.subscribe(() => pushDispatcher.wake())
+  void database.ready().then((ok) => ok && pushDispatcher.wake())
+}
+
 const app = !role.http
   ? undefined
   : createApp({
@@ -1137,6 +1187,10 @@ const app = !role.http
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
+  ...(pendingChanges ? { pendingChanges } : {}),
+  ...(pushStore && pushDispatcher ? { push: { store: pushStore, dispatcher: pushDispatcher } } : {}),
+  ...(notifyChannels ? { notifyChannels } : {}),
+  publicUrl: config.publicUrl,
   upgradeWebSocket,
   tabs,
   // A person's session on /api/v1/ai/* (#4975 phase 5), dropped when the backend revokes it.

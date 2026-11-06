@@ -161,7 +161,7 @@ def test_a_hostile_or_broken_svg_is_refused(store: AssetStore, payload: bytes, r
 def test_only_svg_and_png_content_is_accepted_whatever_the_name(
     store: AssetStore, payload: bytes
 ) -> None:
-    with pytest.raises(AssetRejectedError, match="only SVG and PNG"):
+    with pytest.raises(AssetRejectedError, match="only SVG, PNG, STL, 3MF and OBJ"):
         store.put(payload, "looks-fine.png")
 
 
@@ -406,7 +406,13 @@ def test_samples_are_the_bare_named_files_of_an_accepted_kind(model_dir: Path) -
     (model_dir / "sub" / "nested.svg").write_bytes(HEART_SVG)
     (model_dir / "dir.svg").mkdir()
 
-    assert sample_files(model_dir) == ["sample-cat.svg", "sample-leaf.PNG", "sample-rings.svg"]
+    assert sample_files(model_dir) == [
+        "part.stl",
+        "sample-cat.svg",
+        "sample-leaf.PNG",
+        "sample-rings.svg",
+    ]
+    assert sample_files(model_dir, ("stl", "3mf")) == ["part.stl"]
     assert sample_files(model_dir, ("png",)) == ["sample-leaf.PNG"]
     assert sample_files(model_dir, ("svg",)) == ["sample-cat.svg", "sample-rings.svg"]
 

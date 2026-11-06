@@ -14,6 +14,8 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
+import { pinnedOutward } from './pinnedOutward.js'
+import type { FetchGrantMinter } from './fetchGrant.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -125,6 +127,8 @@ export type ToolServices = {
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
+  /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
+  fetchGrant?: FetchGrantMinter | undefined
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
@@ -145,10 +149,17 @@ export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
  * any outward tool (`approval: 'none'` tools are outward already, so this never
  * gates them), and an outward tool lowered below it is not gated at all.
  */
-export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
+export async function effectiveTool(
+  tool: Tool,
+  services: Pick<ToolServices, 'toolOverrides'>,
+  /** The call's arguments, when there is a call: one outward by its input (#959, pinnedOutward.ts) stays gated whatever the override. */
+  input?: unknown,
+): Promise<EffectiveTool> {
   const override = await services.toolOverrides?.of(tool.name)
+  const disabled = override?.disabled === true
+  if (input !== undefined && pinnedOutward(tool.name, input)) return { risk: 'outward', gated: true, disabled }
   const risk = override?.tier ?? tool.risk
-  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled: override?.disabled === true }
+  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled }
 }
 
 /** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
@@ -207,6 +218,13 @@ export type ToolContext = ToolServices & {
    * (`needs_approval`, spec 2026-10-01 §6.4) has passed. Not prepared again either.
    */
   gate?: 'harness' | 'workflow'
+  /**
+   * Whether this call's own approval was a person's in the ScadBuddy UI (responder or
+   * decider `browser`), not a run grant, a flow's standing grant or another principal's
+   * decision (#959). Set by the ToolCall activity (`workflow`) and by /mcp's
+   * confirm_action from the approval it consumed; unset anywhere else. Only what must reach a person reads it: fetch_asset's one-off host.
+   */
+  approvedByPerson?: boolean
   /**
    * Under `harness`: the tier the turn's permission seam applied to this call. The
    * seam reads each call's access (#2171, access/live.ts) and records the tier it
@@ -641,7 +659,7 @@ async function runJudgedByResult(
 ): Promise<ToolRun> {
   let effective: EffectiveTool
   try {
-    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx, args))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
     return refused(`${tool.name} is refused: its Settings → Tools & plugins entry cannot be read`)

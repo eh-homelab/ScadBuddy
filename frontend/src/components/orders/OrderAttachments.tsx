@@ -1,7 +1,7 @@
 import { useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { CameraIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, PaperclipIcon, PackageCheckIcon, Trash2Icon } from 'lucide-react'
 import { api } from '../../api/client'
-import type { OrderAttachment, OrderAttachmentRole } from '../../api/types'
+import type { Fulfilment, OrderAttachment, OrderAttachmentRole } from '../../api/types'
 import { NEW_TAB, downloadBlob } from '../../lib/embed'
 import { formatBytes } from '../../lib/format'
 import { failure, formatMegabytes, useUploadLimit } from '../../lib/mediaFiles'
@@ -27,29 +27,37 @@ const MAX_CAPTION_CHARS = 1000
 
 type Upload = { id: number; name: string; fraction: number }
 type Refusal = { id: number; text: string }
+/** The upload's target when it is the item itself, not one of its attempts. */
+const ITEM_ITSELF = '__item__'
 
 /**
  * #4251 — the files of an order, or of one line item (`itemId`): any file at all,
  * dropped, chosen or taken with a phone's camera, each with a role and a caption. On an
  * item, a photo can be marked as what was actually delivered (`deliveredId`), which then
- * stands as the item's picture.
+ * stands as the item's picture. An item's files may go onto one of its `attempts`
+ * instead, and each such file says which.
  */
 export function OrderAttachments({
   orderId,
   itemId = null,
   attachments,
   deliveredId = null,
+  attempts = [],
   onChanged,
 }: {
   orderId: string
   itemId?: string | null
-  /** This subject's own files: the order's (`item_id` null) or the item's. */
+  /** This subject's own files: the order's (`item_id` null) or the item's, its attempts' among them. */
   attachments: OrderAttachment[]
   deliveredId?: string | null
+  /** The item's fulfilment attempts, which a file may be attached to (#4251). */
+  attempts?: Fulfilment[]
   onChanged: () => void
 }) {
   const limit = useUploadLimit()
   const [role, setRole] = useState<OrderAttachmentRole>(itemId ? 'finished' : 'reference')
+  const [target, setTarget] = useState<string>(ITEM_ITSELF)
+  const attemptNumber = new Map(attempts.map((a) => [a.id, a.attempt]))
   const [uploads, setUploads] = useState<Upload[]>([])
   const nextUpload = useRef(0)
   const [errors, setErrors] = useState<Refusal[]>([])
@@ -68,12 +76,18 @@ export function OrderAttachments({
         .map((file) => refusal(file.size === 0 ? `${file.name} is empty.` : `${file.name} is larger than the ${formatMegabytes(most)} upload limit.`)),
     )
     const chosen = role
+    const attempt = target === ITEM_ITSELF ? null : target
     for (const file of fine) {
       const id = (nextUpload.current += 1)
       setUploads((now) => [...now, { id, name: file.name, fraction: 0 }])
       try {
-        await api.addOrderAttachment(orderId, itemId, file, { role: chosen }, (fraction) =>
-          setUploads((now) => now.map((upload) => (upload.id === id ? { ...upload, fraction } : upload))),
+        await api.addOrderAttachment(
+          orderId,
+          itemId,
+          file,
+          { role: chosen },
+          (fraction) => setUploads((now) => now.map((upload) => (upload.id === id ? { ...upload, fraction } : upload))),
+          attempt,
         )
         onChanged()
       } catch (caught) {
@@ -119,6 +133,21 @@ export function OrderAttachments({
             ))}
           </SelectContent>
         </Select>
+        {itemId && attempts.length > 0 && (
+          <Select value={target} onValueChange={setTarget}>
+            <SelectTrigger size="sm" aria-label="Add item files to" className="w-32">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper">
+              <SelectItem value={ITEM_ITSELF}>The item</SelectItem>
+              {attempts.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  Attempt {a.attempt}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
         <FilePick label="Take a photo" capture onPick={(files) => void add(files)} icon={<CameraIcon aria-hidden="true" />} accept="image/*" />
         <FilePick label={`Attach ${what} files`} multiple onPick={(files) => void add(files)} icon={<PaperclipIcon aria-hidden="true" />} />
       </div>
@@ -150,6 +179,7 @@ export function OrderAttachments({
               itemId={itemId}
               attachment={attachment}
               delivered={attachment.id === deliveredId}
+              attempt={attachment.fulfilment_id ? attemptNumber.get(attachment.fulfilment_id) : undefined}
               onChanged={onChanged}
             />
           ))}
@@ -159,7 +189,7 @@ export function OrderAttachments({
   )
 }
 
-function FilePick({
+export function FilePick({
   label,
   icon,
   accept,
@@ -199,17 +229,23 @@ function FilePick({
 
 type Busy = 'caption' | 'role' | 'delete' | 'delivered' | 'download'
 
-function AttachmentCard({
+export function AttachmentCard({
   orderId,
   itemId,
   attachment,
   delivered,
+  attempt,
+  locked = false,
   onChanged,
 }: {
   orderId: string
   itemId: string | null
   attachment: OrderAttachment
   delivered: boolean
+  /** The number of the attempt it is on, when it is on one. */
+  attempt?: number
+  /** A file of a design revision sent to the customer: the record of what they saw, so its role, caption and presence stay. */
+  locked?: boolean
   onChanged: () => void
 }) {
   const [caption, setCaption] = useState(attachment.caption)
@@ -264,13 +300,21 @@ function AttachmentCard({
             {attachment.filename} · {formatBytes(attachment.size_bytes)}
             {delivered && <span className="ml-1 font-medium text-primary">· Delivered</span>}
           </span>
+          {attempt !== undefined && <span className="text-xs text-muted-foreground">Attempt {attempt}</span>}
+          {locked ? (
+            <span className="text-xs">
+              {ROLE_LABELS[attachment.role]}
+              {attachment.caption && <span className="text-muted-foreground"> · {attachment.caption}</span>}
+            </span>
+          ) : (
+            <>
           <div className="flex gap-1.5">
             <Select value={attachment.role} disabled={busy !== null} onValueChange={(value) => void act('role', () => api.updateOrderAttachment(orderId, attachment.id, { role: value as OrderAttachmentRole }))}>
               <SelectTrigger size="sm" aria-label={`Role of ${attachment.filename}`} className="w-44">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
-                {ROLES.map((r) => (
+                {(ROLES.some((r) => r === attachment.role) ? ROLES : [attachment.role]).map((r) => (
                   <SelectItem key={r} value={r}>
                     {ROLE_LABELS[r]}
                   </SelectItem>
@@ -300,6 +344,8 @@ function AttachmentCard({
               </Button>
             )}
           </form>
+            </>
+          )}
           <div className="flex flex-wrap items-center gap-1.5">
             {OPENS.has(attachment.media_type) && (
               <Button asChild variant="outline" size="sm">
@@ -339,18 +385,20 @@ function AttachmentCard({
                 {delivered ? 'Delivered (unmark)' : 'Mark as delivered'}
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="ghost"
-              className="ml-auto text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-              onClick={() => {
-                setError(null)
-                setConfirming(true)
-              }}
-            >
-              <Trash2Icon aria-hidden="true" />
-              Remove
-            </Button>
+            {!locked && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="ml-auto text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => {
+                  setError(null)
+                  setConfirming(true)
+                }}
+              >
+                <Trash2Icon aria-hidden="true" />
+                Remove
+              </Button>
+            )}
           </div>
           {error && !confirming && (
             <p role="alert" className="text-xs text-warn">

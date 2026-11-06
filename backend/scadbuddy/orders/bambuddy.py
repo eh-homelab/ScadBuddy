@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import FINISH_PHOTO_PREFIX, ArchiveDetail, SliceJob, Spool
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
@@ -32,6 +33,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     CopiedMedia,
     MediaTooLargeError,
+    ShelfSpool,
     SpoolGroup,
 )
 
@@ -101,6 +103,7 @@ def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
         grams=grams,
         finish_photos=[p for p in archive.photos if p.startswith(FINISH_PHOTO_PREFIX)],
         timelapse=bool(archive.timelapse_path),
+        timelapse_name=_timelapse_name(archive) if archive.timelapse_path else None,
     )
 
 
@@ -130,6 +133,30 @@ class BambuddyIntegrations:
         async with client_for(stored) as client:
             return spool_groups(await client.spools())
 
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        """``GET /inventory/spools`` (archived ones included, so a named one is known)
+        and ``GET /inventory/assignments`` for where each is loaded: two reads, none per
+        printer, so one printer Bambuddy cannot reach refuses no print (#5269 review)."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            spools, assignments = await asyncio.gather(
+                client.spools(include_archived=True), client.spool_assignments()
+            )
+        loaded = {a.spool_id: a.printer_id for a in assignments}
+        return [
+            ShelfSpool(
+                id=spool.id,
+                material=spool.material,
+                subtype=spool.subtype,
+                brand=spool.brand,
+                colour=_colour(spool.rgba),
+                remaining_g=spool.remaining_g,
+                archived=spool.archived_at is not None,
+                loaded_printer_id=loaded.get(spool.id),
+            )
+            for spool in spools
+        ]
+
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
@@ -139,6 +166,18 @@ class BambuddyIntegrations:
                 if error.status == 404 and await client.archive_deleted(archive_id):
                     return None
                 raise
+
+    async def archive_cost(self, archive_id: int) -> float | None:
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            try:
+                archive = await client.archive(archive_id)
+            except ApiError as error:
+                if error.status == 404 and await client.archive_deleted(archive_id):
+                    return None
+                raise
+            runs = await client.archive_runs(archive_id)
+        return archive_cost(archive.cost, archive.filament_used_grams, runs.items)
 
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
@@ -153,8 +192,9 @@ class BambuddyIntegrations:
                 path, filename = f"/archives/{archive_id}/photos/{name}", name
                 operation = "media.photo"
             else:
-                detail = await client.archive(archive_id)
-                path, filename = f"/archives/{archive_id}/timelapse", _timelapse_name(detail)
+                if name is None:
+                    name = _timelapse_name(await client.archive(archive_id))
+                path, filename = f"/archives/{archive_id}/timelapse", name
                 operation = "media.timelapse"
             digest = hashlib.sha256()
             size = 0
@@ -173,6 +213,18 @@ class BambuddyIntegrations:
                 target.unlink(missing_ok=True)
                 raise
         return CopiedMedia(filename=filename, sha256=digest.hexdigest(), size=size)
+
+    async def project_exists(self, project_id: int) -> bool:
+        """``GET /projects/{id}``: false only on a 404, a project deleted in Bambuddy."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            try:
+                await client.project(project_id)
+            except ApiError as error:
+                if error.status == 404:
+                    return False
+                raise
+        return True
 
     async def ensure_project(self, name: str, parent_id: int | None) -> int:
         """``ensure_project``'s create, as the project picker's create makes one: the

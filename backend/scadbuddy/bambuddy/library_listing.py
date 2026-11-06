@@ -114,7 +114,9 @@ async def list_library(
         folder_id=folder_id,
         all=show_all,
         folders=folder_views(tree),
-        files=[_entry(row) for row in sorted(shown, key=lambda row: row.filename.casefold())],
+        files=[
+            _entry(row) for row in sorted(shown, key=lambda row: (row.filename.casefold(), row.id))
+        ],
         hidden=len(here) - len(shown),
     )
 
@@ -127,9 +129,40 @@ SEARCH_LIMIT = 100
 _SEPARATORS = re.compile(r"[\s_\-.()\[\]]+")
 
 
-class LibrarySearchHit(LibraryEntry):
+class LibraryFileEntry(LibraryEntry):
+    """One file with where it is (#5321): a search hit, or the file read alone."""
+
     #: The folder's names from the top, empty for the top level: where the file is.
     folder_path: list[str] = Field(default_factory=list)
+
+
+class LibrarySearchHit(LibraryFileEntry):
+    pass
+
+
+def folder_path(folders: Sequence[LibraryFolderView], folder_id: int | None) -> list[str]:
+    """The folder's names from the top, walked up by ``parent_id``; a tree that loops back
+    on itself ends the walk where it repeats."""
+    by_id = {folder.id: folder for folder in folders}
+    names: list[str] = []
+    seen: set[int] = set()
+    at = by_id.get(folder_id) if folder_id is not None else None
+    while at is not None and at.id not in seen:
+        seen.add(at.id)
+        names.append(at.name)
+        at = by_id.get(at.parent_id) if at.parent_id is not None else None
+    return list(reversed(names))
+
+
+def file_entry(listing: LibraryListing, file_id: int) -> LibraryFileEntry | None:
+    """The file from its folder's listing (read with ``show_all``), with its folder path;
+    None when the listing no longer holds it."""
+    found = next((entry for entry in listing.files if entry.id == file_id), None)
+    if found is None:
+        return None
+    return LibraryFileEntry(
+        **found.model_dump(), folder_path=folder_path(listing.folders, listing.folder_id)
+    )
 
 
 class LibrarySearch(BaseModel):

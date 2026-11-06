@@ -21,6 +21,7 @@ function fulfil() {
   state.fulfilments.push({
     id: 'f-made',
     order_item_id: ITEM_APPROVED,
+    purpose: 'production',
     attempt: 1,
     quantity: 2,
     outcome: 'succeeded',

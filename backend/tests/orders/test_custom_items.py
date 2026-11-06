@@ -67,9 +67,9 @@ def test_a_custom_item_sits_beside_a_model_item(shop: Shop) -> None:
     assert (model.kind, model.requires_printing) == ("model", True)
     # The model item still waits for its price.
     assert shop.get(order).status == "draft"
-    # The asset sweep reads only the model item's inputs.
+    # The asset sweep reads only the model item's inputs: its own and its revision 1's.
     assert model.reference is not None
-    assert list(shop.rows.item_inputs()) == [model.reference.inputs]
+    assert list(shop.rows.item_inputs()) == [model.reference.inputs] * 2
 
 
 def test_quantity_and_price_edits_are_priced_at_once(shop: Shop) -> None:

@@ -7,6 +7,18 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: "POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
+    reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
+  },
+  {
+    operation: "POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model",
+    reason: "A person's choice in the Revisions panel (#5280, spec 2026-11-02 §4.6); add_model_media adds the agent's own photos.",
+  },
+  {
+    operation: "GET /api/v1/model-facets",
+    reason: "The Models page's filter counts beside a page of the list (#2290); list_models takes the same search and filters and says how many they select.",
+  },
+  {
     operation: "GET /api/v1/auth/delegated",
     reason: "A delegation link's sign-in (#4975, spec 2026-11-01 §7.4): opened by the browser the agent drives, the link browser_sign_in_link mints; never a call.",
   },
@@ -440,6 +452,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   { route: 'GET /api/v1/ai/pending-input', tool: 'pending_input_list' },
   { route: 'GET /api/v1/ai/sessions/{id}/pending-input', tool: 'sessions_pending_input' },
   {
+    route: 'GET /api/v1/ai/pending-input/changes',
+    reason:
+      "The badge's wake-up (#815): an event stream that says only that pending_input_list may have changed, " +
+      'for a browser tab to re-read; an agent reads pending_input_list itself.',
+  },
+  {
     route: 'POST /api/v1/ai/pending-input/{request_id}',
     reason:
       'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +
@@ -451,6 +469,32 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
+  // Web Push (#815 §3, routes/push.ts).
+  ...['GET /api/v1/ai/push/key', 'PUT /api/v1/ai/push/subscription', 'DELETE /api/v1/ai/push/subscription'].map((route) => ({
+    route,
+    reason:
+      "A browser's own push subscription, made by the page once the person grants notifications from a click; " +
+      'an agent reaches the person through request_user_attention, which the push announces.',
+  })),
+  ...['GET /api/v1/ai/settings/push-services', 'PUT /api/v1/ai/settings/push-services'].map((route) => ({
+    route,
+    reason:
+      'Which push services the agent may POST to, a person\'s setting in Settings → Assistant → Notifications; ' +
+      'an agent must not widen where the service sends requests.',
+  })),
+  // Notification channels (#815 §3, routes/notifyChannels.ts).
+  ...[
+    'GET /api/v1/ai/notify/channels',
+    'POST /api/v1/ai/notify/channels',
+    'PUT /api/v1/ai/notify/channels/{id}',
+    'DELETE /api/v1/ai/notify/channels/{id}',
+    'POST /api/v1/ai/notify/channels/{id}/test',
+  ].map((route) => ({
+    route,
+    reason:
+      "Where the assistant's notifications go (ntfy, Home Assistant), set by the person in Settings → Assistant → " +
+      "Notifications; an agent must not choose where the service sends, or read the channels' tokens.",
+  })),
   // Settings → Tools & plugins (#2171).
   ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
     (route) => ({ route, reason: CAPABILITIES_READ }),

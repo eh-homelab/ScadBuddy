@@ -48,8 +48,14 @@ def _build(core: Core, components: Components) -> OperationCommands:
     # Print runs and operations share the `bambuddy` queue and the API's lazy client;
     # the library kinds run on the `library` worker (#1054).
     runs = core.print_runs
+    kinds = build_kinds(core, components, feature_exports(KINDS_MODULE, KINDS_ATTR))
+    # The API answers every kind's 202, and its in-process workers and the lost sweep
+    # may end any kind's record (#2295).
+    core.metrics.operation_kinds(kinds)
     return OperationCommands(
-        store=OperationStore(core.projection.pool, events=transactional_events(core.events)),
+        store=OperationStore(
+            core.projection.pool, events=transactional_events(core.events), metrics=core.metrics
+        ),
         client=runs.client,
         queues=MappingProxyType(
             {
@@ -58,9 +64,7 @@ def _build(core: Core, components: Components) -> OperationCommands:
                 "projects": core.settings.temporal_task_queue_projects,
             }
         ),
-        kinds=MappingProxyType(
-            build_kinds(core, components, feature_exports(KINDS_MODULE, KINDS_ATTR))
-        ),
+        kinds=MappingProxyType(kinds),
         search_attributes=runs.search_attributes,
     )
 

@@ -34,6 +34,7 @@ from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
@@ -184,6 +185,27 @@ def test_file_id_lists_its_folder(native_client: TestClient, in_folder: NativeFi
     )
 
 
+def test_a_native_folder_is_paged_as_bambuddy_s_is(
+    native_client: TestClient, tmp_path: Path
+) -> None:
+    """#2290: `limit`/`after` page ScadBuddy's own library too, in name order."""
+    folder = _native(native_client).rows.create_folder("Parts", None)
+    made = [
+        _upload(native_client, _three_mf(tmp_path / f"part-{n}.3mf"), folder.id) for n in (2, 0, 1)
+    ]
+    order = [file.id for file in sorted(made, key=lambda file: file.name)]
+
+    first = native_client.get("/api/v1/print/library", params={"folder_id": folder.id, "limit": 2})
+    rest = native_client.get(
+        "/api/v1/print/library",
+        params={"folder_id": folder.id, "limit": 2, "after": order[1]},
+    )
+
+    assert [row["id"] for row in first.json()["files"]] == order[:2]
+    assert [row["id"] for row in rest.json()["files"]] == order[2:]
+    assert first.headers["X-Total-Count"] == rest.headers["X-Total-Count"] == "3"
+
+
 def test_a_bambuddy_range_id_is_404_on_native(native_client: TestClient) -> None:
     assert native_client.get("/api/v1/print/library/42/file").status_code == 404
     assert native_client.get("/api/v1/print/library/42/plates").status_code == 404
@@ -263,6 +285,39 @@ def test_an_entry_names_its_live_output(
     )
     hits = native_client.get("/api/v1/print/library/search", params={"q": "bracket"}).json()
     assert hits["files"][0]["output_id"] == uploaded_with_output.output_id
+    # #5321: and so does the read of the file alone.
+    one = native_client.get(f"/api/v1/print/library/{uploaded_with_output.id}").json()
+    assert one["output_id"] == uploaded_with_output.output_id
+    assert one["folder_path"] == []
+
+
+def test_one_native_file_is_read_with_where_it_is(
+    native_client: TestClient, in_folder: NativeFile
+) -> None:
+    """#5321: one file by id, as the listing gives it, with its folder's path."""
+    body = native_client.get(f"/api/v1/print/library/{in_folder.id}").json()
+    assert body | {"created_at": None} == {
+        "id": in_folder.id,
+        "filename": "bracket.3mf",
+        "file_type": "3mf",
+        "folder_id": in_folder.folder_id,
+        "has_thumbnail": True,
+        "print_count": 0,
+        "printable": True,
+        "sliced": False,
+        "file_size": in_folder.size,
+        "created_at": None,
+        "output_id": None,
+        "is_external": False,
+        "folder_path": ["Dinos"],
+    }
+    # #5333 review: an id in the native range, so the router's `check_served` lets it
+    # through and the native library's own not-found answers.
+    missing = in_folder.id + 1000
+    assert is_native_id(missing)
+    gone = native_client.get(f"/api/v1/print/library/{missing}")
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == f"library file {missing} not found"
 
 
 # writes (Task 5)

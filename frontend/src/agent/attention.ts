@@ -13,8 +13,8 @@ import { fetchNotingSignedOut } from '../lib/signedOut'
  * questions, and its attention requests (`request_user_attention`). So the badge
  * means "things waiting for you", not only approvals.
  *
- * The in-app channel; the same read's attention requests (a `tab_disconnected` wait
- * among them) are its `notices`, which `attentionNotifications.ts` raises as OS
+ * The in-app channel; the same read's requests waiting on the user (approvals,
+ * questions and attention requests) are its `notices`, which `attentionNotifications.ts` raises as OS
  * notifications while the page is hidden. Durable sessions' entries are in the same
  * read; one past its timer whose worker has not resolved it yet is `expiring` and not
  * counted.
@@ -23,6 +23,13 @@ import { fetchNotingSignedOut } from '../lib/signedOut'
 export const ATTENTION_PATH = '/api/v1/ai/pending-input'
 /** How often the count is read while the assistant is available. */
 export const ATTENTION_POLL_MS = 15_000
+/**
+ * #815 — the agent's event stream that says, with no data, when what `ATTENTION_PATH` lists may
+ * have changed (agent routes/pendingInput.ts `PENDING_CHANGES_PATH`), so a new request is read
+ * within moments rather than on the next poll, which a background tab's throttled timers stretch.
+ * The poll stays: it covers an agent without the stream (a 503 closes the EventSource for good).
+ */
+export const PENDING_CHANGES_PATH = '/api/v1/ai/pending-input/changes'
 
 /** How long one read may take; a proxy that accepts and never answers counts as no answer. */
 export const ATTENTION_TIMEOUT_MS = 8_000
@@ -43,11 +50,11 @@ export interface PendingCounts {
   runs?: RunWaiting[]
   /** #4813 — the approvals in no session and no flow run, which no feed shows (`ApprovalsWaitingContext`). */
   unattached?: PendingApproval[]
-  /** #815 — the attention requests waiting on the user, by request id: what an OS notification announces. */
+  /** #815 — the requests waiting on the user (approvals, questions, attention requests), by request id: what an OS notification announces. */
   notices?: AttentionNotice[]
 }
 
-/** #815 — an attention request waiting on the user (a `tab_disconnected` wait among them), as a notification shows it. */
+/** #815 — a request waiting on the user (an approval, a question or an attention request), as a notification shows it. */
 export interface AttentionNotice {
   /** The pending-input request id, `question:<id>` or a durable one. */
   id: string
@@ -175,14 +182,19 @@ function unattached(entries: readonly PendingEntry[]): PendingApproval[] {
   return approvals
 }
 
-/** The attention requests that wait on the user, as `read` counts them; never a done summary. */
+/**
+ * What waits on the user, as `read` counts it: approvals (reason `approval`), plain questions
+ * (`question`) and attention requests; never a done summary (the agent's `pendingNotices`).
+ */
 function notices(entries: readonly PendingEntry[]): AttentionNotice[] {
   const out: AttentionNotice[] = []
   for (const entry of entries) {
+    if (!entry.id || entry.expiring || entry.run?.hop === 'parent') continue
     const a = entry.attention
-    if (entry.kind !== 'answer' || !a || !entry.id || entry.expiring || entry.run?.hop === 'parent') continue
-    if (isDoneSummary(a.reason, a.on_timeout !== null)) continue
-    out.push({ id: entry.id, sessionId: typeof entry.session_id === 'string' ? entry.session_id : null, reason: a.reason, message: entry.prompt ?? '' })
+    if (a && isDoneSummary(a.reason, a.on_timeout !== null)) continue
+    const sessionId = typeof entry.session_id === 'string' ? entry.session_id : null
+    if (entry.kind === 'approval') out.push({ id: entry.id, sessionId, reason: 'approval', message: entry.summary ?? '' })
+    else out.push({ id: entry.id, sessionId, reason: a?.reason ?? 'question', message: entry.prompt ?? '' })
   }
   return out
 }
@@ -244,9 +256,13 @@ export function useAttention(enabled: boolean): Attention {
   // toggles must not pile requests up behind it. Held per generation, so a read
   // left open by a switch off does not hold back the first read after switching on.
   const inflight = useRef<number | null>(null)
+  // #815: a change heard while a read is open, read once that one settles: it may have
+  // happened after the agent answered that read.
+  const changedDuring = useRef(false)
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(function read() {
     if (!enabled || inflight.current === generation.current) return
+    changedDuring.current = false
     const started = generation.current
     inflight.current = started
     // Each answer is shown as it lands, so a slow sessions list does not hold back the
@@ -262,6 +278,7 @@ export function useAttention(enabled: boolean): Attention {
       }),
     ]).then(() => {
       if (inflight.current === started) inflight.current = null
+      if (changedDuring.current && current()) read()
     })
   }, [enabled])
 
@@ -279,7 +296,15 @@ export function useAttention(enabled: boolean): Attention {
     }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', refresh)
+    const changes = typeof EventSource === 'undefined' ? undefined : new EventSource(PENDING_CHANGES_PATH)
+    const onChange = () => {
+      if (inflight.current === generation.current) changedDuring.current = true
+      else refresh()
+    }
+    changes?.addEventListener('changed', onChange)
     return () => {
+      changes?.removeEventListener('changed', onChange)
+      changes?.close()
       clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', refresh)

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { attentionNotificationsState, requestAttentionNotifications } from '../../agent/attentionNotifications'
+import { enableWebPush } from '../../agent/webPush'
 import { Button } from '@/components/ui/button'
 
 /** Where "Not now" is remembered, per browser. */
@@ -14,7 +15,7 @@ function dismissed(): boolean {
 }
 
 /**
- * #815 — offers OS notifications for attention requests while the browser has not been asked
+ * #815 — offers OS notifications for pending requests while the browser has not been asked
  * yet. The permission prompt opens only from "Turn on", a click, as browsers require; once
  * answered (or "Not now"), the offer is gone.
  */
@@ -23,7 +24,14 @@ export function NotificationsOffer({ className }: { className?: string }) {
   const [hidden, setHidden] = useState(dismissed)
   if (state !== 'default' || hidden) return null
   const turnOn = () => {
-    void requestAttentionNotifications().then(setState, () => setState(attentionNotificationsState()))
+    void requestAttentionNotifications().then(
+      (next) => {
+        setState(next)
+        // #815: with the permission, a closed tab can be told too (Web Push).
+        if (next === 'granted') void enableWebPush()
+      },
+      () => setState(attentionNotificationsState()),
+    )
   }
   const notNow = () => {
     setHidden(true)
@@ -36,7 +44,7 @@ export function NotificationsOffer({ className }: { className?: string }) {
   return (
     <div role="region" aria-label="Notifications" className={className}>
       <p className="text-[12.5px] text-muted-foreground">
-        Get a notification when the assistant needs you while this tab is in the background.
+        Get a notification when the assistant needs you while this tab is in the background or closed.
       </p>
       <div className="mt-1 flex gap-2">
         {/* Human-only: the browser bridge (#254) must never let an agent press these. */}

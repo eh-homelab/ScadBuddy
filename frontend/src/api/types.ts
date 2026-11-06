@@ -24,7 +24,7 @@ export type CustomizerSchema = Schemas['CustomizerSchema']
 /** A revision's schema, with that revision's own `ui` declaration (#425). */
 export type RevisionSchema = Schemas['RevisionSchema']
 
-/** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
+/** #204 — an SVG, PNG, STL, 3MF or OBJ uploaded for a `// file` parameter; its `id` is the value. */
 export type Asset = Schemas['AssetMeta']
 /** #296 — how much the upload store holds, against its caps (0 is no limit). */
 export type AssetUsage = Schemas['AssetUsage']
@@ -47,6 +47,8 @@ export type RevokedSessions = Schemas['RevokedSessions']
 export type RepositoryLag = Schemas['RepositoryLag']
 
 export type ModelSummary = Schemas['ModelRecord']
+/** #2290 — the Models page's filter counts. */
+export type ModelFacets = Schemas['ModelFacets']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
@@ -180,6 +182,11 @@ export type FlowDefinition = Schemas['Definition']
 export type FlowSummary = Schemas['DefinitionSummary']
 /** #2503 — one version of a flow's git history. */
 export type FlowVersion = Schemas['FlowVersion']
+/** #3186 — a flow's display name and description (`flow.json`), and the change of them. */
+export type FlowDetails = Schemas['FlowDetails']
+export type FlowDetailsUpdate = Schemas['DetailsUpdate']
+/** #3186 — what a save is called in the flow's history: its commit message and body. */
+export type FlowCommitMessage = Schemas['CommitMessage']
 /** #2485 — whether a flow is archived or deleted, and by whom. */
 export type FlowState = Schemas['FlowState']
 /** #2487 — the editor's Save body, its check, and what it completes. */
@@ -282,6 +289,7 @@ export type LibraryListing = Schemas['LibraryListing']
 /** #2349 — one library file's name by id (`GET /print/library/names`). */
 export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryFileEntry = Schemas['LibraryFileEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
 export type LibrarySearchHit = Schemas['LibrarySearchHit']
@@ -364,6 +372,12 @@ export type OrderTotals = Schemas['OrderTotals']
 export type OrderPage = Schemas['OrderPage']
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
+/** Storefront phase 1 (#5280, spec 2026-11-02 §4): one design of an item, and how it is approved. */
+export type Revision = Schemas['Revision']
+export type RevisionAnswer = Revision['answer']
+export type Approval = OrderItem['approval']
+export type RevisionCreate = Defaulted<Schemas['RevisionCreate'], 'note'>
+export type RevisionAnswerInput = Defaulted<Schemas['RevisionAnswerInput'], 'note'>
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']
@@ -376,6 +390,10 @@ export type Shipment = Schemas['Shipment']
 export type Payment = Schemas['Payment']
 export type OrderCharge = Schemas['Charge']
 export type OrderEvent = Schemas['OrderEvent']
+// #4251 §6.4 — `GET /orders/{id}/costs`.
+export type OrderCosts = Schemas['OrderCosts']
+export type ItemCost = Schemas['ItemCost']
+export type AttemptCost = Schemas['AttemptCost']
 export type AddressSnapshot = Schemas['AddressSnapshot']
 export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
 export type OrderPatch = Partial<Schemas['OrderPatch']>
@@ -616,6 +634,43 @@ export interface MemorySettings {
   recall_max_query_chars: number
   default: number
   max: number
+}
+
+/**
+ * #815 — the push services the agent may send Web Push to (`GET/PUT
+ * /api/v1/ai/settings/push-services`, agent `src/routes/push.ts`): host names, or `*.` and
+ * one for its subdomains. `default` is the browsers' own services.
+ */
+export interface PushServices {
+  hosts: string[]
+  default: string[]
+}
+
+/**
+ * #815 — a notification channel out of the browser (agent `src/routes/notifyChannels.ts`):
+ * an ntfy topic, or a Home Assistant notify service. The token is never returned.
+ */
+export interface NotifyChannel {
+  id: string
+  kind: 'ntfy' | 'home_assistant'
+  name: string
+  url: string
+  target: string | null
+  enabled: boolean
+  has_token: boolean
+  token_last4: string
+  last_error: string | null
+  last_sent_at: string | null
+}
+
+/** What a new channel is made of; `token` and `target` as each kind needs. */
+export interface NotifyChannelInput {
+  kind: NotifyChannel['kind']
+  name: string
+  url: string
+  target?: string | null
+  token?: string | null
+  enabled?: boolean
 }
 
 /**

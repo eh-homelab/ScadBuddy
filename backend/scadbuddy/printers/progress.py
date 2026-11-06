@@ -38,13 +38,12 @@ from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.reports import RUNNING as _RUNNING
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import print_error_text
 from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
-
-_RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
 PAUSED = "Paused on the printer."
 MOVED_ON = "The printer has started another print since, so how this one ended is not known."
 NOT_HEARD = "The printer has not reported for a while, so how this print ended is not known."

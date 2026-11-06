@@ -1925,6 +1925,40 @@ describe('preset tools carry a description and tags (#327)', () => {
   })
 })
 
+describe('preset tools hand back the link to a preset (#1022)', () => {
+  const MUM = {
+    id: 'p',
+    name: 'Mum',
+    origin: 'mine',
+    params: {},
+    description: '',
+    tags: [],
+    path: '/m/m?preset=p',
+    url: 'https://scad.test/m/m?preset=p',
+  }
+
+  it('says so, and passes the link through from the backend', async () => {
+    for (const name of ['list_presets', 'save_preset', 'update_preset', 'duplicate_preset']) {
+      expect(tool(name).description).toMatch(/`url`.*`path`/)
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json([MUM])),
+      http.post(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json(MUM, { status: 201 })),
+      http.patch(`${BACKEND}/api/v1/models/m/presets/p`, () => HttpResponse.json(MUM)),
+      http.post(`${BACKEND}/api/v1/models/m/presets/p/duplicate`, () =>
+        HttpResponse.json({ ...MUM, id: 'q', path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' }, { status: 201 })),
+    )
+    const listed = await runTool(tool('list_presets'), { slug: 'm' }, ctx())
+    expect(firstText(listed)).toMatchObject({ items: [{ path: MUM.path, url: MUM.url }] })
+    const saved = await runTool(tool('save_preset'), { slug: 'm', name: 'Mum' }, ctx())
+    expect(firstText(saved)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const updated = await runTool(tool('update_preset'), { slug: 'm', preset_id: 'p', name: 'Mum' }, ctx())
+    expect(firstText(updated)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const copied = await runTool(tool('duplicate_preset'), { slug: 'm', preset_id: 'p', name: 'Mum 2' }, ctx())
+    expect(firstText(copied)).toMatchObject({ path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' })
+  })
+})
+
 describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () => {
   const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
 
@@ -2184,6 +2218,19 @@ describe('binary results: inline under the cap, a link over it', () => {
     const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
     expect(large.isError).toBeFalsy()
     expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
+  })
+
+  it("get_asset with content: a mesh's picture is its preview, never its bytes (#959)", async () => {
+    const asset = 'c'.repeat(64)
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset, kind: 'stl', triangles: 12 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () => HttpResponse.json({}, { status: 500 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/preview`, () =>
+        new HttpResponse(new Uint8Array(4), { headers: { 'content-type': 'image/png' } }),
+      ),
+    )
+    const answer = await runTool(tool('get_asset'), { slug: 'box', asset_id: asset, include_content: true }, ctx({ maxInlineBytes: 16 }))
+    expect(answer.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
   })
 })
 
@@ -3256,6 +3303,20 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
     const stale = await runTool(tool('list_models'), { limit: 10, cursor: first.next_cursor }, ctx())
     expect(stale.isError).toBe(true)
     expect(JSON.stringify(stale.content)).toMatch(/stale/)
+  })
+
+  it('list_models passes its search and filters to the backend, and scopes the cursor to them (#2290)', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => models, (m) => m.slug, queries)))
+    const args = { limit: 25, q: 'box lid', tag: ['kitchen', 'box'], origin: 'mine', sort: 'name' }
+    const first = firstText(await runTool(tool('list_models'), args, ctx())) as { next_cursor: string }
+    expect(queries[0]?.get('q')).toBe('box lid')
+    expect(queries[0]?.getAll('tag')).toEqual(['kitchen', 'box'])
+    expect(queries[0]?.get('origin')).toBe('mine')
+    expect(queries[0]?.get('sort')).toBe('name')
+    const other = await runTool(tool('list_models'), { ...args, q: 'bolt', cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
   })
 
   it('list_outputs passes the window through for its model, and scopes the cursor to it', async () => {

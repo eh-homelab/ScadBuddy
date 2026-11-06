@@ -44,6 +44,23 @@ class SpoolGroup(BaseModel):
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
 
 
+class ShelfSpool(BaseModel):
+    """One spool of the inventory and where it is loaded (§5.4 "Spools", #4251), in
+    orders' own shape."""
+
+    id: int
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    #: ``#RRGGBB`` from its ``rgba``; None for one known only by its colour's name, which
+    #: is never taken for a record's colour.
+    colour: str | None = None
+    remaining_g: float = 0.0
+    archived: bool = False
+    #: The Bambuddy printer it is loaded in; None on the shelf.
+    loaded_printer_id: int | None = None
+
+
 class ArchiveFacts(BaseModel):
     """One Bambuddy archive (one plate's print) as an attempt copies it (§8.2), in
     orders' own shape."""
@@ -60,6 +77,9 @@ class ArchiveFacts(BaseModel):
     finish_photos: list[str] = Field(default_factory=list)
     #: Whether the archive has a timelapse (pulled off the printer) to copy.
     timelapse: bool = False
+    #: The name its timelapse is attached under (``timelapse-<id>.mp4``), so the copy
+    #: needs no second read of the archive (#5263).
+    timelapse_name: str | None = None
 
 
 #: What of an archive an attempt can copy into its attachments (§8.2).
@@ -101,17 +121,34 @@ class OrderIntegrations(Protocol):
         without a Bambuddy."""
         ...
 
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        """Every spool and the printer it is loaded in (§5.4 "Spools");
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         """One archive's facts (§8.2); None for one Bambuddy deleted.
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
+    async def archive_cost(self, archive_id: int) -> float | None:
+        """Bambuddy's cost of one archive, corrected for suspect filament readings
+        (``bambuddy/costs.py``, §6.4); None for one Bambuddy deleted or never priced.
         :class:`NotLinkedError` without a Bambuddy."""
         ...
 
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
-        """The archive's ``finish_`` photo ``name`` or its timelapse written to
+        """The archive's ``finish_`` photo ``name`` or its timelapse (attached as ``name``,
+        else as its archive names it) written to
         ``target``, through Bambuddy's media routes. :class:`MediaTooLargeError` past
         ``limit`` bytes, with ``target`` removed."""
+        ...
+
+    async def project_exists(self, project_id: int) -> bool:
+        """Whether Bambuddy still has project ``project_id`` (#5263: one deleted there is
+        made again). :class:`NotLinkedError` without a Bambuddy."""
         ...
 
     async def ensure_project(self, name: str, parent_id: int | None) -> int:
@@ -131,12 +168,21 @@ class NotLinked:
     async def spool_groups(self) -> list[SpoolGroup]:
         raise NotLinkedError
 
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        raise NotLinkedError
+
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        raise NotLinkedError
+
+    async def archive_cost(self, archive_id: int) -> float | None:
         raise NotLinkedError
 
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
+        raise NotLinkedError
+
+    async def project_exists(self, project_id: int) -> bool:
         raise NotLinkedError
 
     async def ensure_project(self, name: str, parent_id: int | None) -> int:

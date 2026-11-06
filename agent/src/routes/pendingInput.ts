@@ -22,6 +22,9 @@ import { browserUser } from '../auth/browserSession.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 import { linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
+import { streamSSE } from 'hono/streaming'
+import type { PendingChanges } from '../gate/changes.js'
+import { SSE_KEEPALIVE_MS } from './sessions.js'
 
 // GET /api/v1/ai/pending-input (#815; durable-agents spec §6.6, PR #1070): every
 // tool call parked on a person that the browser user may answer, in one shape,
@@ -71,6 +74,26 @@ export type PendingInputRouteDeps = {
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
+  /** The pending tables' change ticks (gate/changes.ts); without them the changes stream is 503. */
+  changes?: PendingChanges | undefined
+  /** Ends the changes streams when the app closes. */
+  shutdown?: AbortSignal | undefined
+}
+
+/**
+ * GET /api/v1/ai/pending-input/changes (#815): an event stream that sends `changed`, with no
+ * data, when it opens and whenever anything parked on a person may have opened or closed
+ * (gate/changes.ts), so the badge re-reads `GET /pending-input` at once rather than on its
+ * 15 s poll, which a background tab's throttled timers stretch. It names no entry, so it
+ * tells nobody anything a read would not; it is a read behind the same guard.
+ */
+export const PENDING_CHANGES_PATH = '/api/v1/ai/pending-input/changes'
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** The pending tables' change ticks (gate/changes.ts); left out without the event bus. */
+    pendingChanges?: PendingChanges | undefined
+  }
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -489,6 +512,52 @@ async function repeated(sessions: SessionManager, requestId: string, body: Respo
 }
 
 export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDeps): void {
+  app.get(PENDING_CHANGES_PATH, (c) => {
+    const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'pending input reads')
+    if (problem) return c.json({ detail: problem }, 403)
+    const changes = deps.changes
+    if (!changes) return c.json({ detail: 'the event bus is not running, so changes are not streamed; poll /api/v1/ai/pending-input' }, 503)
+    c.header('X-Accel-Buffering', 'no')
+    c.header('Cache-Control', 'no-cache')
+    return streamSSE(c, async (stream) => {
+      const done = new AbortController()
+      const end = () => done.abort()
+      stream.onAbort(end)
+      deps.shutdown?.addEventListener('abort', end, { once: true })
+      if (deps.shutdown?.aborted) end()
+      // One write at a time, and at most one waiting behind it: ticks carry nothing, so a
+      // burst while a write is open is one more tick.
+      let writing: Promise<void> | undefined
+      let again = false
+      const tick = () => {
+        if (writing) {
+          again = true
+          return
+        }
+        writing = stream
+          .writeSSE({ event: 'changed', data: '' })
+          .catch(end)
+          .finally(() => {
+            writing = undefined
+            if (again) {
+              again = false
+              tick()
+            }
+          })
+      }
+      const off = changes.subscribe(tick)
+      const keepalive = setInterval(() => void stream.write(': keepalive\n\n').catch(end), SSE_KEEPALIVE_MS)
+      try {
+        tick()
+        if (!done.signal.aborted) await new Promise((resolve) => done.signal.addEventListener('abort', resolve, { once: true }))
+      } finally {
+        off()
+        clearInterval(keepalive)
+        deps.shutdown?.removeEventListener('abort', end)
+      }
+    })
+  })
+
   app.get('/api/v1/ai/pending-input', async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'pending input reads')
     if (problem) return c.json({ detail: problem }, 403)
@@ -553,12 +622,14 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
 
 /** The pending-input read and its respond route (#815). */
 export const route: RouteModule = {
-  register(app, deps) {
+  register(app, deps, shutdown) {
     registerPendingInputRoutes(app, {
       sessions: deps.sessions,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
+      changes: deps.pendingChanges,
+      shutdown,
     })
   },
 }

@@ -43,9 +43,13 @@ from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import META_NAME, LanPlateSend, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.progress import lan_last_print
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore, lan_settle_hook
 from scadbuddy.render.glb import BoundingBox
+from tests.conftest import PgPool
 
 OUTPUT = "c" * 32
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -477,6 +481,39 @@ def test_each_read_that_moved_runs_each_read_hook_once(paths: DataPaths) -> None
         (OUTPUT, "running", False),
         (OUTPUT, "done", True),
     ]
+
+
+@pytest.mark.requires_postgres
+def test_the_lan_read_hooks_write_nothing_for_a_bambuddy_read(
+    paths: DataPaths, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """#5144: every read hook hears every read of every subject, so each LAN hook keeps
+    to ``route`` ``lan``. A Bambuddy print's reads, even ones naming a run that has LAN
+    records, leave its last print and its rack picks as they were."""
+    write_output(paths)
+    prints = OutputPrintStore(pg_pool)
+    prints.record_lan(OUTPUT, run_id="r", printer=None, plates=[LanPlateSend(plate_id=1, copies=1)])
+    rack = RackUsageStore(pg_conninfo)
+    try:
+        picked = PickedHotend(group_id=0, position=2, serial="SERIAL5144")
+        asyncio.run(rack.record_lan_picks("r", "scadbuddy-r-p1", None, [picked]))
+        bambuddy = [
+            progress("running").model_copy(update={"run_id": "r"}),
+            progress("done", settled=True, done=1).model_copy(update={"run_id": "r"}),
+        ]
+        follower, _ = follower_for(
+            paths,
+            Script(*bambuddy),
+            on_read=[lan_last_print(prints), lan_settle_hook(rack)],
+        )
+        assert follow(follower) == "settled"
+
+        row = prints.for_outputs([OUTPUT])[OUTPUT]
+        assert (row.print_route, row.print_stage, row.print_settled) == ("lan", "running", False)
+        with psycopg.connect(pg_conninfo) as conn:
+            assert conn.execute("SELECT count(*) FROM rack_nozzle_prints").fetchone() == (0,)
+    finally:
+        rack.close()
 
 
 def test_a_failing_settled_hook_does_not_fail_the_follow(paths: DataPaths) -> None:

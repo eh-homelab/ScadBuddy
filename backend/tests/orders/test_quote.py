@@ -28,6 +28,7 @@ from scadbuddy.orders.models import (
     PricingPolicy,
     Reference,
 )
+from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.quote import (
     QuoteError,
     QuoteRun,
@@ -294,6 +295,14 @@ def test_the_check_refuses_a_settled_item(shop: Shop) -> None:
     assert gone.value.status == 404
 
 
+def test_the_check_refuses_a_request_with_no_design(shop: Shop) -> None:
+    request = shop.lifecycle.add_request_item(shop.order.id, BY, title="A dragon", quantity=1)
+    with pytest.raises(ApiError) as refused:
+        quote_check(shop.rows, POLICY, shop.order.id, request.id, shop.request())
+    assert refused.value.status == 409
+    assert refused.value.type == PROBLEMS + "item_has_no_design"
+
+
 def test_the_check_refuses_an_order_that_is_not_open(shop: Shop) -> None:
     quote = shop.lifecycle.record_manual_quote(
         shop.order.id, shop.item.id, ManualQuoteInput(unit_price_minor=100), BY
@@ -556,6 +565,84 @@ async def test_the_run_writes_the_filaments_first(shop: Shop, tmp_path: Path) ->
     assert shop.holders() == {quote.id}
     assert isinstance(run.slicer, FakeSlicer)
     assert run.slicer.subjects == [f"order_item:{shop.item.id}"]
+
+
+async def test_the_runs_new_filaments_are_a_revision_the_quote_names(
+    shop: Shop, tmp_path: Path
+) -> None:
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    revisions = shop.rows.revisions(shop.item.id)
+    assert [r.number for r in revisions] == [1, 2]
+    assert quote.revision_id == revisions[1].id
+
+
+async def test_a_revision_made_during_the_run_refuses_its_quote(shop: Shop, tmp_path: Path) -> None:
+    """Review Focus 5: the slice is of a design a person has since replaced."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    assert isinstance(run.slicer, FakeSlicer)
+    fetch = run.slicer.fetch
+
+    async def revising(sliced: SlicedPlate) -> bytes:
+        shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, note="new photos")
+        return await fetch(sliced)
+
+    run.slicer.fetch = revising  # type: ignore[method-assign]
+    with pytest.raises(ApiError) as refused:
+        await quote_run(
+            run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+        )
+    assert refused.value.status == 409
+    assert refused.value.type.endswith("/revision_not_newest")
+    assert shop.rows.quotes(shop.item.id) == []
+    assert shop.holders() == set()
+
+
+async def test_a_revision_made_during_the_render_refuses_its_quote(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """A revision made while the item's render runs: the render is of the old design,
+    so the run writes nothing past it and records no quote."""
+
+    class Revising(FakeRenders):
+        async def submit(self, *args: Any, **kwargs: Any) -> Job:
+            shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, note="new photos")
+            return await super().submit(*args, **kwargs)
+
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])}, renders=Revising())
+    with pytest.raises(ApiError) as refused:
+        await quote_run(
+            run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+        )
+    assert refused.value.status == 409
+    assert refused.value.type.endswith("/revision_not_newest")
+    assert shop.rows.quotes(shop.item.id) == []
+    assert shop.holders() == set()
+    assert shop.get_item().output_id is None
+
+
+async def test_an_item_with_no_revision_is_repaired_and_quoted(shop: Shop, tmp_path: Path) -> None:
+    """An item a build before revisions wrote has none: the run makes its revision 1
+    from the item's copy and quotes it, never a 500."""
+    shop.lifecycle.update_item(
+        shop.order.id, shop.item.id, BY, filaments={0: shop.pla, 1: shop.petg}
+    )
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_items SET current_revision_id = NULL WHERE id = %s", (shop.item.id,)
+        )
+        conn.execute("DELETE FROM order_item_revisions WHERE item_id = %s", (shop.item.id,))
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    item = shop.get_item()
+    assert item.current_revision_id is not None
+    assert quote.revision_id == item.current_revision_id
+    kinds = [e.kind for e in shop.rows.events(shop.order.id)]
+    assert "revision.repaired" in kinds
 
 
 async def test_a_recorded_quote_keeps_its_rates(shop: Shop, tmp_path: Path) -> None:

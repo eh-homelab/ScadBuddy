@@ -28,6 +28,35 @@ test.describe('library', () => {
     await expect(dialog.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
   })
 
+  test("opens a file's details, and prints and renames from them (#1031)", async ({ page }) => {
+    await page.goto('/library/MakerWorld')
+    await page.getByTestId('library-open-67').click()
+    const drawer = page.getByRole('dialog', { name: "Clara's Wand.3mf" })
+    await expect(drawer.getByTestId('library-details-plates').getByRole('img')).toHaveCount(3)
+    await expect(drawer.getByTestId('library-details-objects')).toContainText('Wand')
+    await expect(page).toHaveURL(/\/library\/MakerWorld\?details=67$/)
+
+    // The print dialog opens over the drawer, and closing it leaves the drawer open.
+    await drawer.getByRole('button', { name: 'Print', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await expect(drawer).toBeVisible()
+
+    // A rename typed into its dialog keeps the drawer, now named anew.
+    await drawer.getByRole('button', { name: 'Rename' }).click()
+    const rename = page.getByRole('dialog', { name: /^Rename/ })
+    await rename.getByRole('textbox').fill('Wand of Clara')
+    await rename.getByTestId('library-rename-confirm').click()
+    await expect(page.getByRole('dialog', { name: 'Wand of Clara.3mf' })).toBeVisible()
+
+    await page.goBack()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page).toHaveURL(/\/library\/MakerWorld$/)
+  })
+
   test('Advanced lists a sliced file with Print, and is remembered', async ({ page }) => {
     await page.goto('/library')
     await page.getByRole('switch', { name: 'Advanced' }).click()

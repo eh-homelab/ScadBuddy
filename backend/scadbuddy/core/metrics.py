@@ -9,7 +9,7 @@ outcome, a route template) -- never a slug, a job id or a raw path.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import Literal, get_args
 
@@ -21,12 +21,15 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from prometheus_client.metrics import MetricWrapperBase
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = [
     "CONTENT_TYPE_LATEST",
+    "ROLE_SERIES",
     "HttpMetrics",
     "Metrics",
+    "MetricsRole",
     "RenderOutcome",
     "RenderStage",
     "SettlePass",
@@ -71,11 +74,74 @@ RENDER_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 240, 480, 900)
 #: A native slice: the slicer queue's wait (up to two hours) and four `slice_plate`
 #: attempts of up to 30 minutes, past `RENDER_BUCKETS`' 15 minutes (Task 14/15 review M3).
 SLICE_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 16200)
-HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+#: Up to 120 s (#2293): list routes took 10 to 16 s and a save with its polling ~37 s,
+#: and past the top finite bucket a quantile reads as that bucket.
+HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120)
+#: An operation, from its record to its end (#2295): most answer in a second, a save with
+#: its render ~37 s, a run up to its 5-minute ``RUN_TIMEOUT``, a slice quote 30 minutes.
+OPERATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120, 300, 600, 1800)
+
+#: How an operation ended: its record's final status (`operations/store.py`
+#: `OperationStatus`), spelled out here so the metrics never load the operations stack.
+OperationOutcome = Literal["succeeded", "failed"]
+
+#: Which process the metrics are for: the API, or one of `python -m scadbuddy.worker`'s
+#: queues (the render worker, ``--queue bambuddy``, ``--queue projects``).
+MetricsRole = Literal["api", "render", "print", "projects"]
+
+#: Every worker: its build, the events it publishes and the event-loop watch.
+_WORKER_COMMON = frozenset(
+    {
+        "build_info",
+        "events_published",
+        "events_dropped",
+        "event_loop_lag",
+        "event_loop_stalls",
+        "default_executor_wait",
+        "default_executor_stalls",
+    }
+)
+#: A worker that starts its event bus listens and prunes the log too.
+_LISTENING = frozenset({"events_received", "events_resyncs", "event_log_pruned"})
+#: A worker that serves operations ends their records (`OperationStore.finish`, #2295).
+#: The 202 past the deadline (`operations_deferred`) is the API's alone.
+_OPERATIONS = frozenset({"operation_duration", "operations_finished"})
+
+#: The attributes each worker role registers (#664): only what that worker sets, so its
+#: /metrics never carries the API's series as constant zeros (`scadbuddy_render_store_up
+#: 0` fires ScadBuddyRenderStoreUnreadable). The API registers every series. When a
+#: worker starts setting a ``metrics.<attribute>``, add the attribute to its role here, or
+#: that worker never exports it.
+ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
+    "render": _WORKER_COMMON
+    | {
+        "activity_write_failures",
+        "render_finished",
+        "render_duration",
+        "job_latency",
+        "queue_wait",
+        "project_retries",
+        "stage_duration",
+        "store_ops",
+        "worker_cache",
+        "worker_cache_bytes",
+        "render_data_bytes",
+        "store_render_key_fallback",
+    },
+    "print": _WORKER_COMMON
+    | _LISTENING
+    | _OPERATIONS
+    | {"activity_write_failures", "print_follows_running", "rack_watch_settle_failed"},
+    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS,
+}
 
 
 class Metrics:
-    def __init__(self, registry: CollectorRegistry | None = None) -> None:
+    def __init__(
+        self, registry: CollectorRegistry | None = None, *, role: MetricsRole = "api"
+    ) -> None:
+        """``role`` other than ``api`` keeps only `ROLE_SERIES`' series in ``registry``;
+        the others stay as attributes, counted but never exported."""
         self.registry = registry if registry is not None else CollectorRegistry()
         r = self.registry
 
@@ -260,6 +326,13 @@ class Metrics:
             "the next prints wait on the follow queue, unfollowed.",
             registry=r,
         )
+        self.rack_watch_settle_failed = Counter(
+            "scadbuddy_rack_watch_settle_failed",
+            "LAN prints whose rack picks the printer watch could not settle as the printer "
+            "ended them (#5138). Not retried: lan_wait or the run's follow may settle them, "
+            "else they stay pending until PENDING_PICK_MAX_AGE.",
+            registry=r,
+        )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
             "Time from submit until its workflow began the render, by kind.",
@@ -305,6 +378,31 @@ class Metrics:
             " (completed, failed, cancelled).",
             ["outcome"],
             buckets=SLICE_BUCKETS,
+            registry=r,
+        )
+
+        # Operations (#1053, #2295): `kind` is a registered `OperationKind`'s name, a
+        # closed set each process pre-creates (`operation_kinds`). Counted where the
+        # record ends (`OperationStore.finish`), in the process whose worker ran it.
+        self.operation_duration = Histogram(
+            "scadbuddy_operation_duration_seconds",
+            "Time from an operation's record to its end, by kind and outcome (succeeded, failed).",
+            ["kind", "outcome"],
+            buckets=OPERATION_BUCKETS,
+            registry=r,
+        )
+        self.operations_finished = Counter(
+            "scadbuddy_operations_finished",
+            "Operations whose record ended, by kind and outcome (succeeded, failed).",
+            ["kind", "outcome"],
+            registry=r,
+        )
+        self.operations_deferred = Counter(
+            "scadbuddy_operations_deferred",
+            "Operation requests not answered within the deadline: a 202 to follow (or a"
+            " 503 still-accepting for a key the follow URL cannot carry), by kind; once"
+            " per request, so a re-send counts again.",
+            ["kind"],
             registry=r,
         )
 
@@ -467,6 +565,21 @@ class Metrics:
             self.events_dropped.labels(reason)
         for outcome in get_args(TraceRelayOutcome):
             self.trace_relay_batches.labels(outcome)
+
+        if role != "api":
+            keep = ROLE_SERIES[role]
+            for name, value in vars(self).items():
+                if isinstance(value, MetricWrapperBase) and name not in keep:
+                    r.unregister(value)
+
+    def operation_kinds(self, kinds: Iterable[str]) -> None:
+        """Make each kind's operation series at zero, as the other labelled series are
+        made above, once the registered kinds are known."""
+        for kind in kinds:
+            self.operations_deferred.labels(kind)
+            for outcome in get_args(OperationOutcome):
+                self.operations_finished.labels(kind, outcome)
+                self.operation_duration.labels(kind, outcome)
 
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:

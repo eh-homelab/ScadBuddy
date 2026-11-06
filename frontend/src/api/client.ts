@@ -32,6 +32,9 @@ import type {
   ModelSetting,
   ImageSettings,
   MemorySettings,
+  PushServices,
+  NotifyChannel,
+  NotifyChannelInput,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
@@ -49,6 +52,7 @@ import type {
   Job,
   CatalogueLibrary,
   DependencyReport,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
@@ -79,6 +83,7 @@ import type {
   BatchChoice,
   PrintBatch,
   BatchQueueProgress,
+  ModelFacets,
   ModelSummary,
   ModelVersion,
   Output,
@@ -123,7 +128,10 @@ import type {
   FlowDecided,
   FlowProposal,
   FlowRunQueue,
+  FlowCommitMessage,
   FlowDefinition,
+  FlowDetails,
+  FlowDetailsUpdate,
   FlowGrantSpec,
   FlowGrantView,
   FlowHostInterface,
@@ -206,6 +214,7 @@ import type {
   OrderCreate,
   OrderDetail,
   OrderEstimate,
+  OrderCosts,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -217,6 +226,9 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  Revision,
+  RevisionAnswerInput,
+  RevisionCreate,
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
@@ -244,6 +256,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { unmatchable } from '../lib/catalogueQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
 import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
@@ -315,6 +328,26 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+export const MODELS_PAGE_LIMIT = 500
+
+/** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
+export interface ModelFilters {
+  q: string
+  tags: string[]
+  origin: 'all' | 'builtin' | 'mine'
+  sort: 'updated' | 'name'
+}
+
+function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
+  const query = new URLSearchParams()
+  if (q.trim()) query.set('q', q.trim())
+  // As typed: the route folds them, and the browser cannot fold as it does (#5305 review).
+  for (const tag of new Set(tags)) query.append('tag', tag)
+  if (origin !== 'all') query.set('origin', origin)
+  return query
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -1055,7 +1088,14 @@ export const api = {
   archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
   unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
   /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
-  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
+  deleteFlow: (name: string, message?: FlowCommitMessage) =>
+    request<FlowState>(`/workflows/names/${seg(name)}`, {
+      method: 'DELETE',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
+  /** #3186 — a flow's display name and description: one commit of `flow.json`, not a version. */
+  updateFlowDetails: (name: string, body: FlowDetailsUpdate) =>
+    request<FlowDetails>(`/workflows/names/${seg(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   /**
    * One flow's versions, newest first: the one place the page reads them from, its git
@@ -1091,8 +1131,11 @@ export const api = {
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
 
   /** A new version with the script at `commit`: a new commit, type-checked first. */
-  restoreFlowVersion: (name: string, commit: string) =>
-    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
+  restoreFlowVersion: (name: string, commit: string, message?: FlowCommitMessage) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, {
+      method: 'POST',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
 
   /**
    * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
@@ -1170,6 +1213,72 @@ export const api = {
     }),
 
   listModels: () => request<ModelSummary[]>('/models'),
+
+  /**
+   * #2290 — one page of the catalogue, searched, filtered and sorted on the server.
+   * `total` is how many models the filters select (`X-Total-Count`).
+   */
+  listModelsPage: async (
+    filters: ModelFilters,
+    page: { limit?: number; after?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    // Tags no model can carry all of select none, and GET /models would refuse them.
+    if (unmatchable(filters.tags)) return { items: [], total: 0 }
+    const query = modelFilterParams(filters)
+    query.set('sort', filters.sort)
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models?${query}`, { headers: { Accept: 'application/json' }, signal })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as ModelSummary[]
+    return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
+  },
+
+  /**
+   * The first `size` models `filters` select, read in pages of at most
+   * `MODELS_PAGE_LIMIT` (the backend's `MAX_PAGE_LIMIT`), each after the last: a window
+   * past the cap asked for in one read answers 422 (#5289 review). A chunk whose `after`
+   * went away (409) reads the window again from the top, once; `signal` stops it
+   * between chunks (#5292 review).
+   */
+  listModelsWindow: async (
+    filters: ModelFilters,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const read = async (): Promise<{ items: ModelSummary[]; total: number }> => {
+      const items: ModelSummary[] = []
+      let total = 0
+      while (items.length < size) {
+        signal?.throwIfAborted()
+        const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
+        const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug }, signal)
+        items.push(...page.items)
+        total = page.total
+        if (page.items.length < limit) break
+      }
+      return { items, total }
+    }
+    try {
+      return await read()
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) return await read()
+      throw cause
+    }
+  },
+
+  /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
+  modelFacets: async (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal): Promise<ModelFacets> => {
+    if (!unmatchable(filters.tags)) {
+      return await request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal })
+    }
+    // None selected: only the whole catalogue's count is asked for, and each tag is at 0.
+    const every = await request<ModelFacets>(`/model-facets?${modelFilterParams({ ...filters, tags: [] })}`, {
+      signal,
+    })
+    return { total: every.total, matched: 0, tags: [...new Set(filters.tags)].map((tag) => ({ tag, count: 0 })) }
+  },
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
@@ -1436,7 +1545,7 @@ export const api = {
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
-   * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
+   * #204 — stores an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter (#959). The answer's `id` (the
    * SHA-256 of what the server kept) is the value the render takes.
    */
   uploadAsset: (slug: string, file: File) => {
@@ -1478,6 +1587,10 @@ export const api = {
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
+
+  /** A PNG of an uploaded STL, 3MF or OBJ (#959); an image is its own picture. */
+  assetPreviewUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/preview`,
 
   /**
    * A sample file the template ships beside its source (a `file` parameter's
@@ -1654,6 +1767,26 @@ export const api = {
     `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
+
+  /**
+   * #2290 — one page of a model's outputs, newest first. `after` is the last output id
+   * of the page before; `total` is how many outputs the model has (`X-Total-Count`).
+   */
+  listOutputsPage: async (
+    slug: string,
+    page: { limit?: number; after?: string } = {},
+  ): Promise<{ items: Output[]; total: number }> => {
+    const query = new URLSearchParams()
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models/${seg(slug)}/outputs?${query}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as Output[]
+    // Without the header a full page cannot tell its end: `Infinity` keeps Load more.
+    const header = response.headers.get('X-Total-Count')
+    const total = header !== null ? Number(header) : page.limit !== undefined && items.length >= page.limit ? Infinity : items.length
+    return { items, total }
+  },
 
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
@@ -2142,8 +2275,10 @@ export const api = {
   /** Back in the pickers, so a new order can name them again. */
   unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
-  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number; statuses?: Order['status'][] } = {}) => {
     const search = new URLSearchParams(ordersApiParams(query))
+    // #5276: `status` repeated is orders of any of them, filtered by the server.
+    for (const status of page.statuses ?? []) search.append('status', status)
     if (page.limit !== undefined) search.set('limit', String(page.limit))
     if (page.cursor) search.set('cursor', page.cursor)
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
@@ -2151,6 +2286,8 @@ export const api = {
   },
   order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
+  /** #4251 §6.4 — the accepted quotes beside the attempts. */
+  orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -2188,9 +2325,11 @@ export const api = {
     file: File,
     fields: { role?: OrderAttachmentRole; caption?: string },
     onProgress?: (fraction: number) => void,
+    /** #4251 — one of the item's attempts. */
+    fulfilmentId?: string | null,
   ): Promise<OrderAttachment> =>
     uploadForm<OrderAttachment>(
-      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}/attachments`,
+      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}${itemId && fulfilmentId ? `/fulfilments/${seg(fulfilmentId)}` : ''}/attachments`,
       () => {
         const body = new FormData()
         body.append('file', file)
@@ -2200,6 +2339,46 @@ export const api = {
       },
       onProgress,
     ),
+  // -- design revisions (#5280, storefront spec 2026-11-02 §4) -----------------------------
+  addOrderItemRevision: (orderId: string, itemId: string, body: RevisionCreate) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions`, { method: 'POST', body: JSON.stringify(body) }),
+  sendOrderItemRevision: (orderId: string, itemId: string, revisionId: string) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/send`, { method: 'POST' }),
+  answerOrderItemRevision: (orderId: string, itemId: string, revisionId: string, body: RevisionAnswerInput) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A file on one revision: its `render`, a `reference`, or (with `fulfilmentId`) the photo of its test print. */
+  addRevisionAttachment: (
+    orderId: string,
+    itemId: string,
+    revisionId: string,
+    file: File,
+    opts: { role: OrderAttachmentRole; caption?: string; fulfilmentId?: string | null },
+    onProgress?: (fraction: number) => void,
+  ): Promise<OrderAttachment> =>
+    uploadForm<OrderAttachment>(
+      `/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        body.append('role', opts.role)
+        if (opts.caption) body.append('caption', opts.caption)
+        if (opts.fulfilmentId) body.append('fulfilment_id', opts.fulfilmentId)
+        return body
+      },
+      onProgress,
+    ),
+  /** A test print of the item's newest revision: one copy, an attempt of purpose `test`. */
+  testPrintRevision: (orderId: string, itemId: string, revisionId: string, body: PrintRunRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/test-print`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A test-print photo of an accepted revision, copied into its template's photos. */
+  revisionPhotoToModel: (orderId: string, attachmentId: string) =>
+    command<ModelSummary>(`/orders/${seg(orderId)}/attachments/${seg(attachmentId)}/to-model`, { method: 'POST' }),
   updateOrderAttachment: (orderId: string, id: string, body: OrderAttachmentPatch) =>
     request<OrderAttachment>(`/orders/${seg(orderId)}/attachments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderAttachment: (orderId: string, id: string) =>
@@ -2302,6 +2481,26 @@ export const api = {
     return request<LibraryListing>(`/print/library${suffix}`)
   },
 
+  /**
+   * #2290 — one page of a folder's files, in the listing's order, with the tree. `after`
+   * is the last file id of the page before; `fileId` beside a `folderId` stretches the
+   * first page down to that file. `total` is how many files the folder lists.
+   */
+  listLibraryPage: async (
+    query: { folderId: number | null; all: boolean; fileId?: number },
+    page: { limit: number; after?: number },
+  ): Promise<LibraryListing & { total: number }> => {
+    const search = new URLSearchParams({ limit: String(page.limit) })
+    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
+    if (query.all) search.set('all', 'true')
+    if (page.after !== undefined) search.set('after', String(page.after))
+    const response = await send(`${API_BASE}/print/library?${search}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const listing = (await response.json()) as LibraryListing
+    return { ...listing, total: Number(response.headers.get('X-Total-Count') ?? (listing.files ?? []).length) }
+  },
+
   /** #3630 — library files whose name or folder holds every word, from every folder. */
   searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
     const search = new URLSearchParams({ q: query.q })
@@ -2361,6 +2560,10 @@ export const api = {
     command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  /** #5321 — one library file by id, whatever its type, with its folder's path. */
+  getLibraryFile: (fileId: number) => request<LibraryFileEntry>(`/print/library/${fileId}`),
+  /** #1031 — the library file itself, always served as a download. */
+  libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
@@ -2710,6 +2913,27 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
     }),
+
+  /** #815 — the push services the agent may send Web Push to. */
+  getPushServices: () => request<PushServices>('/ai/settings/push-services'),
+
+  putPushServices: (hosts: string[]) =>
+    request<PushServices>('/ai/settings/push-services', { method: 'PUT', body: JSON.stringify({ hosts }) }),
+
+  /** #815 — the notification channels (ntfy, Home Assistant), served by the agent service. */
+  listNotifyChannels: () => request<{ channels: NotifyChannel[] }>('/ai/notify/channels'),
+
+  createNotifyChannel: (input: NotifyChannelInput) =>
+    request<NotifyChannel>('/ai/notify/channels', { method: 'POST', body: JSON.stringify(input) }),
+
+  updateNotifyChannel: (id: string, patch: Partial<NotifyChannelInput>) =>
+    request<NotifyChannel>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+
+  deleteNotifyChannel: (id: string) =>
+    request<void>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  testNotifyChannel: (id: string) =>
+    request<{ ok: boolean; detail?: string }>(`/ai/notify/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
 
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),

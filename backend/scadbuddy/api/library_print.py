@@ -40,6 +40,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
 from scadbuddy.api.media import receive_upload
+from scadbuddy.api.models import PAGED_RESPONSES, TOTAL_COUNT_HEADER, PageLimit, page_window
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -84,8 +85,10 @@ from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
     LibraryEntry,
+    LibraryFileEntry,
     LibraryListing,
     LibrarySearch,
+    file_entry,
     folder_views,
     list_library,
     search_library,
@@ -197,15 +200,26 @@ FileIdPath = Annotated[int, Path(ge=1)]
 FolderIdPath = Annotated[int, Path(ge=1)]
 
 
-@router.get("", response_model=LibraryListing, summary="Bambuddy's library, one folder at a time")
+@router.get(
+    "",
+    response_model=LibraryListing,
+    summary="Bambuddy's library, one folder at a time",
+    responses=PAGED_RESPONSES,
+)
 async def get_library(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     outputs: OutputsDep,
     library: PrintLibraryDep,
+    response: Response,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
     file_id: Annotated[int | None, Query(ge=1)] = None,
+    limit: PageLimit = None,
+    after: Annotated[
+        int | None,
+        Query(ge=1, description="Start after this file (the last file of the page before)"),
+    ] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
@@ -214,23 +228,54 @@ async def get_library(
     any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
     folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
     no longer has is its 404. On ``library_backend=native`` it is ScadBuddy's own library,
-    and an id outside it, a file's or a folder's, is a 404."""
+    and an id outside it, a file's or a folder's, is a 404.
+
+    ``limit`` and ``after`` (a file id) page the folder's files (#2290), and
+    ``X-Total-Count`` counts every file the folder lists; the tree comes with every page.
+    A link to a file (``file_id``, with or without its ``folder_id``) with a ``limit``
+    answers from the top of the folder down to that file at least, so the linked file is
+    on its first page."""
     native = await library.serving_native()
     check_folder_served(folder_id, native)
+    # A file with its folder named is only where the page stretches to; without, the
+    # file's folder is what is listed.
+    linked, resolve = file_id, file_id is not None and folder_id is None
     if native is not None:
-        if file_id is not None and folder_id is None:
+        if resolve and file_id is not None:
             folder_id = (await native.library_file(file_id)).folder_id
         listing = await list_library(native, folder_id=folder_id, show_all=show_all)
+        _page_files(listing, response, linked=linked, after=after, limit=limit)
         await _name_native_outputs(native, outputs, listing.files)
         return listing
     async with client_for(store.load()) as client:
-        if file_id is not None and folder_id is None:
+        if resolve and file_id is not None:
             folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
+    _page_files(listing, response, linked=linked, after=after, limit=limit)
     made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in listing.files))
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+def _page_files(
+    listing: LibraryListing,
+    response: Response,
+    *,
+    linked: int | None,
+    after: int | None,
+    limit: int | None,
+) -> None:
+    """Keep the window of ``listing.files`` that ``after``/``limit`` ask for, the page
+    stretched down to a ``linked`` file when it starts at the top."""
+    response.headers[TOTAL_COUNT_HEADER] = str(len(listing.files))
+    if after is None and limit is None:
+        return
+    keys = [str(entry.id) for entry in listing.files]
+    if after is None and limit is not None and linked is not None and str(linked) in keys:
+        limit = max(limit, keys.index(str(linked)) + 1)
+    window = page_window(keys, None if after is None else str(after), limit, "file")
+    listing.files = listing.files[window]
 
 
 async def _name_native_outputs(
@@ -358,6 +403,45 @@ async def get_library_search(
     for entry in found.files:
         entry.output_id = made.get(entry.id)
     return found
+
+
+# After `/names` and `/search`: a path parameter declared first would take those words.
+@router.get(
+    "/{file_id}",
+    response_model=LibraryFileEntry,
+    summary="One library file, whatever its type, with its folder's path",
+)
+async def get_library_file_entry(
+    file_id: FileIdPath,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    library: PrintLibraryDep,
+) -> LibraryFileEntry:
+    """The file as the listing gives it, with ``all`` (a sliced file or an STL too), plus
+    ``folder_path``, the names of its folder from the top (#5321): what the Library page's
+    details read for a file no listing on screen holds. Read from the file's folder, as a
+    ``file_id`` link to the listing is; a file Bambuddy (or, on ``library_backend=native``,
+    ScadBuddy's own library) does not have is a 404."""
+    native = await library.serving_native()
+    if native is not None:
+        folder_id = (await native.library_file(file_id)).folder_id
+        listing = await list_library(native, folder_id=folder_id, show_all=True)
+        entry = file_entry(listing, file_id)
+        if entry is not None:
+            await _name_native_outputs(native, outputs, [entry])
+    else:
+        async with client_for(store.load()) as client:
+            folder_id = (await client.library_file(file_id)).folder_id
+            listing = await list_library(client, folder_id=folder_id, show_all=True)
+        entry = file_entry(listing, file_id)
+        if entry is not None:
+            made = await live_outputs_for_files(uploads, outputs, [entry.id])
+            entry.output_id = made.get(entry.id)
+    if entry is None:
+        # Moved or deleted between the two reads.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"library file {file_id} is not listed")
+    return entry
 
 
 @router.post(

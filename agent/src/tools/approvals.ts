@@ -68,7 +68,8 @@ export const approvalTools: Tool[] = [
       if (!action) return refused(`no pending action ${pending_action_id} for this caller (it may have expired)`)
       const tool = ctx.lookup?.(action.tool)
       // As it runs now (#1953): raised to outward since the prepare still runs here; disabled since, never.
-      const effective = tool ? await effectiveTool(tool, ctx) : undefined
+      // With the arguments, so a call its input pins outward (pinnedOutward.ts) is judged as it was prepared.
+      const effective = tool ? await effectiveTool(tool, ctx, args) : undefined
       if (!tool || !effective) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
       if (effective.disabled) return refused(`${tool.name} is disabled in Settings → Tools & plugins; nothing was sent`)
       // Lowered since (#2171): the call no longer asks, so there is nothing to confirm.
@@ -111,7 +112,8 @@ export const approvalTools: Tool[] = [
       // The report also names the tool, so runToolWithOutcome's untrusted-data
       // envelope (and its error attribution) says the content is that tool's, not confirm_action's.
       ctx.report?.({ approvalId: claim.action.id, ran: { tool: tool.name, input } })
-      return tool.execute(input, ctx)
+      // Who approved it, for what must reach a person (fetch_asset's one-off host, #959); never the caller's say.
+      return tool.execute(input, { ...ctx, approvedByPerson: claim.byPerson === true })
     },
   }),
 ]

@@ -47,7 +47,15 @@ ChargeKind = Literal["shipping", "discount", "fee", "tax"]
 QuoteSource = Literal["slice", "manual"]
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
 #: ``custom`` item is a title, a quantity and a typed price with nothing behind it.
-ItemKind = Literal["model", "custom"]
+ItemKind = Literal["model", "custom", "request"]
+#: When the customer approves a design (storefront spec §4): ``design_first`` waits for the
+#: design to be accepted before the item is quoted or printed; ``together`` approves it
+#: with the quote.
+Approval = Literal["design_first", "together"]
+#: A design revision's answer: the customer's, or ``superseded`` by a newer revision.
+RevisionAnswer = Literal["accepted", "changes_requested", "superseded"]
+#: Why an attempt was printed: the order's ``production`` run, or a ``test`` of a revision.
+FulfilmentPurpose = Literal["production", "test"]
 #: ``rounding`` is ``to_major``'s difference (#4250 Ruling 5), so the lines always add.
 QuoteLineKind = Literal[
     "filament", "machine_time", "setup", "labour", "markup", "rounding", "manual"
@@ -233,7 +241,8 @@ class Order(BaseModel):
 class OrderFilter(BaseModel):
     """What ``GET /orders`` narrows by (§4)."""
 
-    status: OrderStatus | None = None
+    #: Any of these (#5276); None or empty is every status.
+    status: list[OrderStatus] | None = None
     customer_id: str | None = None
     #: Matched against the number, the notes and the customer's name.
     q: str | None = None
@@ -279,7 +288,8 @@ class OrderItem(BaseModel):
     title: str
     notes: str
     kind: ItemKind = "model"
-    #: What to make; None for a ``custom`` item, which names nothing (#4954).
+    #: What to make; None for a ``custom`` item, which names nothing (#4954), and for a
+    #: ``request`` item until its first design.
     reference: Reference | None
     #: A ``custom`` item's own flag: False skips the print path (it is marked done by
     #: hand). Always True for a ``model`` item.
@@ -291,8 +301,30 @@ class OrderItem(BaseModel):
     #: The image attachment a person marked as what was actually delivered (§6.2), one
     #: of the item's own; None until one is marked, and again once it is removed.
     delivered_attachment_id: str | None = None
+    #: The design revision the reference and colours are a copy of; None before the first.
+    current_revision_id: str | None = None
+    approval: Approval = "together"
     created_at: datetime
     updated_at: datetime
+
+
+class Revision(BaseModel):
+    """One design of an item: a reference and colours, numbered per item, with the
+    customer's answer once it is sent and answered."""
+
+    id: str
+    item_id: str
+    number: int = Field(ge=1)
+    reference: Reference
+    colours: list[ColourSlot]
+    note: str
+    created_at: datetime
+    created_by: Actor
+    sent_at: datetime | None = None
+    answer: RevisionAnswer | None = None
+    answer_note: str | None = None
+    answered_at: datetime | None = None
+    answered_by: Actor | None = None
 
 
 # -- quotes (§3.4) ----------------------------------------------------------------------
@@ -311,6 +343,8 @@ class QuoteLine(BaseModel):
 class Quote(BaseModel):
     id: str
     order_item_id: str
+    #: The design revision it was quoted for, when the item had one.
+    revision_id: str | None = None
     created_at: datetime
     source: QuoteSource
     accepted: bool
@@ -335,6 +369,9 @@ class Fulfilment(BaseModel):
     id: str
     order_item_id: str
     attempt: int
+    #: A ``test`` attempt prints a revision for the shop, and names it.
+    purpose: FulfilmentPurpose = "production"
+    revision_id: str | None = None
     quantity: int
     outcome: Outcome
     failure_reason: str | None
@@ -364,7 +401,8 @@ class Fulfilment(BaseModel):
     #: started (#4719); a retried operation finds its claim by it.
     print_request_id: str | None = None
     #: The Bambuddy archives its run's queue items made, one per plate (§8.2), copied
-    #: once the print settled; empty for an attempt by hand or one not linked yet.
+    #: once the print settled (an attempt by hand: the one it named); empty for an attempt
+    #: by hand naming none, or one not linked yet.
     archive_ids: list[int] = Field(default_factory=list)
     #: The archives' printing time and filament, summed (§8.2).
     actual_seconds: int | None = None
@@ -411,7 +449,12 @@ class Shipment(BaseModel):
 AttachmentKind = Literal["image", "video", "document", "other"]
 #: Why it is kept: the customer's ``reference`` (a sketch, a logo, a drawing), a print's
 #: ``issue``, the ``finished`` object, the ``packed`` box, a ``timelapse``, or ``other``.
-AttachmentRole = Literal["reference", "issue", "finished", "packed", "timelapse", "other"]
+AttachmentRole = Literal[
+    "reference", "issue", "finished", "packed", "timelapse", "render", "test_print", "other"
+]
+#: The roles only a design revision's file takes (storefront spec §4): its ``render``
+#: and the photo of its ``test_print``.
+REVISION_ROLES: frozenset[AttachmentRole] = frozenset({"render", "test_print"})
 #: The longest caption, in characters, as a template's media (``library/media.py``).
 MAX_ATTACHMENT_CAPTION = 1000
 
@@ -446,10 +489,16 @@ def _listed(types: frozenset[str]) -> list[JsonValue]:
 class Attachment(BaseModel):
     id: str
     order_id: str
-    #: ``order:<id>`` or ``order_item:<id>``: what it is attached to.
+    #: ``order:<id>``, ``order_item:<id>``, ``order_item_fulfilment:<id>`` or
+    #: ``order_item_revision:<id>``: what it is
+    #: attached to.
     subject: str
-    #: The line item it is attached to, or None for the order's own.
+    #: The line item it is attached to, or the attempt's item; None for the order's own.
     item_id: str | None
+    #: The fulfilment attempt it is attached to (#4251), or None.
+    fulfilment_id: str | None = None
+    #: The design revision it is attached to (an ``order_item_revision:<id>`` subject).
+    revision_id: str | None = None
     kind: AttachmentKind
     role: AttachmentRole
     #: The name it was sent with, for display and the download.

@@ -49,8 +49,8 @@ def script(*body: str) -> str:
     return "\n".join([*lines, "asyncio.run(main())"])
 
 
-def register(client: TestClient, body: str, name: str = "swap", **extra: Any) -> dict[str, Any]:
-    response = client.post("/api/v1/workflows", json={"name": name, "script": body, **extra})
+def register(client: TestClient, source: str, name: str = "swap", **extra: Any) -> dict[str, Any]:
+    response = client.post("/api/v1/workflows", json={"name": name, "script": source, **extra})
     assert response.status_code == 201, response.text
     created: dict[str, Any] = response.json()
     return created
@@ -231,6 +231,79 @@ def test_a_flows_history_source_diff_and_restore(client: TestClient) -> None:
 
 
 AGENT_ACTOR = {"kind": "agent", "principal": "token:p1", "session": "s1"}
+
+
+def test_a_flows_details_and_commit_messages(client: TestClient) -> None:
+    """#3186: a display name and description in `<name>/flow.json`, each change its own
+    commit, and every save's message and body in the history."""
+    one = register(
+        client,
+        script("return 1"),
+        message="First cut",
+        body="Notes on\n\nthe first cut.",
+        display_name="Nightly swap",
+        description="Swaps **nightly**.",
+    )
+    assert (one["display_name"], one["description"]) == ("Nightly swap", "Swaps **nightly**.")
+    base = "/api/v1/workflows/names/swap/versions"
+    [version] = client.get(base).json()
+    assert (version["message"], version["body"]) == ("First cut", "Notes on\n\nthe first cut.")
+    [summary] = client.get("/api/v1/workflows").json()
+    assert (summary["name"], summary["display_name"]) == ("swap", "Nightly swap")
+
+    changed = client.patch(
+        "/api/v1/workflows/names/swap",
+        json={"display_name": "Swap batch", "message": "Better name"},
+        headers=AGENT,
+    )
+    assert changed.status_code == 200, changed.text
+    details = changed.json()
+    assert (details["name"], details["display_name"], details["description"]) == (
+        "swap",
+        "Swap batch",
+        "Swaps **nightly**.",
+    )
+    assert details["commit"]
+    # Not a version; every version shows the flow's details now.
+    assert len(client.get(base).json()) == 1
+    assert client.get(f"/api/v1/workflows/{one['id']}").json()["display_name"] == "Swap batch"
+    # Nothing changed, nothing committed.
+    same = client.patch("/api/v1/workflows/names/swap", json={"display_name": "Swap batch"})
+    assert (same.status_code, same.json()["commit"]) == (200, None)
+    assert client.patch("/api/v1/workflows/names/nothing", json={}).status_code == 404
+
+    two = register(client, script("return 2"))
+    assert two["display_name"] == "Swap batch"
+    restored = client.post(f"{base}/{one['commit']}/restore", json={"message": "Back to one"})
+    assert restored.status_code == 201, restored.text
+    assert restored.json()["display_name"] == "Swap batch"
+    assert client.get(base).json()[0]["message"] == "Back to one"
+    # A plain restore still has its own subject.
+    plain = client.post(f"{base}/{two['commit']}/restore")
+    assert plain.status_code == 201, plain.text
+    assert client.get(base).json()[0]["message"] == f"Restore swap to {two['commit'][:7]}"
+
+    # A run names its flow's display name.
+    run_id = start(client, one["id"], "k1").json()["id"]
+    view = until(client, run_id, lambda v: v["status"] == "succeeded")
+    assert view["display_name"] == "Swap batch"
+    assert view["run"]["display_name"] == "Swap batch"
+    assert [r["display_name"] for r in client.get("/api/v1/workflow-runs").json()] == ["Swap batch"]
+
+    deleted = client.request(
+        "DELETE", "/api/v1/workflows/names/swap", json={"message": "Retire swap"}
+    )
+    assert deleted.status_code == 200, deleted.text
+    refused = client.patch("/api/v1/workflows/names/swap", json={"display_name": "x"})
+    assert (refused.status_code, refused.json()["type"].rsplit("/", 1)[1]) == (409, "flow-deleted")
+
+
+def test_a_flow_without_details_is_named_by_its_slug(client: TestClient) -> None:
+    made = register(client, script("return 1"))
+    assert (made["display_name"], made["description"]) == (None, None)
+    assert client.get("/api/v1/workflows").json()[0]["display_name"] is None
+    [version] = client.get("/api/v1/workflows/names/swap/versions").json()
+    assert (version["message"], version["body"]) == ("Register swap v1", None)
 
 
 def listed(client: TestClient, **query: str) -> list[tuple[str, int]]:

@@ -93,6 +93,17 @@ def test_the_list_pages_newest_first_and_filters(client: TestClient) -> None:
     bad = client.get("/api/v1/orders", params={"cursor": "nonsense"})
     assert bad.status_code == 400
     assert bad.json()["type"] == "https://scadbuddy.dev/problems/bad-cursor"
+    # #5276: `status` repeated is any of them, so a picker of the orders in work pages
+    # through those only.
+    assert client.post(f"/api/v1/orders/{ids[1]}/cancel").status_code == 200
+    either = client.get("/api/v1/orders", params=[("status", "cancelled"), ("status", "quoted")])
+    assert [o["id"] for o in either.json()["items"]] == [ids[1]]
+    both = client.get("/api/v1/orders", params=[("status", "cancelled"), ("status", "draft")])
+    assert len(both.json()["items"]) == 5
+    assert (
+        client.get("/api/v1/orders", params=[("status", "draft"), ("status", "nope")]).status_code
+        == 422
+    )
     unknown = client.get("/api/v1/orders", params={"customer": ada["id"]})
     assert unknown.status_code == 400
     assert unknown.json()["type"] == "https://scadbuddy.dev/problems/unknown-parameter"

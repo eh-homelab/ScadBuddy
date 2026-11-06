@@ -139,6 +139,37 @@ test.describe('duplicating a preset', () => {
   })
 })
 
+test.describe('a link to a preset (#1022)', () => {
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
+  test('opens the customizer with the preset applied, and a change keeps the link', async ({ page }) => {
+    const mum = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+    await page.goto(`/m/name-keychain?preset=${mum}`)
+    const preset = page.getByRole('combobox', { name: 'Preset' })
+    const name = page.getByRole('textbox', { name: 'Name on the tag' })
+    await expect(preset).toHaveText('Mum', { timeout: 20_000 })
+    await expect(name).toHaveValue('Mum')
+
+    await name.fill('Dad')
+    await expect(page.getByTestId('preset-modified')).toHaveText('Changed from Mum')
+    expect(new URL(page.url()).searchParams.get('preset')).toBe(mum)
+
+    // A pick follows into the URL.
+    await choose(page, preset, 'Tiny')
+    await page.getByRole('button', { name: 'Replace my changes' }).click()
+    await expect(page).toHaveURL(/[?&]preset=template-tiny$/)
+  })
+
+  test('an unknown preset opens the defaults with a notice', async ({ page }) => {
+    await page.goto('/m/name-keychain?preset=template-gone')
+    await expect(page.getByTestId('preset-link-missing')).toContainText('not on this model', { timeout: 20_000 })
+    await expect(page.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+  })
+})
+
 test.describe('a preset\'s details (#327)', () => {
   test.skip(
     !!process.env.E2E_BASE_URL,

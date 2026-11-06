@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
 import { useAgentHandlers } from '../agent/useAgentHandlers'
-import { api } from '../api/client'
+import { api, ApiError, type ModelFilters } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { CatalogueFilters } from '../components/CatalogueFilters'
@@ -25,19 +25,18 @@ import { cn } from '@/lib/utils'
 import {
   type CatalogueQuery,
   clearFilters,
-  filterModels,
   fold,
   parseQuery,
-  tagCounts,
   toParams,
 } from '../lib/catalogueQuery'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 
+/** #2290 — how many models a page of the catalogue reads. */
+export const MODELS_PAGE_SIZE = 24
+
 export function CataloguePage() {
-  // #269 — live: models created, duplicated, renamed or deleted anywhere appear here.
-  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [], ['models'])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   // One lightbox for the page: whichever card's media was clicked, at that item.
@@ -54,9 +53,80 @@ export function CataloguePage() {
   useEffect(() => {
     if (params.get('view') !== query.view) setParams(toParams(query), { replace: true })
   }, [params, query, setParams])
-  const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
-  // Counted over what the other filters leave, so a chip's count is what clicking it shows.
-  const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
+
+  // #2290 — the server searches, filters, sorts and pages; the page holds only the
+  // models it has read so far. A read again (#269: models created, duplicated,
+  // renamed or deleted anywhere) reads as many as are shown, so Load more's pages stay.
+  const filters: ModelFilters = { q: query.q, tags: query.tags, origin: query.origin, sort: query.sort }
+  const filterKey = JSON.stringify(filters)
+  const { sort: _sort, ...facetFilters } = filters
+  const facetKey = JSON.stringify(facetFilters)
+  const loaded = useRef({ key: filterKey, size: MODELS_PAGE_SIZE })
+  // One controller per filters, shared by every window read for them: a read for other
+  // filters stops them all between chunks (#5292, #5305 reviews). One for the same
+  // filters lets the others finish, so a background refresh that fails cannot cost a key
+  // its first answer.
+  const windowRead = useRef<{ key: string; controller: AbortController } | undefined>(undefined)
+  const models = useAsync(
+    () => {
+      if (loaded.current.key !== filterKey) loaded.current = { key: filterKey, size: MODELS_PAGE_SIZE }
+      if (windowRead.current?.key !== filterKey) {
+        windowRead.current?.controller.abort()
+        windowRead.current = { key: filterKey, controller: new AbortController() }
+      }
+      return api.listModelsWindow(filters, loaded.current.size, windowRead.current.controller.signal)
+    },
+    [filterKey],
+    ['models'],
+  )
+  const facets = useAsync(() => api.modelFacets(facetFilters), [facetKey], ['models'])
+  // What the last answers showed stays on screen while the next read runs, so typing
+  // a search neither blanks the list nor unmounts the box being typed in.
+  const page = useKept(models.data)
+  const counts = useKept(facets.data)
+  const shown = page?.items ?? []
+  const error = models.error ?? facets.error
+  // `key` is the filters the error was for: another search's list does not show it.
+  const [more, setMore] = useState<{ loading: boolean; error?: string; key?: string }>({ loading: false })
+  const upstreamNames = useUpstreamNames(shown)
+
+  async function loadMore() {
+    const last = shown.at(-1)
+    if (!page || !last) return
+    const key = filterKey
+    setMore({ loading: true })
+    try {
+      const next = await api.listModelsPage(filters, { limit: MODELS_PAGE_SIZE, after: last.slug })
+      if (loaded.current.key !== key) return
+      const items = [...page.items, ...next.items.filter((m) => !page.items.some((o) => o.slug === m.slug))]
+      loaded.current = { key, size: items.length }
+      const dropped = models.setData({ items, total: next.total }, { supersede: true })
+      setMore({ loading: false })
+      // The append dropped a read in flight (a change's), so read the window again.
+      // A read that fails leaves the list as it is, and says so.
+      if (dropped) models.refresh(undefined, () =>
+        setMore({ loading: false, key, error: 'Could not read the models again; the list shown may be out of date.' }),
+      )
+    } catch (cause) {
+      // The last model shown went away since: start again from the first page.
+      if (cause instanceof ApiError && cause.status === 409) {
+        loaded.current = { key, size: MODELS_PAGE_SIZE }
+        setMore({ loading: false })
+        models.reload()
+        return
+      }
+      setMore({
+        loading: false,
+        key,
+        error: `Could not load more models: ${cause instanceof Error ? cause.message : String(cause)}`,
+      })
+    }
+  }
+
+  function reload() {
+    models.reload()
+    facets.reload()
+  }
 
   function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
     setParams(toParams(next), options)
@@ -66,18 +136,21 @@ export function CataloguePage() {
     if (!query.tags.includes(tag)) setQuery({ ...query, tags: [...query.tags, tag] })
   }
 
-  // #254 — the catalogue's browser tools. `search` filters the list the page already
-  // holds rather than typing into the search box; the filters on screen (#276) are
-  // URL state, which the global `navigate` tool sets (`/?q=…&tag=…`).
+  // #254 — the catalogue's browser tools. `search` reads the whole catalogue (the page
+  // holds only the pages it has shown, #2290) rather than typing into the search box;
+  // the filters on screen (#276) are URL state, which the global `navigate` tool sets
+  // (`/?q=…&tag=…`).
   useAgentHandlers(
     'catalogue',
     {
-      search: ({ query }) => {
-        if (!data) throw new AgentToolError('timeout', error ? `The catalogue did not load: ${error.message}` : 'The catalogue is still loading.')
-        return data.filter((model) => matches(model, query)).map(summarise)
+      search: async ({ query }) => {
+        const every = await api.listModels().catch((cause: unknown) => {
+          throw new AgentToolError('timeout', `The catalogue did not load: ${cause instanceof Error ? cause.message : String(cause)}`)
+        })
+        return every.filter((model) => matches(model, query)).map(summarise)
       },
       open_model: async ({ slug }) => {
-        const model = data?.find((entry) => entry.slug === slug)
+        const model = shown.find((entry) => entry.slug === slug) ?? (await api.getModel(slug).catch(() => undefined))
         if (!model) {
           throw new AgentToolError('invalid_args', `No model "${slug}" in the catalogue; search lists the slugs.`)
         }
@@ -90,13 +163,14 @@ export function CataloguePage() {
         return { route: modelPath(slug) }
       },
     },
-    () => ({ loading, error: error?.message, models: data?.length, shown: shown.length }),
+    () => ({ loading: !page, error: error?.message, models: counts?.total, shown: shown.length, matched: page?.total }),
   )
 
   function added(model: ModelSummary) {
-    setData([model, ...(data ?? []).filter((m) => m.slug !== model.slug)])
     void navigate(modelPath(model.slug))
   }
+
+  const empty = counts?.total === 0 && page?.total === 0
 
   return (
     <div className="h-full overflow-y-auto">
@@ -123,7 +197,7 @@ export function CataloguePage() {
           </div>
         </div>
 
-        {loading && (
+        {!page && !error && (
           <div role="status" aria-label="Loading models">
             <span className="sr-only">Loading models</span>
             <ul aria-hidden className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -150,21 +224,21 @@ export function CataloguePage() {
           </Card>
         )}
 
-        {data && data.length === 0 && (
+        {empty && (
           <EmptyState onUpload={() => setUploadOpen(true)} onImport={() => setImportOpen(true)} />
         )}
 
-        {data && data.length > 0 && (
+        {page && counts && !empty && (
           <CatalogueFilters
             query={query}
             onChange={setQuery}
-            tags={tags}
-            shown={shown.length}
-            total={data.length}
+            tags={counts.tags}
+            shown={page.total}
+            total={counts.total}
           />
         )}
 
-        {data && data.length > 0 && shown.length === 0 && (
+        {page && counts && !empty && page.total === 0 && (
           <NoResults onClear={() => setQuery(clearFilters(query))} />
         )}
 
@@ -174,7 +248,7 @@ export function CataloguePage() {
               <ModelRow
                 key={model.slug}
                 model={model}
-                upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
+                upstreamName={model.upstream ? upstreamNames.get(model.upstream.id) : undefined}
                 onOpen={(slides, index) => setLightbox({ slug: model.slug, slides, index })}
                 onTag={addTag}
               />
@@ -188,12 +262,29 @@ export function CataloguePage() {
               <ModelCard
                 key={model.slug}
                 model={model}
-                upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
+                upstreamName={model.upstream ? upstreamNames.get(model.upstream.id) : undefined}
                 onTag={addTag}
                 onOpenMedia={(slides, index) => setLightbox({ slug: model.slug, slides, index })}
               />
             ))}
           </ul>
+        )}
+
+        {page && shown.length < page.total && (
+          <div className="mt-4 flex flex-col items-center gap-2">
+            <p className="text-xs text-muted-foreground">
+              Showing {shown.length} of {page.total}
+            </p>
+            <Button variant="outline" onClick={() => void loadMore()} disabled={more.loading}>
+              {more.loading ? 'Loading…' : 'Load more'}
+            </Button>
+          </div>
+        )}
+
+        {more.error && more.key === filterKey && (
+          <p role="alert" className="mt-2 text-center text-sm text-destructive">
+            {more.error}
+          </p>
         )}
       </div>
 
@@ -316,6 +407,40 @@ function ModelCard({
       </Card>
     </li>
   )
+}
+
+/** `value`, or the last one that was not undefined. */
+function useKept<T>(value: T | undefined): T | undefined {
+  const [kept, setKept] = useState(value)
+  if (value !== undefined && value !== kept) setKept(value)
+  return value ?? kept
+}
+
+/**
+ * The display name of each shown duplicate's upstream: from the models shown, or read
+ * once when the upstream is on a page not shown (#2290). An upstream that cannot be
+ * read is named by its id, as `DuplicatedFrom` does without a name.
+ */
+function useUpstreamNames(shown: ModelSummary[]): Map<string, string> {
+  const [read, setRead] = useState<ReadonlyMap<string, string>>(new Map())
+  const asked = useRef(new Set<string>())
+  const names = useMemo(() => {
+    const known = new Map(read)
+    for (const model of shown) known.set(model.slug, model.name)
+    return known
+  }, [shown, read])
+  useEffect(() => {
+    for (const model of shown) {
+      const id = model.upstream?.id
+      if (!id || names.has(id) || asked.current.has(id)) continue
+      asked.current.add(id)
+      api.getModel(id).then(
+        (upstream) => setRead((before) => new Map(before).set(id, upstream.name)),
+        () => {},
+      )
+    }
+  }, [shown, names])
+  return names
 }
 
 function matches(model: ModelSummary, query: string): boolean {

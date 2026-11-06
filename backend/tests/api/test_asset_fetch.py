@@ -1,4 +1,5 @@
-"""`POST /models/{slug}/assets/fetch`: an SVG or PNG off an allowlisted URL (#844)."""
+"""`POST /models/{slug}/assets/fetch`: an SVG, PNG, STL, 3MF or OBJ off an allowlisted URL
+(#844, #959)."""
 
 from __future__ import annotations
 
@@ -108,7 +109,7 @@ def test_content_that_is_not_svg_or_png_is_refused(client: TestClient) -> None:
     response = _fetch(client, ICON_URL)
 
     assert response.status_code == 422
-    assert "only SVG and PNG" in response.json()["detail"]
+    assert "only SVG, PNG, STL, 3MF and OBJ" in response.json()["detail"]
 
 
 def test_a_fetch_needs_a_model(client: TestClient) -> None:

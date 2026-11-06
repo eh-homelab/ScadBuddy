@@ -32,6 +32,8 @@ export function SessionFlowRuns({ sessionId }: { sessionId: string }) {
   const count = runs.data?.length ?? 0
   if (count === 0) return null
   const waiting = (queues.data ?? []).filter((q) => q.entries.length > 0)
+  // #3186: each run by its flow's display name, which the run list carries.
+  const titles = new Map((runs.data ?? []).flatMap((r) => (r.display_name ? [[r.id, r.display_name] as const] : [])))
   return (
     <div className="shrink-0 border-b border-line px-3 py-1.5 text-[12.5px]">
       <Link to={`/workflows?session=${encodeURIComponent(sessionId)}`} className="text-primary hover:underline">
@@ -42,7 +44,7 @@ export function SessionFlowRuns({ sessionId }: { sessionId: string }) {
           {waiting.map((q) => (
             <li key={q.run_id}>
               <Link to={flowRunPath(q.run_id)} className="text-primary hover:underline">
-                {q.name}
+                {titles.get(q.run_id) ?? q.name}
               </Link>{' '}
               waits on {q.entries.length}
               <ul className="ml-3 list-disc text-[12px] text-subtle">

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api/client'
-import type { ModelSummary, OrderItemCreate, Output } from '../../api/types'
+import type { ModelSummary, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
@@ -54,17 +55,42 @@ function pinnedOf(model: ModelSummary | null): Pinned | null {
     : null
 }
 
+/** A revision's body for `choice` (#5280): the current version names its commit and inputs, an output its id. */
+function revisionBody(current: Pinned | null, choice: string, note: string): RevisionCreate {
+  if (choice === CURRENT) {
+    if (!current) throw new Error('This template has no version to pin.')
+    return { note, reference: { slug: current.slug, commit: current.version, inputs: { params: {}, v: current.inputsVersion } } }
+  }
+  return { note, output_id: choice }
+}
+
 /**
  * "Add item" on the order page (spec 2026-10-18 §3.3, §9): pick a template from the
  * catalogue, then what to make of it, either its current version with default settings or
  * one of its saved outputs (exact settings and colours), how many, and an optional title.
  * The order page shows it only while the order is `draft` or `quoted`
- * (`Lifecycle._open_for_items`).
+ * (`Lifecycle._open_for_items`). It also takes a "Design request" (#5280): a title and the
+ * customer's words, whose design a revision supplies later. With `revise` it is the
+ * design picker of an item's new revision instead (`slug`: the item's template, if any).
  */
-export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boolean; orderId: string; onAdded: () => void; onClose: () => void }) {
+export function AddItemDialog({
+  open,
+  orderId,
+  onAdded,
+  onClose,
+  revise,
+}: {
+  open: boolean
+  orderId: string
+  onAdded: () => void
+  onClose: () => void
+  revise?: { itemId: string; slug: string | null }
+}) {
   const models = useAsync(() => (open ? api.listModels() : Promise.resolve([] as ModelSummary[])), [open])
   const [query, setQuery] = useState('')
-  const [slug, setSlug] = useState<string | null>(null)
+  const [slug, setSlug] = useState<string | null>(revise?.slug ?? null)
+  const [request, setRequest] = useState(false)
+  const [note, setNote] = useState('')
   const model = (models.data ?? []).find((m) => m.slug === slug) ?? null
   const outputs = useAsync(() => (slug ? api.listOutputs(slug) : Promise.resolve([] as Output[])), [slug])
   // What the person picked; empty until they pick, for this template.
@@ -83,14 +109,16 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
   useEffect(() => {
     if (!open) {
       setQuery('')
-      setSlug(null)
+      setSlug(revise?.slug ?? null)
+      setRequest(false)
+      setNote('')
       setPicked('')
       setQuantity('1')
       setTitle('')
       setError(null)
       setBusy(false)
     }
-  }, [open])
+  }, [open, revise?.slug])
   /** Another template, or none, starting from its own default pick in the same render. */
   function pickTemplate(next: string | null) {
     setSlug(next)
@@ -98,6 +126,28 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
   }
 
   async function add() {
+    if (request) {
+      if (!title.trim()) {
+        setError('Type a title for the request.')
+        return
+      }
+      const count = parseQuantity(quantity)
+      if (count === null) {
+        setError(QUANTITY_HINT)
+        return
+      }
+      setBusy(true)
+      setError(null)
+      try {
+        await api.addOrderItem(orderId, { kind: 'request', title: title.trim(), quantity: count, notes: note })
+        onAdded()
+        onClose()
+      } catch (err) {
+        setError(refusalText(err))
+        setBusy(false)
+      }
+      return
+    }
     if (!model) {
       setError('Pick a template.')
       return
@@ -106,7 +156,7 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
       setError('Pick what to order.')
       return
     }
-    const count = parseQuantity(quantity)
+    const count = revise ? 1 : parseQuantity(quantity)
     if (count === null) {
       setError(QUANTITY_HINT)
       return
@@ -114,7 +164,8 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
     setBusy(true)
     setError(null)
     try {
-      await api.addOrderItem(orderId, itemBody(pinned, choice, count, title))
+      if (revise) await api.addOrderItemRevision(orderId, revise.itemId, revisionBody(pinned, choice, note))
+      else await api.addOrderItem(orderId, itemBody(pinned, choice, count, title))
       onAdded()
       onClose()
     } catch (err) {
@@ -127,11 +178,43 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
     <Dialog open={open} onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Add item</DialogTitle>
-          <DialogDescription>A template becomes a line item of this order, pinned to one revision and its settings.</DialogDescription>
+          <DialogTitle>{revise ? 'New revision' : 'Add item'}</DialogTitle>
+          <DialogDescription>
+            {revise
+              ? "Pick the design this revision shows: a template's current version or one of its saved outputs."
+              : request
+                ? "A request for a design: the customer's words now, its designs as revisions later."
+                : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
+          </DialogDescription>
         </DialogHeader>
         <div className="flex min-w-0 flex-col gap-3">
-          {model ? (
+          {!revise && (
+            <div className="flex gap-2" role="group" aria-label="Kind of item">
+              <Button type="button" size="sm" variant={request ? 'outline' : 'secondary'} aria-pressed={!request} onClick={() => setRequest(false)}>
+                From a template
+              </Button>
+              <Button type="button" size="sm" variant={request ? 'secondary' : 'outline'} aria-pressed={request} onClick={() => setRequest(true)}>
+                Design request
+              </Button>
+            </div>
+          )}
+          {request && (
+            <>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="add-request-title">Title</Label>
+                <Input id="add-request-title" maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="add-request-text">What the customer asked for</Label>
+                <Textarea id="add-request-text" rows={3} value={note} onChange={(e) => setNote(e.target.value)} />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="add-request-quantity">Quantity</Label>
+                <Input id="add-request-quantity" inputMode="numeric" className="w-24" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+              </div>
+            </>
+          )}
+          {!request && (model ? (
             <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2" data-testid="add-item-template">
               <span className="min-w-0 truncate text-sm font-medium">{model.name}</span>
               <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => pickTemplate(null)}>
@@ -167,9 +250,9 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
                 </ul>
               )}
             </div>
-          )}
+          ))}
 
-          {model && (
+          {!request && model && (
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium" id="add-item-what">
                 What to order
@@ -206,7 +289,14 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
             </div>
           )}
 
-          {model && (
+          {!request && model && revise && (
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="add-revision-note">Note</Label>
+              <Textarea id="add-revision-note" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+            </div>
+          )}
+
+          {!request && model && !revise && (
             <div className="flex flex-wrap gap-3">
               <div className="flex flex-col gap-1">
                 <Label htmlFor="add-item-quantity">Quantity</Label>
@@ -219,7 +309,7 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
             </div>
           )}
 
-          {model && choice && choice !== CURRENT && <RoughEstimate outputId={choice} idPrefix="add-item-estimate" />}
+          {!request && model && choice && choice !== CURRENT && !revise && <RoughEstimate outputId={choice} idPrefix="add-item-estimate" />}
 
           {(error ?? models.error?.message) && (
             <p role="alert" className="text-[13px] text-warn">
@@ -231,8 +321,8 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
           <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
             Cancel
           </Button>
-          <Button type="button" disabled={busy || !model || !choice} onClick={() => void add()}>
-            Add item
+          <Button type="button" disabled={busy || (request ? !title.trim() : !model || !choice)} onClick={() => void add()}>
+            {revise ? 'Add revision' : 'Add item'}
           </Button>
         </DialogFooter>
       </DialogContent>

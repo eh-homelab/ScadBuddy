@@ -9,7 +9,7 @@ and grams summed (:func:`mirror_archives`). That runs when the print's outcome i
 (``GET …/fulfilments/{f}/archives``), so a link Bambuddy made late is still copied.
 
 An archive's ``finish_`` photo and its timelapse are offered as one-click copies into the
-item's attachments (§6.2): the bytes are pulled once through the seam into the claim
+attempt's attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim
 store, kept as ScadBuddy's own blob and recorded as the attachment, with the role
 ``finished`` or ``timelapse`` (:func:`copy_in`). Nothing goes the other way.
 """
@@ -38,7 +38,7 @@ from scadbuddy.orders.integrations import (
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.models import Actor, Attachment, AttachmentRole, Fulfilment
 from scadbuddy.orders.problems import PROBLEMS
-from scadbuddy.orders.store import OrderStore, item_subject
+from scadbuddy.orders.store import OrderStore, fulfilment_subject, item_subject
 from scadbuddy.store import BlobStore
 
 logger = logging.getLogger(__name__)
@@ -100,40 +100,46 @@ async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> lis
 
 
 async def mirror_archives(
-    store: OrderStore, integrations: OrderIntegrations, attempt: Fulfilment
+    lifecycle: Lifecycle, integrations: OrderIntegrations, attempt: Fulfilment
 ) -> tuple[Fulfilment, list[ArchiveFacts]]:
     """The attempt with its archives' facts copied (once its print settled), and those
-    facts. Nothing is asked without a Bambuddy, for an attempt by hand, or one whose
-    run Bambuddy has linked no archive to yet."""
-    if not integrations.linked or attempt.print_run_id is None:
+    facts. An attempt recorded by hand naming its archive (#4251, a print attached to
+    the item from its own page) copies that archive's, its print being over. Nothing is
+    asked without a Bambuddy, for an attempt by hand naming none, or one whose run
+    Bambuddy has linked no archive to yet."""
+    if not integrations.linked:
         return attempt, []
-    archive_ids = await asyncio.to_thread(store.run_archives, attempt.print_run_id)
+    if attempt.print_run_id is None:
+        archive_ids, settled = attempt.archive_ids, True
+    else:
+        archive_ids = await asyncio.to_thread(lifecycle.store.run_archives, attempt.print_run_id)
+        settled = attempt.finished_at is not None
     if not archive_ids:
         return attempt, []
     facts = await _facts(integrations, archive_ids)
-    if attempt.finished_at is None or not facts:
+    if not settled or not facts:
         return attempt, facts
     started = [f.started_at for f in facts if f.started_at is not None]
     completed = [f.completed_at for f in facts if f.completed_at is not None]
     written = await asyncio.to_thread(
-        store.set_archive_facts,
-        attempt.id,
+        lifecycle.record_archive_facts,
+        attempt,
         [f.archive_id for f in facts],
         started_at=min(started) if started else None,
         finished_at=max(completed) if completed else None,
         actual_seconds=_sum([f.actual_seconds for f in facts]),
         actual_grams=_sum([f.grams for f in facts]),
     )
-    return written or attempt, facts
+    return written, facts
 
 
-async def mirror_run(store: OrderStore, integrations: OrderIntegrations, run_id: str) -> None:
+async def mirror_run(lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str) -> None:
     """:func:`mirror_archives` for the attempt a run started, if any; logged, never
     raised: the attempt's archives are read again when they are shown."""
     try:
-        attempt = await asyncio.to_thread(store.print_attempt, run_id)
+        attempt = await asyncio.to_thread(lifecycle.store.print_attempt, run_id)
         if attempt is not None:
-            await mirror_archives(store, integrations, attempt)
+            await mirror_archives(lifecycle, integrations, attempt)
     except Exception:
         logger.warning("could not copy an order item's print archives", exc_info=True)
 
@@ -150,14 +156,14 @@ def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: st
 
 
 async def attempt_archives(
-    store: OrderStore,
+    lifecycle: Lifecycle,
     integrations: OrderIntegrations,
     order_id: str,
     item_id: str,
     fulfilment_id: str,
 ) -> AttemptArchives:
-    attempt = await asyncio.to_thread(attempt_of, store, order_id, item_id, fulfilment_id)
-    attempt, facts = await mirror_archives(store, integrations, attempt)
+    attempt = await asyncio.to_thread(attempt_of, lifecycle.store, order_id, item_id, fulfilment_id)
+    attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
     return AttemptArchives(
         linked=integrations.linked,
         attempt=attempt,
@@ -179,7 +185,7 @@ async def copy_check(
         raise not_linked()
     attempt = await asyncio.to_thread(attempt_of, store, order_id, item_id, fulfilment_id)
     linked = (
-        []
+        attempt.archive_ids
         if attempt.print_run_id is None
         else await asyncio.to_thread(store.run_archives, attempt.print_run_id)
     )
@@ -207,8 +213,9 @@ async def copy_in(
     limit: int,
 ) -> Attachment:
     """The archive's ``finish_`` photo (``name``, else its latest) or its timelapse as
-    an attachment of the item, with the role ``finished`` or ``timelapse``. The same
-    bytes copied again under the same role are the attachment already there."""
+    an attachment of the attempt (listed under its item), with the role ``finished`` or
+    ``timelapse``. The same bytes copied again under the same role are the attachment
+    already there."""
     await copy_check(store, integrations, order_id, item_id, fulfilment_id, archive_id)
     attempt = await asyncio.to_thread(attempt_of, store, order_id, item_id, fulfilment_id)
     try:
@@ -233,14 +240,22 @@ async def copy_in(
     staging = claims.root / f".copy-{uuid.uuid4().hex}"
     try:
         copied = await integrations.download_archive_media(
-            archive_id, what, name if what == "finished_photo" else None, staging, limit
+            archive_id,
+            what,
+            name if what == "finished_photo" else facts.timelapse_name,
+            staging,
+            limit,
         )
     except MediaTooLargeError as error:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, str(error)) from None
     role = ROLES[what]
     held = await asyncio.to_thread(claims.hold_file, staging, copied.sha256)
     try:
-        existing = await asyncio.to_thread(store.subject_attachments, item_subject(item_id))
+        # The attempt's files, and the item's from before copies went onto the attempt.
+        existing = [
+            *await asyncio.to_thread(store.subject_attachments, fulfilment_subject(fulfilment_id)),
+            *await asyncio.to_thread(store.subject_attachments, item_subject(item_id)),
+        ]
         same = next((a for a in existing if a.sha256 == copied.sha256 and a.role == role), None)
         if same is not None:
             return same
@@ -268,6 +283,7 @@ async def copy_in(
                 sha256=copied.sha256,
                 blob_key=key,
                 caption=f"Attempt {attempt.attempt}, Bambuddy archive {archive_id}",
+                fulfilment_id=attempt.id,
             )
         )
     finally:

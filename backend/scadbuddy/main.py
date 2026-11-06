@@ -38,6 +38,7 @@ from scadbuddy.api import (
     mesh_models,
     metrics,
     models,
+    order_attachments,
     outputs,
     print_attachments,
     telemetry,
@@ -113,7 +114,11 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
-from scadbuddy.printers.bambuddy_sync import sync_printers
+from scadbuddy.printers.bambuddy_sync import (
+    boot_adoption_due,
+    sync_printers,
+    sync_virtual_printers,
+)
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
@@ -251,6 +256,8 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
     types, can only describe it through `openapi_extra`, which FastAPI copies in
     verbatim: the model would be inlined and never named, and the generated client
     would have no type for it. Named here, `openapi_extra` points at it by `$ref`.
+    A name already in the spec is refused: two models under one name would leave one
+    shape for both, and a client would build the wrong body (#5317).
     """
     generate = app.openapi
 
@@ -260,6 +267,8 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
         schema = generate()
         named = schema.setdefault("components", {}).setdefault("schemas", {})
         for model in extra:
+            if model.__name__ in named:
+                raise ValueError(f"the OpenAPI spec already names a {model.__name__}")
             named[model.__name__] = model.model_json_schema(
                 ref_template="#/components/schemas/{model}"
             )
@@ -789,6 +798,43 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
             )
 
     await _with_bambuddy(state, sweep)
+
+
+#: How long the boot's virtual-printer pass may take: two Bambuddy lists and an upsert
+#: per virtual printer.
+VP_BOOT_TIMEOUT = 60.0
+
+
+async def _adopt_virtual_rows_logged(state: AppState) -> None:
+    """#5236: the boot's virtual-printer pass. A row made by hand before the sync existed,
+    with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
+    left to the sweeps' Schedule, which prod turns off. So, once per boot and only when
+    `boot_adoption_due`, the sync's virtual-printer part runs: two Bambuddy lists, no
+    access code, no probe. Nothing without a Bambuddy. Bambuddy refusing, unreachable or
+    past `VP_BOOT_TIMEOUT` is one WARNING from this pass (the client logs its own failed
+    request besides); anything else one logged traceback; never raised."""
+    try:
+        registry = state.components.get(PRINTERS)
+        rows = await asyncio.to_thread(registry.store.list)
+        if not boot_adoption_due(rows):
+            return
+        settings = await asyncio.to_thread(state.settings_store.load)
+        async with asyncio.timeout(VP_BOOT_TIMEOUT), client_for(settings) as client:
+            await sync_virtual_printers(registry, client)
+    except ApiError as error:
+        if error.type == NOT_CONFIGURED_PROBLEM:
+            return
+        logger.warning(
+            "could not sync the virtual printers from Bambuddy at start",
+            extra={"status": error.status},
+        )
+    except TimeoutError:
+        logger.warning(
+            "could not sync the virtual printers from Bambuddy at start",
+            extra={"timeout": VP_BOOT_TIMEOUT},
+        )
+    except Exception:
+        logger.exception("could not sync the virtual printers from Bambuddy at start")
 
 
 async def _sweep_print_library_logged(state: AppState) -> None:
@@ -1329,7 +1375,13 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
-    watches = WatchActivities(registry.store, registry.reports, state.events)
+    watches = WatchActivities(
+        registry.store,
+        registry.reports,
+        state.events,
+        rack=state.components.get(RACK_USAGE),
+        settle_failed=state.metrics.rack_watch_settle_failed,
+    )
     content = state.store.content
     lan = LanDeps(
         printers=registry.store,
@@ -1774,6 +1826,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow = follow_changes(state)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
+    adopt_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -1810,6 +1863,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         attach_now = asyncio.create_task(
             _attach_backfills_logged(state, reraise=False, stop=stop_background),
             name="attach backfills",
+        )
+        # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
+        # VP's, with the sweeps off too.
+        adopt_now = asyncio.create_task(
+            _adopt_virtual_rows_logged(state), name="adopt virtual printers"
         )
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
@@ -1853,7 +1911,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now)
+        await _join_background(stop_background, backfill, attach_now, adopt_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
@@ -1998,7 +2056,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         media.MediaUpload,
         mesh_models.MeshUpload,
         library_print.LibraryFileUploadForm,
-        print_attachments.AttachmentUpload,
+        print_attachments.PrintAttachmentUpload,
+        order_attachments.OrderAttachmentUpload,
+        order_attachments.RevisionAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

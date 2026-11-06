@@ -182,10 +182,33 @@ def follow(client: TestClient, op_id: str, timeout: float = 30) -> dict[str, Any
     return follow_operation(client, response.json(), timeout)
 
 
-def test_a_done_operation_answers_its_result(client: TestClient) -> None:
+def _sample(app: FastAPI, name: str, labels: dict[str, str]) -> float:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    return state.metrics.registry.get_sample_value(name, labels) or 0.0
+
+
+def test_a_done_operation_answers_its_result(client: TestClient, app: FastAPI) -> None:
     response = post(client, {"a": 1})
     assert response.status_code == 200, response.text
     assert response.json() == {"done": True, "n": 1}
+    # #2295: finished and timed once, where its record ended; answered in time.
+    succeeded = {"kind": "test", "outcome": "succeeded"}
+    assert _sample(app, "scadbuddy_operations_finished_total", succeeded) == 1
+    assert _sample(app, "scadbuddy_operation_duration_seconds_count", succeeded) == 1
+    assert _sample(app, "scadbuddy_operations_deferred_total", {"kind": "test"}) == 0
+
+
+def test_every_registered_kinds_operation_series_start_at_zero(
+    client: TestClient, app: FastAPI
+) -> None:
+    """#2295: a closed set of kinds, each there from the first scrape."""
+    state: AppState = getattr(app.state, STATE_ATTR)
+    sample = state.metrics.registry.get_sample_value
+    for outcome in ("succeeded", "failed"):
+        labels = {"kind": "output_inbox_delete", "outcome": outcome}
+        assert sample("scadbuddy_operations_finished_total", labels) == 0
+        assert sample("scadbuddy_operation_duration_seconds_count", labels) == 0
+    assert sample("scadbuddy_operations_deferred_total", {"kind": "output_inbox_delete"}) == 0
 
 
 def test_a_retry_with_the_same_key_answers_the_record_and_runs_nothing(
@@ -269,18 +292,20 @@ def test_a_pruned_library_operation_names_the_model_not_bambuddy(
 
 
 def test_a_slow_done_command_answers_202_and_is_followed(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
     )
     started = post(client, {"delay": 20}, key=PRESS_4)
+    posts = 1
     # Re-sent with its key until it is recorded, as a client does: a loaded machine
     # may not have written the record within the deadline.
     resend_until = time.monotonic() + 60
     while started.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM:
         assert time.monotonic() < resend_until, started.text
         started = post(client, {"delay": 20}, key=PRESS_4)
+        posts += 1
     assert started.status_code == 202, started.text
     assert started.json()["repeated"] is False
     location = f"/api/v1/activity/operation:{started.json()['id']}"
@@ -289,6 +314,13 @@ def test_a_slow_done_command_answers_202_and_is_followed(
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
     # Review #1063 r6 4: `repeated` belongs to a route's 202, never to the record.
     assert "repeated" not in op
+    # #2295: each request past the deadline is deferred, once per POST and never on the
+    # follow (#5311 review); the run finishes once.
+    assert _sample(app, "scadbuddy_operations_deferred_total", {"kind": "test"}) == posts
+    succeeded = {"kind": "test", "outcome": "succeeded"}
+    assert _sample(app, "scadbuddy_operations_finished_total", succeeded) == 1
+    # The run slept 20 s, from its record to its end.
+    assert _sample(app, "scadbuddy_operation_duration_seconds_sum", succeeded) >= 15
 
 
 def test_only_the_202_documents_repeated(app: FastAPI) -> None:

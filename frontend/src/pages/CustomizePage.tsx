@@ -5,7 +5,7 @@ import { AgentToolError, type ToolImpl, type ToolImpls } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import { missingFonts } from '../lib/fonts'
-import type { Output, Param, ParamValue, Plate } from '../api/types'
+import type { Output, Param, ParamPreset, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
@@ -18,7 +18,7 @@ import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
 import { RawInputs } from '../components/RawInputs'
-import { PresetPicker, type SelectedElsewhere } from '../components/PresetPicker'
+import { PresetPicker, type OfferedPreset, type SelectedElsewhere } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
 import { Hint } from '../components/Hint'
@@ -85,6 +85,8 @@ const WARN = 'border-destructive/40 bg-destructive/10 text-destructive'
 const NOTHING: ParamValues = Object.freeze({})
 /** #4885 — the budget a parameter tool gives `schemaLoaded`; `render` gives it its own `timeout_ms`. */
 const SCHEMA_WAIT_MS = 10_000
+/** #1022 — how long a preset link waits for the presets before it opens on the defaults. */
+const PRESET_LINK_TIMEOUT_MS = 15_000
 
 /** The model an agent tool call was made on, to check the page against after every wait. */
 type CallOn = { slug: string; version: string | undefined }
@@ -324,6 +326,30 @@ export function CustomizePage() {
       ),
     [],
   )
+  /**
+   * #1022 — `?preset=<id>` opens the page with that preset applied, as a pick in the
+   * picker would, and the URL then follows the picker's selection. `linkDone` is the
+   * link (slug and id) the page has answered: applied, or found missing. Until then the
+   * link is pending, and no render starts on the defaults it is about to replace.
+   */
+  const linkedPreset = search.get('preset')
+  const linkKey = linkedPreset ? `${slug}\n${linkedPreset}` : null
+  const [linkDone, setLinkDone] = useState<string | null>(null)
+  // The picker shows the linked preset once it is applied: the link is answered. A
+  // link taken out of the URL is forgotten, so the same link opened again applies.
+  if (linkKey !== null && linkKey !== linkDone && presetInUse?.id === linkedPreset) setLinkDone(linkKey)
+  if (linkKey === null && linkDone !== null) setLinkDone(null)
+  const linkPending = linkKey !== null && linkKey !== linkDone && presetInUse?.id !== linkedPreset
+  /** Why the linked preset could not be applied, shown over the defaults it left. */
+  const [linkMissing, setLinkMissing] = useState<{ slug: string; message: string } | null>(null)
+  /**
+   * The linked preset, handed to the picker to apply as a pick there is: over unsaved
+   * edits it asks first. A one-shot message, cleared once the picker has taken it.
+   */
+  const [presetOffer, setPresetOffer] = useState<OfferedPreset | null>(null)
+  useEffect(() => {
+    if (presetOffer) setPresetOffer((current) => (current === presetOffer ? null : current))
+  }, [presetOffer])
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -387,8 +413,9 @@ export function CustomizePage() {
   const unrenderable = formSchema ? outOfRange(formSchema, values) : undefined
   const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
-  // with no parameters, whose defaults still render (#941).
-  const renderable = Boolean(settled && seed && !invalid)
+  // with no parameters, whose defaults still render (#941). A preset link (#1022) is
+  // applied first: the defaults it replaces are not rendered on the way.
+  const renderable = Boolean(settled && seed && !invalid && !linkPending)
   const {
     job,
     rendering,
@@ -524,12 +551,17 @@ export function CustomizePage() {
   // A preset's stored inputs, brought up to the template version before the picker cuts
   // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
   // they are, at once; ones that cannot be migrated show read-only instead.
+  // `stillWanted` is asked when a failure lands, and guards only the failure: a link that
+  // gave up waiting (#1022) must not put a late failure's inputs on screen beside the
+  // defaults it opened on. A late success is still returned; the caller must drop it
+  // itself, as the link's `Promise.race` does.
   const migratePreset = useCallback(
-    (saved: JsonObject): JsonObject | Promise<JsonObject | null> => {
+    (saved: JsonObject, stillWanted?: () => boolean): JsonObject | Promise<JsonObject | null> => {
       const v = typeof saved.v === 'number' ? saved.v : 0
       if (inputsVersion === undefined || v === inputsVersion) return saved
       return migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
         if (outcome.kind === 'failed') {
+          if (stillWanted && !stillWanted()) return null
           setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
           return null
         }
@@ -584,6 +616,107 @@ export function CustomizePage() {
     if (!current) throw new Error('the schema is still loading')
     return current
   }, [live])
+  /**
+   * Puts `preset` on screen (its `inputs` already migrated) and shows it selected in the
+   * picker, as a pick there does: a template UI's `presets.load`.
+   */
+  const showPreset = useLatest((preset: ParamPreset) => {
+    if (!schema) throw new Error('the schema is still loading')
+    const applied = applyPreset(schema, preset)
+    onApplyPreset(applied.values, applied.extra)
+    setPresetElsewhere({ preset, values: applied.values, extra: applied.extra })
+  })
+
+  // #1022 — the linked preset, read once the picker is on screen to show it and the
+  // model says which inputs version is current (so its inputs migrate as a pick's do).
+  const linkReady =
+    linkPending && !choosing && seed !== null && (inputsVersion !== undefined || Boolean(modelState.error))
+  const linking = useRef<string | null>(null)
+  useEffect(() => {
+    // Answered: the same link opened again later is read again.
+    if (!linkPending) linking.current = null
+    if (!linkReady || linkKey === null || linkedPreset === null || linking.current === linkKey) return
+    linking.current = linkKey
+    const current = () => linking.current === linkKey
+    const missing = (message: string) => {
+      if (!current()) return
+      setLinkMissing({ slug, message })
+      setLinkDone(linkKey)
+    }
+    void (async () => {
+      // Bounded: no render starts while the link is pending, so a list or a migration
+      // that never answers would leave the page with no preview and nothing said.
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let gaveUp = false
+      const late = new Promise<'late'>((resolve) => {
+        timer = setTimeout(() => {
+          gaveUp = true
+          resolve('late')
+        }, PRESET_LINK_TIMEOUT_MS)
+      })
+      const tooLate = () =>
+        missing('The linked preset could not be read: the server did not answer in time. Showing the defaults.')
+      try {
+        let preset: ParamPreset | undefined
+        try {
+          const listed = await Promise.race([api.listPresets(slug), late])
+          if (listed === 'late') return tooLate()
+          preset = listed.find((candidate) => candidate.id === linkedPreset)
+        } catch (caught) {
+          const why = caught instanceof ApiError ? caught.detail : String(caught)
+          return missing(`The linked preset could not be read: ${why}. Showing the defaults.`)
+        }
+        if (!preset) {
+          return missing('The linked preset is not on this model; it may have been deleted. Showing the defaults.')
+        }
+        const stored = isJsonObject(preset.inputs)
+          ? (preset.inputs as JsonObject)
+          : joinInputs(preset.params ?? {}, NO_EXTRA)
+        const migrated = await Promise.race([
+          Promise.resolve(migratePreset(stored, () => !gaveUp && current())),
+          late,
+        ])
+        if (migrated === 'late') return tooLate()
+        if (!current()) return
+        // One that cannot be migrated is shown read-only by `migratePreset`, as a pick's is.
+        if (migrated === null) {
+          setLinkDone(linkKey)
+          return
+        }
+        // The picker answers it: applied, the link is done once the picker shows it. Over
+        // edits the user made (not the values the page opened on) it asks first, and a
+        // Cancel leaves the edits and lets the link go.
+        setPresetOffer({
+          preset: { ...preset, inputs: migrated },
+          ask: isDirty.current(),
+          onDeclined: () => {
+            if (current()) setLinkDone(linkKey)
+          },
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+    })()
+  }, [linkPending, linkReady, linkKey, linkedPreset, slug, migratePreset, isDirty])
+
+  // The URL follows the picker (#1022): a pick names its preset, none takes it out.
+  // `replace`, as the page's other search-param writes: a pick is not a navigation.
+  // Not while a preset put on screen here is on its way to the picker (`presetElsewhere`).
+  useEffect(() => {
+    if (linkPending || choosing || presetElsewhere) return
+    const id = presetInUse?.id ?? null
+    if (id === linkedPreset) return
+    setSearch(
+      (current) => {
+        const next = new URLSearchParams(current)
+        if (id) next.set('preset', id)
+        else next.delete('preset')
+        return next
+      },
+      { replace: true },
+    )
+  }, [linkPending, choosing, presetElsewhere, presetInUse, linkedPreset, setSearch])
+
   // The Host's Generate in flight, with the template it is for.
   const generating = useRef<{ key: string; run: Promise<GenerateResult> } | null>(null)
   const hostDeps: HostDeps = useMemo(() => {
@@ -659,9 +792,7 @@ export function CustomizePage() {
         load: async (id: string) => {
           const preset = (await api.listPresets(slug)).find((candidate) => candidate.id === id)
           if (!preset) throw new Error(`no preset ${id}`)
-          const applied = applyPreset(schemaNow(), preset)
-          onApplyPreset(applied.values, applied.extra)
-          setPresetElsewhere({ preset, values: applied.values, extra: applied.extra })
+          showPreset.current(preset)
         },
       },
       onDescribe: (fn: (() => string) | null) => {
@@ -1122,6 +1253,7 @@ export function CustomizePage() {
       resetKey={resets}
       selected={presetElsewhere}
       onSelected={onPresetSelected}
+      offered={presetOffer}
     />
   )
   const templateUi = customUi && (
@@ -1271,6 +1403,14 @@ export function CustomizePage() {
             </Button>
           </div>
         )}
+        {linkMissing?.slug === slug && (
+          <div role="status" data-testid="preset-link-missing" className={`${BANNER} ${WARN}`}>
+            <span>{linkMissing.message}</span>
+            <Button type="button" size="sm" variant="ghost" onClick={() => setLinkMissing(null)}>
+              Dismiss
+            </Button>
+          </div>
+        )}
         {modelState.error && (
           <div role="alert" className={`${BANNER} ${WARN}`}>
             <span>Could not load this model&apos;s details: {modelState.error.message}</span>
@@ -1383,6 +1523,7 @@ export function CustomizePage() {
                     resetKey={resets}
                     selected={presetElsewhere}
                     onSelected={onPresetSelected}
+                    offered={presetOffer}
                   />
                 </>
               }

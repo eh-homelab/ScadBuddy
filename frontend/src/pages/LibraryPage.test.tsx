@@ -1,15 +1,16 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
-import { useLocation } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles, libraryFolders } from '../mocks/features/library'
+import type { LibraryEntry, PrintSummary } from '../api/types'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { sharedInFlight } from '../test/inFlight'
 import { NARROW_QUERY } from '../lib/useMediaQuery'
 import { renderPage } from '../test/utils'
-import { LibraryPage } from './LibraryPage'
+import { LIBRARY_PAGE_SIZE, LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
 
 // Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
@@ -70,6 +71,45 @@ function posted(path: string): { bodies: unknown[]; stop: () => void } {
   return { bodies, stop: () => server.events.removeListener('request:start', listen) }
 }
 
+/**
+ * #2290 — a top level of `count` files, paged as the backend pages it: `limit`, `after`
+ * (a 409 when `refuse` says so), the first page stretched to a linked `file_id`. The
+ * answer's `X-Total-Count` is `total`.
+ */
+function bigTopLevel(count: number, refuse: () => boolean = () => false, total = count) {
+  const files: LibraryEntry[] = Array.from({ length: count }, (_, n) => ({
+    id: 5000 + n,
+    filename: `part-${String(n).padStart(3, '0')}.3mf`,
+    file_type: '3mf',
+    folder_id: null,
+    has_thumbnail: false,
+    print_count: 0,
+    printable: true,
+    sliced: false,
+    is_external: false,
+  }))
+  const asked: URLSearchParams[] = []
+  server.use(
+    http.get('/api/v1/print/library', ({ request }) => {
+      const search = new URL(request.url).searchParams
+      asked.push(search)
+      const after = search.get('after')
+      if (after !== null && refuse()) return HttpResponse.json({ detail: 'no file is listed any more to page after' }, { status: 409 })
+      const start = after === null ? 0 : files.findIndex((file) => file.id === Number(after)) + 1
+      const linked = search.get('file_id')
+      let size = Number(search.get('limit') ?? count)
+      if (after === null && linked !== null) size = Math.max(size, files.findIndex((file) => file.id === Number(linked)) + 1)
+      return HttpResponse.json(
+        { folder_id: null, all: false, folders: libraryFolders, files: files.slice(start, start + size), hidden: 0 },
+        { headers: { 'X-Total-Count': String(total) } },
+      )
+    }),
+  )
+  return { files, asked }
+}
+
+const cardCount = () => screen.getAllByTestId(/^library-file-\d+$/).length
+
 describe('LibraryPage', () => {
   beforeEach(() => {
     resetMockState()
@@ -82,6 +122,83 @@ describe('LibraryPage', () => {
     expect(within(card).getByRole('button', { name: /^Print / })).toBeInTheDocument()
     expect(screen.queryByTestId('library-file-104')).toBeNull()
     expect(screen.getByText(/1 more under Advanced/)).toBeInTheDocument()
+  })
+
+  it('reads a large folder a page at a time, with Load more and the total (#2290)', async () => {
+    bigTopLevel(130)
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library' })
+    await screen.findByTestId('library-file-5000')
+    expect(cardCount()).toBe(LIBRARY_PAGE_SIZE)
+    expect(screen.getByTestId('library-shown')).toHaveTextContent(`Showing ${LIBRARY_PAGE_SIZE} of 130`)
+    expect(screen.getByRole('button', { name: /^Select all shown/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(cardCount()).toBe(2 * LIBRARY_PAGE_SIZE))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(`shown=${2 * LIBRARY_PAGE_SIZE}`))
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(cardCount()).toBe(130))
+    expect(screen.getByTestId('library-shown')).toHaveTextContent('Showing 130 of 130')
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    expect(screen.getByRole('button', { name: /^Select all in folder/ })).toBeInTheDocument()
+  })
+
+  it('drops Load more when a Load more finds no more files, though the total says more (#5291 review)', async () => {
+    // A file added before the cursor since the first page: the total counts it, no page after has it.
+    bigTopLevel(LIBRARY_PAGE_SIZE + 10, undefined, LIBRARY_PAGE_SIZE + 11)
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-5000')
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(cardCount()).toBe(LIBRARY_PAGE_SIZE + 10))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Load more|Loading/ })).toBeNull())
+    expect(cardCount()).toBe(LIBRARY_PAGE_SIZE + 10)
+  })
+
+  it('opens with as many files as the URL says were shown, so Back returns to them (#2290)', async () => {
+    const { asked } = bigTopLevel(130)
+    renderPage(<LibraryPage />, { route: `/library?shown=${LIBRARY_PAGE_SIZE + 30}` })
+    await screen.findByTestId('library-file-5000')
+    expect(cardCount()).toBe(LIBRARY_PAGE_SIZE + 30)
+    expect(asked.at(-1)?.get('limit')).toBe(String(LIBRARY_PAGE_SIZE + 30))
+  })
+
+  it('reads the folder again from the top when the last file shown went away (#2290)', async () => {
+    let refused = false
+    const { asked } = bigTopLevel(130, () => {
+      if (refused) return false
+      refused = true
+      return true
+    })
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-5000')
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+
+    await waitFor(() => expect(asked.filter((search) => !search.has('after')).length).toBe(2))
+    await waitFor(() => expect(cardCount()).toBe(LIBRARY_PAGE_SIZE))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('lists a linked file far down its folder on the first page (#2290)', async () => {
+    bigTopLevel(130)
+    renderPage(<LibraryPage />, { route: '/library?file=5100' })
+    expect(await screen.findByTestId('library-file-5100')).toBeInTheDocument()
+    expect(cardCount()).toBe(101)
+    expect(screen.queryByText(/is not listed here/)).toBeNull()
+  })
+
+  it('filters the folder tree to the folders named so, with their parents (#2290)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-folder-1')
+    await user.type(screen.getByRole('searchbox', { name: 'Filter folders' }), 'stor')
+
+    const tree = screen.getByRole('tree', { name: 'Library folders' })
+    expect(within(tree).getByRole('treeitem', { name: 'Storage' })).toBeVisible()
+    expect(within(tree).getByRole('treeitem', { name: 'Supplies' })).toBeInTheDocument()
+    expect(within(tree).queryByRole('treeitem', { name: 'MakerWorld' })).toBeNull()
+
+    await user.clear(screen.getByRole('searchbox', { name: 'Filter folders' }))
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld' })).toBeInTheDocument()
   })
 
   it('arranges the files ticked, made by ScadBuddy or not (#1864, #1863)', async () => {
@@ -265,13 +382,15 @@ describe('LibraryPage', () => {
     )
   })
 
-  it('renders a folder of hundreds of files with lazy thumbnails', async () => {
+  it('renders a page of a folder of hundreds of files with lazy thumbnails', async () => {
     const { user, container } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-folder-9'))
-    await waitFor(() => expect(screen.getAllByTestId(/^library-file-/)).toHaveLength(300))
+    // #2290: a page of them at a time, the total beside.
+    await waitFor(() => expect(screen.getAllByTestId(/^library-file-/)).toHaveLength(LIBRARY_PAGE_SIZE))
+    expect(screen.getByTestId('library-shown')).toHaveTextContent(`Showing ${LIBRARY_PAGE_SIZE} of 300`)
     // The thumbnails are decorative (alt=""): the caption names the file.
     const images = Array.from(container.querySelectorAll('img'))
-    expect(images).toHaveLength(300)
+    expect(images).toHaveLength(LIBRARY_PAGE_SIZE)
     expect(images.every((image) => image.getAttribute('loading') === 'lazy')).toBe(true)
   })
 
@@ -1051,6 +1170,352 @@ describe('LibraryPage, folders and projects (#3650)', () => {
     expect(await screen.findByTestId('library-file-130')).toBeInTheDocument()
     expect(screen.getByTestId('library-project-folder-14')).toBeInTheDocument()
     expect(screen.getByTestId('library-project-shown')).toHaveTextContent('Showing the files in Lamp.')
+  })
+})
+
+/** #1031 — a print of a library file, as `GET /prints?library_file_id=` lists it. */
+function libraryPrint(fileId: number, archiveId: number, status: string): PrintSummary {
+  return {
+    archive_id: archiveId,
+    output_id: null,
+    slug: null,
+    library_file_id: fileId,
+    library_file_name: null,
+    queue_item_id: null,
+    output_name: `Print of file ${fileId}`,
+    status,
+    printer_id: 1,
+    printer_name: 'Workshop H2C',
+    started_at: '2026-10-01T09:00:00Z',
+    completed_at: '2026-10-01T10:00:00Z',
+    actual_time_seconds: 3600,
+    filament_used_grams: 12.5,
+    cover: null,
+    has_timelapse: false,
+    attachment_count: 0,
+    params_diff: null,
+    run_count: 1,
+  }
+}
+
+/** Prints of each library file, by id, from `GET /prints`; every other filter lists none. */
+function libraryPrints(byFile: Record<number, PrintSummary[]>) {
+  server.use(
+    http.get('/api/v1/prints', ({ request }) => {
+      const file = new URL(request.url).searchParams.get('library_file_id')
+      return HttpResponse.json({ items: file === null ? [] : (byFile[Number(file)] ?? []), next_cursor: null })
+    }),
+  )
+}
+
+/** Back, as the browser's: outside the drawer, which is modal to the page. */
+function Back() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" data-testid="back" onClick={() => void navigate(-1)}>
+      Back
+    </button>
+  )
+}
+
+/** Forward, as the browser's. */
+function Forward() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" data-testid="forward" onClick={() => void navigate(1)}>
+      Forward
+    </button>
+  )
+}
+
+describe('LibraryPage file details (#1031)', () => {
+  beforeEach(() => {
+    resetMockState()
+    window.localStorage.clear()
+  })
+
+  it("opens a file's details from its card as a URL, which Back and Close leave", async () => {
+    libraryPrints({ 89: [libraryPrint(89, 7001, 'completed'), libraryPrint(89, 7002, 'failed')] })
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+        <Back />
+      </>,
+      { route: '/library' },
+    )
+    const open = await screen.findByTestId('library-open-89')
+    expect(open).toHaveAccessibleName(/^Details of bag-clip-/)
+    await user.click(open)
+    const drawer = await screen.findByRole('dialog', { name: /bag-clip-3155628dc2bb43d4940fad6dba164efc\.3mf/ })
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\?details=89$/)
+    // The card stays marked while its details are open.
+    expect(screen.getByTestId('library-file-89')).toHaveAttribute('aria-current', 'true')
+
+    const facts = within(drawer).getByTestId('library-details-facts')
+    expect(facts).toHaveTextContent('3MF')
+    expect(facts).toHaveTextContent('110 kB')
+    expect(facts).toHaveTextContent('Top level')
+
+    // The output ScadBuddy made it from, with a way back to the customizer.
+    const origin = await within(drawer).findByTestId('library-details-origin')
+    expect(origin).toHaveTextContent('name-keychain')
+    expect(origin).toHaveTextContent('Reagan')
+    expect(within(origin).getByRole('link', { name: /Open in the customizer/ })).toHaveAttribute(
+      'href',
+      `/edit/${'a'.repeat(32)}`,
+    )
+
+    // Its plates, and its filaments slot by slot.
+    expect(await within(drawer).findByRole('img', { name: 'Plate 1' })).toBeInTheDocument()
+    const slots = await within(drawer).findByTestId('library-details-slots')
+    expect(slots).toHaveTextContent('Slot 1')
+    expect(slots).toHaveTextContent('PLA')
+
+    // Its prints, each linking to its detail, and the whole history.
+    const history = await within(drawer).findByTestId('library-details-prints')
+    await waitFor(() => expect(within(history).getAllByRole('link', { name: /Print of file 89/ })).toHaveLength(2))
+    expect(within(history).getAllByRole('link', { name: /Print of file 89/ }).map((a) => a.getAttribute('href'))).toEqual([
+      '/prints/7001',
+      '/prints/7002',
+    ])
+    expect(history).toHaveTextContent(/failed/i)
+    expect(within(drawer).getByRole('link', { name: /All prints of this file/ })).toHaveAttribute('href', '/prints?file=89')
+    expect(within(drawer).getByRole('button', { name: 'Download' })).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Print' })).toBeInTheDocument()
+
+    // Back closes it: opening it was a step.
+    fireEvent.click(screen.getByTestId('back'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
+
+    // And Close too.
+    await user.click(screen.getByTestId('library-open-91'))
+    const again = await screen.findByRole('dialog')
+    await user.click(within(again).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
+  })
+
+  it("opens a deep link on the file's folder, with its plates and objects", async () => {
+    libraryPrints({})
+    renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+      </>,
+      { route: '/library?details=67' },
+    )
+    const drawer = await screen.findByRole('dialog', { name: "Clara's Wand.3mf" })
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\?details=67$/))
+    expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld')
+    const plates = await within(drawer).findByTestId('library-details-plates')
+    expect(within(plates).getAllByRole('img').map((img) => img.getAttribute('alt'))).toEqual(['Side', 'Side', 'Roller Bolt'])
+    const objects = await within(drawer).findByTestId('library-details-objects')
+    expect(objects).toHaveTextContent('Wand')
+    expect(objects).toHaveTextContent('Star')
+    expect(objects).toHaveTextContent('× 2')
+    expect(await within(drawer).findByText('No prints of this file yet.')).toBeInTheDocument()
+    // Not one ScadBuddy made.
+    expect(within(drawer).queryByTestId('library-details-origin')).toBeNull()
+  })
+
+  it('shows what a sliced file was sliced for', async () => {
+    window.localStorage.setItem('scadbuddy.library.advanced', '1')
+    libraryPrints({})
+    renderPage(<LibraryPage />, { route: '/library?details=104' })
+    const drawer = await screen.findByRole('dialog', { name: /\.gcode\.3mf$/ })
+    expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('Sliced 3MF')
+    const sliced = await within(drawer).findByTestId('library-details-sliced')
+    expect(sliced).toHaveTextContent('Bambu Lab H2C')
+    expect(sliced).toHaveTextContent('0.4 mm')
+    expect(sliced).toHaveTextContent('Textured PEI Plate')
+    expect(sliced).toHaveTextContent('45m')
+    expect(sliced).toHaveTextContent('9.8 g')
+    // A sliced file has no objects to read again.
+    expect(within(drawer).queryByTestId('library-details-objects')).toBeNull()
+  })
+
+  it('opens a link to a file only Advanced lists, read by id (#5321)', async () => {
+    libraryPrints({})
+    renderPage(<LibraryPage />, { route: '/library?details=46' })
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    const facts = within(drawer).getByTestId('library-details-facts')
+    expect(facts).toHaveTextContent('STL')
+    expect(facts).toHaveTextContent('Supplies / Storage')
+    expect(within(drawer).queryByText(/is not listed here/)).toBeNull()
+  })
+
+  it('shows a file read by id in the folder a move from its details took it to (#5333 review)', async () => {
+    libraryPrints({})
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+      </>,
+      { route: '/library?details=46' },
+    )
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('Supplies / Storage'))
+    await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move Desiccant_Box\.stl to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\?details=46$/))
+    const after = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(after).getByTestId('library-details-facts')).not.toHaveTextContent('Storage')
+  })
+
+  it('shows a search hit a move takes out of the results in its new folder (#5333 review)', async () => {
+    window.localStorage.setItem('scadbuddy.library.advanced', '1')
+    libraryPrints({})
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=storage&details=46' })
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('Supplies / Storage'))
+    await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move Desiccant_Box\.stl to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    // It matched "storage" by its folder only: the search no longer finds it.
+    await waitFor(() => expect(screen.queryByTestId('library-file-46')).toBeNull())
+    const after = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(after).getByTestId('library-details-facts')).not.toHaveTextContent('Storage')
+  })
+
+  it('keeps a file read by id on screen while the listing is read again (#5333 review)', async () => {
+    libraryPrints({})
+    renderPage(<LibraryPage />, { route: '/library?details=46' })
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await within(drawer).findByTestId('library-details-facts')
+    // The next listing never answers: the page has none on screen meanwhile.
+    server.use(http.get('/api/v1/print/library', () => delay('infinite')))
+    fireEvent.click(screen.getByTestId('library-advanced'))
+    await waitFor(() => expect(screen.queryByTestId('library-file-89')).toBeNull())
+    expect(screen.getByRole('dialog', { name: 'Desiccant_Box.stl' })).toBeInTheDocument()
+    expect(within(screen.getByRole('dialog')).getByTestId('library-details-facts')).toHaveTextContent('Supplies / Storage')
+  })
+
+  it('says when the linked file is not in the library', async () => {
+    libraryPrints({})
+    renderPage(<LibraryPage />, { route: '/library?details=9999' })
+    const drawer = await screen.findByRole('dialog')
+    expect(await within(drawer).findByText(/Bambuddy has no such resource/)).toBeInTheDocument()
+  })
+
+  it("forgets a renamed file's kept copy once its details close (#5322 review)", async () => {
+    libraryPrints({})
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Forward />
+      </>,
+      { route: '/library/Spec/MakerWorld/Work' },
+    )
+    await user.click(await screen.findByTestId('library-open-120'))
+    let drawer = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Rename' }))
+    const rename = await screen.findByRole('dialog', { name: /^Rename/ })
+    await user.clear(within(rename).getByRole('textbox'))
+    await user.type(within(rename).getByRole('textbox'), 'drawer-tag')
+    await user.click(within(rename).getByTestId('library-rename-confirm'))
+    drawer = await screen.findByRole('dialog', { name: 'drawer-tag.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    // Moved from its card, with no details open, so the page stays where it is.
+    await user.click(await screen.findByRole('button', { name: 'More actions for drawer-tag.3mf' }))
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move drawer-tag\.3mf to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    await waitFor(() => expect(screen.queryByTestId('library-file-120')).toBeNull())
+
+    // Forward to its details: the file as it is now, not as the rename left it.
+    fireEvent.click(screen.getByTestId('forward'))
+    drawer = await screen.findByRole('dialog', { name: 'drawer-tag.3mf' })
+    await waitFor(() => expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(drawer).getByTestId('library-details-facts')).not.toHaveTextContent('Work')
+  })
+
+  it('renames and deletes the file from its details, Delete after a confirmation', async () => {
+    libraryPrints({})
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+      </>,
+      { route: '/library/Spec/MakerWorld/Work?details=120' },
+    )
+    let drawer = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Rename' }))
+    const rename = await screen.findByRole('dialog', { name: /^Rename/ })
+    const box = within(rename).getByRole('textbox')
+    await user.clear(box)
+    await user.type(box, 'drawer-tag')
+    await user.click(within(rename).getByTestId('library-rename-confirm'))
+    drawer =await screen.findByRole('dialog', { name: 'drawer-tag.3mf' })
+
+    await user.click(within(drawer).getByRole('button', { name: 'Delete' }))
+    const confirm = await screen.findByRole('alertdialog', { name: /Delete drawer-tag\.3mf\?/ })
+    await user.click(within(confirm).getByTestId('library-delete-confirm'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Spec\/MakerWorld\/Work$/)
+    await waitFor(() => expect(screen.queryByTestId('library-file-120')).toBeNull())
+  })
+
+  it('moves the file from its details, and the drawer follows it to its folder', async () => {
+    libraryPrints({})
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+      </>,
+      { route: '/library/Spec/MakerWorld/Work?file=120&details=120' },
+    )
+    const drawer = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move drawer-label\.3mf to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\?details=120$/))
+    const after = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
+    await waitFor(() => expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(after).getByTestId('library-details-facts')).not.toHaveTextContent('Spec')
+    expect(screen.queryByText(/is not listed here/)).toBeNull()
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+  })
+
+  it("opens a listed file's details without reading the listing again (#5322 review)", async () => {
+    libraryPrints({})
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const open = await screen.findByTestId('library-open-89')
+    const reads = listingAnswers()
+    onTestFinished(reads.stop)
+    await user.click(open)
+    const drawer = await screen.findByRole('dialog', { name: /bag-clip/ })
+    await within(drawer).findByTestId('library-details-prints')
+    // The grid behind it stays, and no second listing is asked for.
+    expect(screen.getByTestId('library-file-89')).toBeInTheDocument()
+    expect(screen.getByTestId('library-file-91')).toBeInTheDocument()
+    expect(reads.count()).toBe(0)
+  })
+
+  it('keeps the details of a file a rename takes out of the search (#5322 review)', async () => {
+    libraryPrints({})
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=headphone&details=121' })
+    const drawer = await screen.findByRole('dialog', { name: 'alex-headphone-hook.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Rename' }))
+    const rename = await screen.findByRole('dialog', { name: /^Rename/ })
+    const box = within(rename).getByRole('textbox')
+    await user.clear(box)
+    await user.type(box, 'desk-hook')
+    await user.click(within(rename).getByTestId('library-rename-confirm'))
+    const after = await screen.findByRole('dialog', { name: 'desk-hook.3mf' })
+    await waitFor(() => expect(screen.queryByTestId('library-file-121')).toBeNull())
+    expect(within(after).queryByText(/is not listed here/)).toBeNull()
+    expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('Spec / MakerWorld / Work')
   })
 })
 

@@ -516,6 +516,77 @@
           "legendFormat": "{{outcome}}"
         }
       ]
+    },
+    {
+      "id": 26,
+      "type": "row",
+      "title": "Operations (bambuddy queue)",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 61, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Operation time",
+      "description": "Print worker operations: from the operation's record to its end, by kind (#2295): p50 and p95 of those that succeeded, p95 of those that failed. On 2026-10-11 a save (output_create) took ~37 s.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 62, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-print\", outcome=\"succeeded\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{kind}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-print\", outcome=\"succeeded\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{kind}}"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-print\", outcome=\"failed\"}[$__rate_interval])))",
+          "legendFormat": "p95 failed {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Operations",
+      "description": "Print worker operations: operations whose record ended, by kind and outcome (#2295).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 62, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=\"scadbuddy-print\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Operations past the deadline",
+      "description": "Print worker operations: requests the API answered 202 to follow (or 503 to send again) because the operation had not ended within the deadline, by kind (#2295). Once per request: a re-send counts again.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 62, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\"}[$__rate_interval])) and on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=\"scadbuddy-print\"}[1h]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
     }
   ]
 }

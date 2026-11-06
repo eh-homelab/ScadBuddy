@@ -5,7 +5,7 @@ import { bridge } from '../agent/bridge'
 import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
-import { COASTER_INPUTS, flowRequests, setFlowState } from '../mocks/features/flows'
+import { COASTER_INPUTS, flowRequests, setFlowDetails, setFlowState } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
 import { choose } from '../test/select'
 import { FlowPage } from './FlowPage'
@@ -111,7 +111,11 @@ describe('FlowPage', () => {
     await user.click(save)
     expect(await screen.findByRole('heading', { name: 'swap v2' })).toBeInTheDocument()
     expect(flowRequests()).toEqual([
-      { path: '/api/v1/workflows', key: null, body: { name: 'swap', script: 'async def main():\n    await sleep(5)\n' } },
+      {
+        path: '/api/v1/workflows',
+        key: null,
+        body: { name: 'swap', script: 'async def main():\n    await sleep(5)\n', message: 'Update script' },
+      },
     ])
     expect(screen.getByText(/Registered by you, in the browser/)).toBeInTheDocument()
   })
@@ -155,8 +159,8 @@ describe('FlowPage', () => {
     expect(screen.getByTestId('modified')).toHaveTextContent('await queue_print')
     expect(screen.getByRole('heading', { name: 'v1 → v2' })).toBeInTheDocument()
 
-    await choose(user, within(compare).getByRole('combobox', { name: 'From' }), 'v2')
-    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), 'v1')
+    await choose(user, within(compare).getByRole('combobox', { name: 'From' }), /^v2 /)
+    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), /^v1 /)
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByRole('heading', { name: 'v2 → v1' })).toBeInTheDocument()
     expect(screen.getByTestId('original')).toHaveTextContent('await queue_print')
@@ -242,7 +246,7 @@ describe('FlowPage', () => {
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
     const compare = screen.getByRole('region', { name: 'Compare versions' })
-    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), 'v2')
+    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), /^v2 /)
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByTestId('source-diff')).toHaveAttribute('data-side-by-side', 'false')
     expect(screen.getByRole('button', { name: 'Start run' })).toBeInTheDocument()
@@ -294,6 +298,62 @@ describe('FlowPage', () => {
   })
 })
 
+describe('FlowPage details and commit messages (#3186)', () => {
+  it('heads the page with the display name, the slug beside it, and the description as Markdown', async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap', description: 'Swaps the **colour**.' })
+    render('def-swap')
+    expect(await screen.findByRole('heading', { name: 'Nightly swap v1' })).toBeInTheDocument()
+    expect(screen.getByText('swap', { selector: 'code' })).toBeInTheDocument()
+    const description = screen.getByRole('region', { name: 'Description' })
+    expect(within(description).getByText('colour', { selector: 'strong' })).toBeInTheDocument()
+  })
+
+  it('edits the display name and description as a commit of their own, with its message', async () => {
+    const { user } = render('def-swap')
+    expect(await screen.findByRole('heading', { name: 'swap v1' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit details' })
+    // Each field stops at the length the route takes, so a long one is not refused on Save.
+    expect(within(dialog).getByRole('textbox', { name: 'Display name' })).toHaveAttribute('maxLength', '120')
+    expect(within(dialog).getByRole('textbox', { name: 'Description' })).toHaveAttribute('maxLength', '20000')
+    await user.type(within(dialog).getByRole('textbox', { name: 'Display name' }), 'Nightly swap')
+    await user.type(within(dialog).getByRole('textbox', { name: 'Description' }), 'Swaps.')
+    await user.clear(within(dialog).getByRole('textbox', { name: 'Commit message' }))
+    await user.type(within(dialog).getByRole('textbox', { name: 'Commit message' }), 'Name it')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('heading', { name: 'Nightly swap v1' })).toBeInTheDocument()
+    expect(flowRequests()).toEqual([
+      {
+        path: '/api/v1/workflows/names/swap',
+        key: null,
+        body: { display_name: 'Nightly swap', description: 'Swaps.', message: 'Name it' },
+      },
+    ])
+    expect(screen.queryByRole('dialog', { name: 'Edit details' })).not.toBeInTheDocument()
+  })
+
+  it("saves a script with its commit message and body, and lists each version's message", async () => {
+    const { user } = render('def-swap')
+    const editor = await screen.findByRole('textbox', { name: 'Script' })
+    const message = screen.getByRole('textbox', { name: 'Commit message' })
+    expect(message).toHaveValue('Update script')
+    fireEvent.change(editor, { target: { value: 'async def main():\n    await sleep(5)\n' } })
+    await user.clear(message)
+    await user.type(message, 'Sleep first')
+    await user.type(screen.getByRole('textbox', { name: 'Commit details (optional)' }), 'Longer notes.')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('heading', { name: 'swap v2' })).toBeInTheDocument()
+    expect(flowRequests()[0]!.body).toMatchObject({ message: 'Sleep first', body: 'Longer notes.' })
+    const versions = screen.getByRole('region', { name: 'Versions' })
+    expect(await within(versions).findByRole('link', { name: /^v2 Sleep first/ })).toBeInTheDocument()
+    const compare = screen.getByRole('region', { name: 'Compare versions' })
+    expect(within(compare).getByRole('combobox', { name: 'To' })).toHaveTextContent('v2 Sleep first')
+    // The next save starts from the default message again, not this one's.
+    expect(screen.getByRole('textbox', { name: 'Commit message' })).toHaveValue('Update script')
+    expect(screen.getByRole('textbox', { name: 'Commit details (optional)' })).toHaveValue('')
+  })
+})
+
 describe('FlowPage inputs (#2483)', () => {
   it('edits the inputs schema beside the script, checks it, and saves it with the version', async () => {
     const { user } = render('def-coasters')
@@ -321,7 +381,7 @@ describe('FlowPage inputs (#2483)', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByRole('heading', { name: 'coasters v2' })).toBeInTheDocument()
     expect(flowRequests().map((r) => r.body)).toEqual([
-      { name: 'coasters', script: expect.stringContaining('await inputs()'), inputs_schema: next },
+      { name: 'coasters', script: expect.stringContaining('await inputs()'), inputs_schema: next, message: 'Update script' },
     ])
   })
 

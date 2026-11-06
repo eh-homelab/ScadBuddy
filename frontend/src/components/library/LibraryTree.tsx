@@ -27,6 +27,29 @@ interface Props {
    * row a `contextmenu` event.
    */
   wrapRow?: (folder: LibraryFolderView, row: ReactNode) => ReactNode
+  /** #2290 — only the folders whose name holds every word, with their parents, all open. */
+  filter?: string
+}
+
+/**
+ * #2290 — the folders whose name holds every word of `filter` (any case), each with
+ * the folders above it, in the tree's order; every folder when `filter` has no words.
+ */
+export function filterFolders(folders: LibraryFolderView[], filter: string): LibraryFolderView[] {
+  const words = filter.toLocaleLowerCase().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return folders
+  const byId = new Map(folders.map((folder) => [folder.id, folder]))
+  const kept = new Set<number>()
+  for (const folder of folders) {
+    const name = folder.name.toLocaleLowerCase()
+    if (!words.every((word) => name.includes(word))) continue
+    let at: LibraryFolderView | undefined = folder
+    while (at && !kept.has(at.id)) {
+      kept.add(at.id)
+      at = at.parent_id != null ? byId.get(at.parent_id) : undefined
+    }
+  }
+  return folders.filter((folder) => kept.has(folder.id))
 }
 
 /**
@@ -64,14 +87,17 @@ function openMenuAt(row: HTMLElement | null) {
  * collapsible (#3670).
  */
 export function LibraryTree({
-  folders,
+  folders: all,
   selected,
   onSelect,
   label = 'Library folders',
   testIdPrefix = 'library-folder',
   rootLabel = 'Top level',
   wrapRow,
+  filter = '',
 }: Props) {
+  const folders = useMemo(() => filterFolders(all, filter), [all, filter])
+  const filtering = folders !== all
   const children = useMemo(() => {
     const map = new Map<number | null, LibraryFolderView[]>()
     const known = new Set(folders.map((folder) => folder.id))
@@ -86,11 +112,26 @@ export function LibraryTree({
   const countId = useId()
   const hasChildren = (id: number) => (children.get(id)?.length ?? 0) > 0
 
-  const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
+  const [opened, setExpanded] = useState<Set<number>>(() => new Set())
+  // While filtering, every folder left starts open, so each match shows under its
+  // parents; the chevrons and ←/→ then fold and open them as usual (#5291 review). A new
+  // filter opens them all again, and clearing it gives back what was open before. The
+  // folds are kept by the filter's text, not the list's identity, so a read of the tree
+  // again while filtering keeps them; only the ids still listed are kept (#5303 review).
+  // Any change of the text drops them, so going back to an earlier text opens all again
+  // (#5306 review).
+  const allLeft = useMemo(() => new Set(folders.map((folder) => folder.id)), [folders])
+  const [filterFolded, setFilterFolded] = useState<{ of: string; ids: Set<number> } | null>(null)
+  if (filterFolded && (!filtering || filterFolded.of !== filter)) setFilterFolded(null)
+  const folded = filtering && filterFolded?.of === filter ? filterFolded.ids : null
+  const expanded = useMemo(
+    () => (!filtering ? opened : folded ? new Set([...allLeft].filter((id) => !folded.has(id))) : allLeft),
+    [filtering, opened, folded, allLeft],
+  )
   // The selected folder and its ancestors open whenever it changes, as a deep link or
   // Back lands on it, so its subfolders show too (#3631); whatever else was opened stays
   // open.
-  const selectedChain = ancestry(folders, selected)
+  const selectedChain = ancestry(all, selected)
     .map((folder) => folder.id)
     .filter(hasChildren)
     .join(',')
@@ -132,12 +173,16 @@ export function LibraryTree({
   }
 
   function toggle(id: number, open?: boolean) {
-    setExpanded((now) => {
+    const flip = (now: Set<number>) => {
       const next = new Set(now)
       if (open ?? !now.has(id)) next.add(id)
       else next.delete(id)
       return next
-    })
+    }
+    if (filtering) {
+      const open = flip(expanded)
+      setFilterFolded({ of: filter, ids: new Set([...allLeft].filter((folder) => !open.has(folder))) })
+    } else setExpanded(flip)
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLElement>, key: Key) {
@@ -313,6 +358,11 @@ export function LibraryTree({
         </li>
       )}
       {(children.get(null) ?? []).map((folder) => renderFolder(folder, 1))}
+      {filtering && folders.length === 0 && (
+        <li role="none" className="px-2 py-1 text-xs text-muted-foreground">
+          No folder is named so.
+        </li>
+      )}
     </ul>
   )
 }

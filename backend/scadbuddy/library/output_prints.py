@@ -48,6 +48,9 @@ class LastPrint(BaseModel):
     lan_plates: list[LanPlateSend] = Field(default_factory=list)
     print_stage: Stage | None = None
     print_settled: bool = False
+    #: Whether a print of the output ever reached Bambuddy's queue (#5143): a LAN
+    #: print's row keeps it, though it clears the ids that said so.
+    sent_to_bambuddy: bool = False
 
     def fields(self) -> dict[str, Any]:
         """What the row overrides on an ``OutputMeta``: a null id leaves the file's,
@@ -83,8 +86,8 @@ class OutputPrintStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_last_prints AS t"
-                " (output_id, queue_item_id, print_route, slice_job_id, project_id, plates)"
-                " VALUES (%s, %s, 'slice_queue', %s, %s, %s)"
+                " (output_id, queue_item_id, print_route, slice_job_id, project_id, plates,"
+                " sent_to_bambuddy) VALUES (%s, %s, 'slice_queue', %s, %s, %s, true)"
                 " ON CONFLICT (output_id) DO UPDATE SET"
                 " queue_item_id = COALESCE(EXCLUDED.queue_item_id, t.queue_item_id),"
                 " print_route = EXCLUDED.print_route,"
@@ -92,7 +95,7 @@ class OutputPrintStore:
                 " project_id = EXCLUDED.project_id,"
                 " plates = EXCLUDED.plates,"
                 " print_run_id = NULL, printer = NULL, lan_plates = '[]',"
-                " print_stage = NULL, print_settled = false,"
+                " print_stage = NULL, print_settled = false, sent_to_bambuddy = true,"
                 " recorded_at = now()",
                 (
                     output_id,
@@ -113,8 +116,9 @@ class OutputPrintStore:
     ) -> None:
         """A LAN print (#4644): its run, its registry printer and each plate with its
         copies, printing as the printer took its first start. A Bambuddy print's ids
-        recorded before are cleared. Recorded again for the same run (a retried record)
-        it keeps the stage the follow has written since."""
+        recorded before are cleared, and ``sent_to_bambuddy`` kept (#5143). Recorded
+        again for the same run (a retried record) it keeps the stage the follow has
+        written since."""
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_last_prints AS t"
@@ -156,8 +160,8 @@ class OutputPrintStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT output_id, queue_item_id, print_route, slice_job_id, project_id, plates,"
-                " print_run_id, printer::text AS printer, lan_plates, print_stage, print_settled"
-                " FROM output_last_prints WHERE output_id = ANY(%s)",
+                " print_run_id, printer::text AS printer, lan_plates, print_stage, print_settled,"
+                " sent_to_bambuddy FROM output_last_prints WHERE output_id = ANY(%s)",
                 (list(output_ids),),
             ).fetchall()
         return {row["output_id"]: LastPrint.model_validate(row) for row in rows}

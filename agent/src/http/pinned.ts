@@ -50,10 +50,10 @@ export class PinnedRequestError extends Error {
 export function pinnedFetch(
   url: string,
   address: string,
-  init: { method: string; headers?: OutgoingHttpHeaders; body?: string; signal?: AbortSignal; maxBytes?: number },
+  init: { method: string; headers?: OutgoingHttpHeaders; body?: string | Buffer; signal?: AbortSignal; maxBytes?: number },
 ): Promise<PinnedResponse> {
   const target = new URL(url)
-  const body = init.body === undefined ? undefined : Buffer.from(init.body, 'utf8')
+  const body = init.body === undefined ? undefined : typeof init.body === 'string' ? Buffer.from(init.body, 'utf8') : init.body
   const headers: OutgoingHttpHeaders = { ...init.headers, host: target.host }
   if (body) headers['content-length'] = body.length
   const maxBytes = init.maxBytes ?? 4 * 1024 * 1024

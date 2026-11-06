@@ -5,10 +5,11 @@ import hashlib
 import json
 import logging
 import math
+import unicodedata
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import psycopg
@@ -302,6 +303,74 @@ def page_window(keys: list[str], after: str | None, limit: int | None, what: str
     return slice(start, None if limit is None else start + limit)
 
 
+#: The Models page's search, filters and sort (#2290), run here so the page can page.
+#: Matching folds case and accents, as the page's own `fold` did: "Crème" finds "creme".
+CatalogueOrigin = Literal["builtin", "mine"]
+CatalogueSort = Literal["updated", "name"]
+SearchWords = Annotated[
+    str | None,
+    Query(
+        max_length=256,
+        description="Search words; each must appear in the name, the description or a tag",
+    ),
+]
+#: How many `tag`s, and how long each, the route takes: bounds on the request only.
+#: Past a model's own caps (`MAX_TAGS` distinct tags as folded, `MAX_TAG_CHARS` each) no
+#: model can match, and the answer is empty rather than 422 (#5305 review): a browser
+#: cannot fold as `fold` does, so it sends the tags as typed and leaves that to here.
+MAX_TAG_FILTERS = 4 * MAX_TAGS
+MAX_TAG_FILTER_CHARS = 4 * MAX_TAG_CHARS
+TagFilter = Annotated[
+    list[Annotated[str, Field(min_length=1, max_length=MAX_TAG_FILTER_CHARS)]] | None,
+    Query(max_length=MAX_TAG_FILTERS, description="Only models carrying every one of these tags"),
+]
+OriginFilter = Annotated[CatalogueOrigin | None, Query(description="Only built-ins, or mine")]
+SortOrder = Annotated[
+    CatalogueSort | None,
+    Query(description="`updated`: newest first; `name`. The catalogue's own order when omitted"),
+]
+
+
+def fold(text: str) -> str:
+    """``text`` without case or accents, for matching."""
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _selects(
+    record: ModelRecord, words: list[str], tags: list[str], origin: CatalogueOrigin | None
+) -> bool:
+    if origin is not None and record.origin != origin:
+        return False
+    own = {fold(tag) for tag in record.tags}
+    if not all(tag in own for tag in tags):
+        return False
+    text = fold("\n".join([record.name, record.description, *record.tags]))
+    return all(word in text for word in words)
+
+
+def select_models(
+    records: list[ModelRecord],
+    q: str | None,
+    tags: list[str] | None,
+    origin: CatalogueOrigin | None,
+) -> list[ModelRecord]:
+    """The records the search and filters select, in the catalogue's order."""
+    words = fold(q or "").split()
+    wanted = [fold(tag) for tag in tags or []]
+    return [record for record in records if _selects(record, words, wanted, origin)]
+
+
+def sort_models(records: list[ModelRecord], sort: CatalogueSort | None) -> list[ModelRecord]:
+    if sort == "name":
+        return sorted(records, key=lambda record: fold(record.name))
+    if sort == "updated":
+        return sorted(
+            records, key=lambda record: (-record.updated_at.timestamp(), fold(record.name))
+        )
+    return records
+
+
 @router.get(
     "/models",
     response_model=list[ModelRecord],
@@ -313,13 +382,31 @@ def list_models(
     response: Response,
     limit: PageLimit = None,
     after: PageAfter = None,
+    q: SearchWords = None,
+    tag: TagFilter = None,
+    origin: OriginFilter = None,
+    sort: SortOrder = None,
 ) -> list[ModelRecord]:
     """Mine, then the built-ins. `X-Total-Count` counts every template, one whose
     ``model.json`` cannot be read (and so is left out of the list) too.
 
     A page holds `limit` records whenever the list goes on past it: a model left out
     of a window does not shorten the page, because the agent reads a short page as
-    the end of the list and would never list the models after it."""
+    the end of the list and would never list the models after it.
+
+    With `q`, `tag`, `origin` or `sort` (#2290) every record is read, selected and
+    sorted, and the page is a window of that order; `X-Total-Count` is then how many
+    the filters select."""
+    if q is None and not tag and origin is None and sort is None:
+        return _catalogue_page(catalogue, response, limit, after)
+    selected = sort_models(select_models(catalogue.list_models(), q, tag, origin), sort)
+    response.headers[TOTAL_COUNT_HEADER] = str(len(selected))
+    return selected[page_window([record.slug for record in selected], after, limit, "model")]
+
+
+def _catalogue_page(
+    catalogue: Catalogue, response: Response, limit: int | None, after: str | None
+) -> list[ModelRecord]:
     slugs = catalogue.slugs()
     response.headers[TOTAL_COUNT_HEADER] = str(len(slugs))
     if limit is None and after is None:
@@ -334,6 +421,59 @@ def list_models(
         records.extend(catalogue.list_models(chunk))
         start += len(chunk)
     return records
+
+
+class TagCount(BaseModel):
+    tag: str
+    count: int = Field(description="How many of the selected models carry it")
+
+
+class ModelFacets(BaseModel):
+    """What the Models page's filters show beside a page of the list (#2290)."""
+
+    total: int = Field(
+        description="Every listed model, whatever the filters. Only models whose "
+        "`model.json` can be read: unlike an unfiltered `GET /models`'s `X-Total-Count`, "
+        "which counts every template"
+    )
+    matched: int = Field(description="How many models the search and filters select")
+    tags: list[TagCount] = Field(
+        description="Each tag of the selected models, most used first, then by name; "
+        "a wanted tag none of them carry is listed at 0"
+    )
+
+
+def tag_counts(records: list[ModelRecord], wanted: list[str]) -> list[TagCount]:
+    """Tags counted folded, each spelled as the first record that carries it spells it."""
+    spelling: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for record in records:
+        for tag in record.tags:
+            spelling.setdefault(fold(tag), tag)
+        for key in {fold(tag) for tag in record.tags}:
+            counts[key] = counts.get(key, 0) + 1
+    for tag in wanted:
+        spelling.setdefault(fold(tag), tag)
+        counts.setdefault(fold(tag), 0)
+    rows = [TagCount(tag=spelling[key], count=count) for key, count in counts.items()]
+    return sorted(rows, key=lambda row: (-row.count, fold(row.tag)))
+
+
+@router.get("/model-facets", response_model=ModelFacets, summary="Model list facets")
+def model_facets(
+    catalogue: CatalogueDep,
+    q: SearchWords = None,
+    tag: TagFilter = None,
+    origin: OriginFilter = None,
+) -> ModelFacets:
+    """How many models the search and filters of `GET /models` select, of how many,
+    and the tags of the selected ones with their counts (#2290), so a page of the list
+    can show the filters the whole list would."""
+    records = catalogue.list_models()
+    selected = select_models(records, q, tag, origin)
+    return ModelFacets(
+        total=len(records), matched=len(selected), tags=tag_counts(selected, tag or [])
+    )
 
 
 class PastedSource(BaseModel):

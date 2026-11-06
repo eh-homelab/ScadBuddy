@@ -105,4 +105,32 @@ describe("an order's files (#4251)", () => {
     expect(state.items.find((i) => i.id === ITEM_APPROVED)?.delivered_attachment_id).toBeNull()
     expect(await within(files).findByText('No files yet.')).toBeInTheDocument()
   })
+
+  it("keeps a file on one of the item's attempts (#4251)", async () => {
+    state.fulfilments.push({
+      id: 'f-attempt',
+      order_item_id: ITEM_APPROVED,
+      purpose: 'production',
+      attempt: 1,
+      quantity: 2,
+      outcome: 'succeeded',
+      failure_reason: null,
+      started_at: null,
+      finished_at: '2026-11-01T12:00:00Z',
+      notes: '',
+      accepted_at: null,
+      created_by: { kind: 'browser', principal: null, session: null },
+      created_at: '2026-11-01T10:00:00Z',
+    })
+    const { user } = render()
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const drawer = await openItem(user)
+    const files = within(drawer).getByRole('region', { name: 'Item files' })
+    await user.click(within(files).getByRole('combobox', { name: 'Add item files to' }))
+    await user.click(await screen.findByRole('option', { name: 'Attempt 1' }))
+    await user.upload(within(files).getByLabelText('Attach item files'), photo('done.png'))
+    const card = await within(files).findByRole('listitem', { name: 'done.png' })
+    expect(within(card).getByText('Attempt 1')).toBeInTheDocument()
+    expect(only()).toMatchObject({ item_id: ITEM_APPROVED, fulfilment_id: 'f-attempt', subject: 'order_item_fulfilment:f-attempt' })
+  })
 })
