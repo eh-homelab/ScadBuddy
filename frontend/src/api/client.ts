@@ -90,6 +90,7 @@ import type {
   BatchQueueProgress,
   ModelFacets,
   ModelSummary,
+  ReadmeImage,
   ModelVersion,
   Output,
   OutputPlate,
@@ -1327,6 +1328,16 @@ export const api = {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
     return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+  },
+
+  /**
+   * #5475 — an image into the template's `images/` folder, for its README, as one
+   * revision. The answer's `path` is what the README links: `images/<name>`.
+   */
+  addReadmeImage: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return command<ReadmeImage>(`/models/${seg(slug)}/images`, { method: 'POST', body })
   },
 
   /**
