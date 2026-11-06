@@ -2941,11 +2941,11 @@ describe("a model's lifecycle as operations (#1054)", () => {
     expect(asked).toBe(sent)
   })
 
-  it("delete_model's summary says when it trashes the library copies (#5371)", () => {
+  it("delete_model's summary says when it trashes the library copies, on ScadBuddy's own library only (#5371, #5422)", () => {
     const summarize = tool('delete_model').summarize!
     expect(summarize({ slug: 'w', force: false, delete_inbox_copies: false })).toBe('Delete the model "w" and its outputs')
     expect(summarize({ slug: 'w', force: false, delete_inbox_copies: true })).toBe(
-      "Delete the model \"w\" and its outputs, trashing their copies in ScadBuddy's library",
+      "Delete the model \"w\" and its outputs; on ScadBuddy's own library, also trashing their copies there",
     )
   })
 })

@@ -762,9 +762,13 @@ function descendants(id: number): Set<number> {
   return found
 }
 
-/** #5371 — a model delete's `delete_inbox_copies`: its outputs' copies to the mocked trash. */
-export function trashMockLibraryFiles(ids: Iterable<number>): void {
-  for (const id of ids) trashed.add(id)
+/**
+ * #5371 — a model delete's `delete_inbox_copies`: its outputs' copies still filed under the
+ * template's folder go to the mocked trash. A move clears `filed` (`trash_filed`, #5422), so
+ * a copy moved out stays where it is.
+ */
+export function trashFiledMockLibraryFiles(ids: Iterable<number>): void {
+  for (const id of ids) if (!moved.has(id)) trashed.add(id)
 }
 
 function listedFiles(): LibraryEntry[] {

@@ -663,6 +663,12 @@ describe('mock API: a model delete\'s library copies (#5371)', () => {
     await api.deleteModel('name-keychain', false, true)
     expect(await rootFiles()).toEqual([])
   })
+
+  it('keeps a copy moved out of the folder, naming no output (#5422)', async () => {
+    await api.moveLibraryFiles([91], null)
+    await api.deleteModel('name-keychain', false, true)
+    expect(await rootFiles()).toEqual([{ id: 91, output_id: null }])
+  })
 })
 
 describe('mock API: a preset\'s description and tags (#327)', () => {
