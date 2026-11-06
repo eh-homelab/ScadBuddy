@@ -1001,10 +1001,12 @@ ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 
 def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
-    """Remove a released orphan's directory (#1815): no read sees it (they glob for
-    meta.json), but its bytes stay. Only an output's own directory, still without
-    meta.json, and untouched for ``grace``: a save writes its files before meta.json.
-    Best effort: its holds are already gone, so a failure costs only the bytes."""
+    """Remove a released orphan's directory (#1815), or one that never held anything
+    (#5448, `_remove_unheld_directories`): no read sees it (they glob for meta.json),
+    but its bytes stay. Only an output's own directory, still without meta.json, and
+    untouched for ``grace``: a save writes its files before meta.json. Best effort: it
+    holds nothing (its holds are gone, or it never had any), so a failure costs only
+    the bytes."""
     if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or directory.is_symlink():
         return
     try:
@@ -1022,6 +1024,15 @@ def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
         )
 
 
+def _remove_unheld_directories(bare: list[Path], holding: set[str], grace: timedelta) -> None:
+    """Remove each output directory with no meta.json and no hold at all (#5448): a
+    save that claimed its id (`OutputStore.claim`) and stopped before it held its
+    Parts. A held one waits for its holds' release instead."""
+    for directory in bare:
+        if directory.name not in holding:
+            _remove_orphan_directory(directory, grace)
+
+
 def reap_orphan_holds(
     refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
 ) -> int:
@@ -1036,9 +1047,11 @@ def reap_orphan_holds(
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
     listed that slug's directory. A slug directory that is missing (not yet copied onto
-    a new volume, say) releases nothing for that slug and is logged. A directory it
-    cannot list (permissions, a stale NFS handle) raises and ends the pass, since
-    ``Path.glob`` would skip it. An unmounted or empty volume lists no slug at all, so
+    a new volume, say) releases nothing for that slug and is logged. With a hold
+    past the grace, a directory it cannot list (permissions, a stale NFS handle)
+    raises and ends the pass, since ``Path.glob`` would skip it; with none, only the
+    unheld-directory pass walks, and a listing that fails is logged and ends it
+    (#5453). An unmounted or empty volume lists no slug at all, so
     releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
     and with no live output to learn it from) is never released here. The cost of all
     this: holds orphaned by a model's whole deletion stay until a person drops them."""
@@ -1051,15 +1064,23 @@ def reap_orphan_holds(
         ).fetchall()
     held = {row["holder_id"] for row in rows if row["aged"]}
     holding = {row["holder_id"] for row in rows}
-    live, bare = _live_outputs(root) if root.is_dir() else ({}, [])
-    for directory in bare:
-        # A directory that holds nothing and has no meta.json (#5448): a save that
-        # claimed its id (`OutputStore.claim`) and stopped before it held its Parts.
-        # A held one waits for its holds' release below.
-        if directory.name not in holding:
-            _remove_orphan_directory(directory, grace)
     if not held:
+        # Only the bare-directory pass is left. A directory it cannot list is logged,
+        # not raised, so a listing that fails does not fail every tick (#5453); with a
+        # hold to release, the walk below raises as before.
+        try:
+            _, bare = _live_outputs(root) if root.is_dir() else ({}, [])
+        except OSError:
+            logger.warning(
+                "could not list the outputs to remove unheld directories",
+                exc_info=True,
+                extra={"root": str(root)},
+            )
+            return 0
+        _remove_unheld_directories(bare, holding, grace)
         return 0
+    live, bare = _live_outputs(root) if root.is_dir() else ({}, [])
+    _remove_unheld_directories(bare, holding, grace)
     live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
     # Holds taken before slugs were recorded: a live output tells its own slug.
     _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
