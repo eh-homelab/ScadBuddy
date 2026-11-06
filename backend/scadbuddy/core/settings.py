@@ -85,6 +85,10 @@ def check_approval_timeout(value: int, name: str) -> int:
     return value
 
 
+#: SCADBUDDY_CRUD_PORT's default (#5298); `tests/conftest.py` moves it to 0.
+DEFAULT_CRUD_PORT = 8082
+
+
 class Settings(BaseSettings):
     """Environment configuration. Every field is overridable as ``SCADBUDDY_<FIELD>``."""
 
@@ -281,6 +285,11 @@ class Settings(BaseSettings):
     service_bootstrap_file: Path | None = None
     service_bootstrap_dir: Path | None = None
     service_account_namespace: str = ""
+
+    # SCADBUDDY_CRUD_PORT (#5298, plan D3): the second port the API serves, answering only
+    # the CRUD routes, the service-token exchange and /healthz (`crud/listener.py`). 0 is
+    # any free port. A factory, so the tests can move the default off a fixed port.
+    crud_port: int = Field(default_factory=lambda: DEFAULT_CRUD_PORT, ge=0, le=65535)
 
     @model_validator(mode="after")
     def _one_service_proof(self) -> Settings:
@@ -714,6 +723,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "service_account_namespace": (
             "Whose ServiceAccounts may exchange for a service credential (#5494): the"
             " deployment's namespace, never a stored setting."
+        ),
+        "crud_port": (
+            "The port the workers' CRUD calls reach (#5298). The deployment's Service and"
+            " NetworkPolicy name it, so a form only the API reads would split them."
         ),
         "trusted_proxies": (
             "Which peers are believed about the client they forward for. Like the allowed"

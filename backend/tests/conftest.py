@@ -65,6 +65,11 @@ _provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(_SPANS)))
 trace.set_tracer_provider(_provider)
 
 
+#: Every app a test starts binds its CRUD listener to a free port (#5298): on the fixed
+#: default, two xdist workers' apps (or a developer's own API) would collide.
+settings_module.DEFAULT_CRUD_PORT = 0
+
+
 @pytest.fixture(autouse=True)
 def _clear_spans() -> Iterator[None]:
     """Every test's spans go after it, whether it read them or not: the exporter lives
