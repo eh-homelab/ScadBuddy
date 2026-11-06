@@ -316,6 +316,8 @@ export class PackageInstaller {
       const code = (err as NodeJS.ErrnoException).code
       if (code !== 'ENOTEMPTY' && code !== 'EEXIST') throw err
     }
+    // A verified copy is here now, so a cached `headerSecrets` failure for it is over (#5490).
+    this.headerFailures.delete(dir)
     return dir
   }
 
@@ -413,11 +415,18 @@ export class PackageInstaller {
    * they stay secrets that every tool redacts and every upload refuses. Throws when no copy can
    * be had (the fetch fails, or the files do not hash to the pin), so the secrets read fails
    * closed; for `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without a
-   * fetch (a refusal, never an empty list). Runs in the package's queue.
+   * fetch (a refusal, never an empty list), unless a copy that hashes to the pin is cached by
+   * then, which ends the refusal at once. Runs in the package's queue.
    */
   headerSecrets(pin: PackagePin): Promise<string[]> {
     const key = this.cacheDir(pin)
     return this.serial(pin.name, async () => {
+      // A good copy first: one cached since a failure (a load placed it, or another replica's
+      // fetch filled a shared cache) ends the refusal at once (#5490).
+      if (await this.cacheMatches(key, pin)) {
+        this.headerFailures.delete(key)
+        return declaredHeaderSecrets(key)
+      }
       const failed = this.headerFailures.get(key)
       if (failed && Date.now() - failed.at <= PACKAGE_SECRETS_FAILURE_MS) throw failed.error
       try {

@@ -775,6 +775,57 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     }
   })
 
+  it('ends a cached secrets failure inside the window once a good copy is cached (#5490)', async () => {
+    const HEADER = 'Bearer pkg-header-token-79'
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', headers: { Authorization: HEADER } } } }),
+    })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    const served: Record<string, TestRepo> = {}
+    const down = localFetcher(served)
+    const fresh = () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
+      temps.push(dir)
+      return dir
+    }
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-06T00:00:00Z'))
+
+      // Through a fetch: a load fetches the package again and `place` puts the copy in the cache.
+      const viaLoad = new PackageInstaller({ fetcher: down, cacheRoot: fresh(), resolve: resolver() })
+      await expect(viaLoad.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+      expect(down.checkouts).toHaveLength(1)
+      served.greeter = repos.greeter
+      vi.setSystemTime(Date.now() + 1_000)
+      await viaLoad.materialise(pin)
+      expect(down.checkouts).toHaveLength(2)
+      // `place` cleared the failure: with the copy gone and the host down again, the next read
+      // fetches (and fails afresh) instead of answering the cached failure.
+      rmSync(viaLoad.cacheDir(pin), { recursive: true, force: true })
+      delete served.greeter
+      await expect(viaLoad.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+      expect(down.checkouts).toHaveLength(3)
+
+      // Through a copy already in the cache: another installer on the same cache fetched it.
+      const shared = fresh()
+      const viaCache = new PackageInstaller({ fetcher: down, cacheRoot: shared, resolve: resolver() })
+      await expect(viaCache.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+      expect(down.checkouts).toHaveLength(4)
+      await new PackageInstaller({ fetcher, cacheRoot: shared, resolve: resolver() }).materialise(pin)
+      vi.setSystemTime(Date.now() + 1_000)
+      expect(await viaCache.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-79'])
+      expect(down.checkouts).toHaveLength(4)
+      // And the success cleared the entry: with no copy and no host, the next read fetches.
+      rmSync(viaCache.cacheDir(pin), { recursive: true, force: true })
+      await expect(viaCache.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+      expect(down.checkouts).toHaveLength(5)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('refuses a fetch on the unvetted path whose files do not hash to the pin, and the secrets read fails closed (#5488)', async () => {
     repos.greeter = gitRepo(GREETER)
     const good = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))

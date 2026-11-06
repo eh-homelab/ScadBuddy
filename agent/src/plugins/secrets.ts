@@ -63,7 +63,9 @@ export const PLUGIN_SECRETS_CACHE_MS = 30_000
  * turn adds its loaded plugins' current headers on top (tools/harness.ts).
  *
  * `fresh` reads both with no cache, for a workspace pick in the UI (#4703): a pick is rare,
- * and a secret stored a moment ago counts. main.ts wires both from here, and the tests use
+ * and a secret stored a moment ago counts. One layer down, a package pin whose files could not
+ * be had stays refused for install.ts `PACKAGE_SECRETS_FAILURE_MS` (30 s), so a `fresh` pick
+ * right after an outage is refused too, with no new fetch, until a good copy is cached. main.ts wires both from here, and the tests use
  * this too, so a regression in the wiring fails them (#5483).
  */
 export function toolSecrets(deps: {
