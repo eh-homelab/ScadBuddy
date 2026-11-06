@@ -29,7 +29,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -841,3 +841,19 @@ class ServiceAuth(httpx.Auth):
         response = yield request
         if token is not None and response.status_code == 401:
             await asyncio.to_thread(self._reader.invalidate, token)
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        """The same, for a sync client (`crud/client.py` `CrudSyncClient`)."""
+        token = self._reader.token()
+        if token is not None:
+            request.headers["Authorization"] = f"Bearer {token}"
+        response = yield request
+        if token is not None and response.status_code == 401:
+            self._reader.invalidate(token)
+
+    def refresh(self, request: httpx.Request) -> None:
+        """Drops the token ``request`` carried, so the next request exchanges for a new
+        one: for a 403 that says the credential's scopes are stale (`crud/client.py`)."""
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            self._reader.invalidate(header.removeprefix("Bearer "))
