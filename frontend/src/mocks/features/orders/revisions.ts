@@ -5,7 +5,7 @@ import { mockModels, setMockMedia } from '../../handlers'
 import { printersState } from '../printers'
 import { upload } from './attachments'
 import type { Resolved } from './orders'
-import { acceptQuote, checkQuote, event, itemOf, printInFlight, lock, notEnded, notOnHold, openForItems, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
+import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, openForItems, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
 import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revisionsOf, state } from './state'
 
 /**
@@ -201,6 +201,7 @@ export const handlers = [
         created_at: now(),
         purpose: 'test',
         revision_id: revision.id,
+        print_request_id: printRequestId(found.id, request.headers.get('Idempotency-Key')!),
         print_run_id: newId('run'),
         copies: 1,
         sliced_sha256: quote.sliced_sha256,

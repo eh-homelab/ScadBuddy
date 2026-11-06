@@ -76,8 +76,12 @@ export function reset(): void {
   printsStarting.clear()
 }
 
-/** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. */
-export const printInFlight = (itemId: string) => attemptsOf(itemId).find((f) => f.print_run_id && f.outcome === 'unknown' && f.finished_at === null)
+/** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. A claim
+ * counts by its `print_request_id`, its run attached or not yet. */
+export const printInFlight = (itemId: string) => attemptsOf(itemId).find((f) => f.print_request_id && f.outcome === 'unknown' && f.finished_at === null)
+/** `orders/printing.py` `print_request_id`: one claim per item and Idempotency-Key. The
+ * backend hashes the pair; the mock joins it. */
+export const printRequestId = (itemId: string, key: string) => `order-item-print-${itemId}-${key}`
 const shipmentsOf = (orderId: string) => state.shipments.filter((s) => s.order_id === orderId)
 
 export function lock(orderId: string): Order {
@@ -1038,6 +1042,7 @@ export const handlers = [
         created_by: BROWSER,
         created_at: now(),
         purpose: 'production',
+        print_request_id: printRequestId(found.id, request.headers.get('Idempotency-Key')!),
         print_run_id: newId('run'),
         copies,
         sliced_sha256: quote.sliced_sha256,
