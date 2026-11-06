@@ -914,6 +914,23 @@ def test_a_vps_row_alone_is_enough_bambuddy_for_the_boot_pass(store: PrinterStor
     assert boot_adoption_due(store.list()) is True
 
 
+def test_a_row_unlinked_from_bambuddy_does_not_follow_it_for_the_boot_pass(
+    store: PrinterStore,
+) -> None:
+    """#5260: a row unlinked from its Bambuddy printer by hand carries only
+    ``bambuddy_unlinked_id``; it does not count as following Bambuddy, so a hand-made row
+    that may be a VP's beside it is left to Settings > Printers' import."""
+    from scadbuddy.printers.bambuddy_sync import boot_adoption_due
+
+    h2c = store.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    store.link_bambuddy(h2c.id, 1)
+    store.create(PrinterCreate(serial=VP_SERIAL, name="hand-made"))
+    assert boot_adoption_due(store.list()) is True
+    unlinked = store.unlink_bambuddy(h2c.id)
+    assert unlinked.bambuddy_printer_id is None and unlinked.bambuddy_unlinked_id == 1
+    assert boot_adoption_due(store.list()) is False
+
+
 async def test_a_bambuddy_that_hangs_at_boot_is_one_warning(
     monkeypatch: pytest.MonkeyPatch,
     printers: FakePrinters,
@@ -957,6 +974,32 @@ async def test_an_unreachable_bambuddy_at_boot_is_one_warning_and_never_raised(
     (record,) = [r for r in caplog.records if r.name == main.logger.name]
     assert record.getMessage() == "could not sync the virtual printers from Bambuddy at start"
     assert record.levelno == logging.WARNING and record.exc_info is None
+
+
+async def test_a_registry_api_error_at_boot_is_a_traceback_not_a_bambuddy_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    printers: FakePrinters,
+    store: PrinterStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#5259: an ApiError from the registry's own writes is a local fault. It is logged
+    with its traceback at ERROR, not as Bambuddy refusing (a WARNING with no traceback),
+    and never raised."""
+    from scadbuddy import main
+
+    _prods_registry(store)
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(1, VP_SERIAL, 1)], codes={1: CODE})
+    _boot_client(monkeypatch, client)
+
+    def fails(*_args: object, **_kwargs: object) -> object:
+        raise ApiError(409, "the registry refused")
+
+    monkeypatch.setattr(store, "upsert_virtual", fails)
+    with caplog.at_level(logging.WARNING, logger=main.logger.name):
+        await main._adopt_virtual_rows_logged(_boot_state(printers))
+    (record,) = [r for r in caplog.records if r.name == main.logger.name]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    assert isinstance(record.exc_info[1], ApiError)
 
 
 async def test_no_bambuddy_at_boot_logs_nothing(
