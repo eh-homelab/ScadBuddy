@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 import numpy as np
+import psycopg
 import pytest
 import respx
 import trimesh
@@ -49,6 +50,7 @@ from tests.api.test_analyzers import SILK_REQUEST
 from tests.api.test_analyzers import bambuddy_routes as analysis_routes
 from tests.api.test_analyzers import library_routes as analysis_library_routes
 from tests.api.test_arrange_api import Arranger
+from tests.api.test_events import Recorded, published
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import flow_copy_routes, run_library, uploaded_name
 from tests.api.test_print_run_choices import body as run_body
@@ -1226,6 +1228,40 @@ def test_model_delete_keeps_its_outputs_copies_naming_no_output(
     assert files == {filed: None, moved: None}
     still_filed = _native(native_client).rows.file(filed)
     assert still_filed is not None and still_filed.output_id is None
+
+
+@pytest.mark.requires_git
+def test_a_failed_library_read_still_finishes_the_model_delete(
+    native_client: TestClient,
+    widget: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#5117 review: the model is gone once the library is asked which one is in use, so
+    a failed read is logged and the rest of the cleanup still runs."""
+    _save(native_client, widget, "One")
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    events = Recorded(state.events)
+    state.events.add_listener(events.record)
+    forgotten: list[str] = []
+    forget = state.settings_store.forget_model_projects
+
+    def spy(slug: str) -> None:
+        forgotten.append(slug)
+        forget(slug)
+
+    async def away() -> NativeLibrary | None:
+        raise psycopg.OperationalError("database is away")
+
+    monkeypatch.setattr(state.settings_store, "forget_model_projects", spy)
+    monkeypatch.setattr(state.components.get(PRINT_LIBRARY), "serving_native", away)
+
+    r = native_client.delete(f"/api/v1/models/{widget}", headers=press())
+
+    assert r.status_code == 204, r.text
+    assert forgotten == [widget]
+    assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": widget}]
+    assert any("could not tell which library" in rec.getMessage() for rec in caplog.records)
 
 
 @pytest.mark.requires_git

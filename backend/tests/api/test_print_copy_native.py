@@ -217,3 +217,79 @@ def test_an_output_delete_during_an_open_print_run_is_refused(
     live = {f.id for f in native.rows.files(None, every_folder=True)}
     assert {copy.id, sliced.id} <= live
     assert native_client.get(f"/api/v1/outputs/{saved['id']}").status_code == 200
+
+
+def _per_print_copy(client: TestClient, output_id: str) -> tuple[int, int]:
+    """A native run's per-print copy of ``output_id`` and its slice, recorded as a run
+    records them: the copy's id and the slice's."""
+    native = _native(client)
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    portal = client.portal
+    assert portal is not None
+    copy = portal.call(native.upload, "copy.3mf", io.BytesIO(b"c"), None)
+    sliced = portal.call(native.upload, "copy.plate1.gcode.3mf", io.BytesIO(b"g"), None)
+    portal.call(
+        state.uploads.record, output_id, LibraryCopy(id=copy.id, folder_id=None, target_key="t")
+    )
+    portal.call(state.uploads.record_sliced, output_id, copy.id, SlicedCopy(id=sliced.id))
+    return copy.id, sliced.id
+
+
+@pytest.mark.requires_git
+@pytest.mark.parametrize("delete_inbox_copies", [True, False])
+def test_a_model_delete_trashes_its_outputs_native_per_print_copies(
+    native_client: TestClient, widget: str, delete_inbox_copies: bool
+) -> None:
+    """#5117 review: as an output delete does, before the upload rows that lead to them
+    are forgotten. Without the flag they stay as files of the library."""
+    saved = _save(native_client, widget, "One").json()
+    copy, sliced = _per_print_copy(native_client, saved["id"])
+
+    deleted = native_client.delete(
+        f"/api/v1/models/{widget}",
+        params={"delete_inbox_copies": str(delete_inbox_copies).lower()},
+        headers=press(),
+    )
+
+    assert deleted.status_code == 204, deleted.text
+    live = {f.id for f in _native(native_client).rows.files(None, every_folder=True)}
+    trashed = {copy, sliced} - live
+    assert trashed == ({copy, sliced} if delete_inbox_copies else set())
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert native_client.portal is not None
+    found = native_client.portal.call(partial(state.uploads.for_output, saved["id"], native=True))
+    assert found == []
+
+
+@pytest.mark.requires_git
+def test_a_model_delete_during_an_open_print_run_is_refused(
+    native_client: TestClient, widget: str
+) -> None:
+    """#5117 review: with ``delete_inbox_copies``, as an output delete is: refused,
+    naming the run, before anything is deleted."""
+    saved = _save(native_client, widget, "One").json()
+    copy, sliced = _per_print_copy(native_client, saved["id"])
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert native_client.portal is not None
+    run = native_client.portal.call(
+        partial(
+            state.print_runs.store.insert_accepted,
+            "run-open-1",
+            subject=PrintSubject.output(saved["id"]),
+            key="k",
+            slug=widget,
+            workflow_id="print-k",
+            workflow_run_id="r",
+            retention=None,
+        )
+    )
+
+    deleted = native_client.delete(
+        f"/api/v1/models/{widget}", params={"delete_inbox_copies": "true"}, headers=press()
+    )
+
+    assert deleted.status_code == 409, deleted.text
+    assert run.id in deleted.json()["detail"]
+    live = {f.id for f in _native(native_client).rows.files(None, every_folder=True)}
+    assert {copy, sliced} <= live
+    assert native_client.get(f"/api/v1/models/{widget}").status_code == 200

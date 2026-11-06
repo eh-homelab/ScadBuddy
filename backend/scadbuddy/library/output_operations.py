@@ -36,7 +36,7 @@ from scadbuddy.library.outputs import MODEL_NAME, hold_parts, release_parts, req
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
-from scadbuddy.print_library.copies import trash_copies
+from scadbuddy.print_library.copies import open_runs_on_copies, trash_copies
 from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
@@ -242,9 +242,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             return []
         if await components.get(PRINT_LIBRARY).serving_native() is None:
             return []
-        if not await state.uploads.for_output(request["output_id"], native=True):
-            return []
-        return [run.id for run in await state.print_runs.store.running_for(request["output_id"])]
+        return await open_runs_on_copies(
+            state.uploads, state.print_runs.store, request["output_id"]
+        )
 
     async def delete_check(request: dict[str, Any]) -> dict[str, Any]:
         """Before Bambuddy's inbox prelude, so a refusal deletes nothing."""

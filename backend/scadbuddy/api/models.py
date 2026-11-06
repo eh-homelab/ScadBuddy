@@ -135,6 +135,7 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copies import open_runs_on_copies, trash_copies
 from scadbuddy.print_library.filing import trash_filed
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
@@ -1472,7 +1473,10 @@ async def delete_model(
         Query(
             description=(
                 "On ScadBuddy's own library, also trash each output's copy still filed "
-                "under the template's folder, as an output delete with this flag does"
+                "under the template's folder and its per-print copies with their slices, "
+                "as an output delete with this flag does; refused with 409 while one of "
+                "their print runs is open. Unlike an output delete, it never deletes "
+                "copies in Bambuddy's inbox"
             )
         ),
     ] = False,
@@ -1514,6 +1518,8 @@ async def delete_template(
     # cleanup after a delete: the model is gone.
     # Each on its own, so a failed upload cleanup cannot leave links serving archives.
     if output_ids:
+        # Before the upload rows go: they are all that leads to the per-print copies.
+        await _forget_native_copies(slug, output_ids, state, trash=delete_inbox_copies)
         try:
             await state.uploads.delete_outputs(output_ids)
         except psycopg.Error:
@@ -1535,7 +1541,6 @@ async def delete_template(
                     "could not release a deleted model's output Parts",
                     extra={"slug": slug, "id": output_id},
                 )
-        await _forget_filed_copies(slug, output_ids, state, trash=delete_inbox_copies)
     # And the projects it was filed into (#1660), or Settings keeps listing its id.
     try:
         await asyncio.to_thread(state.settings_store.forget_model_projects, slug)
@@ -1544,25 +1549,49 @@ async def delete_template(
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 
-async def _forget_filed_copies(
+async def model_open_runs(slug: str, state: AppState) -> list[str]:
+    """The open print runs of the model's outputs that a delete with
+    ``delete_inbox_copies`` would trash native per-print copies and slices under, as an
+    output delete's check asks (#5117, #4312 re-review I-a). None on Bambuddy's library."""
+    if await state.components.get(PRINT_LIBRARY).serving_native() is None:
+        return []
+    running: list[str] = []
+    for output_id in await asyncio.to_thread(state.outputs.ids_for, slug):
+        running += await open_runs_on_copies(state.uploads, state.print_runs.store, output_id)
+    return running
+
+
+async def _forget_native_copies(
     slug: str, output_ids: list[str], state: AppState, *, trash: bool
 ) -> None:
     """Each deleted output's copies in the native library, as an output delete leaves
-    them (`library/output_operations.py`, #5117): with ``trash`` the ones still
-    ``filed`` go to the trash (`trash_filed`); in every case no row names the output
-    any more (`forget_output`). After the model's own delete, so a refusal trashes
-    nothing; best effort, as the cleanup above. Bambuddy's library has none."""
-    native = await state.components.get(PRINT_LIBRARY).serving_native()
+    them (`library/output_operations.py`, #5117). With ``trash``, the copies still
+    ``filed`` go to the trash (`trash_filed`), and so do the per-print copies with their
+    slices (`trash_copies`; a run opened since the check keeps its slices). In every case
+    no row names the output any more (`forget_output`). After the model's own delete, so
+    a refusal trashes nothing; best effort, as the rest of the cleanup: a failure is
+    logged and the delete goes on. Bambuddy's library has none."""
+    try:
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+    except psycopg.Error:
+        logger.exception(
+            "could not tell which library a deleted model's copies are in", extra={"slug": slug}
+        )
+        return
     if native is None:
         return
     for output_id in output_ids:
         try:
             if trash:
                 await trash_filed(native, output_id)
+                open_runs = await open_runs_on_copies(
+                    state.uploads, state.print_runs.store, output_id
+                )
+                await trash_copies(native, state.uploads, output_id, keep_slices=bool(open_runs))
             await asyncio.to_thread(native.rows.forget_output, output_id)
         except psycopg.Error:
             logger.exception(
-                "could not forget a deleted model's filed library copies",
+                "could not forget a deleted model's library copies",
                 extra={"slug": slug, "id": output_id},
             )
 

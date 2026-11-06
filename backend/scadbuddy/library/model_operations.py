@@ -128,6 +128,17 @@ def model_kinds(state: AppState) -> list[OperationKind]:
             request["force"],
             renders=False,
         )
+        # As an output delete's check: refused before anything is deleted (#5117).
+        if request.get("delete_inbox_copies", False):
+            running = await models_api.model_open_runs(request["slug"], state)
+            if running:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    f"print run {running[0]} of an output of this model is still running,"
+                    " or has prints still to start, and its sliced files are in"
+                    " ScadBuddy's library: delete the model once the run has ended",
+                    run_id=running[0],
+                )
         return {}
 
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
