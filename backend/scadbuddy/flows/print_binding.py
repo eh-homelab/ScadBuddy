@@ -27,6 +27,7 @@ decision sends it back: the approval binds only the pair the person was shown.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ from typing import Any
 import httpx
 
 from scadbuddy.printers.models import PrinterRow
+
+logger = logging.getLogger(__name__)
 
 #: The agent tool this binds.
 PRINT_OUTPUT = "print_output"
@@ -49,6 +52,11 @@ UUID_FORM = re.compile(
 
 #: Reads a registry row by its id; None when the registry does not hold it.
 PrinterLookup = Callable[[str], Awaitable[PrinterRow | None]]
+
+#: Whether a run on a registry row goes over the LAN, never through Bambuddy (the row's
+#: id in `print_run.lan_printers`, as the agent's `linkedNative` reads the choices'
+#: `lan_printers`, #4660). Only the run page's line reads it; the binding never does.
+NativeCheck = Callable[[str], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -67,9 +75,20 @@ def named_printer(tool: str | None, args: dict[str, Any]) -> str | None:
     return printer if UUID_FORM.fullmatch(printer) else None
 
 
-async def bind_call(tool: str | None, args: dict[str, Any], lookup: PrinterLookup) -> BoundCall:
+async def bind_call(
+    tool: str | None,
+    args: dict[str, Any],
+    lookup: PrinterLookup,
+    native: NativeCheck | None = None,
+) -> BoundCall:
     """The call as its approval binds it: a `print_output` call that names a linked
-    registry printer and no `printer_id` gets the `printer_id` the row links now."""
+    registry printer and no `printer_id` gets the `printer_id` the row links now.
+
+    The line says "over the LAN" for a run that does not go through Bambuddy, as the
+    agent's `prepareApproval` words it: a row that links no Bambuddy printer, or a linked
+    one `native` says prints natively. "Bambuddy printer N" only when `native` says the
+    run goes through Bambuddy; without `native`, or when it fails, the line names the
+    printer alone, never a path it could not check."""
     printer = named_printer(tool, args)
     if printer is None:
         return BoundCall(args)
@@ -79,12 +98,25 @@ async def bind_call(tool: str | None, args: dict[str, Any], lookup: PrinterLooku
     elif row.bambuddy_printer_id is None:
         summary = f"Prints on {row.name} over the LAN"
     else:
-        summary = f"Prints on {row.name} (Bambuddy printer {row.bambuddy_printer_id})"
+        summary = f"Prints on {row.name}{await _path_of(row, native)}"
     if "printer_id" in args:
         # The script sent the pair: bound as sent. The agent refuses a pair that disagrees.
         return BoundCall(args, summary)
     linked = None if row is None else row.bambuddy_printer_id
     return BoundCall({**args, "printer_id": linked}, summary)
+
+
+async def _path_of(row: PrinterRow, native: NativeCheck | None) -> str:
+    """How a linked row's line names the path its run takes."""
+    if native is None:
+        return ""
+    try:
+        lan = await native(row.id)
+    except Exception:
+        # Only the line's wording: the binding stands, and the line says no path.
+        logger.warning("could not read whether a run on a printer goes over the LAN", exc_info=True)
+        return ""
+    return " over the LAN" if lan else f" (Bambuddy printer {row.bambuddy_printer_id})"
 
 
 def api_lookup(client: httpx.AsyncClient) -> PrinterLookup:

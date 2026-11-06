@@ -39,14 +39,52 @@ async def nothing(printer: str) -> PrinterRow | None:
 
 
 async def test_a_linked_printer_binds_the_pair_and_names_it() -> None:
-    bound = await bind_call("print_output", CALL, holding(row(2)))
+    bound = await bind_call("print_output", CALL, holding(row(2)), native(False))
     assert bound.args == {**CALL, "printer_id": 2}
     assert bound.summary == "Prints on Garage (Bambuddy printer 2)"
 
 
+def native(lan: bool) -> Any:
+    async def check(printer: str) -> bool:
+        assert printer == PRINTER
+        return lan
+
+    return check
+
+
+async def broken_native(printer: str) -> bool:
+    raise RuntimeError("the settings are away")
+
+
+# #5466: the line names the path the run takes, as the agent's `prepareApproval` words it,
+# and never names Bambuddy for a run it could not check goes through Bambuddy.
+@pytest.mark.parametrize(
+    ("check", "line"),
+    [
+        (native(False), "Prints on Garage (Bambuddy printer 2)"),
+        (native(True), "Prints on Garage over the LAN"),
+        (None, "Prints on Garage"),
+        (broken_native, "Prints on Garage"),
+    ],
+)
+async def test_a_linked_printers_line_names_the_path_its_run_takes(check: Any, line: str) -> None:
+    bound = await bind_call("print_output", CALL, holding(row(2)), check)
+    assert bound.args == {**CALL, "printer_id": 2}
+    assert bound.summary == line
+
+
+async def test_a_printer_only_the_lan_reaches_is_not_checked_for_its_path() -> None:
+    bound = await bind_call("print_output", CALL, holding(row(None)), nothing_native)
+    assert bound.summary == "Prints on Garage over the LAN"
+
+
+async def nothing_native(printer: str) -> bool:
+    raise AssertionError("a row that links no Bambuddy printer needs no path read")
+
+
 async def test_a_pair_the_script_sent_is_bound_as_sent() -> None:
     sent = {**CALL, "printer_id": 3}
-    bound = await bind_call("print_output", sent, holding(row(2)))
+    bound = await bind_call("print_output", sent, holding(row(2)), native(False))
     assert bound.args == sent
     assert bound.summary == "Prints on Garage (Bambuddy printer 2)"
 

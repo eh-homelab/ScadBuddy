@@ -103,6 +103,8 @@ RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
 PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
 #: An approval of a print on a registry printer the run page could not name (#4445).
 PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
+#: The API refused the projects worker's read of a print's registry printer (#5466).
+PRINTER_REFUSED = "https://scadbuddy.dev/problems/flow-printer-refused"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
@@ -182,6 +184,17 @@ def _printer_unbound() -> ApiError:
         "The run page could not say which printer this call prints on, so it cannot be"
         " approved yet. Reload it, and approve once it names the printer.",
         type_=PRINTER_UNBOUND,
+    )
+
+
+def _printer_refused(code: int) -> ApiError:
+    """The API refused the projects worker's read of the row: its service credential, a
+    fault an operator fixes. Trying again would be refused the same way."""
+    return ApiError(
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        f"ScadBuddy's API refused to read the printer this call prints on (HTTP {code}),"
+        " so nothing was approved. Check the projects worker's service credential.",
+        type_=PRINTER_REFUSED,
     )
 
 
@@ -402,6 +415,14 @@ def flow_kinds(
                     )
                 try:
                     args = (await bind_call(name, args, api_lookup(registry))).args
+                except httpx.HTTPStatusError as err:
+                    activity.logger.warning(
+                        "could not read the printer a flow's print names", exc_info=True
+                    )
+                    if err.response.status_code < 500:
+                        # A refusal (401, 403, ...): another try is refused the same way.
+                        raise _printer_refused(err.response.status_code) from None
+                    raise _printer_unreadable() from None
                 except httpx.HTTPError:
                     # Nothing is recorded: the person approves again once the row reads.
                     activity.logger.warning(
