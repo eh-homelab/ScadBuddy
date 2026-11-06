@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { api } from '../../api/client'
+import { api, newRequestId } from '../../api/client'
 import type { CostEntry, TimeEntry } from '../../api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -65,7 +65,8 @@ function useSubmission() {
   return {
     source(...fields: unknown[]): string {
       const text = JSON.stringify(fields)
-      if (last.current?.fields !== text) last.current = { fields: text, key: `manual:${crypto.randomUUID()}` }
+      // getRandomValues, not randomUUID: the Bambuddy iframe may be served without a secure context.
+      if (last.current?.fields !== text) last.current = { fields: text, key: `manual:${newRequestId()}` }
       return last.current.key
     },
     done() {
@@ -149,7 +150,7 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
           setError('Enter whole minutes, such as 15.')
           return
         }
-        void save(count, null, submission.source(kind, count, note.trim()))
+        void save(count, null, submission.source(itemId, kind, count, note.trim()))
       }}
     >
       <div className="flex flex-col gap-1">
@@ -251,16 +252,11 @@ export function AddCost({ orderId, itemId, exponent, currency, onDone }: Scope &
           setError('Enter the amount spent, such as 2.50.')
           return
         }
+        const source = submission.source(itemId, kind, minor, note.trim())
         setBusy(true)
         setError(null)
         api
-          .addCostEntry(orderId, {
-            order_item_id: itemId,
-            kind,
-            amount_minor: minor,
-            note: note.trim(),
-            source: submission.source(kind, minor, note.trim()),
-          })
+          .addCostEntry(orderId, { order_item_id: itemId, kind, amount_minor: minor, note: note.trim(), source })
           .then(() => {
             submission.done()
             setAmount('')

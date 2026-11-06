@@ -97,8 +97,23 @@ describe('OrderCosts', () => {
 
     await waitFor(() => expect(state.costEntries.map((e) => [e.order_item_id, e.kind, e.amount_minor, e.note])).toEqual([[null, 'material', 125, 'magnets']]))
     // A form's own key, so a resubmit after a lost reply writes once.
-    expect(state.costEntries[0]!.source).toMatch(/^manual:[0-9a-f-]{36}$/)
+    expect(state.costEntries[0]!.source).toMatch(/^manual:[0-9a-f]{32}$/)
     expect(await screen.findByText('Materials, $1.25 · magnets')).toBeInTheDocument()
+  })
+
+  it('adds a cost outside a secure context, where crypto.randomUUID is missing', async () => {
+    const original = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true })
+    try {
+      const { user } = renderPage(<Card />)
+      const form = await screen.findByRole('form', { name: 'Add a cost to the order' })
+      await user.type(within(form).getByLabelText('Amount (USD)'), '2')
+      await user.click(within(form).getByRole('button', { name: 'Add cost' }))
+      await waitFor(() => expect(state.costEntries.map((e) => e.amount_minor)).toEqual([200]))
+    } finally {
+      if (original) Object.defineProperty(crypto, 'randomUUID', original)
+      else delete (crypto as { randomUUID?: unknown }).randomUUID
+    }
   })
 
   it('stops a timer started earlier into one entry, rounded up to the minute', async () => {
