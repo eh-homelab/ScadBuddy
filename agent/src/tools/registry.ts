@@ -103,8 +103,10 @@ export type ToolServices = {
   workspace?: SessionFiles | undefined
   /**
    * The secrets a tool must never hand the model (#2329): every saved Claude
-   * credential's (main.ts), and in a classic turn the turn's plugin tokens too
-   * (tools/harness.ts). workspace_read redacts them from text, as the event log
+   * credential's and every plugin secret (main.ts, plugins/secrets.ts
+   * `readPluginSecrets`, one list in every mode, #5480), and in an in-process turn
+   * its loaded plugins' current headers too (tools/harness.ts). workspace_read
+   * redacts them from text and every upload refuses them, as the event log
    * is redacted of them (sessions/sdkEvents.ts `scrubForLog`).
    */
   secrets?: (() => Promise<readonly string[]>) | undefined

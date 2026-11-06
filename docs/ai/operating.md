@@ -1743,9 +1743,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
   redacts them, and an upload would otherwise carry them into a README, a source file,
   an asset or Bambuddy. The refusal names the upload, never the credential.
-- `workspace_read` redacts every saved Claude credential's secret from text (and the
-  turn's plugin tokens) before the model sees it
-  (`ToolServices.secrets`, `main.ts`).
+- `workspace_read` redacts every saved Claude credential's secret and every plugin
+  secret (each enabled plugin's header, each package server's header, each OAuth
+  sign-in's tokens and client secret) from text before the model sees it, in every
+  mode: an in-process turn, a ToolCall, `/mcp` and a background task read one list
+  (`ToolServices.secrets`, `main.ts`; `plugins/secrets.ts` `readPluginSecrets`, #5480).
+  An in-process turn adds its loaded plugins' current headers to it.
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. Claude Code's own file tools (§9) reach the workspace only
   through the session's directory, the copy below, which is written back by sha256.
