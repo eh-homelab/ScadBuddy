@@ -59,6 +59,7 @@ export const libraryCopyTools: Tool[] = [
     description:
       "A library copy's progress (copy_library_files): its counts (`total`, `pending`, `copied`, `skipped_same_hash`, `failed`), whether it still runs (`running`), " +
       'and up to 500 of its files with how each ended (`copied` with its `target_id`, `skipped_same_hash`, `failed` with its `reason`, or `pending`), failed ones first. ' +
+      'Each file has `attempts`, the tries begun on it; a `pending` file with a `reason` is being retried, and the reason says why its last try did not end. ' +
       'Refused (404) for an id no copy has.',
     input: z.object({ copy_id: z.string().min(1).max(100) }),
     risk: 'read',
