@@ -9,6 +9,7 @@ import base64
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -70,7 +71,9 @@ def _forget(jobs: JobProjection, subject: str) -> None:
 
 async def _refused(crud: CrudClient, subject: str, create: bool) -> CrudRefusedError:
     with pytest.raises(CrudRefusedError) as refused:
-        await crud.request("POST", f"{BASE}/payload-keys/{subject}", json={"create": create})
+        await crud.request(
+            "POST", f"{BASE}/payload-keys/{quote(subject, safe='')}", json={"create": create}
+        )
     return refused.value
 
 
@@ -129,6 +132,28 @@ async def test_a_session_key_is_read_never_made(
     assert await RemotePayloadKeys(crud, TEST_KEK).key_for(session, False) == made
 
 
+async def test_a_session_encode_reads_the_agents_key_and_asks_to_make_none(
+    crud: CrudClient, api_keys: PgPayloadKeys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The codec encodes with `create` (a grant check's result in a session workflow); on
+    a cache miss the worker reads the session's key, never asking to make it."""
+    session = f"session-{uuid.uuid4()}"
+    made = await api_keys.key_for(session, True)
+    sent: list[Any] = []
+    request = crud.request
+
+    async def spy(method: str, path: str, **kwargs: Any) -> Any:
+        sent.append(kwargs.get("json"))
+        return await request(method, path, **kwargs)
+
+    monkeypatch.setattr(crud, "request", spy)
+    keys = RemotePayloadKeys(crud, TEST_KEK)
+    assert await keys.key_for(session, True) == made
+    keys._cache.clear()  # expired or evicted
+    assert await keys.key_for(session, True) == made
+    assert sent == [{"create": False}, {"create": False}]
+
+
 #: A fixed id: xdist workers must collect the same parameters.
 ID = "0b0e2a0c-1111-4222-8333-444455556666"
 
@@ -141,6 +166,8 @@ ID = "0b0e2a0c-1111-4222-8333-444455556666"
         f"flow-{ID}-call-1",
         f"bgtask-{ID}-0000abcd",
         f"bridge-{ID}",
+        f"flow-{ID}\n",
+        f"session-{ID}\n",
     ],
 )
 async def test_any_other_subject_is_refused_for_good(crud: CrudClient, subject: str) -> None:

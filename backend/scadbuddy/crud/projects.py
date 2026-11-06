@@ -228,9 +228,12 @@ class RemotePayloadKeys(CachedPayloadKeys):
         self._client = client
 
     async def sealed_key(self, subject: str, create: bool) -> tuple[bytes, str] | None:
+        # The codec asks to create on every encode; a session's key is the agent's to make,
+        # so for a session (a grant check's result) it is only read (plan D10).
+        make = create and subject.startswith("flow-")
         try:
             response = await self._client.request(
-                "POST", f"{BASE}/payload-keys/{_part(subject)}", json={"create": create}
+                "POST", f"{BASE}/payload-keys/{_part(subject)}", json={"create": make}
             )
         except CrudRefusedError as error:
             if error.status == 410 and error.problem.get("reason") == SUBJECT_FORGOTTEN:

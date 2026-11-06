@@ -15,6 +15,7 @@ it is decoded before routing, so no route would match.
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any
 
 from fastapi import status
@@ -36,7 +37,6 @@ from scadbuddy.workflows.flow_models import (
     HopRecord,
     ProjectionWrite,
 )
-from scadbuddy.workflows.payload_codec import subject_of
 
 #: A decision refused because its call left the hop it was made for.
 HOP_MOVED = "hop_moved"
@@ -50,6 +50,10 @@ RESET_REFUSED = "reset-refused"
 SUBJECT_FORGOTTEN = "subject-forgotten"
 #: A payload key refused for good: not a flow run's or a session's, or a session's to make.
 SUBJECT_REFUSED = "subject-refused"
+#: The subjects a key is asked for by: the whole path segment, a trailing newline included.
+KEY_SUBJECT = re.compile(
+    r"(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
 #: The gRPC statuses that no retry of the same Reset mends.
 RESET_REFUSALS = frozenset(
     {
@@ -323,7 +327,7 @@ async def payload_key(subject: str, body: KeyRequest, flows: FlowsDep) -> Sealed
     """A subject's data key as stored, sealed (plan D10): the worker opens it with its own
     KEK, so the open key never crosses the wire. With `create`, a flow run's key is made
     first, under the subject's lock (`payload_codec.create_key`); a session's is only read."""
-    if subject_of(subject) != subject or (body.create and not subject.startswith("flow-")):
+    if not KEY_SUBJECT.fullmatch(subject) or (body.create and not subject.startswith("flow-")):
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
             "The projects worker has no such payload key to ask for.",
