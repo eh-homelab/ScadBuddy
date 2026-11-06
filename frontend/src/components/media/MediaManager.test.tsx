@@ -1,3 +1,6 @@
+import { AssistantOpenerContext } from '../../agent/chat/opener'
+import { seedSessionFile } from '../../mocks/features/sessionFiles'
+import { seedPickerSession } from '../../mocks/features/workspacePicker'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -513,5 +516,27 @@ describe('MediaManager paste (#722)', () => {
 
     await waitFor(() => expect(names).toHaveLength(1))
     expect(upload).toHaveBeenCalledWith(BUILTIN_SLUG, expect.any(File), {}, expect.any(Function))
+  })
+
+  it("adds a file from an assistant session's workspace (#4703)", async () => {
+    seedPickerSession({ id: 's-media', title: 'Photos', touched: [{ type: 'model', id: GALLERY_SLUG }] })
+    seedSessionFile('s-media', 'photo.png', PNG, 'image/png')
+    const upload = vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug) => api.getModel(slug))
+    const model = await api.getModel(GALLERY_SLUG)
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <MediaManager model={model} onChanged={vi.fn()} />
+      </AssistantOpenerContext.Provider>,
+    )
+    await user.click(screen.getByRole('button', { name: 'From a session…' }))
+    await user.click(await screen.findByRole('button', { name: 'Use photo.png' }))
+    await waitFor(() =>
+      expect(upload).toHaveBeenCalledWith(
+        GALLERY_SLUG,
+        expect.objectContaining({ name: 'photo.png', type: 'image/png' }),
+        {},
+        expect.any(Function),
+      ),
+    )
   })
 })

@@ -304,6 +304,8 @@ export type LibraryCopySummary = Schemas['LibraryCopySummary']
 export type LibraryCopyStatus = Schemas['LibraryCopyStatus']
 export type LibraryCopyFileResult = Schemas['LibraryCopyFileResult']
 export type LibraryRenameResult = Schemas['LibraryRenameResult']
+/** #4703 — the file a library upload filed. */
+export type LibraryEntryUpdated = Schemas['LibraryEntryUpdated']
 export type LibraryFolder = Schemas['LibraryFolder']
 export type LibraryFolderCreate = Schemas['LibraryFolderCreate']
 export type LibraryFolderDeleteResult = Schemas['LibraryFolderDeleteResult']
@@ -726,6 +728,26 @@ export interface BackgroundTask {
   expires_at: string | null
   detail: string | null
   created_at: string
+}
+
+/** #4703 — a file the workspace file picker lists (agent `routes/workspacePicker.ts`). */
+export interface PickerFile extends WorkspaceFile {
+  /** Why it cannot be read now (a sealed blob this agent cannot open); null when it can. */
+  unavailable: string | null
+}
+
+/** #4703 — one session in the workspace file picker, with the files the target takes. */
+export interface PickerSession {
+  id: string
+  title: string
+  status: SessionStatus
+  archived: boolean
+  updated_at: string
+  /** Why none of its files can be read now; null when they can, or it has none. */
+  unavailable: string | null
+  /** Its files the target does not take. */
+  other_files: number
+  files: PickerFile[]
 }
 
 export interface WorkspaceFileList {

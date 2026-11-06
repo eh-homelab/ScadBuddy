@@ -16,7 +16,8 @@ import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
-import { ClipboardPasteIcon, LinkIcon, PlusIcon } from 'lucide-react'
+import { MediaPicker } from '../components/media/MediaPicker'
+import { BoxIcon, ClipboardPasteIcon, LinkIcon, PlusIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -39,6 +40,8 @@ export const MODELS_PAGE_SIZE = 24
 export function CataloguePage() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  /** #4703 — a 3MF or STL is being opened as a mesh model: from disk, or from an assistant session's workspace. */
+  const [meshOpen, setMeshOpen] = useState(false)
   // One lightbox for the page: whichever card's media was clicked, at that item.
   const [lightbox, setLightbox] = useState<{
     slug: string
@@ -191,6 +194,9 @@ export function CataloguePage() {
             <Button variant="outline" size="lg" onClick={() => setImportOpen(true)}>
               <LinkIcon /> Import from URL
             </Button>
+            <Button variant="outline" size="lg" onClick={() => setMeshOpen(true)}>
+              <BoxIcon /> Open a mesh
+            </Button>
             <Button size="lg" onClick={() => setUploadOpen(true)}>
               <PlusIcon /> Add model
             </Button>
@@ -300,6 +306,20 @@ export function CataloguePage() {
         onUploaded={(model) => {
           setUploadOpen(false)
           added(model)
+        }}
+      />
+      <MediaPicker
+        open={meshOpen}
+        title="Open a mesh as a model"
+        description="A 3MF or STL becomes an editable mesh model, named after the file."
+        onClose={() => setMeshOpen(false)}
+        sections={[]}
+        onPick={() => undefined}
+        upload={{
+          accept: '.3mf,.stl',
+          hint: '3MF or STL',
+          onFile: async (file) => added(await api.createMeshModelFromUpload(file)),
+          workspace: { resource: null, label: 'a model' },
         }}
       />
       <ImportDialog

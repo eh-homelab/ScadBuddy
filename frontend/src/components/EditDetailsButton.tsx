@@ -369,6 +369,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                   accept: 'image/png,image/jpeg,image/webp',
                   hint: 'PNG, JPEG or WebP, up to 10 MB. Added to the template’s media.',
                   onFile: uploadCover,
+                  workspace: { resource: { type: 'model', id: slug }, label: 'this model' },
                 }}
               />
             </fieldset>

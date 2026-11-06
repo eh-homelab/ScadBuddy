@@ -1,5 +1,7 @@
 import { useRef, useState, type DragEvent } from 'react'
+import type { ResourceRef } from '../../api/types'
 import { failure } from '../../lib/mediaFiles'
+import { WorkspacePickButton } from '../workspace/WorkspaceFilePicker'
 import { Spinner } from '../ui/spinner'
 import { UploadIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -54,6 +56,11 @@ interface Props {
     /** What may be uploaded, e.g. "PNG, JPEG or WebP, up to 10 MB". */
     hint: string
     onFile: (file: File) => Promise<void>
+    /**
+     * #4703 — also take the file from an assistant session's workspace: the sessions
+     * that touched `resource` first (every session when null). `label` names it: "this model".
+     */
+    workspace?: { resource: ResourceRef | null; label: string }
   }
   /** Why uploading is not possible here; replaces the upload zone. */
   uploadBlocked?: string
@@ -153,6 +160,19 @@ export function MediaPicker({
               {busy === 'upload' ? <Spinner /> : <UploadIcon />}
               Upload…
             </Button>
+            {upload.workspace && (
+              <WorkspacePickButton
+                disabled={busy !== null}
+                resource={upload.workspace.resource}
+                resourceLabel={upload.workspace.label}
+                accept={upload.accept}
+                onFile={async (file) => {
+                  await upload.onFile(file)
+                  setError(null)
+                  onClose()
+                }}
+              />
+            )}
           </div>
         )}
         {uploadBlocked && <p className="text-xs text-muted-foreground">{uploadBlocked}</p>}

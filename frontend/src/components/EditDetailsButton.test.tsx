@@ -1,3 +1,6 @@
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { seedSessionFile } from '../mocks/features/sessionFiles'
+import { seedPickerSession } from '../mocks/features/workspacePicker'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -446,5 +449,42 @@ describe('EditDetailsButton, live (#269)', () => {
     emitRealtime('model.updated', ['model:name-keychain'], { slug: 'name-keychain' })
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(within(dialog).queryByText(/changed elsewhere since you opened them/)).not.toBeInTheDocument()
+  })
+
+  it("takes the thumbnail from an assistant session's workspace (#4703)", async () => {
+    seedPickerSession({ id: 's-cover', title: 'Cover shots', touched: [{ type: 'model', id: 'name-keychain' }] })
+    seedSessionFile('s-cover', 'cover.png', new TextEncoder().encode('png'), 'image/png')
+    const uploadMedia = vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug, file) => {
+      const model = await api.getModel(slug)
+      const added = {
+        id: 'e5f6a1b2c3d4',
+        file: 'e5f6a1b2c3d4.png',
+        kind: 'image' as const,
+        caption: '',
+        poster: null,
+        missing: false,
+        readonly: false,
+        content_type: 'image/png',
+        size: file.size,
+      }
+      return { ...model, media: [...(model.media ?? []), added] }
+    })
+    const view = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <EditDetailsButton slug="name-keychain" onSaved={vi.fn()} />
+      </AssistantOpenerContext.Provider>,
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    await within(dialog).findByLabelText('Name')
+    await view.user.click(within(dialog).getByRole('button', { name: 'Change…' }))
+    const picker = screen.getByRole('dialog', { name: 'Choose the thumbnail' })
+    await view.user.click(within(picker).getByRole('button', { name: 'From a session…' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Use cover.png' }))
+
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('cover.png becomes the cover on save.'),
+    )
+    expect(uploadMedia).toHaveBeenCalledWith('name-keychain', expect.objectContaining({ name: 'cover.png', type: 'image/png' }))
   })
 })

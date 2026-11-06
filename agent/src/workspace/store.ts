@@ -503,6 +503,45 @@ export class SessionFiles {
     return { files: row?.files ?? 0, bytes: Number(row?.bytes ?? 0) }
   }
 
+  /**
+   * #4703 — the files of several sessions' workspaces in one read, by session id, each
+   * workspace by path (the file picker's list). `sealed`: the bytes are a blob in the
+   * backend's store, not in Postgres. A session with no files has no entry.
+   */
+  async listSessions(sessionIds: readonly string[]): Promise<Map<string, (WorkspaceFileInfo & { sealed: boolean })[]>> {
+    const out = new Map<string, (WorkspaceFileInfo & { sealed: boolean })[]>()
+    if (sessionIds.length === 0) return out
+    const keys = sessionIds.map((id) => keyOf({ kind: 'session', sessionId: id }).key)
+    const rows = await this.sql<(Row & { workspace: string; sealed: boolean })[]>`
+      SELECT workspace, path, media_type, size, sha256, source, created_at, updated_at, blob_key IS NOT NULL AS sealed
+      FROM ai_session_files WHERE workspace = ANY(${keys}::text[]) ORDER BY workspace, path`
+    for (const row of rows) {
+      const id = row.workspace.slice('session:'.length)
+      const files = out.get(id) ?? []
+      files.push({ ...infoOf(row), sealed: row.sealed })
+      out.set(id, files)
+    }
+    return out
+  }
+
+  /**
+   * #4703 — why a sealed file (a blob in the backend's store) cannot be read from here now,
+   * or undefined when it can: no key to open it, or the backend keeps files locally again
+   * (store_backend local), or the store does not answer. Never throws.
+   */
+  async sealedUnreadable(): Promise<string | undefined> {
+    if (!this.blobs) return 'its bytes are in the blob store, and this agent has no blob store configured'
+    if (!this.blobs.sealing) return 'its bytes are sealed in the blob store, and this agent has no SCADBUDDY_SECRET_KEY_FILE to open them'
+    try {
+      if ((await this.blobs.store.backend()) === 'local') {
+        return 'its bytes are in the blob store, and the backend now keeps files locally (store_backend local)'
+      }
+    } catch {
+      return 'its bytes are in the blob store, which does not answer now'
+    }
+    return undefined
+  }
+
   /** One file's metadata, or undefined. */
   async stat(ws: WorkspaceRef, path: string): Promise<WorkspaceFileInfo | undefined> {
     const [row] = await this.sql<Row[]>`

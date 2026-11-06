@@ -101,11 +101,15 @@ function asToolError(err: unknown): never {
 
 /** The secrets an upload must not carry, as bytes; shorter than four characters is not a secret (secrets.ts `redact`). */
 async function secretBytes(ctx: ToolContext): Promise<Buffer[]> {
-  const secrets = (await ctx.secrets?.()) ?? []
+  return asSecretBytes((await ctx.secrets?.()) ?? [])
+}
+
+/** `secrets` as the bytes a search looks for; shorter than four characters is not a secret. */
+export function asSecretBytes(secrets: readonly string[]): Buffer[] {
   return [...new Set(secrets)].filter((s) => s.length >= 4).map((s) => Buffer.from(s, 'utf8'))
 }
 
-function holdsSecret(bytes: Uint8Array, secrets: readonly Buffer[]): boolean {
+export function holdsSecret(bytes: Uint8Array, secrets: readonly Buffer[]): boolean {
   const haystack = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   return secrets.some((secret) => haystack.indexOf(secret) !== -1)
 }

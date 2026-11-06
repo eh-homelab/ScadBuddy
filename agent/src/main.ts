@@ -1180,6 +1180,8 @@ const app = !role.http
   ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
+  // A file picked from a workspace (#4703) is refused when it holds one of these.
+  ...(toolServices.secrets ? { workspaceSecrets: toolServices.secrets } : {}),
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
