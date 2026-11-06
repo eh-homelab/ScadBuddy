@@ -1761,8 +1761,11 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   stays in the list, and the package's load check in Settings shows why it is not loaded
   (`routes/pluginPackages.ts`, `packageLoadCheck`). When no verified copy is cached, the
   read fetches the pin again without vetting it. When that fetch fails too (the git host
-  is down, or the pinned commit is gone), the read fails, and so do `workspace_read` and
-  every upload until a fetch succeeds. The operator fixes the fetch, or disables or
+  is down, the pinned commit is gone, or the files do not hash to the pin), the read
+  fails, and so do `workspace_read` and every upload until a fetch succeeds. For 30 s after
+  a failure (`PACKAGE_SECRETS_FAILURE_MS`) that pin is refused again at once, with no new
+  fetch, so the calls do not each wait for a fetch to time out. It is still a refusal,
+  never an empty list (#5488). The operator fixes the fetch, or disables or
   removes the package in Settings. On a fresh replica the first read can wait on that
   fetch when the start-up warm-up has not finished (`plugin package warm-up` in the log).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked

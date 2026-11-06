@@ -8,7 +8,7 @@ import { type LoadedPackage, loadPackagesForRun, type PackagesForRun } from '../
 import {
   collidingServerNames,
   forwardPackageServers,
-  packageHeaderSecrets,
+  declaredHeaderSecrets,
   type PackageServers,
   serverAccess,
 } from '../src/plugins/packages/mcp.js'
@@ -114,8 +114,8 @@ describe("a plugin package's MCP servers as turn tools", () => {
 
   it("says a package http server's header value and its bare token with no route or address check, as a ToolCall redacts them", async () => {
     const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: 'http://169.254.169.254/', headers: { Authorization: HEADER } } } })
-    expect(packageHeaderSecrets([pkg])).toEqual(expect.arrayContaining([HEADER, HEADER.slice('Bearer '.length)]))
-    expect(packageHeaderSecrets([await fakePackage({ mcpServers: { local: { command: 'node', headers: { A: 'x-local-only' } } } })])).toEqual([])
+    expect(declaredHeaderSecrets(pkg.dir)).toEqual(expect.arrayContaining([HEADER, HEADER.slice('Bearer '.length)]))
+    expect(declaredHeaderSecrets((await fakePackage({ mcpServers: { local: { command: 'node', headers: { A: 'x-local-only' } } } })).dir)).toEqual([])
   })
 
   it('refuses a metadata or link-local address before anything is registered', async () => {
