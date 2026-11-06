@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity, workflow
@@ -22,7 +23,13 @@ from scadbuddy.api.flows import _pending
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.operations import FLOW_DECIDE, PRINTER_CHANGED, flow_kinds, request_id
+from scadbuddy.flows.operations import (
+    FLOW_DECIDE,
+    PRINTER_CHANGED,
+    PRINTER_UNBOUND,
+    flow_kinds,
+    request_id,
+)
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.flow_tools import (
     FLOW_BEATLESS_CALL_PATCH,
@@ -211,6 +218,13 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
         assert printer == PRINTER
         return _printer(2)
 
+    async def away(printer: str) -> PrinterRow | None:
+        raise psycopg.OperationalError("the database is away")
+
+    # A failed printer read leaves the call shown, unnamed and unbound: never a failed page.
+    pending, live = await _pending(outward.client, parked, away, HASH_KEY)
+    assert live
+    assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [(call_id, None, None)]
     pending, live = await _pending(outward.client, parked, lookup, HASH_KEY)
     assert live
     bound = input_hash(HASH_KEY, "print_output", {**call, "printer_id": 2})
@@ -234,10 +248,14 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
         k for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api(2)) if k.name == FLOW_DECIDE
     )
     unbound = {k: v for k, v in request.items() if k != "bound_hash"}
-    for kind, sent in [(moved, request), (decide, unbound)]:
+    for kind, sent, problem in [
+        (moved, request, PRINTER_CHANGED),
+        # A page that could not name the printer sends none: refused, and says so.
+        (decide, unbound, PRINTER_UNBOUND),
+    ]:
         with pytest.raises(ApiError) as stale:
             await env.run(kind.run, sent, await env.run(kind.check, sent))
-        assert (stale.value.status, stale.value.type) == (409, PRINTER_CHANGED)
+        assert (stale.value.status, stale.value.type) == (409, problem)
         assert await outward.store.get_decision(request_id(parked, call_id)) is None
     await env.run(decide.run, request, await env.run(decide.check, request))
     decision = await outward.store.get_decision(request_id(parked, call_id))

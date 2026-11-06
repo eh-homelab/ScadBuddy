@@ -724,7 +724,8 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     return createBackendClient(BACKEND, async (request) => {
       const req = request as Request
       const url = new URL(req.url)
-      if (url.pathname === `/api/v1/printers/${PRINTER}`) {
+      // The registry's ids compare without case (a uuid column), as the backend's route reads them.
+      if (url.pathname.toLowerCase() === `/api/v1/printers/${PRINTER}`) {
         state.reads++
         if (state.status !== undefined && (state.failures === undefined || state.reads <= state.failures)) return Response.json({ detail: state.detail ?? 'unavailable' }, { status: state.status })
         return Response.json({ id: PRINTER, serial: '01P00A0000000AA', name: 'Garage', bambuddy_printer_id: state.linked, preferred_path: 'auto' })
@@ -995,6 +996,20 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
         const h = harness({ flows: grant, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
         await env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named)
         expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
+      })
+
+      // #5450 review: `printer` is hashed as the script wrote it, as the backend binds it; the
+      // shared vector (fixtures/approval-hash-vectors.json) pins the same hash on both sides.
+      it('binds an uppercase printer as the script wrote it', async () => {
+        const upper = { ...chosen, printer: PRINTER.toUpperCase() }
+        const flows: FlowRuns = {
+          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+          approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', { ...upper, printer_id: 2 }),
+        }
+        const state = registry()
+        const h = harness({ flows, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        await env(FLOW, 'tool-call_ok').run(h.activities.print_output!, upper)
+        expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER.toUpperCase(), printer_id: 2 })])
       })
 
       it("refuses a person's decision on the raw arguments: it never falls back past the resolution", async () => {

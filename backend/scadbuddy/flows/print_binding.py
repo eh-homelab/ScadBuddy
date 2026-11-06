@@ -8,12 +8,18 @@ pair. The agent's gate (agent/src/temporal/toolActivities.ts) adds the pair agai
 the call runs and hashes it. A row re-linked between the approval and the run gives
 another `printer_id`, so the hash does not match and the agent refuses the call.
 
-A row that links no Bambuddy printer prints over the LAN, and a row the registry does
-not hold prints nowhere: their calls bind `printer_id: null`, as the agent's
-`flowBinding` does. So a binding never equals the script's raw arguments, and a row
-linked between the approval and the run hashes otherwise too. A call that sends its own
-`printer_id`, or a `printer` that is no uuid, is bound as sent: the agent refuses a pair
-the row does not link, and arguments that do not parse, when the call runs.
+A row that links no Bambuddy printer prints over the LAN: its call binds
+`printer_id: null` here and in the agent's `flowBinding` alike. So the binding never
+equals the script's raw arguments, and a row linked between the approval and the run
+hashes otherwise. A row the registry does not hold binds `printer_id: null` here only,
+so the run page can still show the call and its approval stays distinct from the raw
+arguments; the agent's `prepareApproval` refuses that call when it runs (its read of
+the row answers 404), so it never binds or runs it. A call that sends its own
+`printer_id` is bound as sent: the agent refuses a pair the row does not link.
+
+`printer` counts as named only in the form the agent's schema takes (zod's `uuid()`,
+`UUID_FORM`); any other form is bound as sent, and the agent refuses it, since its
+arguments do not parse. Both sides hash the string as the script sent it, case and all.
 
 The run page gets the bound hash with the summary (`bound_hash`), and the person's
 decision sends it back: the approval binds only the pair the person was shown.
@@ -21,7 +27,7 @@ decision sends it back: the approval binds only the pair the person was shown.
 
 from __future__ import annotations
 
-import uuid
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +38,14 @@ from scadbuddy.printers.models import PrinterRow
 
 #: The agent tool this binds.
 PRINT_OUTPUT = "print_output"
+
+#: The uuid forms the agent's `z.string().uuid()` accepts (zod 4's RFC 9562 pattern,
+#: agent/node_modules/zod/v4/core/regexes.js `uuid`): hyphenated, either case, versions 1
+#: to 8 with the RFC variant, and the nil and max uuids. No braces, no `urn:uuid:`.
+UUID_FORM = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+    r"|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff"
+)
 
 #: Reads a registry row by its id; None when the registry does not hold it.
 PrinterLookup = Callable[[str], Awaitable[PrinterRow | None]]
@@ -50,11 +64,7 @@ def named_printer(tool: str | None, args: dict[str, Any]) -> str | None:
     printer = args.get("printer")
     if tool != PRINT_OUTPUT or not isinstance(printer, str):
         return None
-    try:
-        uuid.UUID(printer)
-    except ValueError:
-        return None
-    return printer
+    return printer if UUID_FORM.fullmatch(printer) else None
 
 
 async def bind_call(tool: str | None, args: dict[str, Any], lookup: PrinterLookup) -> BoundCall:

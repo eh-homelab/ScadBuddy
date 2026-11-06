@@ -772,7 +772,13 @@ async def _pending(
         )
         if (call := parked_call(approval.tool_name, approval.tool_input)) is not None:
             _, tool, args = call
-            bound = await bind_call(tool, args, lookup)
+            try:
+                bound = await bind_call(tool, args, lookup)
+            except psycopg.Error:
+                # The page still shows the call; with no binding, an approval is refused
+                # until a read names the printer (`flow-printer-unbound`).
+                logger.warning("could not read the printer a parked print names", exc_info=True)
+                continue
             entries[-1].summary = bound.summary
             if bound.summary is not None and hash_key is not None and tool is not None:
                 entries[-1].bound_hash = input_hash(hash_key, tool, bound.args)

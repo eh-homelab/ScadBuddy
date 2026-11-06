@@ -65,6 +65,22 @@ async def test_a_printer_the_registry_does_not_hold_binds_no_printer_id() -> Non
     assert bound.summary == f"Prints on printer {PRINTER}, which the registry does not hold"
 
 
+# Review of #5450: the agent sends `printer` verbatim and hashes it so; the binding keeps
+# the script's string, case and all (the shared vector in approval-hash-vectors.json pins
+# that hash on both sides).
+async def test_an_uppercase_printer_is_bound_as_the_script_wrote_it() -> None:
+    upper = {"output_id": "o1", "printer": PRINTER.upper()}
+    seen: list[str] = []
+
+    async def lookup(printer: str) -> PrinterRow | None:
+        seen.append(printer)
+        return row(2)
+
+    bound = await bind_call("print_output", upper, lookup)
+    assert bound.args == {**upper, "printer_id": 2}
+    assert seen == [PRINTER.upper()]
+
+
 @pytest.mark.parametrize(
     ("tool", "args"),
     [
@@ -72,6 +88,11 @@ async def test_a_printer_the_registry_does_not_hold_binds_no_printer_id() -> Non
         ("print_output", {"output_id": "o1", "printer_id": 2}),
         ("print_output", {"output_id": "o1", "printer": "garage"}),
         ("print_output", {"output_id": "o1", "printer": 7}),
+        # Forms Python's uuid parses but the agent's schema refuses: never named here.
+        ("print_output", {"output_id": "o1", "printer": "{" + PRINTER + "}"}),
+        ("print_output", {"output_id": "o1", "printer": "urn:uuid:" + PRINTER}),
+        ("print_output", {"output_id": "o1", "printer": PRINTER.replace("-", "")}),
+        ("print_output", {"output_id": "o1", "printer": "00000000-0000-0000-0000-0000000000aa"}),
     ],
 )
 async def test_other_calls_read_no_printer(tool: str, args: dict[str, Any]) -> None:

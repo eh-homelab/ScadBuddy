@@ -101,6 +101,8 @@ PARENT_TIER = "https://scadbuddy.dev/problems/flow-escalation-parent-tier"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
 #: A print's registry printer links another printer than the run page showed (#4445).
 PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
+#: An approval of a print on a registry printer the run page could not name (#4445).
+PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
@@ -171,6 +173,15 @@ def _printer_changed() -> ApiError:
         status.HTTP_409_CONFLICT,
         "The printer this call prints on is not the one you were shown. Reload it.",
         type_=PRINTER_CHANGED,
+    )
+
+
+def _printer_unbound() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run page could not say which printer this call prints on, so it cannot be"
+        " approved yet. Reload it, and approve once it names the printer.",
+        type_=PRINTER_UNBOUND,
     )
 
 
@@ -362,7 +373,8 @@ def flow_kinds(
         name and arguments, which the agent hashes again from the call it is asked to
         run. None for a ScadBuddy host function (the workflow runs it itself). A print
         on a registry printer is bound to the pair its row links now (#4445), which must
-        be the `bound_hash` the run page showed (`shown`): else a 409."""
+        be the `bound_hash` the run page showed (`shown`): else a 409, which says
+        whether the page showed another pair or none."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
@@ -386,7 +398,11 @@ def flow_kinds(
                 finally:
                     await client.aclose()
                 bound = input_hash(hash_key, name, args)
-                if not isinstance(shown, str) or not hmac.compare_digest(shown, bound):
+                if not isinstance(shown, str):
+                    # The page showed no binding (its read of the run or of the printer
+                    # failed): never approved without one.
+                    raise _printer_unbound()
+                if not hmac.compare_digest(shown, bound):
                     raise _printer_changed()
                 return bound
             return input_hash(hash_key, name, args)
