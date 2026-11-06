@@ -334,9 +334,9 @@ differs.
 | slicer | none, unchanged (transfer tokens) | — | — |
 
 The CRUD service keeps a fixed map from `system:serviceaccount:<namespace>:<name>` to the
-caller name. The namespace is configuration (`SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE`), not a
-constant: ScadBuddy's own namespace once eh-homelab/clusters#3200 lands (§11 D7). An unknown
-ServiceAccount, or any ServiceAccount of another namespace, is refused. `default` is never in
+caller name. The namespace is configuration (`SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE`, today
+`bambuddy`), not a constant. An unknown ServiceAccount, or any ServiceAccount of another
+namespace, is refused. `default` is never in
 the map in any namespace: every pod that names no ServiceAccount runs as it (§2.4).
 
 The sidecar shares the API pod's ServiceAccount. The API container is the CRUD service and
@@ -448,7 +448,9 @@ This covers `e2e-stack/compose.yaml` (one `app` container, `:84-91`) and
 The bootstrap secret of option D. The CRUD service reads
 `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`, one file per caller (`render`, `print`, `projects`,
 `agent`), and keeps only their hashes. Each caller reads
-`SCADBUDDY_SERVICE_BOOTSTRAP_FILE`. A compose file mounts the same secret to both. A caller
+`SCADBUDDY_SERVICE_BOOTSTRAP_FILE`. Compose makes the secrets itself: a one-shot service
+writes a random file per caller into a shared volume at start, and mounts each caller's file
+into the CRUD service and that caller. Nobody creates, stores or copies one. A caller
 with neither a projected token path nor a bootstrap file gets no credential, which `off`
 and `observe` still serve, as today (§2.2).
 
@@ -467,7 +469,7 @@ directory is set, so a cluster that does not set it has no static secret to stea
   fake backend route.
 - Real TokenReview is never called in CI. The clusters PR is checked on the cluster by a
   one-off `kubectl create token scadbuddy-print --audience scadbuddy` and a call to the
-  route (§8 step 4).
+  route (§8 step 3).
 
 ## 8. Migration, with no downtime
 
@@ -482,18 +484,15 @@ Every step merges with the mode where it is today, and old and new builds run si
    read the view as today**. An exchange that answers `404` (an old API pod during the
    roll) falls back to the view while the caller still has a database URL. Both kinds of
    token resolve through the same `resolve`, so any API pod accepts either.
-2. **Namespace move.** ScadBuddy moves to its own namespace (eh-homelab/clusters#3200,
-   §11 D7) and the CRUD service's `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` names it. Nothing
-   exchanges yet, so the move changes no credential.
-3. **Clusters PR.** A ServiceAccount per Deployment (§6.1); `automountServiceAccountToken:
+2. **Clusters PR.** A ServiceAccount per Deployment (§6.1); `automountServiceAccountToken:
    false` on every ScadBuddy pod; the projected volume and `SCADBUDDY_SERVICE_TOKEN_FILE`
    on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator`
    and its own apiserver token mounted in the API container only. Merge after step 1's
-   image is deployed and step 2 is done.
-4. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
+   image is deployed.
+3. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
    `scadbuddy_auth_would_refuse_total` stays at zero (auth spec §9.1). Add a counter
    `scadbuddy_service_token_exchanges_total{caller, proof, result}` in `core/metrics.py`.
-5. **Stop the database path.** When every caller exchanges (no `legacy` row used for a
+4. **Stop the database path.** When every caller exchanges (no `legacy` row used for a
    week; `last_used_at` shows it), the API stops minting sealed 30-day rows; a new
    migration drops the views, `grant_caller_views` and the sealed columns' NOT NULL; then a
    later one drops the columns. `TokenReader`'s database path and
@@ -560,10 +559,10 @@ Each one takes the more secure option. The cost is stated with it.
    secrets a caller needs in plaintext (printer access codes, render keys) come from routes
    for that purpose. Then the KEK leaves every other pod (#5342). Cost: one more route
    class to scope and audit.
-7. **ScadBuddy moves to its own namespace first** (eh-homelab/clusters#3200), with one
-   ServiceAccount per Deployment and `automountServiceAccountToken: false` on every pod.
-   Its ServiceAccounts and grants then never sit beside Bambuddy's. Cost: one migration of
-   every ScadBuddy object, done before the ServiceAccounts.
+7. **ScadBuddy stays in its namespace.** Each Deployment gets its own ServiceAccount, and
+   `automountServiceAccountToken: false` goes on every pod. A move to a namespace of its own
+   adds no protection: another pod can run as a ScadBuddy ServiceAccount only if someone edits
+   its manifest, and that person already controls the cluster.
 8. **The render worker becomes a caller now** with `crud.render` only, so #5298 can take its
    database secret away before #5296 moves template Python out. Template code then reaches
    at most a 15-minute `crud.render` credential, not a database password.
