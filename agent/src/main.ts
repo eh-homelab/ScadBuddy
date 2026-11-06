@@ -1032,10 +1032,20 @@ const hostWorkers =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
+// A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
+// a recorded entry's decision in its row (R5, plan Step 9.7).
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
+// The browser relay's calls go through Temporal only sealed, each under a key of its own
+// that is deleted once the caller has the answer (#4780): so only with the codec.
+if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
+  const keys = payloadKeys
+  tabRelay.useClient({ client: temporalClient, dropKey: (subject) => dropPayloadKey(database.sql, keys, subject) })
+}
 // This replica claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with
 // bridge.tab: a claim before (or with a worker that never started) would send other replicas'
-// calls to wait out the ack timeout (#4806 review).
-if (tabRelay && hostWorkers) {
+// calls to wait out the ack timeout (#4806 review). And only with the codec, as useClient above:
+// a replica without the KEK cannot decode the sealed calls sent to it (#4949).
+if (tabRelay && hostWorkers && workerDataConverter) {
   const relay = tabRelay
   const pinned = hostWorkers.pinned
   // Unref'd, so a worker that never connects does not hold the process open at shutdown.
@@ -1045,15 +1055,6 @@ if (tabRelay && hostWorkers) {
     relay.startHosting()
   }, 200)
   polling.unref()
-}
-// A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
-// a recorded entry's decision in its row (R5, plan Step 9.7).
-if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
-// The browser relay's calls go through Temporal only sealed, each under a key of its own
-// that is deleted once the caller has the answer (#4780): so only with the codec.
-if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
-  const keys = payloadKeys
-  tabRelay.useClient({ client: temporalClient, dropKey: (subject) => dropPayloadKey(database.sql, keys, subject) })
 }
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.

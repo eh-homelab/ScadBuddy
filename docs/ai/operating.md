@@ -93,8 +93,8 @@ covers the same ground more briefly.
   another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
   [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
-  beside it for one release, and #4868 removed it: every replica since then claims its
-  tabs in `ai_tab_owners`, so a call finds the owner there or answers "not connected".
+  beside it for one release, and #4868 removed it: every replica with the KEK since then
+  claims its tabs in `ai_tab_owners` (one without it claims none, #4949), so a call finds the owner there or answers "not connected".
   A new replica's tab has no row until its host worker polls, so for those first seconds
   of its start a call from another replica answers "not connected" (an old replica could
   reach it through the Postgres relay before).
