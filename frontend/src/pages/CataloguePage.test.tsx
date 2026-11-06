@@ -79,7 +79,7 @@ describe('CataloguePage filters (#276)', () => {
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
     // The last list stays on screen while the search's read runs (#2290): wait for its answer.
     await waitFor(() => expect(names()).toEqual(['Crème Coaster']))
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 9')
+    expect(screen.getByTestId('result-count')).toHaveTextContent(`1 of ${models.length}`)
   })
 
   it('adds a card tag to the filter from the URL-encoded chip', async () => {
@@ -105,7 +105,7 @@ describe('CataloguePage filters (#276)', () => {
     renderCatalogue('/?tag=keychain&origin=builtin')
     expect(await screen.findByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
     expect(names()).toEqual(['Keychain Template'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 9')
+    expect(screen.getByTestId('result-count')).toHaveTextContent(`1 of ${models.length}`)
   })
 
   it('sorts by name', async () => {
@@ -118,6 +118,7 @@ describe('CataloguePage filters (#276)', () => {
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(names()).toEqual([
       'Ball Maze',
+      'Bookmark',
       'Crème Coaster',
       'Dollhouse Kit',
       'Gridfinity Bin',
@@ -137,7 +138,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement)
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(screen.getByRole('searchbox')).toHaveValue('')
-    expect(names()).toHaveLength(9)
+    expect(names()).toHaveLength(models.length)
   })
 
   it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {
@@ -740,7 +741,7 @@ describe('CataloguePage list mode (#278)', () => {
 
     await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
 
     await user.click(screen.getByRole('radio', { name: 'Cards' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
@@ -751,7 +752,7 @@ describe('CataloguePage list mode (#278)', () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     await user.click(screen.getByRole('radio', { name: 'List' }))
-    expect(rows()).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
 
     // The agent's `navigate` and the Models tab name no view, so they show Cards.
     await user.click(screen.getByRole('button', { name: 'Agent navigate' }))
@@ -794,14 +795,14 @@ describe('CataloguePage list mode (#278)', () => {
       { route: '/?view=list' },
     ).user
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
 
     await user.click(screen.getByRole('link', { name: 'Crème Coaster' }))
     await screen.findByText('Customizer')
     await user.click(screen.getByRole('button', { name: 'Back' }))
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
   })
 
   it('undoes and redoes a view toggle with back and forward', async () => {
@@ -809,7 +810,7 @@ describe('CataloguePage list mode (#278)', () => {
     await screen.findByRole('heading', { name: 'Crème Coaster' })
 
     await user.click(screen.getByRole('radio', { name: 'List' }))
-    expect(rows()).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
@@ -818,7 +819,7 @@ describe('CataloguePage list mode (#278)', () => {
 
     await user.click(screen.getByRole('button', { name: 'Forward' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
   })
 
   it('keeps the filters and sort when the view changes', async () => {
@@ -1022,11 +1023,11 @@ describe('CataloguePage list mode (#278)', () => {
   it('names the models list the same in both views', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(9)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(models.length)
 
     await user.click(screen.getByRole('radio', { name: 'List' }))
-    expect(rows()).toHaveLength(9)
-    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(9)
+    expect(rows()).toHaveLength(models.length)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(models.length)
   })
 
   it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {
