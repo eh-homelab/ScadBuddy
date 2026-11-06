@@ -185,29 +185,36 @@ CALLERS = (
     scadbuddy.flows.operations,
 )
 _PATH = re.compile(r'f?"(/api/v1/[^"]*)"')
+#: The method each path literal in those modules is sent with, read from its call site:
+#: the source does not say it beside the literal. A new literal fails until it is here.
+METHODS = {
+    "/api/v1/models/{_segment(slug, 'slug')}/render": "POST",
+    "/api/v1/jobs/{_segment(accepted['job_id'], 'job id')}": "GET",
+    "/api/v1/models/{_segment(slug, 'slug')}/outputs": "POST",
+    "/api/v1/operations/{_segment(answer['id'], 'operation id')}": "GET",
+    "/api/v1/print/library/{int(file_id)}/run": "POST",
+    "/api/v1/print/outputs/{_segment(output_id, 'output id')}/run": "POST",
+    "/api/v1/print/runs/{_segment(run['id'], 'run id')}": "GET",
+    "/api/v1/outputs/arrange": "POST",
+    "/api/v1/jobs/{_segment(accepted['id'], 'job id')}": "GET",
+    "/api/v1/outputs/{_segment(obj['output_id'])}": "GET",
+    "/api/v1/settings/print-options": "GET",
+    "/api/v1/outputs/{_segment(source['output_id'])}": "GET",
+    "/api/v1/printers/{printer}": "GET",
+}
 
 
 def test_every_path_those_modules_name_is_a_flow_host_route() -> None:
-    """A path added beside these without a call above still has to be `flow.host`."""
+    """A path added beside these without a call above still has to be `flow.host`, for
+    the method it is sent with."""
     routes = _app_routes()
-    named = [
+    named = {
         path
         for module in CALLERS
         for path in _PATH.findall(Path(module.__file__ or "").read_text())
-    ]
-    assert named
-    for path in named:
+    }
+    assert named == set(METHODS)
+    for path, method in METHODS.items():
         # Each `{...}` is one segment; the library's is a number.
         concrete = re.sub(r"\{[^}]*\}", "1", path)
-        # The method is not in the source: one of the endpoints the path reaches.
-        endpoints = {
-            _endpoint(routes, method, concrete)
-            for method in ("GET", "POST")
-            if _serves(routes, method, concrete)
-        }
-        assert endpoints & FLOW_HOST_ENDPOINTS, (path, endpoints)
-
-
-def _serves(routes: list[Route], method: str, path: str) -> bool:
-    scope = {"type": "http", "method": method, "path": path.removeprefix(API_PREFIX)}
-    return any(r.matches(scope)[0] == Match.FULL for r in routes)
+        assert _endpoint(routes, method, concrete) in FLOW_HOST_ENDPOINTS, (method, path)

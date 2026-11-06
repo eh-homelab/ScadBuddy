@@ -415,12 +415,15 @@ test already fails for an unclassified route (`routes.py:1-7`). Each new CRUD ro
 |---|---|
 | `render` | `crud.render` |
 | `print` | `internal.outputs`, `internal.library`, `crud.print` |
-| `projects` | `flow.host` (the flow host routes the auth spec §7.1 names: `render`, outputs create, the print queue, `arrange`, `operations` reads), `crud.projects` |
+| `projects` | `flow.host` (the 11 routes in `backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`: render, the job and operation reads, outputs create, read and arrange, print runs create (output and library) and read, the print options read, and the printer read of `flow_decide`), `crud.projects` |
 | `agent` | `api`, `internal.workspace`, `crud.agent` |
 
 - Today `would_refuse` checks the credential's classes for `internal.*` and `api` only
   (`routes.py:172-192`). The change makes it one rule for a service credential: it passes a
-  route only when the route's class is in its scopes. Any other class is refused.
+  route only when the route's class is in its scopes. Any other class is refused. One
+  exception (#5298 Task 8): a `flow.host` route also takes every caller an `api` route
+  takes, so a credential with `api` (the agent's), a person and a personal access token
+  pass there as on any `api` route.
 - `projects` loses `api`: a new class `flow.host` holds the routes `workflows/flow_routes.py`
   calls. This keeps the auth spec §7.1's table, which today's code widens (§2.1).
 - `agent` keeps `api`: its tools call almost every public route (`agent/src/tools/coverage.ts`

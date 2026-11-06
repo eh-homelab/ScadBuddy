@@ -253,7 +253,7 @@ def would_refuse(
         return None
     if isinstance(caller, Anonymous):
         return "signed_out"
-    # A credential whose scopes leave out the public routes (the print and projects ones).
+    # A credential whose scopes leave out the public routes (print, render, projects).
     if (
         route_cls in ("api", "flow.host")
         and isinstance(caller, Service)
