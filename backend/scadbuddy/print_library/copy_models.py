@@ -63,7 +63,7 @@ class LibraryCopyFileResult(BaseModel):
     name: str
     size: int | None = None
     status: LibraryCopyFileStatus
-    #: Why it failed; on a ``pending`` file, why its last try did not end.
+    #: Why it failed; on a ``pending`` file, why try ``reason_try`` did not end.
     reason: str | None = None
     #: The tries begun on it (#5424).
     attempts: int = 0
@@ -93,7 +93,8 @@ class LibraryCopySummary(LibraryCopyCounts):
     error: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
-    #: The workflow run that the job's start began; ``None`` until it began.
+    #: The workflow run that the job's start began; ``None`` until the start records
+    #: it, and on a row from before #5424.
     run_id: str | None = None
 
 

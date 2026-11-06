@@ -93,8 +93,12 @@ async def post_library_copy(
             raise
     if running:
         # A row with no run id (written before #5424, or a start whose `started` write
-        # never happened) is given the running chain's: `_settled` then matches it.
-        await asyncio.to_thread(rows.started, job_id, _first_run(described), only_unset=True)
+        # never happened) is given the running chain's: `_settled` then matches it. The
+        # copy runs either way: a failed write is logged, not answered.
+        try:
+            await asyncio.to_thread(rows.started, job_id, _first_run(described), only_unset=True)
+        except Exception:
+            logger.warning("could not record the run of a joined copy: %s", job_id, exc_info=True)
     if not running:
         await asyncio.to_thread(rows.start, job_id, request)
     # No update to answer, so not `start_command`: a plain start that joins a running one.
@@ -167,13 +171,14 @@ async def get_library_copy(copy_id: str, state: StateDep, ops: OperationsDep) ->
 #: What a job whose execution ended without its finish activity (terminated, timed out)
 #: shows: its row still says `running`, which the execution's state contradicts.
 ENDED_UNFINISHED = "the copy's workflow ended before it finished; start it again"
-#: For a row with no run id only (one written before #5424 shipped, or a start whose
-#: `started` write never happened): its execution reads as ended once it closed this
-#: long after the row's `started_at`. The two times come from two clocks (Temporal's
-#: and Postgres'). Hosts kept by NTP differ by well under a second, and 5 minutes also
-#: covers a host whose clock jumps. So the run before a rerun, which closed before the
-#: rerun's row was written, never reads as this row's end. The cost: such a row whose
-#: execution ended in its first 5 minutes keeps showing `running` until a rerun.
+#: For a row with no run id only (one written before #5424 shipped, a start whose
+#: `started` write failed, or a rerun before its `started` write): its execution reads
+#: as ended once it closed this long after the row's `started_at`. The two times come
+#: from two clocks (Temporal's and Postgres'). Hosts kept by NTP differ by well under a
+#: second, and 5 minutes also covers a host whose clock jumps. So the run before a
+#: rerun, which closed before the rerun's row was written, reads as this row's end only
+#: if the clocks differ by more than 5 minutes. The cost: such a row whose execution
+#: ended in its first 5 minutes keeps showing `running` until a rerun.
 NO_RUN_ID_MARGIN = timedelta(minutes=5)
 
 

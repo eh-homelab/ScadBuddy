@@ -51,8 +51,8 @@ PLAN_RETRIES = RetryPolicy(
     maximum_interval=timedelta(minutes=1),
     maximum_attempts=8,
 )
-#: A batch that raised (a library that does not answer, or a 5xx) is retried with this
-#: backoff. No attempt limit: each file counts its own tries
+#: A batch that raised (a library that does not answer, a 429, a 5xx, a timeout) is
+#: retried with this backoff. No attempt limit: each file counts its own tries
 #: (`print_library.copy.MAX_FILE_TRIES`, `FILE_ATTEMPTS`), so the retries end when the
 #: files do. 10 s doubling to 5 minutes: about 25 minutes before a file's tenth try.
 BATCH_RETRIES = RetryPolicy(

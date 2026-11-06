@@ -1,9 +1,9 @@
 -- Library copy follow-ups (#5424). `run_id` is the workflow run that the job's start
 -- began, so the status route matches the execution by its run id, not by Temporal's
 -- clock against Postgres'. A row with no run id falls back to `close_time >=
--- started_at + NO_RUN_ID_MARGIN` (5 min). `attempts` counts the tries begun on a file, so each
--- file has its own limit. `reason_try` is the try whose failure a pending file's
--- `reason` names. `sha256` is the hash of the bytes a copied or skipped file
+-- started_at + NO_RUN_ID_MARGIN` (5 min). `attempts` counts the tries begun on a file,
+-- so each file has its own limit. `reason_try` is the try whose failure a pending
+-- file's `reason` names. `sha256` is the hash of the bytes a copied or skipped file
 -- holds at the target, so a copy finds what another copy put there after its own
 -- listing was read.
 ALTER TABLE library_copies ADD COLUMN run_id text;

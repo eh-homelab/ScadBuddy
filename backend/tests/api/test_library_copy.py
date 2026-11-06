@@ -183,6 +183,17 @@ def test_a_copy_whose_execution_ended_unfinished_reads_failed_but_one_starting_d
     with state.settings_store.pool.connection() as conn:
         conn.execute("UPDATE library_copies SET run_id = NULL WHERE id = %s", (copy_id,))
     assert status(copy_id)["run_id"] is None
+    # A join whose write fails is logged, not a 500: the copy runs either way.
+    with monkeypatch.context() as patched:
+
+        def fail(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("the database went away")
+
+        patched.setattr(LibraryCopyStore, "started", fail)
+        failed_join = native_client.post("/api/v1/print/library-copies", json=body)
+        assert failed_join.status_code == 202, failed_join.text
+        assert failed_join.json() == {"copy_id": copy_id}
+    assert status(copy_id)["run_id"] is None
     joined = native_client.post("/api/v1/print/library-copies", json=body)
     assert joined.status_code == 202 and joined.json() == {"copy_id": copy_id}
     assert status(copy_id)["run_id"] == run_id

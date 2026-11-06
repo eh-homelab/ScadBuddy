@@ -66,8 +66,8 @@ NOT_NATIVE = (
     " native first"
 )
 GONE_FROM_SOURCE = "it is no longer in the source library"
-#: The try on a file at which a 5xx that the library answered is the file's own
-#: failure, not a retry (a 3MF its upload refuses, bytes gone from its disk).
+#: The try on a file at which a 5xx that the library answered (507 aside) is the
+#: file's own failure, not a retry (a 3MF its upload refuses, bytes gone from its disk).
 FILE_ATTEMPTS = 3
 #: The most tries begun on one file. A library that does not answer, a 429, a batch
 #: that timed out or a worker that stopped: each spends one try of the file in hand.
@@ -469,10 +469,14 @@ async def copy_batch(
 
     - A library that does not answer, or a 429, raises until the file has begun
       `MAX_FILE_TRIES` tries. Each raise writes its reason on the pending row.
-    - A 5xx that the library answered raises too, because it may still be the library.
-      From the `FILE_ATTEMPTS`th try on, it is the file's own failure. So a file that a
-      library always 500s on cannot hold the job.
+    - A 5xx that the library answered (507 aside) raises too, because it may still be
+      the library. From the `FILE_ATTEMPTS`th try on, it is the file's own failure. So a
+      file that a library always 500s on cannot hold the job.
     - A 401 or 403 raises `CopyRefusedError`: it fails every file, so it fails the copy.
+    - Any other answer (a 404, a 422, a 507) fails the file at once.
+
+    A file that another attempt ended first (a timed-out attempt that still runs, and
+    its retry) is not counted again: the counts never exceed the files.
     """
     request = input.request
     rows = await asyncio.to_thread(store.pending, input.copy_id, limit=input.limit)
@@ -490,7 +494,7 @@ async def copy_batch(
                     store, input.copy_id, row, target, client, native, locks, heartbeat
                 )
                 result, target_id, folder_id, reason, digest = outcome
-                await asyncio.to_thread(
+                recorded = await asyncio.to_thread(
                     store.record,
                     input.copy_id,
                     row.source_id,
@@ -504,6 +508,8 @@ async def copy_batch(
                 # Only once the row says where the bytes went (`LibraryCopyStore.held`
                 # reads it), so the next copy to take the lock finds them.
                 await asyncio.to_thread(locks.release_all)
+            if not recorded:
+                continue  # another attempt ended this file first, and counted it
             if result == "copied":
                 copied += 1
             elif result == "skipped_same_hash":

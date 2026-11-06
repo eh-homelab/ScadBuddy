@@ -350,9 +350,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   overwritten. The bytes go into Bambuddy through `send.upload_raw`, the one raw upload
   path (`ensure_raw_copy` uses it too), and into the native library through
   `NativeLibrary.upload` (`StoreFullError` is a failed row naming the 507). Each file
-  counts its own tries (`attempts`; `FILE_ATTEMPTS` for a 5xx, `MAX_FILE_TRIES` for
-  anything else), a 401 or 403 fails the whole copy (`CopyRefusedError`), a session
-  advisory lock per target library and SHA-256 (`TargetLocks`) keeps two copies from
+  counts its own tries (`attempts`): `FILE_ATTEMPTS` for a 5xx the library answered
+  (507 aside), `MAX_FILE_TRIES` for a library that does not answer or answers 429 (and
+  for a try that never ended); any other answer fails the file at once, except a 401 or
+  403, which fails the whole copy (`CopyRefusedError`). A session advisory lock per target library and SHA-256 (`TargetLocks`) keeps two copies from
   putting the same bytes twice, and the status route matches the execution by the
   row's `run_id`; a row with no run id falls back to `close_time >= started_at +
   NO_RUN_ID_MARGIN` (5 min) (#5424). Agent

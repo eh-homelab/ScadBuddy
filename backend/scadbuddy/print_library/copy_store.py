@@ -4,6 +4,7 @@ by the API process (the ``library`` worker runs inside it) over the settings poo
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -164,13 +165,13 @@ class LibraryCopyStore:
         target_id: int | None = None,
         target_folder_id: int | None = None,
         sha256: str | None = None,
-    ) -> None:
-        """How a pending file ended. A row that already ended keeps its outcome: a batch
-        attempt that timed out but still runs and its retry can both end one file, and
-        the second (a `skipped_same_hash` on the first's upload) must not overwrite the
-        first's `copied`."""
+    ) -> bool:
+        """How a pending file ended, and whether this call recorded it. A row that
+        already ended keeps its outcome: a batch attempt that timed out but still runs
+        and its retry can both end one file, and the second (a `skipped_same_hash` on the
+        first's upload) must not overwrite the first's `copied`, nor count again."""
         with self._pool.connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE library_copy_files SET status = %s, reason = %s, target_id = %s,"
                 " target_folder_id = %s, sha256 = %s, reason_try = NULL, updated_at = now()"
                 " WHERE copy_id = %s AND source_id = %s AND status = 'pending'",
@@ -184,6 +185,7 @@ class LibraryCopyStore:
                     source_id,
                 ),
             )
+        return cur.rowcount == 1
 
     def finish(self, copy_id: str, status: LibraryCopyRunStatus, error: str | None = None) -> None:
         with self._pool.connection() as conn:
@@ -262,12 +264,17 @@ class TargetLocks:
     the check and both put the same bytes. They live on a connection of their own, never
     the row pool's: a wait for another copy's put must not hold a pooled connection that
     the row writes need. Closing the connection ends every lock on it, so a worker that
-    stops mid-put frees them. The calls block: run them on a thread."""
+    stops mid-put frees them. The calls block: run them on a thread. A wait that its
+    caller gave up on (the activity was cancelled) is cancelled by the next
+    `release_all` or `close`, so neither queues behind it on the connection."""
 
     def __init__(self, conninfo: Any) -> None:
         self._conninfo = conninfo
         self._conn: psycopg.Connection[Any] | None = None
         self._held: list[str] = []
+        #: Set while no `acquire` waits on the connection.
+        self._idle = threading.Event()
+        self._idle.set()
 
     def acquire(self, direction: str, sha256: str) -> None:
         if self._conn is None:
@@ -282,17 +289,29 @@ class TargetLocks:
                 **TCP_KEEPALIVE,  # type: ignore[arg-type]
             )
         key = _key(direction, sha256)
-        self._conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+        self._idle.clear()
+        try:
+            self._conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+        finally:
+            self._idle.set()
         self._held.append(key)
+
+    def _stop_wait(self) -> None:
+        """Cancel an `acquire` that still waits, and let it end first."""
+        if self._conn is not None and not self._idle.is_set():
+            self._conn.cancel_safe(timeout=TARGET_LOCK_CONNECT_TIMEOUT)
+            self._idle.wait(TARGET_LOCK_CONNECT_TIMEOUT)
 
     def release_all(self) -> None:
         """Every lock taken since the last release. The caller releases them once the
         file's row is recorded."""
+        self._stop_wait()
         while self._held and self._conn is not None:
             key = self._held.pop()
             self._conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
 
     def close(self) -> None:
+        self._stop_wait()
         if self._conn is not None:
             self._conn.close()
             self._conn = None

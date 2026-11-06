@@ -5,11 +5,13 @@ fake Bambuddy library and a native library over S3."""
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import psycopg
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -316,9 +318,13 @@ async def test_a_library_that_does_not_answer_is_retried_until_the_file_tries_ru
     request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[one.id, two.id])
     store = LibraryCopyStore(pool)
     await _planned(store, request, bambuddy=bambuddy, native=native)
-    for _ in range(MAX_FILE_TRIES - 1):
+    for tries in range(1, MAX_FILE_TRIES):
         with pytest.raises(ApiError):
             await _batch(store, request, bambuddy=bambuddy, native=native)
+        # Each retried try writes its number and its reason on the pending row.
+        pending = _rows(store)[one.id]
+        assert (pending.status, pending.attempts, pending.reason_try) == ("pending", tries, tries)
+        assert ("limiting" if answer == "429" else "ReadTimeout") in (pending.reason or "")
     rows = _rows(store)
     assert {f.status for f in rows.values()} == {"pending"}
     assert rows[one.id].attempts == MAX_FILE_TRIES - 1 and rows[two.id].attempts == 0
@@ -601,3 +607,44 @@ async def test_a_file_that_already_ended_keeps_its_outcome(
     row = _rows(store)[file.id]
     assert (row.status, row.target_id) == ("copied", 1000000007)
     assert store.held("bb_to_sb", "ab" * 32) == [1000000007]
+
+
+async def test_a_file_two_attempts_end_is_counted_once(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient
+) -> None:
+    """A timed-out attempt that still runs and its retry both work on one file. The
+    second one's `record` changes nothing, and its batch does not count the file, so
+    the counts never exceed the files."""
+    file = await bambuddy.upload_library_file("one.3mf", b"one")
+    store = LibraryCopyStore(pool)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id])
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    zombie, retry = await asyncio.gather(
+        _batch(store, request, bambuddy=bambuddy, native=native),
+        _batch(store, request, bambuddy=bambuddy, native=native),
+    )
+    assert zombie.copied + zombie.skipped + retry.copied + retry.skipped == 1
+    assert _rows(store)[file.id].status == "copied"
+
+
+async def test_closing_the_locks_cancels_a_wait_it_gave_up_on(pool: Pool) -> None:
+    """An activity cancelled while `acquire` waits on another copy's lock: `close`
+    cancels the wait, so it does not queue behind it for up to 30 minutes."""
+    holder = LibraryCopyStore(pool).locks()
+    await asyncio.to_thread(holder.acquire, "sb_to_bb", "ab" * 32)
+    waiter = LibraryCopyStore(pool).locks()
+    waiting = asyncio.ensure_future(asyncio.to_thread(waiter.acquire, "sb_to_bb", "ab" * 32))
+    try:
+        for _ in range(100):
+            if not waiter._idle.is_set():
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)  # the lock query is on the server, waiting
+        assert not waiting.done()
+        started = time.monotonic()
+        await asyncio.to_thread(waiter.close)
+        assert time.monotonic() - started < 5
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            await waiting
+    finally:
+        await asyncio.to_thread(holder.close)
