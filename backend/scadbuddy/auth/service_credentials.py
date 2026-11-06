@@ -229,6 +229,16 @@ def _insert(conn: Connection[Any], kek: Kek, caller: ServiceCaller, at: datetime
 class ServiceCredentialStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
+        self._listeners: builtins.list[Callable[[ServiceCaller], None]] = []
+
+    def on_suspension_change(self, listener: Callable[[ServiceCaller], None]) -> None:
+        """Calls ``listener`` with the caller after each :meth:`suspend` and :meth:`resume`
+        in this process (the in-process provider drops its token)."""
+        self._listeners.append(listener)
+
+    def _changed(self, caller: ServiceCaller) -> None:
+        for listener in self._listeners:
+            listener(caller)
 
     def mint(self, kek: Kek, caller: LegacyCaller, *, now: datetime | None = None) -> str:
         """A new credential for ``caller`` whatever it holds ("rotate now")."""
@@ -403,6 +413,7 @@ class ServiceCredentialStore:
                 " WHERE caller = %s AND revoked_at IS NULL",
                 (at, caller),
             )
+        self._changed(caller)
 
     def resume(self, caller: ServiceCaller) -> bool:
         """Lifts a suspension; whether there was one."""
@@ -411,6 +422,7 @@ class ServiceCredentialStore:
             cur = conn.execute(
                 "DELETE FROM service_caller_suspensions WHERE caller = %s", (caller,)
             )
+        self._changed(caller)
         return cur.rowcount > 0
 
     def suspensions(self) -> builtins.list[Suspension]:
@@ -692,7 +704,8 @@ class InProcessProvider:
     """§7.1 (E2): a credential the API mints for a caller it serves in its own process
     (the in-process `projects` worker), with ``proof = inprocess``: no route, no file,
     no KEK. Renewed at half-life; a mint that fails keeps the current one until it
-    expires."""
+    expires. A suspend or resume of its caller in this process drops the token, so the
+    next call mints rather than presenting the one the suspension revoked."""
 
     def __init__(
         self,
@@ -708,6 +721,14 @@ class InProcessProvider:
         self._expires_at = 0.0
         self._renew_at = 0.0
         self._next_try = 0.0
+        self._listening = False
+
+    def _suspension_changed(self, caller: ServiceCaller) -> None:
+        if caller != self.caller:
+            return
+        with self._lock:
+            self._token = None
+            self._next_try = 0.0
 
     def token(self) -> str | None:
         with self._lock:
@@ -716,7 +737,11 @@ class InProcessProvider:
                 return self._token
             if now >= self._next_try:
                 try:
-                    issued = self._store().issue(self.caller, "inprocess", rate_limited=False)
+                    store = self._store()
+                    if not self._listening:
+                        store.on_suspension_change(self._suspension_changed)
+                        self._listening = True
+                    issued = store.issue(self.caller, "inprocess", rate_limited=False)
                 except CallerSuspendedError:
                     logger.warning("the %s caller is suspended", self.caller)
                     self._next_try = now + RETRY_SECONDS
@@ -740,6 +765,7 @@ class InProcessProvider:
         with self._lock:
             if token == self._token:
                 self._token = None
+                self._next_try = 0.0
 
 
 class ServiceCredentialConfigError(ValueError):

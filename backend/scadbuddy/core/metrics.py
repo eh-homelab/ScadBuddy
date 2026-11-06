@@ -536,6 +536,11 @@ class Metrics:
             ["caller", "proof", "result"],
             registry=r,
         )
+        self.service_jwks_stale_uses = Counter(
+            "scadbuddy_service_jwks_stale_uses",
+            "Service tokens checked against a cluster JWKS that could not be refreshed.",
+            registry=r,
+        )
 
         self.http_requests = Counter(
             "scadbuddy_http_requests",

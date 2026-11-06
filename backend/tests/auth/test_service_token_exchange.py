@@ -245,7 +245,10 @@ class FakeApiserver:
 
 
 def _verifier(
-    apiserver: FakeApiserver, tmp_path: Path, clock: Callable[[], float] = time.monotonic
+    apiserver: FakeApiserver,
+    tmp_path: Path,
+    clock: Callable[[], float] = time.monotonic,
+    on_stale: Callable[[], None] | None = None,
 ) -> TokenReviewVerifier:
     token_file = tmp_path / "apiserver-token"
     token_file.write_text(apiserver.own_token + "\n")
@@ -256,6 +259,7 @@ def _verifier(
         ca_file=None,
         transport=httpx.MockTransport(apiserver.handler),
         clock=clock,
+        on_stale=on_stale,
     )
 
 
@@ -352,6 +356,42 @@ async def test_an_unknown_kid_refetches_the_jwks_at_most_every_30_s(tmp_path: Pa
     clock.now += 1
     assert await verifier.verify(signed("scadbuddy-print", key=rotated)) is not None
     assert apiserver.jwks_fetches == 3
+
+
+async def test_a_failed_refresh_serves_the_last_jwks_for_a_day(tmp_path: Path) -> None:
+    """Review of #5498: the apiserver's discovery down once the hour's cache is over does
+    not stop every exchange. The last good JWKS serves for up to 24 h after the refresh
+    first failed, counted; TokenReview still decides every token, and an unknown `kid` is
+    still refused."""
+    apiserver = FakeApiserver()
+    clock = Clock()
+    stale: list[int] = []
+    verifier = _verifier(apiserver, tmp_path, clock, on_stale=lambda: stale.append(1))
+    assert await verifier.verify(signed("scadbuddy-print", nonce="0")) is not None
+    apiserver.jwks_status = 503
+    clock.now += 3600
+    assert await verifier.verify(signed("scadbuddy-print", nonce="1")) is not None
+    assert len(stale) == 1
+    rotated = RSAKey.generate_key(2048, parameters={"kid": "rsa-3"})
+    assert await verifier.verify(signed("scadbuddy-print", key=rotated)) is None
+    revoked = signed("scadbuddy-print", nonce="revoked")
+    apiserver.revoke(revoked)
+    assert await verifier.verify(revoked) is None
+    # The apiserver is not asked on every exchange while it is down: every 30 s at most.
+    fetches = apiserver.jwks_fetches
+    await verifier.verify(signed("scadbuddy-print", nonce="2"))
+    assert apiserver.jwks_fetches == fetches
+    clock.now += 24 * 3600 - 1
+    assert await verifier.verify(signed("scadbuddy-print", nonce="3")) is not None
+    clock.now += 1
+    with pytest.raises(VerifierUnavailableError):
+        await verifier.verify(signed("scadbuddy-print", nonce="4"))
+    # A good refresh ends it.
+    apiserver.jwks_status = 200
+    clock.now += 30
+    stale.clear()
+    assert await verifier.verify(signed("scadbuddy-print", nonce="5")) is not None
+    assert stale == []
 
 
 async def test_the_budget_holds_back_only_signed_tokens(tmp_path: Path) -> None:
@@ -834,6 +874,30 @@ def test_the_in_process_provider_mints_and_renews(store: ServiceCredentialStore)
     store.suspend("projects", by="user:i#s")
     clock.now += EXCHANGE_LIFETIME.total_seconds()
     assert provider.token() is None
+
+
+@pg
+def test_the_in_process_provider_drops_its_token_on_suspend_and_resume(
+    store: ServiceCredentialStore,
+) -> None:
+    """Review of #5498: the first in-process call after a resume does not present the
+    token the suspension revoked."""
+    provider = InProcessProvider("projects", lambda: store, clock=Clock())
+    held = provider.token()
+    assert held is not None
+    store.suspend("projects", by="user:i#s")
+    assert provider.token() is None
+    store.resume("projects")
+    fresh = provider.token()
+    assert fresh is not None and fresh != held
+    assert store.resolve(fresh) == Service("projects", SCOPES["projects"])
+    # Another caller's suspension leaves it alone.
+    store.suspend("print", by="user:i#s")
+    assert provider.token() == fresh
+    # A 401'd token (a suspend and resume on another replica) is replaced at once.
+    provider.invalidate(fresh)
+    again = provider.token()
+    assert again is not None and again != fresh
 
 
 # Which source a caller reads (§7.2, §8 step 1).

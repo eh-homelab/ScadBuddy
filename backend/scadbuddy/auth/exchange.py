@@ -52,6 +52,9 @@ LEEWAY_SECONDS = 30
 JWKS_CACHE_SECONDS = 3600.0
 #: ... and fetched again for an unknown ``kid`` at most this often.
 JWKS_REFETCH_SECONDS = 30.0
+#: When the hourly refresh fails, the last good JWKS serves this long after the first
+#: failure (TokenReview still decides every token).
+JWKS_STALE_SECONDS = 86400.0
 
 
 class ReviewLimitedError(Exception):
@@ -183,6 +186,7 @@ class TokenReviewVerifier:
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], float] = time.time,
+        on_stale: Callable[[], None] | None = None,
     ) -> None:
         self.namespace = namespace
         self._base = url.rstrip("/")
@@ -197,9 +201,13 @@ class TokenReviewVerifier:
         self._keys_lock = asyncio.Lock()
         self._keys: tuple[float, str, KeySet] | None = None
         self._refetched_at: float | None = None
+        self._stale_since: float | None = None
+        self._on_stale = on_stale
 
     @classmethod
-    def in_cluster(cls, namespace: str) -> TokenReviewVerifier | None:
+    def in_cluster(
+        cls, namespace: str, *, on_stale: Callable[[], None] | None = None
+    ) -> TokenReviewVerifier | None:
         """The verifier for this pod's cluster, or ``None`` outside one (no apiserver in
         the environment, or no token of the pod's own to ask with)."""
         host = os.environ.get("KUBERNETES_SERVICE_HOST")
@@ -213,6 +221,7 @@ class TokenReviewVerifier:
             url=f"https://{host}:{port}",
             token_file=IN_CLUSTER_TOKEN,
             ca_file=IN_CLUSTER_CA,
+            on_stale=on_stale,
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -243,38 +252,82 @@ class TokenReviewVerifier:
             raise VerifierUnavailableError(f"{path} answered no object")
         return data
 
+    async def _fetch(self) -> tuple[str, KeySet]:
+        async with self._client() as client:
+            discovery = await self._get(client, "/.well-known/openid-configuration")
+            jwks = await self._get(client, "/openid/v1/jwks")
+        issuer = discovery.get("issuer")
+        if not isinstance(issuer, str) or not issuer:
+            raise VerifierUnavailableError("the cluster's discovery names no issuer")
+        try:
+            keys = KeySet.import_key_set(jwks)  # type: ignore[arg-type]
+        except (jose_errors.JoseError, ValueError, TypeError, KeyError):
+            raise VerifierUnavailableError("the cluster's JWKS holds no usable key") from None
+        return issuer, keys
+
     async def _issuer_keys(self, *, refetch: bool = False) -> tuple[str, KeySet]:
         """The issuer (from its discovery document) and its JWKS, both read from the
         apiserver itself (`kubernetes.default.svc`), never from the discovery's
         ``jwks_uri``. Kept :data:`JWKS_CACHE_SECONDS`; ``refetch`` (an unknown ``kid``)
-        reads them again at most every :data:`JWKS_REFETCH_SECONDS`."""
+        reads them again at most every :data:`JWKS_REFETCH_SECONDS`, and a failed
+        refetch keeps the cached ones (the unknown ``kid`` is then refused). When the
+        hour's refresh fails, the last good ones serve for up to
+        :data:`JWKS_STALE_SECONDS` after that first failure, the refresh retried at most
+        every :data:`JWKS_REFETCH_SECONDS`, each use logged and counted; TokenReview
+        still decides every token."""
         async with self._keys_lock:
             now = self._clock()
             cached = self._keys
             if cached is not None:
-                fresh = now - cached[0] < JWKS_CACHE_SECONDS
-                if not refetch and fresh:
+                if refetch:
+                    if (
+                        self._refetched_at is not None
+                        and now - self._refetched_at < JWKS_REFETCH_SECONDS
+                    ):
+                        return cached[1], cached[2]
+                    self._refetched_at = now
+                    try:
+                        issuer, keys = await self._fetch()
+                    except VerifierUnavailableError as error:
+                        logger.warning("could not refetch the cluster's JWKS (%s)", error)
+                        return cached[1], cached[2]
+                    self._keys, self._stale_since = (now, issuer, keys), None
+                    return issuer, keys
+                if now - cached[0] < JWKS_CACHE_SECONDS:
                     return cached[1], cached[2]
                 if (
-                    refetch
+                    self._stale_since is not None
                     and self._refetched_at is not None
                     and now - self._refetched_at < JWKS_REFETCH_SECONDS
                 ):
-                    return cached[1], cached[2]
-            async with self._client() as client:
-                discovery = await self._get(client, "/.well-known/openid-configuration")
-                jwks = await self._get(client, "/openid/v1/jwks")
-            issuer = discovery.get("issuer")
-            if not isinstance(issuer, str) or not issuer:
-                raise VerifierUnavailableError("the cluster's discovery names no issuer")
+                    return self._stale(cached, now)
             try:
-                keys = KeySet.import_key_set(jwks)  # type: ignore[arg-type]
-            except (jose_errors.JoseError, ValueError, TypeError, KeyError):
-                raise VerifierUnavailableError("the cluster's JWKS holds no usable key") from None
+                issuer, keys = await self._fetch()
+            except VerifierUnavailableError as error:
+                if cached is None:
+                    raise
+                logger.warning("could not refresh the cluster's JWKS (%s)", error)
+                self._refetched_at = now
+                if self._stale_since is None:
+                    self._stale_since = now
+                return self._stale(cached, now)
             if refetch:
                 self._refetched_at = now
-            self._keys = (now, issuer, keys)
+            self._keys, self._stale_since = (now, issuer, keys), None
             return issuer, keys
+
+    def _stale(self, cached: tuple[float, str, KeySet], now: float) -> tuple[str, KeySet]:
+        assert self._stale_since is not None
+        if now - self._stale_since >= JWKS_STALE_SECONDS:
+            raise VerifierUnavailableError("the cluster's JWKS could not be refreshed for a day")
+        logger.warning(
+            "checking a service token against the cluster's JWKS of %d s ago: it could not"
+            " be refreshed",
+            int(now - cached[0]),
+        )
+        if self._on_stale is not None:
+            self._on_stale()
+        return cached[1], cached[2]
 
     async def _signed_caller(self, token: str) -> ServiceCaller | None:
         """The caller a token the cluster signed names, checked offline; ``None`` for

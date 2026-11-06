@@ -84,7 +84,10 @@ class AuthComponent:
         # accepts, by proof. TokenReview only in a cluster with the namespace set; the
         # bootstrap secrets only with their directory set (a bad one stops the start).
         self.verifiers: dict[ExchangeProof, ProofVerifier] = {}
-        review = TokenReviewVerifier.in_cluster(settings.service_account_namespace)
+        review = TokenReviewVerifier.in_cluster(
+            settings.service_account_namespace,
+            on_stale=core.metrics.service_jwks_stale_uses.inc,
+        )
         if review is not None:
             self.verifiers["k8s"] = review
         if settings.service_bootstrap_dir is not None:

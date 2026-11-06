@@ -487,7 +487,7 @@ start error, and setting neither reads the view as above:
 
 | Proof | On the caller | On the API |
 |---|---|---|
-| Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, which needs `system:auth-delegator` |
+| Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, and reads the cluster's issuer discovery and JWKS. The API's ServiceAccount needs two ClusterRoleBindings: `system:auth-delegator` (TokenReview) and `system:service-account-issuer-discovery`, which Kubernetes [binds to no one by default](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#service-account-issuer-discovery) |
 | Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named `render`, `print`, `projects` or `agent`; only the hashes are kept |
 
 The API takes a proof only when its own variable is set. The ServiceAccounts it maps are
@@ -498,7 +498,11 @@ Each Kubernetes credential is bound to its pod's name and uid. The route answers
 exchanges a minute per pod and 30 per caller, then `429` with `Retry-After`. Before any
 TokenReview the API checks a token offline against the cluster's JWKS, fetched from the
 apiserver with its own token and kept an hour; an unknown `kid` refetches it at most
-every 30 s. The check covers the signature (RS256 or ES256 only), `iss` (from the
+every 30 s. When the hourly refresh fails, the last good JWKS still serves for up to 24 h
+after the first failure (TokenReview still decides every token, an unknown `kid` is still
+refused), the refresh is retried at most every 30 s, and each such use is logged and
+counted in `scadbuddy_service_jwks_stale_uses_total`; after 24 h every Kubernetes exchange
+answers `503`. The check covers the signature (RS256 or ES256 only), `iss` (from the
 apiserver's `/.well-known/openid-configuration`), `aud` containing `scadbuddy`,
 `exp`/`nbf` with 30 s of skew, a `kubernetes.io.pod` claim with a `name` and `uid` (a
 token bound to no pod is refused), and a `sub` that names a caller above. A token that fails
