@@ -19,8 +19,8 @@ its failed prints, test prints and other costs can be its reason. Its price is n
 across parts. The **suggested unit price** is the unit cost marked up by
 ``pricing_markup_percent``; with no markup, the lowest price whose margin is not thin.
 
-Advice only: nothing is stored and nothing is refused. With no history every figure is
-None and nothing warns.
+Advice only: nothing is stored and nothing is refused. With no history ``jobs`` and
+``units`` are 0, every money figure is None and nothing warns.
 """
 
 from __future__ import annotations

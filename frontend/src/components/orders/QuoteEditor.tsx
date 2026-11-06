@@ -72,10 +72,11 @@ export function QuoteEditor({
   // not yet accepted: what is about to be sent. The route decides whether it warns
   // (`warning`, `below_cost`); the browser never works out the thin rule itself. Each
   // price, once typing stops, is a read of its own, so a job fulfilled meanwhile counts.
+  // A typed price that does not parse warns about nothing: the pending quote is not what
+  // the field holds (#5533).
   const slug = editable ? item?.reference?.slug : undefined
-  const typed = price.trim() ? parseUnitPrice(price, exponent) : null
   const pending = quotes.some((q) => q.accepted) ? undefined : [...quotes].sort(byCreated).at(-1)
-  const current = typed ?? pending?.unit_price_minor ?? null
+  const current = price.trim() ? parseUnitPrice(price, exponent) : (pending?.unit_price_minor ?? null)
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
   const history = useAsync(
     () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked) : Promise.resolve(null)),
