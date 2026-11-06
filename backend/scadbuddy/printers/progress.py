@@ -155,7 +155,7 @@ def lan_ended(
     return None
 
 
-def _ended(started: LanStarted, printer_name: str | None) -> PrintProgress:
+def ended_plate(started: LanStarted, printer_name: str | None) -> PrintProgress:
     """A start the run waited out: how it ended, as its run recorded it."""
     stage = started.ended or "unknown"
     copy = CopyProgress(printer_name=printer_name, stage=stage, message=started.ended_message)
@@ -178,7 +178,7 @@ WAITING = "Waiting for the printer to finish the print before it."
 AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
 
 
-def _waiting(
+def waiting_plate(
     printer_name: str | None, stopped: LanStopped | None, reason: str = WAITING
 ) -> PrintProgress:
     """A start still to come: ``queued`` as one in Bambuddy's queue, or, once the run has
@@ -254,7 +254,7 @@ class LanProgress:
         now = self.now()
         result = run.result
         plates = [
-            _ended(plate, name)
+            ended_plate(plate, name)
             if plate.ended is not None
             else from_lan_report(report, plate, printer_name=name, now=now, max_age=self.max_age)
             for plate in started
@@ -262,7 +262,7 @@ class LanProgress:
         reasons = [WAITING] * len(result.lan_waiting)
         if reasons and result.lan_awaiting_clear:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
-        plates += [_waiting(name, result.lan_stopped, reason) for reason in reasons]
+        plates += [waiting_plate(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
             return plates[0].model_copy(update={"run_id": run.id})
         merged = from_plates(
