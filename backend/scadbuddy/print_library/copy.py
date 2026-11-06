@@ -66,6 +66,8 @@ NOT_NATIVE = (
 )
 GONE_FROM_SOURCE = "it is no longer in the source library"
 #: `StoreFullError`'s reason, the 507 a native upload answers (plan Ruling 11).
+#: The batch attempt on which a file's 5xx is its own failure rather than a retry.
+FILE_ATTEMPTS = 3
 STORE_FULL = "the blob store has no room for it (507)"
 
 
@@ -215,7 +217,9 @@ class _Target:
         return parent
 
     async def has(self, digest: str, size: int | None) -> int | None:
-        """The id of a live file whose bytes hash to ``digest``, or ``None``."""
+        """The id of a live file whose bytes hash to ``digest``, or ``None``. Read, not
+        locked: two copies into one target at once can both miss here and both put the
+        same bytes, so the skip holds between copies, not within a race of them."""
         raise NotImplementedError
 
 
@@ -401,11 +405,15 @@ async def copy_batch(
     native: NativeLibrary,
     uploads: BambuddyUploadStore,
     heartbeat: Callable[[str], None],
+    attempt: int = 1,
 ) -> LibraryCopyBatch:
     """Up to ``input.limit`` of the job's pending files, each recorded as it ends. One
     file's failure (gone from the source, refused by the target, the store full) is its
-    row's ``reason`` and never stops the others; a failure to reach either library at
-    all (the listing, a folder's making) raises, and the activity is retried."""
+    row's ``reason`` and never stops the others. A 5xx raises, and the activity is
+    retried, since it is as likely the library as the file; on the `FILE_ATTEMPTS`th
+    ``attempt`` it is the file's own failure, recorded as its reason, so one file a
+    library always 500s on (a 3MF its upload refuses, bytes gone from its disk) cannot
+    hold the job on that file forever. ``attempt`` is the activity's."""
     request = input.request
     rows = await asyncio.to_thread(store.pending, input.copy_id, limit=input.limit)
     target: _NativeTarget | _BambuddyTarget = (
@@ -424,7 +432,11 @@ async def copy_batch(
         except ApiError as error:
             # A 404 here is the target's (the source's own are answered above): a
             # folder deleted since the plan, say. The row says which.
-            if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
+            if (
+                error.status >= 500
+                and error.status != status.HTTP_507_INSUFFICIENT_STORAGE
+                and attempt < FILE_ATTEMPTS
+            ):
                 raise  # the library is down, not this file: the batch is retried
             outcome = ("failed", None, None, _reason(error))
         except (StoreFullError, ValueError, OSError) as error:
@@ -508,6 +520,7 @@ def library_copy_activities(
                 native=native,
                 uploads=uploads_of(),
                 heartbeat=activity.heartbeat,
+                attempt=activity.info().attempt,
             )
 
     @activity.defn(name=LIBRARY_COPY_FINISH)

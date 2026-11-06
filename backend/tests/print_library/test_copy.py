@@ -16,7 +16,13 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
-from scadbuddy.print_library.copy import GONE_FROM_SOURCE, TARGET_FOLDER_GONE, copy_batch, plan_copy
+from scadbuddy.print_library.copy import (
+    FILE_ATTEMPTS,
+    GONE_FROM_SOURCE,
+    TARGET_FOLDER_GONE,
+    copy_batch,
+    plan_copy,
+)
 from scadbuddy.print_library.copy_models import LibraryCopyBatchInput, LibraryCopyRequest
 from scadbuddy.print_library.copy_store import LibraryCopyStore
 from scadbuddy.print_library.native import NativeLibrary
@@ -161,6 +167,50 @@ async def test_a_source_file_that_is_gone_fails_alone(
     assert results[kept.id] == ("copied", None)
     assert results[4242][0] == "failed"
     assert "no longer in the source" in (results[4242][1] or "")
+
+
+async def test_a_file_the_library_always_500s_on_fails_alone_once_the_retries_ran_out(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 5xx is retried, since it is as likely the library as the file; on the last
+    attempt it is the file's own failure, and the others still copy."""
+    bad = await bambuddy.upload_library_file("bad.3mf", b"bad bytes")
+    good = await bambuddy.upload_library_file("good.3mf", b"good bytes")
+    download = BambuddyClient.download_library_file
+
+    def failing(self: BambuddyClient, file_id: int) -> Any:
+        if file_id == bad.id:
+            raise ApiError(502, "Bambuddy answered 500 for the download")
+        return download(self, file_id)
+
+    monkeypatch.setattr(BambuddyClient, "download_library_file", failing)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[bad.id, good.id])
+    store = LibraryCopyStore(pool)
+    store.start("library-copy-test", request)
+    store.plan("library-copy-test", await plan_copy(request, bambuddy, native))
+
+    async def batch(attempt: int) -> Any:
+        return await copy_batch(
+            store,
+            LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
+            client=bambuddy,
+            native=native,
+            uploads=_uploads(),
+            heartbeat=lambda _: None,
+            attempt=attempt,
+        )
+
+    with pytest.raises(ApiError) as retried:
+        await batch(FILE_ATTEMPTS - 1)
+    assert retried.value.status == 502
+    assert {f.status for f in store.files("library-copy-test")} == {"pending"}
+    done = await batch(FILE_ATTEMPTS)
+    assert (done.copied, done.failed, done.remaining) == (1, 1, 0)
+    results = {f.source_id: (f.status, f.reason) for f in store.files("library-copy-test")}
+    assert results[good.id] == ("copied", None)
+    bad_status, bad_reason = results[bad.id]
+    assert bad_status == "failed"
+    assert bad_reason is not None and "500" in bad_reason
 
 
 async def test_a_full_store_is_a_failed_row_with_the_507(

@@ -89,14 +89,20 @@ async def post_library_copy(
     if not running:
         await asyncio.to_thread(rows.start, job_id, request)
     # No update to answer, so not `start_command`: a plain start that joins a running one.
-    started = await ops.client.start_workflow(
-        LibraryCopy.run,
-        LibraryCopyInput(copy_id=job_id, request=request),
-        id=job_id,
-        task_queue=state.settings.temporal_task_queue_library,
-        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-        id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-    )
+    try:
+        started = await ops.client.start_workflow(
+            LibraryCopy.run,
+            LibraryCopyInput(copy_id=job_id, request=request),
+            id=job_id,
+            task_queue=state.settings.temporal_task_queue_library,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        )
+    except Exception as error:
+        # The row would otherwise say `running` with no execution to ever end it.
+        if not running:
+            await asyncio.to_thread(rows.finish, job_id, "failed", f"could not start: {error}")
+        raise
     return LibraryCopyStarted(copy_id=started.id)
 
 

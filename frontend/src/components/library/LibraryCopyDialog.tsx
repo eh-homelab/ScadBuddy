@@ -154,7 +154,11 @@ export function LibraryCopyDialog({ open, onClose, nativeFolders, picked, onCopi
       api
         .getLibraryCopy(id)
         .then(read)
-        .catch((caught: unknown) => setError(caught instanceof ApiError ? caught.detail : String(caught)))
+        .catch((caught: unknown) => {
+          setError(caught instanceof ApiError ? caught.detail : String(caught))
+          // One failed read is a blip, not the end: a fresh status object polls again.
+          setStatus((current) => (current ? { ...current } : current))
+        })
     }, POLL_MS)
     return () => window.clearTimeout(timer)
     // `read` is this render's; the effect keys on the status it reads.
