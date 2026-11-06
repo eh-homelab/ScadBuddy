@@ -50,7 +50,7 @@ RESET_REFUSED = "reset-refused"
 SUBJECT_FORGOTTEN = "subject-forgotten"
 #: A payload key refused for good: not a flow run's or a session's, or a session's to make.
 SUBJECT_REFUSED = "subject-refused"
-#: The subjects a key is asked for by: the whole path segment, a trailing newline included.
+#: A subject a key may be asked for, matched whole (`fullmatch`: a trailing newline fails).
 KEY_SUBJECT = re.compile(
     r"(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
