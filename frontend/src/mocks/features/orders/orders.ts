@@ -23,6 +23,7 @@ import { printersState } from '../printers'
 import { byCreated } from '../../../components/orders/price'
 import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, revisionsOf, state, UNKNOWN_PARAMETER } from './state'
 import { pushRevision } from './revisions'
+import { orderRow } from './costs'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -31,7 +32,8 @@ import { pushRevision } from './revisions'
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'margin_state', 'cursor', 'limit'])
+const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
 const STATUSES = new Set<OrderStatus>(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled'])
 export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
@@ -341,6 +343,9 @@ export const handlers = [
     // Repeated, any of them (#5276).
     const statuses = sp.getAll('status')
     if (statuses.some((s) => !STATUSES.has(s as OrderStatus))) return problem(request, 422, 'status is not an order status')
+    // #5327: repeated, any of them. An order with no charged figure has no state.
+    const margins = sp.getAll('margin_state')
+    if (margins.some((m) => !MARGIN_STATES.has(m))) return problem(request, 422, 'margin_state is not a margin state')
     const limit = Number(sp.get('limit') ?? '50')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return problem(request, 422, 'limit must be an integer from 1 to 100')
     let after: [string, string] | null = null
@@ -365,6 +370,8 @@ export const handlers = [
         return o.number.toLowerCase().includes(q) || o.notes.toLowerCase().includes(q) || (owner?.display_name ?? '').toLowerCase().includes(q) || (owner?.company ?? '').toLowerCase().includes(q)
       })
       .filter((o) => !after || o.created_at < after[0] || (o.created_at === after[0] && o.id < after[1]))
+      .map(orderRow)
+      .filter((o) => margins.length === 0 || (o.margin_state != null && margins.includes(o.margin_state)))
     const page = rows.slice(0, limit)
     const last = page.at(-1)
     return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })

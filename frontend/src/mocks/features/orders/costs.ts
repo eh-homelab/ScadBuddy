@@ -8,6 +8,7 @@ import type {
   Order,
   OrderCosts,
   OrderItem,
+  OrderRow,
   Quote,
   TimeEntry,
   TimeEntryCreate,
@@ -276,6 +277,18 @@ export function costsOf(orderId: string): OrderCosts | null {
     },
     thin,
   )
+}
+
+/** A row of `GET /orders` (#5327): the order and its margin, the figures `costsOf` gives. */
+export function orderRow(order: Order): OrderRow {
+  const costs = costsOf(order.id)
+  return {
+    ...order,
+    margin_minor: costs?.margin_minor ?? null,
+    margin_percent: costs?.margin_percent ?? null,
+    margin_state: costs?.margin_state ?? null,
+    margin_estimated: (costs?.estimated ?? []).length > 0,
+  }
 }
 
 /** A write's answer, 201 (or `status`), or the lifecycle's refusal. */

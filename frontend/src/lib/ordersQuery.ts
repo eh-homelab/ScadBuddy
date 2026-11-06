@@ -1,7 +1,8 @@
 /**
- * The Orders page's filters, kept in the URL (`?status=&customer=&q=&from=&to=`) so
+ * The Orders page's filters, kept in the URL (`?status=&customer=&q=&from=&to=&margin=`) so
  * back/forward and deep links work, as the Activity page's are (`activityQuery.ts`).
- * `customer` is the API's `customer_id`.
+ * `customer` is the API's `customer_id`. `margin` is `loss_thin` for the "Loss or thin"
+ * filter (#5327), the API's `margin_state=loss&margin_state=thin`.
  */
 export type OrdersQuery = {
   status: string
@@ -9,11 +10,16 @@ export type OrdersQuery = {
   q: string
   from: string
   to: string
+  margin: string
 }
 
-export const DEFAULT_ORDERS_QUERY: OrdersQuery = { status: '', customer: '', q: '', from: '', to: '' }
+export const DEFAULT_ORDERS_QUERY: OrdersQuery = { status: '', customer: '', q: '', from: '', to: '', margin: '' }
 
-const KEYS = ['status', 'customer', 'q', 'from', 'to'] as const
+/** The "Loss or thin" filter's value, and the margin states it asks for. */
+export const LOSS_OR_THIN = 'loss_thin'
+const MARGIN_STATES: Record<string, string[]> = { [LOSS_OR_THIN]: ['loss', 'thin'] }
+
+const KEYS = ['status', 'customer', 'q', 'from', 'to', 'margin'] as const
 
 export function parseOrdersQuery(params: URLSearchParams): OrdersQuery {
   return {
@@ -22,6 +28,7 @@ export function parseOrdersQuery(params: URLSearchParams): OrdersQuery {
     q: params.get('q') ?? '',
     from: params.get('from') ?? '',
     to: params.get('to') ?? '',
+    margin: params.get('margin') ?? '',
   }
 }
 
@@ -39,9 +46,15 @@ export function isOrdersFiltered(query: OrdersQuery): boolean {
   return toOrdersParams(query).size > 0
 }
 
-/** The query as `GET /api/v1/orders` parameters (`customer` is `customer_id`). */
-export function ordersApiParams(query: OrdersQuery): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [key, value] of toOrdersParams(query)) out[key === 'customer' ? 'customer_id' : key] = value
+/**
+ * The query as `GET /api/v1/orders` parameters: `customer` is `customer_id`, and `margin`
+ * is `margin_state`, repeated. An unknown `margin` value asks for nothing.
+ */
+export function ordersApiParams(query: OrdersQuery): URLSearchParams {
+  const out = new URLSearchParams()
+  for (const [key, value] of toOrdersParams(query)) {
+    if (key === 'margin') for (const state of MARGIN_STATES[value] ?? []) out.append('margin_state', state)
+    else out.set(key === 'customer' ? 'customer_id' : key, value)
+  }
   return out
 }

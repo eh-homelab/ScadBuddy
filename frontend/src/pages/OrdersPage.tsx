@@ -1,10 +1,12 @@
 import { useCallback, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { Loader2Icon } from 'lucide-react'
+import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, Loader2Icon } from 'lucide-react'
 import { api } from '../api/client'
-import type { Customer, Order, OrderStatus } from '../api/types'
+import type { Customer, OrderRow, OrderStatus } from '../api/types'
 import { CustomerPicker } from '../components/orders/CustomerPicker'
 import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustomerPicker'
+import { NEXT_SORT, sortByMargin, type MarginSort } from '../components/orders/marginSort'
+import { marginTint } from '../components/orders/OrderCosts'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { refusalText } from '../components/orders/refusal'
 import { DataTable, type Column } from '../components/records/DataTable'
@@ -17,12 +19,31 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { dueAt, formatDueDate, timeAgo } from '../lib/format'
-import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, parseOrdersQuery, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
+import { formatMoney } from '../lib/money'
+import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, LOSS_OR_THIN, parseOrdersQuery, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { useAsync } from '../lib/useAsync'
 
 const PAGE = 50
 const STATUSES: OrderStatus[] = ['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']
 const ANY = 'any'
+
+/**
+ * #5327 (job cost spec §6.2): the margin as a percent, the money in the tooltip; `≈` when a
+ * part is estimated, "—" with no charged figure. A job charged nothing shows its money.
+ */
+function MarginCell({ order }: { order: OrderRow }) {
+  if (order.margin_minor == null) return <span className="text-muted-foreground">—</span>
+  const money = formatMoney(order.margin_minor, order.currency, order.minor_exponent)
+  const approx = order.margin_estimated ? '≈ ' : ''
+  const incomplete = order.margin_state === 'unknown' ? ' Some costs are unknown.' : ''
+  return (
+    <span title={`Margin ${approx}${money}.${incomplete}`} data-testid="order-margin">
+      {approx}
+      {order.margin_percent != null ? `${order.margin_percent}%` : money}
+      {order.margin_state === 'unknown' && <span className="ml-1 text-warn">(incomplete)</span>}
+    </span>
+  )
+}
 
 /** `/orders` (spec 2026-10-18 §9): the list with its filters, newest first, paged by cursor. */
 export function OrdersPage() {
@@ -32,7 +53,8 @@ export function OrdersPage() {
   const key = toOrdersParams(query).toString()
   const customers = useAsync(() => api.customers({ includeArchived: true, limit: 500 }), [])
   const list = useAsync(() => api.orders(query, { limit: PAGE }), [key], ['orders'])
-  const [older, setOlder] = useState<{ key: string; items: Order[]; cursor: string | null } | null>(null)
+  const [older, setOlder] = useState<{ key: string; items: OrderRow[]; cursor: string | null } | null>(null)
+  const [sort, setSort] = useState<MarginSort>('none')
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreFailed, setMoreFailed] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -50,7 +72,8 @@ export function OrdersPage() {
   )
   const held = older?.key === key ? older : null
   const base = list.data?.items ?? []
-  const rows = [...base, ...(held?.items ?? []).filter((o) => !base.some((b) => b.id === o.id))]
+  // Sorting by margin orders the rows loaded so far; "Load more" adds the next page.
+  const rows = sortByMargin([...base, ...(held?.items ?? []).filter((o) => !base.some((b) => b.id === o.id))], sort)
   const cursor = held ? held.cursor : (list.data?.next_cursor ?? null)
   const names = new Map((customers.data ?? []).map((c) => [c.id, c.display_name]))
 
@@ -99,7 +122,8 @@ export function OrdersPage() {
     }
   }
 
-  const columns: Column<Order>[] = [
+  const SortIcon = sort === 'ascending' ? ArrowUpIcon : sort === 'descending' ? ArrowDownIcon : ArrowUpDownIcon
+  const columns: Column<OrderRow>[] = [
     {
       key: 'number',
       header: 'Order',
@@ -113,6 +137,19 @@ export function OrdersPage() {
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
     { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
     { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? formatDueDate(order.due_at) : '') },
+    {
+      key: 'margin',
+      header: (
+        <button type="button" className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => setSort(NEXT_SORT[sort])}>
+          Margin
+          <SortIcon className="size-3" aria-hidden />
+        </button>
+      ),
+      sort,
+      className: 'whitespace-nowrap text-right tabular-nums',
+      headerClassName: 'text-right',
+      cell: (order) => <MarginCell order={order} />,
+    },
   ]
 
   return (
@@ -153,6 +190,13 @@ export function OrdersPage() {
               selected: query.status ? [query.status] : [],
               onChange: ([status]) => onChange({ ...query, status: status ?? '' }),
             },
+            {
+              key: 'margin',
+              label: 'Margin',
+              chips: [{ value: LOSS_OR_THIN, label: 'Loss or thin' }],
+              selected: query.margin ? [query.margin] : [],
+              onChange: ([margin]) => onChange({ ...query, margin: margin ?? '' }),
+            },
           ]}
           filtered={isOrdersFiltered(query)}
           onClear={() => onChange(DEFAULT_ORDERS_QUERY)}
@@ -183,7 +227,15 @@ export function OrdersPage() {
             ))}
           </div>
         ) : (
-          <DataTable label="Orders" columns={columns} rows={rows} rowKey={(o) => o.id} rowTestId={(o) => `order-row-${o.id}`} empty="No orders match." />
+          <DataTable
+            label="Orders"
+            columns={columns}
+            rows={rows}
+            rowKey={(o) => o.id}
+            rowTestId={(o) => `order-row-${o.id}`}
+            rowClassName={(o) => marginTint(o.margin_state)}
+            empty="No orders match."
+          />
         )}
         {moreFailed === key && (
           <p role="alert" className="text-[13px] text-warn">

@@ -2320,7 +2320,7 @@ export const api = {
   unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
   orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number; statuses?: Order['status'][] } = {}) => {
-    const search = new URLSearchParams(ordersApiParams(query))
+    const search = ordersApiParams(query)
     // #5276: `status` repeated is orders of any of them, filtered by the server.
     for (const status of page.statuses ?? []) search.append('status', status)
     if (page.limit !== undefined) search.set('limit', String(page.limit))

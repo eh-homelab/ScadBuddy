@@ -6,6 +6,8 @@ import { resetMockState } from '../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
+import type { OrderRow } from '../api/types'
+import { sortByMargin } from '../components/orders/marginSort'
 import { OrdersPage } from './OrdersPage'
 
 function Location() {
@@ -177,5 +179,42 @@ describe('OrdersPage (#4249)', () => {
     expect(await api.customers({ q: 'grace' })).toHaveLength(1)
     expect(createOrder).toHaveBeenCalledTimes(2)
     createOrder.mockRestore()
+  })
+})
+
+describe('OrdersPage margin (#5327)', () => {
+  beforeEach(() => resetMockState())
+
+  it('shows each margin, tints a loss, and filters to loss or thin', async () => {
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+    await screen.findByRole('table', { name: 'Orders' })
+    const draft = screen.getByTestId(`order-row-${ORDER_DRAFT}`)
+    expect(within(draft).getByText('—')).toBeInTheDocument()
+    expect((await api.orderCosts(ORDER_ACCEPTED)).margin_state).toBe('ok')
+
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 1_000_000 })
+    await user.click(screen.getByRole('radio', { name: 'Loss or thin' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?margin=loss_thin')
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
+    const row = screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)
+    expect(row.className).toContain('text-destructive')
+    const costs = await api.orderCosts(ORDER_ACCEPTED)
+    const margin = within(row).getByTestId('order-margin')
+    expect(margin).toHaveTextContent(`${costs.margin_percent}%`)
+    expect(margin.getAttribute('title')).toMatch(/^Margin /)
+  })
+
+  it('sorts by margin, worst first, with no margin last', () => {
+    const row = (id: string, margin_minor: number | null, margin_percent: number | null) => ({ id, margin_minor, margin_percent }) as OrderRow
+    const rows = [row('none', null, null), row('ok', 500, 50), row('zero', -10, null), row('thin', 50, 5)]
+    expect(sortByMargin(rows, 'ascending').map((r) => r.id)).toEqual(['zero', 'thin', 'ok', 'none'])
+    expect(sortByMargin(rows, 'descending').map((r) => r.id)).toEqual(['ok', 'thin', 'zero', 'none'])
+    expect(sortByMargin(rows, 'none')).toBe(rows)
   })
 })

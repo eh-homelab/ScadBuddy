@@ -588,8 +588,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `pricing_usd_rate`, `orders_thin_margin_percent` (live). Routes `POST`/`DELETE
   /orders/{id}/time-entries` and `…/cost-entries`; agent `order_time_add`, `order_cost_add`
   (write); the order page's `components/orders/OrderCosts.tsx` and `CostEntryForms.tsx`.
-  Every attempt counts, test prints (#5280) too (`OrderStore.order_fulfilments`, every
-  purpose, one query per order, as `order_quotes` is).
+  Every attempt counts, test prints (#5280) too (`OrderStore.cost_rows`, every purpose).
+  Job cost phase 2 (#5327): `GET /orders` rows (`OrderRow`) carry `margin_minor`,
+  `margin_percent`, `margin_state` and `margin_estimated`, and the list takes `margin_state`
+  repeated. `costs.py` `order_margins` and the per-order read are one computation
+  (`_order_costs`) over `OrderStore.cost_rows`, which reads every table once for all the
+  orders given (one order for the page, a page for the list); never a second formula. A
+  margin is not stored, so the filter computes each store page's margins until the page is
+  full (`api/orders.py` `_order_page`). Frontend: the list's Margin column, its sort (the
+  rows loaded, `components/orders/marginSort.ts`) and the "Loss or thin" chip
+  (`lib/ordersQuery.ts` `margin=loss_thin`); agent `order_list`'s `margin_state`.
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)

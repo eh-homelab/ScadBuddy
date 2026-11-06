@@ -380,6 +380,9 @@ export type OrderItemStatus = OrderItem['status']
 export type OrderItemDetail = Schemas['ItemDetail']
 export type OrderTotals = Schemas['OrderTotals']
 export type OrderPage = Schemas['OrderPage']
+/** A row of `GET /orders`: the order and its margin (job cost spec §6.2, #5327). */
+export type OrderRow = Schemas['OrderRow']
+export type MarginState = NonNullable<OrderRow['margin_state']>
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
 /** Storefront phase 1 (#5280, spec 2026-11-02 §4): one design of an item, and how it is approved. */
