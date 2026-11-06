@@ -87,9 +87,15 @@ async def start_native_slice(
 
     A failed or cancelled row is returned running (`NativeSliceStore.start`), so a read
     straight after this never sees the last outcome (Task 12 review I1). ``fresh`` (the
-    dialog's Reslice, #4433) slices a completed row again too, and its execution reuses
-    no other row's slice (`slice_prepare`). A running row is fresh already: the start
-    joins its execution."""
+    dialog's Reslice, #4433) gives a completed slice a new row and a new execution, named
+    by the row (`NativeSliceStore.start`), and that execution reuses no other row's slice
+    (`slice_prepare`). The completed row stays as it is until the sweep. A running row
+    is fresh already: the start joins its execution. One execution per key still holds:
+    the key's starts take one lock, and each row has its own workflow id.
+
+    A start that is not fresh follows the key's newest running or completed row, so a
+    run of the same choices joins a running fresh slice, or uses the newest completed
+    one."""
     preset_key = await native_slice_key(starter, plan, plate_id, client)
     row = await store.start(
         workflow_id=native_workflow_id(

@@ -286,8 +286,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `transfer.py` and `transfer_token.py` (the worker's transfer URLs: presigned S3 GET or
   the internal blob routes, a token MACed under a KEK-derived key; never log one),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
-  `start.py` (`start_native_slice`: one execution per copy, subject, copy sha256 and
-  presets, which the dialog and the run share; the lost-row repair), `preview.py` (the
+  `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
+  and presets, which the dialog and the run share; the dialog's Reslice gives a
+  completed slice a new row of its own, `reslice_of`, #4433; the lost-row repair), `preview.py` (the
   dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
