@@ -590,6 +590,29 @@ async def test_a_read_tool_from_an_agent_that_does_not_say_its_declared_tier_run
     assert [c[0] for c in served.calls] == ["make_thing"]
 
 
+async def _outlast_heartbeat() -> None:
+    """Send no beat, and answer only once Temporal has timed this attempt out (#5474).
+
+    A fixed sleep longer than the heartbeat timeout raced the server's timer: under load,
+    or when WSL2's wall clock jumped back, the timer fired late and the attempt answered
+    first. Here the attempt waits until the server no longer runs it (the next attempt,
+    or the call's end), so its answer always comes too late. An attempt with no heartbeat
+    timeout answers at once."""
+    info = activity.info()
+    if not info.heartbeat_timeout:
+        return
+    assert info.workflow_id is not None
+    handle = activity.client().get_workflow_handle(info.workflow_id, run_id=info.workflow_run_id)
+    while True:
+        described = await handle.describe()
+        if not any(
+            pending.activity_id == info.activity_id and pending.attempt == info.attempt
+            for pending in described.raw_description.pending_activities
+        ):
+            return
+        await asyncio.sleep(0.05)
+
+
 class TurnTools:
     """The agent's turn tools (#2320): `turn_tool_tier` on the tools queue, and each call
     the activity `turn:<server>__<tool>`, here on a replica's own queue, as a pinned
@@ -603,10 +626,11 @@ class TurnTools:
         self.tier_fails: str | None = None
         #: The replicas later tiers name, one a tier, as a deploy replaces them.
         self.next_hosts: list[str] = []
-        #: Seconds each tier takes, with no beat: an agent replica from before #4200.
-        self.tier_delay_s = 0.0
+        #: True: each tier sends no beat and outlasts its heartbeat timeout, as an agent
+        #: replica from before #4200 does.
+        self.tier_beatless = False
         #: The same for each call.
-        self.call_delay_s = 0.0
+        self.call_beatless = False
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         #: Set: http_request's access in Settings, its tier whatever the method (#2171).
@@ -621,7 +645,8 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
-            await asyncio.sleep(self.tier_delay_s)
+            if self.tier_beatless:
+                await _outlast_heartbeat()
             if self.next_hosts:
                 self.host = self.next_hosts.pop(0)
             if self.tier_fails is not None:
@@ -647,7 +672,8 @@ class TurnTools:
             info = activity.info()
             fields = activity.payload_converter().from_payload(args[0].payload, dict)
             self.calls.append((info.activity_type, info.activity_id, fields))
-            await asyncio.sleep(self.call_delay_s)
+            if self.call_beatless:
+                await _outlast_heartbeat()
             if self.call_fails is not None:
                 raise ApplicationError(self.call_fails)
             return f"{fields['method']} done"
@@ -964,7 +990,7 @@ async def test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_b
     heartbeat timeout to answer. The tier is asked once more without one, and the call
     runs, instead of the run's tier check failing."""
     served, queue = turn_tools
-    served.tier_delay_s = 2.5
+    served.tier_beatless = True
     run_id = await outward.run(
         script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
         tools_queue=queue,
@@ -990,7 +1016,7 @@ async def test_a_beatless_tier_in_a_run_from_before_4262_still_fails_and_replays
     on this code: the timeout reaches the script again, and no second tier is asked."""
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
     served = TurnTools(f"{queue}.host-1")
-    served.tier_delay_s = 2.5
+    served.tier_beatless = True
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
     activities = outward_activities(outward.store, None)
     # The workflow sandbox passes `temporalio` through, so the run sees this stand-in
@@ -1036,7 +1062,7 @@ async def test_a_read_on_agent_replicas_that_never_beat_is_asked_again_without_b
     sends no beats and takes longer than the heartbeat timeout to answer. The read is
     asked once more without one, as the tier is (#4262), and the run gets its answer."""
     served, queue = turn_tools
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     run_id = await outward.run(
         script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
         tools_queue=queue,
@@ -1063,7 +1089,7 @@ async def test_a_pinned_read_whose_replica_goes_after_its_missed_beats_moves_to_
     gone = f"{queue}.gone"
     live = f"{queue}.live"
     served = TurnTools(gone)
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     # Tiered once for the call, and once more when nothing picked up its last attempt.
     served.next_hosts = [gone, live]
     answered = TurnTools(live)
@@ -1103,7 +1129,7 @@ async def test_a_write_that_missed_its_beats_is_not_sent_again_and_says_it_may_h
     heartbeat timeout. It may still land there, so it is not sent again, and the script
     is told it may have run, not only that it timed out."""
     served, queue = turn_tools
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     run_id = await outward.run(
         script(
             "try:",
@@ -1131,7 +1157,7 @@ async def test_a_beatless_read_in_a_run_from_before_4281_still_fails_and_replays
     this code: the timeout reaches the script again, and the read is not asked again."""
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
     served = TurnTools(f"{queue}.host-1")
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
     activities = outward_activities(outward.store, None)
     # As `before_4262` above: the sandbox passes `temporalio` through to the run.
