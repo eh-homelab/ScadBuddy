@@ -1730,8 +1730,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`, and
   `create_model_from_mesh`'s upload) take it only (#2510): no tool takes bytes as a
   base64 argument, and `workspace_write` writes text only. Binary reaches the workspace
-  by the user's upload in the panel (`routes/sessionFiles.ts`), `http_request`
-  `save_to_workspace` or `workspace_save`. The sha256 is the one the model read the file at; a file no longer at
+  by the user's upload in the panel (`routes/sessionFiles.ts`), an `/mcp` client's
+  `PUT /mcp/workspace/<path>` (#4550, below), `http_request` `save_to_workspace` or
+  `workspace_save`. The sha256 is the one the model read the file at; a file no longer at
   it is refused, so an approval card and an audit row (the call's input) name the path
   and the exact content, and never carry the bytes. Each tool keeps its tier
   (`import_model` from a file is still `outward`). A binary file is streamed from
@@ -1780,6 +1781,40 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.
+- **Uploads for `/mcp` clients** (#4550,
+  [`agent/src/mcp/uploads.ts`](../../agent/src/mcp/uploads.ts)): an external client (the
+  plugin in a user's own Claude Code) has no panel. It puts a local file into its own
+  principal workspace with `PUT /mcp/workspace/<path>[?expected_sha256=<hex>]`. The body is
+  the file's raw bytes (not multipart, never base64), for example
+  `curl -T thumb.png -H "Authorization: Bearer $TOKEN" "$URL/mcp/workspace/thumb.png"`.
+  `curl -T` (`--upload-file`) sends a PUT with no `Content-Type`; curl's `-d` and
+  `--data-binary` send `application/x-www-form-urlencoded`
+  ([curl manpage, `-d`](https://curl.se/docs/manpage.html#-d)), which is refused `415`.
+  The answer is `201 {name, mediaType, size, sha256}` (`200` when it replaced a file); a
+  later tool call passes `workspace_path: name` and `workspace_sha256: sha256`.
+  - The request passes the gates `/mcp` passes, in the same order (HTTPS, Origin, auth
+    mode, principal), with the same token or OIDC access token. It needs the `write`
+    tier. `disabled` auth mode is refused with `403`: there every caller is `anonymous`,
+    so no credential names one workspace across requests.
+  - The path is checked as every workspace path is (`400` otherwise), segment by segment
+    after percent-decoding, so `..`, an absolute path and a NUL never pass.
+  - The body is read as a stream and stopped at `workspace_file_max_bytes` (`413`); a
+    `Content-Length` over it is refused unread. The quota and the file count apply as to
+    any write (`413`). An empty body is `400`. A form body (`multipart/form-data` or
+    `application/x-www-form-urlencoded`) or a `Content-Encoding` is `415`.
+  - The stored type is ScadBuddy's own guess (the image signature, then the extension,
+    then text or not), never the client's `Content-Type`. When the name's extension, the
+    `Content-Type` or the first bytes disagree about a raster image type (a `.png` that
+    is no PNG, a PNG named `.stl`), the upload is refused `415`. A declared `image/jpg`
+    counts as `image/jpeg`.
+  - A path that exists needs `expected_sha256`, the sha256 it has now (`409` otherwise).
+    The file's `source` is `{kind: "upload", by: "mcp"}`, and it is swept 24 h after its
+    last write, as every principal's file is. Each upload, and each refusal after auth
+    (every `400`, `403`, `409`, `413`, `415` and `503` above), is a `resource` audit row
+    `workspace_upload` on the `mcp` surface.
+  - The ingress routes `/mcp` as a prefix (§1.1), so the route needs no new rule. Its
+    `proxy-body-size` (8m, §1.1) caps an upload below the agent's own cap; raise it on
+    the `/mcp` path to upload larger files.
 
 ## 14. The slicer setting (#3822)
 

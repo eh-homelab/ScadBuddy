@@ -386,6 +386,10 @@ describe('/mcp: fail closed', () => {
     const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
     expect(res.status).toBe(503)
     expect(await res.text()).toContain('AI disabled: no database')
+    // The uploads under /mcp (#4550, mcp/uploads.ts) answer the same.
+    const upload = await appFetch(app)(`${MCP_URL}/workspace/a.png`, { method: 'PUT', body: 'x' })
+    expect(upload.status).toBe(503)
+    expect(await upload.text()).toContain('AI disabled: no database')
     await expect(connect(app)).rejects.toMatchObject({ code: 503 })
   })
 
