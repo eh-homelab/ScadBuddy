@@ -562,5 +562,5 @@ def test_the_umask_is_read_without_setting_it(monkeypatch: pytest.MonkeyPatch) -
 
     expected = os.umask(0o022)
     os.umask(expected)
-    monkeypatch.setattr(repository.os, "umask", refuse)
+    monkeypatch.setattr("scadbuddy.flows.repository.os.umask", refuse)
     assert repository._umask() == expected
