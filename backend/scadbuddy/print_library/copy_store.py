@@ -11,6 +11,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.print_library.copy_models import (
     MAX_LISTED_FILES,
     LibraryCopyCounts,
@@ -59,11 +60,16 @@ class LibraryCopyStore:
                 (copy_id, request.direction, Jsonb(request.model_dump(mode="json"))),
             )
 
-    def started(self, copy_id: str, run_id: str) -> None:
+    def started(self, copy_id: str, run_id: str, *, only_unset: bool = False) -> None:
         """The workflow run the job's start began: the status route reads the job as
-        ended only when the closed execution is this run's."""
+        ended only when the closed execution is this run's. ``only_unset`` writes it only
+        on a row that has none (a start that joined a running execution)."""
         with self._pool.connection() as conn:
-            conn.execute("UPDATE library_copies SET run_id = %s WHERE id = %s", (run_id, copy_id))
+            conn.execute(
+                "UPDATE library_copies SET run_id = %s WHERE id = %s"
+                + (" AND run_id IS NULL" if only_unset else ""),
+                (run_id, copy_id),
+            )
 
     def plan(self, copy_id: str, files: list[PlannedFile]) -> int:
         """The walked files as ``pending`` rows, in place of any the job had."""
@@ -98,26 +104,36 @@ class LibraryCopyStore:
             ).fetchall()
         return [PlannedFile.model_validate(r) for r in rows]
 
-    def begin(self, copy_id: str, source_id: int) -> tuple[int, str | None]:
-        """One more try begun on a pending file: the tries begun so far, this one
-        included, and the reason the last one did not end, if it said."""
-        with self._pool.connection() as conn:
+    def begin(self, copy_id: str, source_id: int, *, limit: int) -> tuple[int, str | None, bool]:
+        """One more try begun on a pending file, unless it has begun ``limit`` already:
+        the tries begun so far (this one included), the reason the last one did not end
+        (if it said), and whether the file has run out of tries. A file that ran out keeps
+        its count, so it never reads more than ``limit``."""
+        with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "UPDATE library_copy_files SET attempts = attempts + 1, updated_at = now()"
-                " WHERE copy_id = %s AND source_id = %s RETURNING attempts, reason",
+                "SELECT attempts, reason FROM library_copy_files"
+                " WHERE copy_id = %s AND source_id = %s FOR UPDATE",
                 (copy_id, source_id),
             ).fetchone()
-        assert row is not None
-        return int(row["attempts"]), row["reason"]
+            assert row is not None
+            tries, reason = int(row["attempts"]), row["reason"]
+            if tries >= limit:
+                return tries, reason, True
+            conn.execute(
+                "UPDATE library_copy_files SET attempts = attempts + 1, updated_at = now()"
+                " WHERE copy_id = %s AND source_id = %s",
+                (copy_id, source_id),
+            )
+        return tries + 1, reason, False
 
-    def note(self, copy_id: str, source_id: int, reason: str) -> None:
-        """Why a try on a file that stays pending did not end: shown on the row while
-        the batch is retried."""
+    def note(self, copy_id: str, source_id: int, reason: str, *, try_: int) -> None:
+        """Why try ``try_`` on a file that stays pending did not end: shown on the row,
+        with its try number, while the batch is retried."""
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE library_copy_files SET reason = %s, updated_at = now()"
+                "UPDATE library_copy_files SET reason = %s, reason_try = %s, updated_at = now()"
                 " WHERE copy_id = %s AND source_id = %s",
-                (reason[:REASON_CHARS], copy_id, source_id),
+                (reason[:REASON_CHARS], try_, copy_id, source_id),
             )
 
     def held(self, direction: str, sha256: str) -> list[int]:
@@ -152,7 +168,7 @@ class LibraryCopyStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE library_copy_files SET status = %s, reason = %s, target_id = %s,"
-                " target_folder_id = %s, sha256 = %s, updated_at = now()"
+                " target_folder_id = %s, sha256 = %s, reason_try = NULL, updated_at = now()"
                 " WHERE copy_id = %s AND source_id = %s",
                 (
                     status,
@@ -213,7 +229,7 @@ class LibraryCopyStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT source_id, path, name, size, status, reason, target_id, target_folder_id,"
-                " attempts FROM library_copy_files WHERE copy_id = %s"
+                " attempts, reason_try FROM library_copy_files WHERE copy_id = %s"
                 " ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,"
                 " path, name, source_id LIMIT %s",
                 (copy_id, limit),
@@ -257,6 +273,9 @@ class TargetLocks:
                 autocommit=True,
                 connect_timeout=TARGET_LOCK_CONNECT_TIMEOUT,
                 options=f"-c lock_timeout={TARGET_LOCK_TIMEOUT_MS}",
+                # A lock may be held for many minutes: a peer that went away is found as
+                # the settings pool finds one, and the server then frees the lock.
+                **TCP_KEEPALIVE,  # type: ignore[arg-type]
             )
         key = _key(direction, sha256)
         self._conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))

@@ -59,8 +59,8 @@ describe('LibraryCopyDialog', () => {
     ])
     // The first read finds it running; the poll then finds it done.
     expect(await screen.findByTestId('library-copy-progress')).toHaveTextContent(/Copying…/)
-    // A file being retried says which try failed, and why (#5424).
-    expect(screen.getByTestId(`library-copy-result-${FAILS}`)).toHaveTextContent(/Pending.*Retrying after try 2: .*ReadTimeout/)
+    // A file being retried says which try failed, and why, while the next one runs (#5424).
+    expect(screen.getByTestId(`library-copy-result-${FAILS}`)).toHaveTextContent(/Pending.*Try 2 failed: .*ReadTimeout; retrying/)
     await waitFor(() => expect(screen.getByTestId('library-copy-progress')).toHaveTextContent(/Done: 1 copied, 1 already there, 1 failed/), {
       timeout: POLL_MS * 4,
     })

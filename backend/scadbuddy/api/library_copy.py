@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -85,10 +86,15 @@ async def post_library_copy(
     handle = ops.client.get_workflow_handle(job_id)
     running = False
     try:
-        running = (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+        described = await handle.describe()
+        running = described.status == WorkflowExecutionStatus.RUNNING
     except RPCError as error:
         if not execution_gone(error):
             raise
+    if running:
+        # A row with no run id (written before #5424, or a start whose `started` write
+        # never happened) is given the running chain's: `_settled` then matches it.
+        await asyncio.to_thread(rows.started, job_id, _first_run(described), only_unset=True)
     if not running:
         await asyncio.to_thread(rows.start, job_id, request)
     # No update to answer, so not `start_command`: a plain start that joins a running one.
@@ -156,6 +162,14 @@ async def get_library_copy(copy_id: str, state: StateDep, ops: OperationsDep) ->
 #: What a job whose execution ended without its finish activity (terminated, timed out)
 #: shows: its row still says `running`, which the execution's state contradicts.
 ENDED_UNFINISHED = "the copy's workflow ended before it finished; start it again"
+#: For a row with no run id only (one written before #5424 shipped, or a start whose
+#: `started` write never happened): its execution reads as ended once it closed this
+#: long after the row's `started_at`. The two times come from two clocks (Temporal's
+#: and Postgres'). Hosts kept by NTP differ by well under a second, and 5 minutes also
+#: covers a host whose clock jumps. So the run before a rerun, which closed before the
+#: rerun's row was written, never reads as this row's end. The cost: such a row whose
+#: execution ended in its first 5 minutes keeps showing `running` until a rerun.
+NO_RUN_ID_MARGIN = timedelta(minutes=5)
 
 
 def _settled(
@@ -166,16 +180,20 @@ def _settled(
     is shown `failed`, saying so. The match is by run id, on Temporal's side only:
     never Temporal's ``close_time`` against Postgres' ``started_at``, because the two
     clocks can differ (#5424). The row is written before the execution starts (and
-    reset before a rerun), so a row with no run id yet, or a closed execution of
-    another run (the one before a rerun), is a copy about to run, not one that ended."""
+    reset before a rerun), so a closed execution of another run (the one before a
+    rerun) is a copy about to run, not one that ended. A row with no run id falls back
+    to the two clocks, with `NO_RUN_ID_MARGIN`."""
     running = described is not None and described.status == WorkflowExecutionStatus.RUNNING
     update: dict[str, object] = {"running": running}
     if (
         summary.status == "running"
-        and summary.run_id is not None
         and described is not None
         and described.close_time is not None
-        and summary.run_id in _chain(described)
+        and (
+            summary.run_id in _chain(described)
+            if summary.run_id is not None
+            else described.close_time >= summary.started_at + NO_RUN_ID_MARGIN
+        )
     ):
         update.update(status="failed", error=ENDED_UNFINISHED)
     return summary.model_copy(update=update)
@@ -184,11 +202,12 @@ def _settled(
 def _chain(described: WorkflowExecutionDescription) -> set[str]:
     """The run ids that name the described execution's chain: its own and the first
     run's (a copy continues as new every `BATCHES_PER_RUN` batches)."""
-    ids = {described.run_id}
-    first = described.raw_info.first_run_id
-    if first:
-        ids.add(first)
-    return ids
+    return {described.run_id, _first_run(described)}
+
+
+def _first_run(described: WorkflowExecutionDescription) -> str:
+    """The first run of the described execution's chain."""
+    return described.raw_info.first_run_id or described.run_id
 
 
 async def _execution(ops: OperationsDep, copy_id: str) -> WorkflowExecutionDescription | None:

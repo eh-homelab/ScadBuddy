@@ -67,6 +67,9 @@ class LibraryCopyFileResult(BaseModel):
     reason: str | None = None
     #: The tries begun on it (#5424).
     attempts: int = 0
+    #: On a ``pending`` file, the try whose failure ``reason`` names. While the next try
+    #: runs, ``attempts`` is already one more.
+    reason_try: int | None = None
     #: The copy's id at the target, once copied.
     target_id: int | None = None
     target_folder_id: int | None = None

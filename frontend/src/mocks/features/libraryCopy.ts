@@ -8,8 +8,8 @@ import { libraryFiles } from './library'
  * `library.ts`'s files as ScadBuddy's own; Bambuddy's library, browsed as a source, is a
  * small tree of its own. A started copy is `running` for one read, then done: each
  * selected file copied, but one whose bytes the target "already holds" (`SAME_HASH`)
- * and one that fails (`FAILS`). While it runs, `FAILS` is pending after two tries, with
- * the reason its last try did not end.
+ * and one that fails (`FAILS`). While it runs, `FAILS` is pending: its try 2 failed, with
+ * the reason, and its try 3 runs.
  */
 
 const base = '/api/v1'
@@ -55,10 +55,10 @@ export const startedCopies: LibraryCopyRequest[] = []
 function outcome(request: LibraryCopyRequest, sourceId: number, done: boolean): LibraryCopyFileResult {
   const source = request.direction === 'bb_to_sb' ? bambuddyFiles : libraryFiles
   const name = source.find((f) => f.id === sourceId)?.filename ?? `file ${sourceId}`
-  const row = { source_id: sourceId, path: '', name, size: 12_345, reason: null, attempts: 1, target_id: null, target_folder_id: request.target_folder_id ?? null }
+  const row = { source_id: sourceId, path: '', name, size: 12_345, reason: null, attempts: 1, reason_try: null, target_id: null, target_folder_id: request.target_folder_id ?? null }
   if (!done && sourceId === FAILS) {
-    // Retried: its last try did not end, and the row says why (#5424).
-    return { ...row, status: 'pending', attempts: 2, reason: 'HTTP 502: could not reach Bambuddy to download the file: ReadTimeout' }
+    // Retried: try 2 failed, and try 3 runs. The row says which try failed, and why (#5424).
+    return { ...row, status: 'pending', attempts: 3, reason_try: 2, reason: 'HTTP 502: could not reach Bambuddy to download the file: ReadTimeout' }
   }
   if (!done) return { ...row, status: 'pending', attempts: 0 }
   if (sourceId === SAME_HASH) return { ...row, status: 'skipped_same_hash', target_id: 1000000050 }

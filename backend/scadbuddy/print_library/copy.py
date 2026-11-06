@@ -370,6 +370,8 @@ async def _copy_bb_to_sb(
         raise
     folder_id = await target.folder_for(row.path)
     if source.file_hash is not None:
+        # The lock before the download, so no spool is held open while it waits.
+        await asyncio.to_thread(locks.acquire, "bb_to_sb", source.file_hash)
         held = await target.has(source.file_hash, source.file_size)
         if held is not None:
             return "skipped_same_hash", held, folder_id, None, source.file_hash
@@ -382,11 +384,12 @@ async def _copy_bb_to_sb(
             raise
         if source.file_hash is not None and digest != source.file_hash:
             return "failed", None, folder_id, f"sha256 mismatch: Bambuddy served {digest}", None
-        # Again under the lock: another copy may have put these bytes since.
-        await asyncio.to_thread(locks.acquire, "bb_to_sb", digest)
-        held = await target.has(digest, source.file_size)
-        if held is not None:
-            return "skipped_same_hash", held, folder_id, None, digest
+        if source.file_hash is None:
+            # No hash to lock on before the download: lock on the bytes' own.
+            await asyncio.to_thread(locks.acquire, "bb_to_sb", digest)
+            held = await target.has(digest, source.file_size)
+            if held is not None:
+                return "skipped_same_hash", held, folder_id, None, digest
         try:
             copied = await target.put(source.filename, spool, folder_id)
         except StoreFullError as error:
@@ -524,9 +527,11 @@ async def _copy_one(
     heartbeat: Callable[[str], None],
 ) -> Outcome:
     """One file's try: its outcome, or a raise that retries the batch."""
-    tries, last = await asyncio.to_thread(store.begin, copy_id, row.source_id)
-    if tries > MAX_FILE_TRIES:
-        return "failed", None, None, GAVE_UP.format(tries=tries - 1, reason=last or NO_REASON), None
+    tries, last, spent = await asyncio.to_thread(
+        store.begin, copy_id, row.source_id, limit=MAX_FILE_TRIES
+    )
+    if spent:
+        return "failed", None, None, GAVE_UP.format(tries=tries, reason=last or NO_REASON), None
     beating = asyncio.create_task(beat_while(f"{row.path}/{row.name}", heartbeat))
     try:
         if isinstance(target, _NativeTarget):
@@ -540,7 +545,9 @@ async def _copy_one(
         if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
             retry_later = _retry_later(error)
             if tries < (MAX_FILE_TRIES if retry_later else FILE_ATTEMPTS):
-                await asyncio.to_thread(store.note, copy_id, row.source_id, _reason(error))
+                await asyncio.to_thread(
+                    store.note, copy_id, row.source_id, _reason(error), try_=tries
+                )
                 raise
             if retry_later:
                 return (

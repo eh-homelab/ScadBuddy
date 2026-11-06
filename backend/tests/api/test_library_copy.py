@@ -19,7 +19,7 @@ from httpx import Response
 from temporalio.client import WorkflowExecutionStatus
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.api.library_copy import ENDED_UNFINISHED, _settled
+from scadbuddy.api.library_copy import ENDED_UNFINISHED, NO_RUN_ID_MARGIN, _settled
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -118,6 +118,7 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
         "status": "failed",
         "reason": "it is no longer there",
         "attempts": 0,
+        "reason_try": None,
         "target_id": None,
         "target_folder_id": None,
     }
@@ -175,6 +176,16 @@ def test_a_copy_whose_execution_ended_unfinished_reads_failed_but_one_starting_d
     copy_id = started.json()["copy_id"]
     _until(lambda: len(gates) == 1)  # the batch is in flight: the execution runs
     assert status(copy_id)["running"] is True
+    # A row with no run id (written before #5424 shipped, or a start whose `started`
+    # write never happened): a start that joins the running execution writes it.
+    run_id = status(copy_id)["run_id"]
+    assert run_id is not None
+    with state.settings_store.pool.connection() as conn:
+        conn.execute("UPDATE library_copies SET run_id = NULL WHERE id = %s", (copy_id,))
+    assert status(copy_id)["run_id"] is None
+    joined = native_client.post("/api/v1/print/library-copies", json=body)
+    assert joined.status_code == 202 and joined.json() == {"copy_id": copy_id}
+    assert status(copy_id)["run_id"] == run_id
     portal = native_client.portal
     assert portal is not None  # a client in its `with` block has one
     portal.call(ops.client.get_workflow_handle(copy_id).terminate)
@@ -303,5 +314,8 @@ def test_settled_matches_the_run_by_its_id_not_by_two_clocks() -> None:
     assert chained.status == "failed"
     rerun = _settled(_summary("run-b", now), _closed("run-a", "run-a", late))
     assert (rerun.status, rerun.error) == ("running", None)
+    # No run id (a row from before #5424): the two clocks, with a margin well above skew.
     unstarted = _settled(_summary(None, now), _closed("run-a", "run-a", late))
     assert unstarted.status == "running"
+    old = _settled(_summary(None, now), _closed("run-a", "run-a", now + NO_RUN_ID_MARGIN))
+    assert (old.status, old.error) == ("failed", ENDED_UNFINISHED)
