@@ -73,8 +73,8 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mosquitto
           if [ -f /etc/apparmor.d/mosquitto ]; then
             sudo ln -sf /etc/apparmor.d/mosquitto /etc/apparmor.d/disable/mosquitto
-            if [ ! -d /sys/kernel/security/apparmor ]; then
-              echo "AppArmor is not active; nothing confines mosquitto."
+            if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" != Y ]; then
+              echo "AppArmor is not enabled; nothing confines mosquitto."
             else
               found=0
               sudo grep '^mosquitto ' /sys/kernel/security/apparmor/profiles || found=$?
