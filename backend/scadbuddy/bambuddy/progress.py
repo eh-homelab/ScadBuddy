@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Literal, Protocol
 
 import psycopg
@@ -576,6 +576,25 @@ async def library_progress(
     )
 
 
+#: Which print a progress read was of: its LAN run's id, and its queue items.
+_PrintIds = tuple[str | None, frozenset[int]]
+
+
+def _print_of(progress: PrintProgress) -> _PrintIds:
+    items = {copy.queue_entry_id for copy in progress.copies_detail}
+    items.add(progress.queue_item_id)
+    return progress.run_id, frozenset(item for item in items if item is not None)
+
+
+def _is_of(ids: _PrintIds, run_id: str | None, queue_item_ids: Collection[int]) -> bool:
+    """Whether a read of ``ids`` was of the print run ``run_id`` started or queued as
+    ``queue_item_ids``."""
+    read_run, read_items = ids
+    if run_id is not None and read_run == run_id:
+        return True
+    return bool(read_items) and read_items <= set(queue_item_ids)
+
+
 #: Outputs whose last observed progress :class:`ProgressObserver` remembers.
 OBSERVED_OUTPUTS = 256
 
@@ -591,39 +610,41 @@ class ProgressObserver:
     settled. Once per process, not once per print, and with no outcome: what acts on a
     print ending (flow triggers) hears ``print.outcome`` instead (#2665, ``outcomes.py``).
 
-    A new print is marked in two steps (#5521): `begin` before its run's end is
-    recorded, `started_subject` with that token after. A read that found something new
-    in between may already be the new print's, so it is kept, and the next read that
-    finds nothing new publishes nothing. A read in between that found what was seen
-    before (the previous print, read before the end) is forgotten as before.
+    A run's end is recorded before its print is marked started, and a read can land in
+    between (#5521). Told which print the run started, `started_subject` keeps a read
+    of that print, so the next read that finds nothing new publishes nothing; a read of
+    any other print (the previous one, read before the end) is forgotten.
     """
 
     def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
         self.events = events
         self.capacity = capacity
         #: Per output: the last progress seen, as JSON, whether it was settled, and
-        #: the number of the read that first saw it (`_reads` then).
-        self._seen: OrderedDict[str, tuple[str, bool, int]] = OrderedDict()
-        #: How many reads found something new: what `begin` hands out.
-        self._reads = 0
+        #: which print it was of (`_print_of`).
+        self._seen: OrderedDict[str, tuple[str, bool, _PrintIds]] = OrderedDict()
         self._lock = threading.Lock()
 
-    def begin(self) -> int:
-        """A token for `started_subject`, taken before a run's end is recorded."""
-        with self._lock:
-            return self._reads
-
-    def started(self, meta: OutputMeta, since: int | None = None) -> None:
+    def started(
+        self, meta: OutputMeta, *, run_id: str | None = None, queue_item_ids: Collection[int] = ()
+    ) -> None:
         """A print of ``meta`` was just started: whatever was seen before is stale."""
-        self.started_subject(meta.id, meta.slug, since)
+        self.started_subject(meta.id, meta.slug, run_id=run_id, queue_item_ids=queue_item_ids)
 
-    def started_subject(self, key: str, slug: str, since: int | None = None) -> None:
+    def started_subject(
+        self,
+        key: str,
+        slug: str,
+        *,
+        run_id: str | None = None,
+        queue_item_ids: Collection[int] = (),
+    ) -> None:
         """A print of the run subject ``key`` (an output's id, or ``library:<file id>``,
-        #1751) was just started: whatever was seen before is stale. With ``since`` (a
-        `begin` token), a read that found something new after the token is kept."""
+        #1751) was just started: whatever was seen before is stale, unless it is of
+        this print, which run ``run_id`` started over the LAN or queued as
+        ``queue_item_ids``."""
         with self._lock:
             seen = self._seen.get(key)
-            if seen is None or since is None or seen[2] <= since:
+            if seen is None or not _is_of(seen[2], run_id, queue_item_ids):
                 self._seen.pop(key, None)
         emit(self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug))
 
@@ -644,14 +665,10 @@ class ProgressObserver:
         kinds: list[Literal["print.progress", "print.settled"]] = []
         with self._lock:
             previous = self._seen.pop(key, None)
-            changed = previous is None or previous[0] != fingerprint
-            if changed:
-                self._reads += 1
-            number = previous[2] if previous is not None and not changed else self._reads
-            self._seen[key] = (fingerprint, progress.settled, number)
+            self._seen[key] = (fingerprint, progress.settled, _print_of(progress))
             while len(self._seen) > self.capacity:
                 self._seen.popitem(last=False)
-            if changed:
+            if previous is None or previous[0] != fingerprint:
                 kinds.append("print.progress")
                 was_settled = previous is not None and previous[1]
                 if progress.settled and not was_settled:

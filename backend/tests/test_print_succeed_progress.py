@@ -1,10 +1,11 @@
 """``print_succeed`` and the progress observer around a run's end (#5521).
 
 ``print_succeed`` records the run's end, then marks the subject's progress new
-(`ProgressObserver.started`). A progress read can land while it does. A read that finds
-the new print is kept, so the next read, which finds nothing new, publishes nothing. A
-read that finds the previous print, as a LAN run's subject does until its end is
-recorded, publishes nothing for it, and the new print's reads are published as new."""
+(`ProgressObserver.started`) with the print's ids: its run and its queue items. A progress
+read can land while it does. A read of the new print is kept, so the next read, which
+finds nothing new, publishes nothing. A read of the previous print, as a LAN run's
+subject finds until its end is recorded, is forgotten, and the new print's reads are
+published as new."""
 
 from __future__ import annotations
 
@@ -138,6 +139,30 @@ async def test_a_lan_run_is_not_reported_settled_by_its_previous_print() -> None
         "print.progress",  # the run's start
         "print.progress",  # the new print
         "print.progress",  # it ended
+        "print.settled",
+    ]
+
+
+async def test_a_fresh_process_still_reports_the_new_print_settled() -> None:
+    """Nothing was read of the subject before the run: the read of the previous print
+    is its first, and is forgotten once the new print starts, so the new print's
+    ``print.settled`` is published even when its first read finds it settled."""
+    activities, observer, seen = _setup(OUTPUT, PREVIOUS)
+    result = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan=[LanStarted(subtask_name="scadbuddy-run-1-p1", started_at=AT, plate_id=1)],
+    )
+
+    await ActivityEnvironment().run(activities.succeed, _input("output", result))
+    observer.observe_subject(OUTPUT, "demo", LAN_DONE)
+
+    assert [event.kind for event in seen] == [
+        "print.progress",  # the previous print, read first
+        "print.settled",
+        "print.progress",  # the run's start
+        "print.progress",  # the new print, ended
         "print.settled",
     ]
 

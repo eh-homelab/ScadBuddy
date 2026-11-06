@@ -688,12 +688,12 @@ class PrintActivities:
         Postgres blip must not turn the run into a failure, review #1061), then the
         print followed (an output's).
 
-        The observer's token is taken before the end is recorded (#5521): a progress
-        read that sees the run ended can land before `started`, and `started` keeps it,
-        so the next read that finds nothing new publishes nothing."""
+        The observer is told which print this run started (#5521): a progress read of
+        it can land between the end and `started`, and is kept, so the next read that
+        finds nothing new publishes nothing."""
         spec = input.input.source
-        since = self.d.observer.begin()
         run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
+        queued = input.result.queue_item_ids
         if spec.kind == "output" and spec.output_id is not None and input.result.lan:
             await self._record_lan(spec.output_id, run, input.result)
         if spec.kind == "output" and spec.output_id is not None:
@@ -702,13 +702,15 @@ class PrintActivities:
             # The workflow then starts its `FollowPrint` (#1053).
             try:
                 meta = await require(self.d.outputs, spec.output_id)
-                self.d.observer.started(meta, since)
+                self.d.observer.started(meta, run_id=run.id, queue_item_ids=queued)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
         elif spec.kind == "library" and spec.file_id is not None:
             # As an output's (#1751): its progress, on `print:library:<file id>`, is new.
             subject = PrintSubject.library(spec.file_id)
-            self.d.observer.started_subject(subject.run_subject, library_slug(subject), since)
+            self.d.observer.started_subject(
+                subject.run_subject, library_slug(subject), run_id=run.id, queue_item_ids=queued
+            )
         return run
 
     async def _record_lan(self, output_id: str, run: PrintRun, result: PrintRunResult) -> None:
