@@ -270,7 +270,9 @@ export const orderTools: Tool[] = [
       '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made. ' +
       "Each order carries its margin, the figures order_costs gives: `margin_minor`, `margin_percent`, `margin_state` " +
       '(`loss`, `thin`, `unknown`, `ok`; null with no charged figure) and `margin_estimated`. `margin_state` filters by ' +
-      'any of the states given (`["loss", "thin"]` is the orders list\'s "Loss or thin").',
+      'any of the states given (`["loss", "thin"]` is the orders list\'s "Loss or thin"). With `margin_state`, each ' +
+      'call reads a limited number of orders, so a page can be short or empty while `next_cursor` remains: follow ' +
+      'the cursor until it is null before you say no order matches.',
     input: z.object({
       status: z.enum(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']).optional(),
       customer_id: customerId.optional(),

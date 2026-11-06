@@ -8,6 +8,9 @@ export const NEXT_SORT: Record<MarginSort, MarginSort> = { none: 'ascending', as
 function marginKey(order: OrderRow): number | null {
   if (order.margin_minor == null) return null
   if (order.margin_percent != null) return order.margin_percent
+  // No percent: the order charged nothing, so a percent of it has no value. Only the
+  // money's sign is left: a loss sorts first, and any other margin sorts as 0, next to a
+  // 0 % margin, because no percent puts it higher or lower than that.
   return order.margin_minor < 0 ? -Infinity : 0
 }
 
