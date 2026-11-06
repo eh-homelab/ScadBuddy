@@ -501,7 +501,11 @@ Every step merges with the mode where it is today, and old and new builds run si
    token resolve through the same `resolve`, so any API pod accepts either.
 2. **Clusters PR.** A ServiceAccount per Deployment (§6.1); `automountServiceAccountToken:
    false` on every ScadBuddy pod; the projected volume and `SCADBUDDY_SERVICE_TOKEN_FILE`
-   on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator`
+   on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator` (TokenReview) and to
+   `system:service-account-issuer-discovery` (the issuer and JWKS reads of §6.2 step 0; Kubernetes
+   binds that role to every ServiceAccount, `system:serviceaccounts`, today (read live
+   on v1.35.9+rke2r1, eh-homelab/clusters#3246); the explicit binding keeps the read from
+   depending on that default)
    and its own apiserver token mounted in the API container only. Merge after step 1's
    image is deployed.
 3. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
@@ -555,9 +559,12 @@ Each one takes the more secure option. The cost is stated with it.
    bootstrap secret file (§7). The database view goes once every caller exchanges (§8).
    Cost: the API depends on the Kubernetes API for each exchange.
 2. **TokenReview after an offline JWKS check.** The offline check refuses forgeries for free;
-   TokenReview then refuses a valid-looking token of a deleted pod. The API's ServiceAccount gets `system:auth-delegator`.
+   TokenReview then refuses a valid-looking token of a deleted pod. The API's ServiceAccount gets `system:auth-delegator`, and
+   `system:service-account-issuer-discovery` for the offline check's JWKS.
    A deleted pod's token is refused at once, and the pod name and uid are bound to each
-   credential. Cost: one cluster-wide grant, held by the CRUD service only. That the ClusterRole grants
+   credential. Cost: two cluster-wide bindings on the API's ServiceAccount: `system:auth-delegator`,
+   held by the CRUD service only, and `system:service-account-issuer-discovery`, which every
+   ServiceAccount already holds by default. That the ClusterRole grants
    `create` on TokenReview and SubjectAccessReview and nothing more is **not verified** here
    (§2.5, §12); check `kubectl get clusterrole system:auth-delegator -o yaml` before the
    binding.
@@ -574,7 +581,9 @@ Each one takes the more secure option. The cost is stated with it.
    (§6.2 step 0). A renewing pod needs about one exchange every 7.5 minutes. A refused proof
    (a forged JWT, or a wrong bootstrap secret, checked locally in constant time) counts
    against no limit, so unauthenticated traffic can never lock a caller out; only a
-   successful mint counts against its caller and pod.
+   successful mint counts against its caller and pod. The per-pod limit is keyed by `pod_uid` for a `k8s`
+   proof; a `bootstrap` caller counts as one pod (its caller name is the key); an `inprocess`
+   mint (no network, no proof to forge) is not limited.
 6. **The KEK goes to the CRUD service only.** A key-release route hands a subject's
    unwrapped data key to a caller whose scope covers that subject, and logs each release;
    secrets a caller needs in plaintext (printer access codes, render keys) come from routes
