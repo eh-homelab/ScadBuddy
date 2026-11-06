@@ -107,17 +107,21 @@ class LibraryCopyStore:
 
     def begin(self, copy_id: str, source_id: int, *, limit: int) -> tuple[int, str | None, bool]:
         """One more try begun on a pending file, unless it has begun ``limit`` already:
-        the tries begun so far (this one included), the reason the last one did not end
-        (if it said), and whether the file has run out of tries. A file that ran out keeps
-        its count, so it never reads more than ``limit``."""
+        the tries begun so far (this one included), why the last try begun before this
+        call did not end (``None`` when that try said nothing: it timed out, or its
+        worker stopped), and whether the file has run out of tries. A file that ran out
+        keeps its count, so it never reads more than ``limit``. The row keeps the older
+        reason with its ``reason_try``, which the status shows while this try runs."""
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "SELECT attempts, reason FROM library_copy_files"
+                "SELECT attempts, reason, reason_try FROM library_copy_files"
                 " WHERE copy_id = %s AND source_id = %s FOR UPDATE",
                 (copy_id, source_id),
             ).fetchone()
             assert row is not None
-            tries, reason = int(row["attempts"]), row["reason"]
+            tries = int(row["attempts"])
+            # Only the last try's own reason: an earlier one's is never named as the last.
+            reason = row["reason"] if row["reason_try"] == tries else None
             if tries >= limit:
                 return tries, reason, True
             conn.execute(
@@ -126,6 +130,19 @@ class LibraryCopyStore:
                 (copy_id, source_id),
             )
         return tries + 1, reason, False
+
+    def server_error(self, copy_id: str, source_id: int) -> int:
+        """One more 5xx answer (507 aside) on a pending file: how many it has had. A
+        library that did not answer is not counted here, only in ``attempts``."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE library_copy_files SET server_errors = server_errors + 1,"
+                " updated_at = now() WHERE copy_id = %s AND source_id = %s"
+                " RETURNING server_errors",
+                (copy_id, source_id),
+            ).fetchone()
+        assert row is not None
+        return int(row["server_errors"])
 
     def note(self, copy_id: str, source_id: int, reason: str, *, try_: int) -> None:
         """Why try ``try_`` on a file that stays pending did not end: shown on the row,

@@ -66,14 +66,16 @@ NOT_NATIVE = (
     " native first"
 )
 GONE_FROM_SOURCE = "it is no longer in the source library"
-#: The try on a file at which a 5xx that the library answered (507 aside) is the
-#: file's own failure, not a retry (a 3MF its upload refuses, bytes gone from its disk).
+#: The 5xx answer (507 aside) on a file at which it is the file's own failure, not a
+#: retry (a 3MF its upload refuses, bytes gone from its disk). Counted apart from its
+#: tries (`LibraryCopyStore.server_error`): a library that did not answer never spends it.
 FILE_ATTEMPTS = 3
-#: The most tries begun on one file. A library that does not answer, a 429, a batch
-#: that timed out or a worker that stopped: each spends one try of the file in hand.
-#: With `workflows.library_copy.BATCH_RETRIES` this is about 25 minutes of retries,
-#: longer than a Bambuddy restart. After it the file fails with the last reason, so a
-#: file that always times out (a very large upload) cannot hold the job forever.
+#: The most tries begun on one file. A library that does not answer, a 429, a 5xx, a
+#: batch that timed out or a worker that stopped: each spends one try of the file in
+#: hand. With `workflows.library_copy.BATCH_RETRIES` this is about 25 minutes of
+#: retries, longer than a Bambuddy restart. After it the file fails with the last try's
+#: reason (`NO_REASON` when that try said nothing), so a file that always times out (a
+#: very large upload) cannot hold the job forever.
 MAX_FILE_TRIES = 10
 GAVE_UP = "gave up after {tries} tries: {reason}"
 #: The reason when no try said why it did not end.
@@ -470,8 +472,9 @@ async def copy_batch(
     - A library that does not answer, or a 429, raises until the file has begun
       `MAX_FILE_TRIES` tries. Each raise writes its reason on the pending row.
     - A 5xx that the library answered (507 aside) raises too, because it may still be
-      the library. From the `FILE_ATTEMPTS`th try on, it is the file's own failure. So a
-      file that a library always 500s on cannot hold the job.
+      the library. Its `FILE_ATTEMPTS`th such answer (counted apart from the tries, so a
+      library that did not answer never spends it) is the file's own failure. So a file
+      that a library always 500s on cannot hold the job. It still counts as a try.
     - A 401 or 403 raises `CopyRefusedError`: it fails every file, so it fails the copy.
     - Any other answer (a 404, a 422, a 507) fails the file at once.
 
@@ -549,20 +552,21 @@ async def _copy_one(
         # A 404 here is the target's (the source's own are answered above): a folder
         # deleted since the plan, say. The row says which.
         if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
-            retry_later = _retry_later(error)
-            if tries < (MAX_FILE_TRIES if retry_later else FILE_ATTEMPTS):
+            if _retry_later(error):
+                # Spends only the file's tries, never its 5xx answers.
+                if tries < MAX_FILE_TRIES:
+                    await asyncio.to_thread(
+                        store.note, copy_id, row.source_id, _reason(error), try_=tries
+                    )
+                    raise
+                reason = GAVE_UP.format(tries=tries, reason=_reason(error))
+                return "failed", None, None, reason, None
+            answered = await asyncio.to_thread(store.server_error, copy_id, row.source_id)
+            if answered < FILE_ATTEMPTS:
                 await asyncio.to_thread(
                     store.note, copy_id, row.source_id, _reason(error), try_=tries
                 )
                 raise
-            if retry_later:
-                return (
-                    "failed",
-                    None,
-                    None,
-                    GAVE_UP.format(tries=tries, reason=_reason(error)),
-                    None,
-                )
         return "failed", None, None, _reason(error), None
     except (StoreFullError, ValueError, OSError) as error:
         logger.warning("a library copy failed on one file", exc_info=True)

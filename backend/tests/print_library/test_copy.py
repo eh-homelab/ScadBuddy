@@ -648,3 +648,81 @@ async def test_closing_the_locks_cancels_a_wait_it_gave_up_on(pool: Pool) -> Non
             await waiting
     finally:
         await asyncio.to_thread(holder.close)
+
+
+async def test_a_library_that_did_not_answer_never_spends_a_files_5xx_answers(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bambuddy restarts during a copy: two tries are not answered, then it answers one
+    500. That 500 is the file's first 5xx answer, not its `FILE_ATTEMPTS`th try, so the
+    file is retried. It fails only at its `FILE_ATTEMPTS`th 5xx answer."""
+    file = await bambuddy.upload_library_file("x.3mf", b"x bytes")
+    calls = 0
+
+    def flaky(self: BambuddyClient, file_id: int) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise ApiError(502, "could not reach Bambuddy: ConnectError", type_=UNAVAILABLE_PROBLEM)
+        raise ApiError(502, "Bambuddy answered 500", type_=UNAVAILABLE_PROBLEM, bambuddy_status=500)
+
+    monkeypatch.setattr(BambuddyClient, "download_library_file", flaky)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id])
+    store = LibraryCopyStore(pool)
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    for _ in range(2 + FILE_ATTEMPTS - 1):  # two unanswered tries, then two 500s
+        with pytest.raises(ApiError):
+            await _batch(store, request, bambuddy=bambuddy, native=native)
+    row = _rows(store)[file.id]
+    assert (row.status, row.attempts, row.reason_try) == ("pending", 4, 4)
+    assert "500" in (row.reason or "")
+    batch = await _batch(store, request, bambuddy=bambuddy, native=native)
+    assert (batch.failed, batch.remaining) == (1, 0)
+    row = _rows(store)[file.id]
+    assert (row.status, row.attempts) == ("failed", 2 + FILE_ATTEMPTS)
+    assert "500" in (row.reason or "")
+
+
+async def test_a_last_try_that_said_nothing_never_takes_an_earlier_reason(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient
+) -> None:
+    """The last try timed out after an earlier one said why it failed: `GAVE_UP` says
+    the last try did not end, never the earlier try's reason as if it were the last."""
+    file = await bambuddy.upload_library_file("huge.3mf", b"huge")
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id])
+    store = LibraryCopyStore(pool)
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    store.begin("library-copy-test", file.id, limit=MAX_FILE_TRIES)
+    store.note("library-copy-test", file.id, "HTTP 502: an early one", try_=1)
+    for _ in range(MAX_FILE_TRIES - 1):
+        store.begin("library-copy-test", file.id, limit=MAX_FILE_TRIES)
+    await _batch(store, request, bambuddy=bambuddy, native=native)
+    row = _rows(store)[file.id]
+    assert row.reason == GAVE_UP.format(tries=MAX_FILE_TRIES, reason=NO_REASON)
+
+
+def test_a_joins_late_run_id_write_never_outlives_a_rerun(pool: Pool) -> None:
+    """`post_library_copy`'s join writes the run it saw only on a row with none
+    (`only_unset`), and a rerun's own start writes its run unconditionally after
+    `start` reset the row. So a join that saw the old run, whatever the order its write
+    lands in, never leaves the old run on a rerun's row."""
+    store = LibraryCopyStore(pool)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[7])
+    job = "library-copy-order"
+    orders = {
+        "join before the rerun's start": ["join", "start", "started"],
+        "join between the rerun's start and its run": ["start", "join", "started"],
+        "join after the rerun's run": ["start", "started", "join"],
+    }
+    for name, steps in orders.items():
+        store.start(job, request)
+        store.started(job, "run-old")
+        for step in steps:
+            if step == "join":
+                store.started(job, "run-old", only_unset=True)
+            elif step == "start":
+                store.start(job, request)
+            else:
+                store.started(job, "run-new")
+        summary = store.summary(job)
+        assert summary is not None and summary.run_id == "run-new", name
