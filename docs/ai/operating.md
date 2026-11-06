@@ -1763,8 +1763,13 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     HTML, SVG, XML and scripts, which go as `application/octet-stream`. The panel fetches
     it and saves it through `downloadBlob`, or previews an image through a blob URL.
     With `?expected_sha256=` it is a pick (#4703): the file is about to go into
-    ScadBuddy, so a file that no longer has that sha256 is `409`, and a file that holds
-    one of the agent's credentials is `422`, as the upload tools refuse it.
+    ScadBuddy, so a file that no longer has that sha256 is `409`. A file that holds a
+    saved Claude credential or a plugin secret is `422`. The plugin secrets are each
+    enabled remote plugin's and package http server's header value, and every OAuth
+    sign-in's access and refresh tokens and client secret
+    ([`agent/src/plugins/secrets.ts`](../../agent/src/plugins/secrets.ts)
+    `readPluginSecrets`). The same reader gives a turn's ToolCall tools the plugin secrets
+    they redact and refuse to upload.
   - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
     file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
     replaced one). A path that exists without it, or with a stale one, is `409`; past

@@ -16,7 +16,7 @@ import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
-import { MediaPicker } from '../components/media/MediaPicker'
+import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
 import { BoxIcon, ClipboardPasteIcon, LinkIcon, PlusIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -308,19 +308,15 @@ export function CataloguePage() {
           added(model)
         }}
       />
-      <MediaPicker
+      <FileUploadDialog
         open={meshOpen}
         title="Open a mesh as a model"
         description="A 3MF or STL becomes an editable mesh model, named after the file."
         onClose={() => setMeshOpen(false)}
-        sections={[]}
-        onPick={() => undefined}
-        upload={{
-          accept: '.3mf,.stl',
-          hint: '3MF or STL',
-          onFile: async (file) => added(await api.createMeshModelFromUpload(file)),
-          workspace: { resource: null, label: 'a model' },
-        }}
+        accept=".3mf,.stl"
+        hint="3MF or STL"
+        onFile={async (file) => added(await api.createMeshModelFromUpload(file))}
+        workspace={{ resource: null, label: 'a model' }}
       />
       <ImportDialog
         open={importOpen}

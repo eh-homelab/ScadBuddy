@@ -3035,8 +3035,8 @@ export const api = {
 
   /**
    * #4703 — a picked workspace file's bytes, as they were at `sha256`. The agent answers
-   * 409 when the file has changed since the list was read, and 422 when it holds one of
-   * the agent's credentials; both throw `ApiError`.
+   * 409 when the file has changed since the list was read, and 422 when it holds a saved
+   * Claude credential or a plugin secret (a header value or an OAuth token); both throw `ApiError`.
    */
   pickAiSessionFile: async (id: string, path: string, sha256: string): Promise<Blob> => {
     const response = await send(`${API_BASE}${sessionFilePath(id, path)}?expected_sha256=${encodeURIComponent(sha256)}`)

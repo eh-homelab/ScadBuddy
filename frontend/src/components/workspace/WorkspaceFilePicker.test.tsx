@@ -1,9 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AssistantOpenerContext } from '../../agent/chat/opener'
-import { api } from '../../api/client'
+import { ApiError, api } from '../../api/client'
 import { seedSessionFile } from '../../mocks/features/sessionFiles'
 import { markPickerFileUnavailable, seedPickerSession } from '../../mocks/features/workspacePicker'
+import { intersect } from '../../test/intersection'
 import { renderPage } from '../../test/utils'
 import { WorkspaceFilePicker, WorkspacePickButton } from './WorkspaceFilePicker'
 
@@ -157,6 +158,37 @@ describe('WorkspaceFilePicker', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Use big.png' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('That image is larger than 10 MB.')
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('says a file is gone when it was deleted after the list was shown, and reads the list again', async () => {
+    seedPickerSession({ id: 's-a', title: 'Work', touched: [MODEL] })
+    seedSessionFile('s-a', 'gone.png', bytes('x'), 'image/png')
+    const list = vi.spyOn(api, 'listWorkspacePicks')
+    const { onFile } = render()
+    const use = await screen.findByRole('button', { name: 'Use gone.png' })
+    vi.spyOn(api, 'pickAiSessionFile').mockRejectedValueOnce(new ApiError(404, 'no file gone.png in this session'))
+    const reads = list.mock.calls.length
+    await userEvent.click(use)
+    expect(await screen.findByRole('alert')).toHaveTextContent('gone.png is gone: the file or its session was deleted')
+    await waitFor(() => expect(list.mock.calls.length).toBeGreaterThan(reads))
+    expect(onFile).not.toHaveBeenCalled()
+  })
+
+  it('reads a thumbnail only once its row comes into view', async () => {
+    seedPickerSession({ id: 's-a', title: 'Work', touched: [MODEL] })
+    seedSessionFile('s-a', 'one.png', bytes('1'), 'image/png')
+    seedSessionFile('s-a', 'two.png', bytes('2'), 'image/png')
+    const read = vi.spyOn(api, 'getAiSessionFile')
+    render()
+    const one = await screen.findByRole('button', { name: 'Use one.png' })
+    await screen.findByRole('button', { name: 'Use two.png' })
+    // Out of view, nothing is read.
+    await new Promise((settle) => setTimeout(settle, 50))
+    expect(read).not.toHaveBeenCalled()
+    intersect(one)
+    await waitFor(() => expect(read).toHaveBeenCalledWith('s-a', 'one.png'))
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(await within(one).findByRole('presentation')).toHaveAttribute('src', 'blob:thumb')
   })
 })
 

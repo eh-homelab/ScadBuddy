@@ -29,8 +29,9 @@ import { ready, type RouteModule } from './module.js'
 //                                                 `expected_sha256` it is a pick (#4703): the
 //                                                 file is about to be uploaded into ScadBuddy,
 //                                                 so 409 when it no longer has that sha256, and
-//                                                 422 when it holds one of the agent's
-//                                                 credentials (tools/workspaceUploads.ts)
+//                                                 422 when it holds a saved Claude credential
+//                                                 or a plugin secret (a header value or an
+//                                                 OAuth token: plugins/secrets.ts)
 //   POST   /api/v1/ai/sessions/:id/files          multipart: `file`, `path`, and
 //                                                   `expected_sha256` to replace a file
 //                                                   → 201 {file} (200 when it replaced one);
@@ -58,7 +59,7 @@ export type SessionFileRouteDeps = {
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   audit?: AuditRepo | undefined
-  /** The agent's credentials (main.ts `toolServices.secrets`): a pick that holds one is refused. */
+  /** Every saved Claude credential and plugin secret (main.ts `workspaceSecrets`): a pick that holds one is refused. */
   secrets?: (() => Promise<readonly string[]>) | undefined
 }
 
@@ -70,8 +71,10 @@ declare module '../app.js' {
      */
     workspace?: SessionFiles | undefined
     /**
-     * The agent's credentials, as the upload tools search for them (tools/workspaceUploads.ts):
-     * a file the browser picks from a workspace (#4703) is refused when it holds one.
+     * Every saved Claude credential and every plugin secret (plugins/secrets.ts
+     * `readPluginSecrets`: header values and OAuth tokens), which a turn's upload tools
+     * also refuse to send (tools/workspaceUploads.ts): a file the browser picks from a
+     * workspace (#4703) is refused when it holds one.
      */
     workspaceSecrets?: (() => Promise<readonly string[]>) | undefined
   }
@@ -268,10 +271,10 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
         if (file.sha256 !== expected) {
           throw new WorkspaceError('conflict', `${name} changed since the list was read: its sha256 is now ${file.sha256}, not ${expected}`)
         }
-        // As the upload tools do: a credential that reached the workspace never moves on from it.
+        // A saved credential or plugin secret that reached the workspace never moves on from it.
         if (holdsSecret(file.bytes, asSecretBytes((await deps.secrets?.()) ?? []))) {
           return c.json(
-            { detail: `${name} contains one of the agent's credentials (a saved Claude credential or a plugin token), which may never be uploaded` },
+            { detail: `${name} contains one of the agent's secrets (a saved Claude credential, or a plugin's header value or OAuth token), which may never be uploaded` },
             422,
           )
         }

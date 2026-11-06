@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
@@ -6,6 +6,10 @@ import { originPolicy } from '../src/http/origins.js'
 import { acceptList, accepts, type PickerSession } from '../src/routes/workspacePicker.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { SessionResources } from '../src/sessions/touched.js'
+import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
+import { PluginStore } from '../src/plugins/registry.js'
+import { readPluginSecrets } from '../src/plugins/secrets.js'
+import { kekFromBase64, sealSecret } from '../src/secrets.js'
 import { SessionFiles } from '../src/workspace/store.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -21,6 +25,7 @@ const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not se
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const sha = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex')
 const SECRET = 'sk-ant-test-credential-0123456789'
+const kek = kekFromBase64(randomBytes(32).toString('base64'))
 
 describe('the accept list', () => {
   it('takes extensions, types and type wildcards, and refuses anything else', () => {
@@ -43,6 +48,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
   let files: SessionFiles
   let touched: SessionResources
   let app: ReturnType<typeof createApp>
+  let plugins: PluginStore
+  let oauth: PluginOAuth
   const failures: unknown[] = []
 
   beforeEach(async () => {
@@ -52,6 +59,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     touched = new SessionResources(db.sql, (err) => failures.push(err))
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     files = new SessionFiles(db.sql)
+    oauth = new PluginOAuth(db.sql)
+    plugins = new PluginStore(db.sql, { oauth })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, workspace: files })
     app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
@@ -64,7 +73,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
       approvals: m.approvals,
       sessions: m,
       workspace: files,
-      workspaceSecrets: () => Promise.resolve([SECRET]),
+      // As main.ts builds it: the saved credentials, then every plugin secret.
+      workspaceSecrets: async () => [SECRET, ...(await readPluginSecrets({ kek, plugins, oauth }))],
     })
   })
   afterEach(async () => {
@@ -133,6 +143,21 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     expect((await pick('?accept=image/png&q=nothing')).body.sessions.map((s) => s.id)).toEqual([empty.id])
   })
 
+  it('finds an older session that matches the search, past the newest `limit` ones', async () => {
+    const old = (await m.start(browser, { origin: 'chat', title: 'first' })).session
+    await put(old.id, 'ancient.png', 'old', 'image/png')
+    for (const n of [1, 2, 3]) {
+      const s = (await m.start(browser, { origin: 'chat', title: `newer ${n}` })).session
+      await put(s.id, `new-${n}.png`, `n${n}`, 'image/png')
+    }
+    expect((await pick('?accept=image/png&limit=2')).body.sessions.map((s) => s.id)).not.toContain(old.id)
+    const found = await pick('?accept=image/png&limit=2&q=ANCIENT')
+    expect(found.body.sessions.map((s) => [s.id, s.files.map((f) => f.path)])).toEqual([[old.id, ['ancient.png']]])
+    // The search is literal text: `%` and `_` are no wildcards.
+    expect((await pick('?accept=image/png&q=%25')).body.sessions).toEqual([])
+    expect((await pick('?accept=image/png&q=new_')).body.sessions).toEqual([])
+  })
+
   it('lists a sealed file it cannot open as unavailable, with the reason', async () => {
     const s = (await m.start(browser, { origin: 'chat', title: 'sealed' })).session
     await put(s.id, 'gone.png', 'x', 'image/png')
@@ -183,6 +208,44 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
 
     await put(s.id, 'leak.txt', `key=${SECRET}`)
     expect((await download('leak.txt', `?expected_sha256=${sha(`key=${SECRET}`)}`)).status).toBe(422)
+
+    // A remote plugin's header value, found without its scheme too.
+    await plugins.create({ name: 'tracker', url: 'https://tracker.example/mcp', secret: 'Bearer plugin-header-secret-42' }, kek)
+    await plugins.update('tracker', { enabled: true }, kek)
+    await put(s.id, 'header.txt', 'token: plugin-header-secret-42')
+    const header = await download('header.txt', `?expected_sha256=${sha('token: plugin-header-secret-42')}`)
+    expect(header.status).toBe(422)
+    expect(((await header.json()) as { detail: string }).detail).toMatch(/header value or OAuth token/)
+
+    // An OAuth sign-in's tokens and client secret, on a plugin that is not even enabled.
+    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' }, kek)
+    const grant = {
+      plugin: 'drive',
+      plugin_url: 'https://drive.example/mcp',
+      resource: 'https://drive.example/mcp',
+      issuer: 'https://auth.example',
+      token_endpoint: 'https://auth.example/token',
+      client_id: 'client-1',
+    }
+    const sealed = sealSecret(
+      kek,
+      JSON.stringify({ access_token: 'oauth-access-token-7', refresh_token: 'oauth-refresh-token-8', client_secret: 'oauth-client-secret-9' }),
+      grantAad(grant),
+    )
+    await db.sql`
+      INSERT INTO ai_plugin_oauth
+        (plugin, plugin_url, resource, issuer, token_endpoint, client_id, auth_method, registration, scope,
+         secret_sealed, dek_sealed, kek_id, has_refresh, access_expires_at, status, last_error, grant_id,
+         connected_by, connected_at, refreshed_at)
+      VALUES (${grant.plugin}, ${grant.plugin_url}, ${grant.resource}, ${grant.issuer}, ${grant.token_endpoint},
+              ${grant.client_id}, 'client_secret_post', 'configured', NULL, ${sealed.secretSealed}, ${sealed.dekSealed},
+              ${sealed.kekId}, true, NULL, 'connected', NULL, ${'00000000-0000-4000-8000-000000000001'}, 'test', now(), NULL)`
+    for (const value of ['oauth-access-token-7', 'oauth-refresh-token-8', 'oauth-client-secret-9']) {
+      await put(s.id, `${value}.txt`, `x ${value} y`)
+      expect((await download(`${value}.txt`, `?expected_sha256=${sha(`x ${value} y`)}`)).status, value).toBe(422)
+    }
+    await put(s.id, 'clean.txt', 'nothing secret here')
+    expect((await download('clean.txt', `?expected_sha256=${sha('nothing secret here')}`)).status).toBe(200)
     // A plain download (the panel's) is as before.
     expect((await download('leak.txt', '')).status).toBe(200)
   })

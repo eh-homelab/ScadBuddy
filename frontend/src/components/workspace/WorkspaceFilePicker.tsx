@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FileIcon, FileImageIcon, FolderOpenIcon } from 'lucide-react'
 import { ApiError, api } from '../../api/client'
 import type { PickerFile, PickerSession, ResourceRef } from '../../api/types'
@@ -8,6 +8,7 @@ import { formatBytes } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
 import { sourceLabel } from '../../lib/workspaceFiles'
 import { useAsync } from '../../lib/useAsync'
+import { useSeen } from '../../lib/useSeen'
 import { Spinner } from '../ui/spinner'
 import { Button } from '@/components/ui/button'
 import {
@@ -26,6 +27,8 @@ import { cn } from '@/lib/utils'
 export const SEARCH_DEBOUNCE_MS = 250
 /** The largest image the picker loads as a thumbnail. */
 export const THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
+/** The most thumbnails read at once; the rest wait for a turn. */
+export const THUMBNAILS_AT_ONCE = 4
 const THUMBNAIL_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 /** Which workspace file was picked: the bytes came from this path at this sha256. */
@@ -112,8 +115,11 @@ export function WorkspaceFilePicker({
       blob = await api.pickAiSessionFile(session.id, file.path, file.sha256)
     } catch (caught) {
       setBusy(null)
-      if (caught instanceof ApiError && (caught.status === 409 || caught.status === 404)) {
+      if (caught instanceof ApiError && caught.status === 409) {
         setError(`${file.path} changed after the list was shown, so it was not used. The list now shows the current files.`)
+        listed.reload()
+      } else if (caught instanceof ApiError && caught.status === 404) {
+        setError(`${file.path} is gone: the file or its session was deleted after the list was shown. The list now shows what is left.`)
         listed.reload()
       } else {
         setError(failure(caught))
@@ -299,18 +305,38 @@ function SessionEntry({
   )
 }
 
-/** A small image of a picture file, read from the workspace; an icon for anything else. */
+let thumbnailsRunning = 0
+const thumbnailsWaiting: (() => void)[] = []
+
+/** Runs `task` once fewer than THUMBNAILS_AT_ONCE thumbnail reads are under way. */
+async function nextThumbnail<T>(task: () => Promise<T>): Promise<T> {
+  if (thumbnailsRunning >= THUMBNAILS_AT_ONCE) await new Promise<void>((go) => thumbnailsWaiting.push(go))
+  thumbnailsRunning += 1
+  try {
+    return await task()
+  } finally {
+    thumbnailsRunning -= 1
+    thumbnailsWaiting.shift()?.()
+  }
+}
+
+/**
+ * A small image of a picture file, read from the workspace once its row comes into view
+ * (`useSeen`), at most THUMBNAILS_AT_ONCE reads at a time; an icon for anything else.
+ */
 function Thumbnail({ sessionId, file }: { sessionId: string; file: PickerFile }) {
   const shows = THUMBNAIL_TYPES.has(file.media_type) && file.size <= THUMBNAIL_MAX_BYTES && file.unavailable === null
+  const box = useRef<HTMLSpanElement>(null)
+  const seen = useSeen(box)
   const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
-    if (!shows) return
+    if (!shows || !seen) return
     let made: string | null = null
     let live = true
-    api
-      .getAiSessionFile(sessionId, file.path)
+    // A row closed while it waited for its turn reads nothing.
+    nextThumbnail(async () => (live ? await api.getAiSessionFile(sessionId, file.path) : null))
       .then((blob) => {
-        if (!live) return
+        if (!live || !blob) return
         made = URL.createObjectURL(blob)
         setUrl(made)
       })
@@ -320,12 +346,17 @@ function Thumbnail({ sessionId, file }: { sessionId: string; file: PickerFile })
       live = false
       if (made) URL.revokeObjectURL(made)
     }
-  }, [shows, sessionId, file.path, file.sha256])
-  if (url) return <img src={url} alt="" className="size-full object-cover" draggable={false} />
-  return file.media_type.startsWith('image/') ? (
-    <FileImageIcon aria-hidden="true" className="size-4 text-muted-foreground" />
-  ) : (
-    <FileIcon aria-hidden="true" className="size-4 text-muted-foreground" />
+  }, [shows, seen, sessionId, file.path, file.sha256])
+  return (
+    <span ref={box} className="grid size-full place-items-center">
+      {url ? (
+        <img src={url} alt="" className="size-full object-cover" draggable={false} />
+      ) : file.media_type.startsWith('image/') ? (
+        <FileImageIcon aria-hidden="true" className="size-4 text-muted-foreground" />
+      ) : (
+        <FileIcon aria-hidden="true" className="size-4 text-muted-foreground" />
+      )}
+    </span>
   )
 }
 

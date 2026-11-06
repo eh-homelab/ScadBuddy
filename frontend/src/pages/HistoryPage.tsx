@@ -8,7 +8,7 @@ import { ArrangedNext } from '../components/ArrangedNext'
 import { LazyArrangedPlates } from '../components/ArrangedPlates'
 import { BlobDownload } from '../components/BlobDownload'
 import { BomTable } from '../components/BomTable'
-import { MediaPicker } from '../components/media/MediaPicker'
+import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
 import { ColorStrip } from '../components/ColorStrip'
 import { statusLabel } from '../components/prints/status'
 import { PrintPicker } from '../components/PrintPicker'
@@ -1018,22 +1018,18 @@ function OutputRow({
         </div>
       </div>
 
-      <MediaPicker
+      <FileUploadDialog
         open={replacingThumbnail}
         title={`Replace the thumbnail of ${label}`}
         description="A PNG image. It replaces the picture History and the print dialog show for this output."
         onClose={() => setReplacingThumbnail(false)}
-        sections={[]}
-        onPick={() => undefined}
-        upload={{
-          accept: '.png,image/png',
-          hint: 'PNG only',
-          onFile: async (file) => {
-            await api.putThumbnail(output.id, file)
-            onRenamed(await api.getOutput(output.id))
-          },
-          workspace: { resource: { type: 'output', id: output.id }, label: 'this output' },
+        accept=".png,image/png"
+        hint="PNG only"
+        onFile={async (file) => {
+          await api.putThumbnail(output.id, file)
+          onRenamed(await api.getOutput(output.id))
         }}
+        workspace={{ resource: { type: 'output', id: output.id }, label: 'this output' }}
       />
 
       <div className="border-t pt-2.5">

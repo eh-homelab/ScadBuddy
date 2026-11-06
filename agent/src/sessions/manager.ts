@@ -560,6 +560,17 @@ export type ListFilter = {
    * leaves them out), the only ones listed (`only`, the archive view), or both (`include`).
    */
   archived?: 'exclude' | 'only' | 'include'
+  /**
+   * #4703 — only sessions whose title, or the path of a file in whose workspace, holds this
+   * text, ignoring case (the workspace file picker's search). Matched before `limit`, so an
+   * older match is found.
+   */
+  search?: string
+}
+
+/** `text` as a literal part of an ILIKE pattern: its `%`, `_` and backslash match themselves. */
+export function likeLiteral(text: string): string {
+  return text.replace(/[\\%_]/g, (c) => `\\${c}`)
 }
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
@@ -889,6 +900,15 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
       match = `r.resource_type = $${params.length - 1} AND r.resource_id = $${params.length}`
     }
     where.push(`EXISTS (SELECT 1 FROM ai_session_resources r WHERE r.session_id = ai_sessions.id AND ${match})`)
+  }
+  if (filter.search) {
+    params.push(`%${likeLiteral(filter.search)}%`)
+    const n = params.length
+    // The files by their primary key's prefix (`workspace`, ai_session_files).
+    where.push(
+      `(title ILIKE $${n} OR EXISTS (SELECT 1 FROM ai_session_files f ` +
+        `WHERE f.workspace = 'session:' || ai_sessions.id::text AND f.path ILIKE $${n}))`,
+    )
   }
   params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
   const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}

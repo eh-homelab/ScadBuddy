@@ -47,7 +47,8 @@ import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { PluginOAuth } from './plugins/oauthStore.js'
-import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { readPluginSecrets } from './plugins/secrets.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
@@ -92,7 +93,7 @@ import { TurnHost } from './sessions/turnHost.js'
 import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
-import { forwardPackageServers, packageHeaderSecrets } from './plugins/packages/mcp.js'
+import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
@@ -782,27 +783,19 @@ const durableCredentialSecrets = async () => {
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
 /**
- * What a ToolCall's tool redacts beside the credentials (plan 2026-10-13 Step 9.2): the header
- * values of the remote plugins and package http servers a turn reaches, as the turn redacts them,
- * read from their stores alone: no address check, no forwarder route, no plugin contacted. The
- * turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (Step 9.3).
+ * What a ToolCall's tool redacts and refuses to upload beside the credentials (plan 2026-10-13
+ * Step 9.2): the plugin secrets the agent holds (plugins/secrets.ts `readPluginSecrets`: remote
+ * plugins' and package http servers' header values, and OAuth sign-ins' tokens), read from their
+ * stores alone. The turn's own forwarder URLs never reach Claude Code with the turn's tools
+ * proxied (Step 9.3). A workspace file picked in the UI is searched for the same (#4703).
  */
-const readHeaderSecrets = async (): Promise<string[]> => {
-  const out: string[] = []
-  if (plugins) {
-    const { plugins: enabled } = await plugins.enabled(kek.ok ? kek.kek : undefined)
-    for (const plugin of enabled) if (plugin.header) out.push(...headerSecretVariants(plugin.header.value))
-  }
-  if (pluginPackages) {
-    const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
-    try {
-      out.push(...packageHeaderSecrets(loaded.loaded))
-    } finally {
-      loaded.release()
-    }
-  }
-  return out
-}
+const readHeaderSecrets = (): Promise<string[]> =>
+  readPluginSecrets({
+    kek: kek.ok ? kek.kek : undefined,
+    plugins,
+    oauth: pluginOAuth,
+    ...(pluginPackages ? { packages: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
+  })
 /** How long one read of them serves every ToolCall's tool: a header changed since is redacted once it lapses. */
 const HEADER_SECRETS_MS = 30_000
 let headerSecrets: { at: number; read: Promise<string[]> } | undefined
@@ -1180,8 +1173,9 @@ const app = !role.http
   ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
-  // A file picked from a workspace (#4703) is refused when it holds one of these.
-  ...(toolServices.secrets ? { workspaceSecrets: toolServices.secrets } : {}),
+  // A file picked from a workspace (#4703) is refused when it holds one of these: every saved
+  // Claude credential and every plugin secret, as a turn's upload tools search for them.
+  workspaceSecrets: async () => [...((await toolServices.secrets?.()) ?? []), ...(await readHeaderSecrets())],
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),

@@ -21,7 +21,9 @@ import { LIST_LIMIT_MAX } from './sessions.js'
 // each listed even when it holds no file the target takes. Without them ("Advanced"):
 // every session the browser user may see, archived ones too, but only those that
 // hold a file the target takes (or whose title matches `q`). Newest first, at most
-// `limit` sessions (100; at most 500), searched in that window.
+// `limit` sessions (100; at most 500). `q` is matched in the session list's own query
+// (SessionManager.list `search`: titles, and the paths in ai_session_files) before the
+// limit, so an older session that matches is found.
 //
 // `accept` is the target's own file input `accept` (a comma list of `.ext`,
 // `type/subtype` and `type/*`); only files it takes are listed, and `other_files`
@@ -128,7 +130,11 @@ export function registerWorkspacePickerRoutes(app: Hono, deps: WorkspacePickerDe
     const limit = limitOf(c.req.query('limit'))
     if (limit === undefined) return c.json({ detail: `limit must be an integer from 1 to ${LIST_LIMIT_MAX}` }, 400)
 
-    const listed = await deps.sessions.list(browserUser(c), resource ? { resource, limit } : { archived: 'include', limit })
+    const listed = await deps.sessions.list(browserUser(c), {
+      ...(resource ? { resource } : { archived: 'include' as const }),
+      ...(q ? { search: q } : {}),
+      limit,
+    })
     const byId = await deps.workspace.listSessions(listed.map((s) => s.id))
     const anySealed = [...byId.values()].some((files) => files.some((f) => f.sealed))
     const unreadable = anySealed ? await deps.workspace.sealedUnreadable() : undefined

@@ -47,7 +47,7 @@ import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { LibraryCopyDialog } from '../components/library/LibraryCopyDialog'
-import { MediaPicker } from '../components/media/MediaPicker'
+import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Spinner } from '../components/ui/spinner'
@@ -847,23 +847,19 @@ export function LibraryPage() {
         onRan={() => (printing ? undefined : setArrangedSent(true))}
       />
       <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
-      <MediaPicker
+      <FileUploadDialog
         open={uploading}
         title={`Upload into ${folder ? folderLabel(tree ?? [], folder.id) : 'the top level'}`}
         description="The file keeps its name in the library."
         onClose={() => setUploading(false)}
-        sections={[]}
-        onPick={() => undefined}
-        upload={{
-          // Any file, as the library takes any: a 3MF or G-code prints from it.
-          accept: '',
-          hint: 'Any file. A sliced 3MF or G-code can be printed from the library.',
-          onFile: async (file) => {
-            await api.uploadLibraryFile(file, folder?.id ?? null)
-            setReload((n) => n + 1)
-          },
-          workspace: { resource: null, label: 'this folder' },
+        // Any file, as the library takes any: a 3MF or G-code prints from it.
+        accept=""
+        hint="Any file. A sliced 3MF or G-code can be printed from the library."
+        onFile={async (file) => {
+          await api.uploadLibraryFile(file, folder?.id ?? null)
+          setReload((n) => n + 1)
         }}
+        workspace={{ resource: null, label: 'this folder' }}
       />
       <LibraryCopyDialog
         open={copying}
