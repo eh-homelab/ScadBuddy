@@ -1,11 +1,12 @@
 """The projects worker's CRUD routes served for a test (#5298): the routes of
-`api/crud_projects.py` over a real `FlowStore` and `api/crud_areas.py`, behind the real
-`auth_check` and gate and the CRUD listener on a local port, and a `RemoteFlowStore`
-that reaches them with an in-process credential, as the projects worker does."""
+`api/crud_projects.py` over a real `FlowStore` and `OperationStore` and `api/crud_areas.py`,
+behind the real `auth_check` and gate and the CRUD listener on a local port, and a
+`RemoteFlowStore` that reaches them with an in-process credential, as the projects worker
+does."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +29,10 @@ from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
+from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.store import OperationStore
 
 
 class _Noted:
@@ -40,17 +45,26 @@ class _NoSessions:
 
 
 def crud_app(
-    store: FlowStore, credentials: ServiceCredentialStore, *, client: Client | None = None
+    store: FlowStore,
+    credentials: ServiceCredentialStore,
+    *,
+    client: Client | None = None,
+    operations: OperationStore | None = None,
+    kinds: Mapping[str, OperationKind] | None = None,
+    settings_store: SettingsStore | None = None,
 ) -> FastAPI:
-    """The routes with the flows component's `store` and Temporal `client` (a Reset's)."""
+    """The routes with the flows component's `store` and Temporal `client` (a Reset's),
+    the operations component's store and `kinds`, and the API's `settings_store`."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
         FLOWS: SimpleNamespace(store=store, client=client),
+        OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
         components=SimpleNamespace(get=lambda key: parts[key]),
+        settings_store=settings_store,
     )
     app.include_router(crud_projects.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
@@ -60,13 +74,26 @@ def crud_app(
 
 
 @asynccontextmanager
-async def served_flow_store(
-    store: FlowStore, *, client: Client | None = None, **options: Any
-) -> AsyncIterator[RemoteFlowStore]:
-    """`RemoteFlowStore` over `crud_app` on a local port, its credential minted in process
-    on `store`'s schema; `options` are the `CrudClient`'s."""
+async def served_crud(
+    store: FlowStore,
+    *,
+    client: Client | None = None,
+    operations: OperationStore | None = None,
+    kinds: Mapping[str, OperationKind] | None = None,
+    settings_store: SettingsStore | None = None,
+    **options: Any,
+) -> AsyncIterator[CrudClient]:
+    """A projects `CrudClient` of `crud_app` on a local port, its credential minted in
+    process on `store`'s schema; `options` are the `CrudClient`'s."""
     credentials = ServiceCredentialStore(store._pool)
-    app = crud_app(store, credentials, client=client)
+    app = crud_app(
+        store,
+        credentials,
+        client=client,
+        operations=operations,
+        kinds=kinds,
+        settings_store=settings_store,
+    )
     await listener.start(app, 0)
     crud = CrudClient(
         f"http://127.0.0.1:{listener.crud_listener_port(app)}",
@@ -75,7 +102,16 @@ async def served_flow_store(
         **options,
     )
     try:
-        yield RemoteFlowStore(crud)
+        yield crud
     finally:
         await crud.aclose()
         await listener.stop(app)
+
+
+@asynccontextmanager
+async def served_flow_store(
+    store: FlowStore, *, client: Client | None = None, **options: Any
+) -> AsyncIterator[RemoteFlowStore]:
+    """`RemoteFlowStore` over `served_crud`."""
+    async with served_crud(store, client=client, **options) as crud:
+        yield RemoteFlowStore(crud)
