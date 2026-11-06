@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -173,6 +174,18 @@ async def test_a_fresh_start_on_a_completed_row_starts_a_row_of_its_own(
     assert await _start(store, fresh=True) == fresh.id
     # A run of the same choices joins the running fresh slice.
     assert await _start(store) == fresh.id
+
+
+async def test_fresh_starts_at_once_on_a_completed_row_make_one_row(
+    store: NativeSliceStore,
+) -> None:
+    """#5456: the key's starts take one lock, so Reslices that land together on a
+    completed row make one new row, and every one of them answers it."""
+    old = await _start(store)
+    await _completed(store, old)
+    ids = await asyncio.gather(*(_start(store, fresh=True) for _ in range(8)))
+    assert len(set(ids)) == 1
+    assert ids[0] != old
 
 
 async def test_a_failed_fresh_slice_leaves_the_completed_row(store: NativeSliceStore) -> None:
