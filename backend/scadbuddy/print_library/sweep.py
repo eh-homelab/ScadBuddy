@@ -196,7 +196,9 @@ async def _sweep_subjects(
     copies = await uploads.for_outputs(subjects, native=True)
     by_use = await uploads.copies_by_use(subjects)
     # The recorded copies not among this page's marked files: unmarked, theirs if live
-    # (moved, restored), else gone; or marked by a subject on another page.
+    # (moved, restored), else gone; or still marked: by a subject on another page, or by
+    # this page's subject and uploaded after the first read (a dialog or quote slice's
+    # copy, #5189).
     unmarked = [c.id for found in copies.values() for c in found if c.id not in files]
     live = {f.id: f for f in await asyncio.to_thread(native.rows.files_by_ids, unmarked)}
     there = await asyncio.to_thread(native.rows.existing, unmarked)
@@ -215,8 +217,10 @@ async def _sweep_subjects(
             row = files.get(copy.id)
             found = live.get(copy.id)
             if row is None and found is not None and found.print_subject is not None:
-                # Marked by another subject, one on another page (#5156): that subject
-                # judges it, as the guard below does within a page. Never released.
+                # Still marked, so never released: marked by a subject on another page
+                # (#5156), which judges it, as the guard below does within a page; or by
+                # this subject, uploaded after the first read (a dialog or quote slice's
+                # copy, #5189), which the next pass judges.
                 continue
             if row is None and copy.id not in live:
                 # Trashed, which a restore may undo; or purged, and then its slices have

@@ -599,25 +599,40 @@ async def test_a_run_that_takes_the_subject_up_under_the_lock_keeps_its_copies(
     assert done.superseded == 0 and live(native, old)
 
 
+@pytest.mark.parametrize("count", [3, 2])
 async def test_a_pass_reads_its_subjects_a_page_at_a_time(
-    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    payload: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
 ) -> None:
     """#5156: each read takes a page of subjects, and every page is swept: a subject on
-    the last page gets the same judgement as one on the first."""
-    subjects = [f"out-page-{n}" for n in range(3)]
+    the last page gets the same judgement as one on the first. A short page is the last
+    read; a full one (exactly ``page`` subjects) takes one more read, which finds none,
+    and the pass stops there."""
+    subjects = [f"out-page-{n}" for n in range(count)]
     olds: list[int] = []
     news: list[int] = []
     for key in subjects:
         olds.append(await copy_of(native, uploads, payload, key=key))
         news.append(await copy_of(native, uploads, payload, target=X1C, key=key))
+    read = native.rows.print_subjects
+    reads: list[tuple[str | None, list[str]]] = []
+
+    def print_subjects(after: str | None, limit: int) -> list[str]:
+        found = read(after, limit)
+        reads.append((after, found))
+        return found
+
+    monkeypatch.setattr(native.rows, "print_subjects", print_subjects)
 
     done = await sweep(native, uploads, page=2)
 
     assert done.superseded == len(subjects)
     assert all(trashed(native, i) for i in olds)
     assert all(live(native, i) for i in news)
-    assert native.rows.print_subjects(None, 2) == subjects[:2]
-    assert native.rows.print_subjects(subjects[1], 2) == subjects[2:]
+    assert reads == [(None, subjects[:2]), (subjects[1], subjects[2:])]
 
 
 async def test_a_copy_marked_by_a_subject_on_another_page_is_never_released(
@@ -639,3 +654,31 @@ async def test_a_copy_marked_by_a_subject_on_another_page_is_never_released(
     assert [c.id for c in await uploads.for_output(KEY, native=True)] == [shared]
     assert shared in {c.id for c in await uploads.for_output(OTHER, native=True)}
     assert live(native, others)
+
+
+async def test_a_copy_its_subject_uploads_after_the_read_is_never_released(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5416: a dialog or quote slice (#5189) uploads a copy with no run after the page's
+    marked files were read. The copy is recorded under the subject and marked by it, but
+    not among the files read: it is never released, and the next pass judges it."""
+    old = await copy_of(native, uploads, payload)
+    new: list[int] = []
+
+    async def subjects_in_use() -> set[str]:
+        if not new:
+            new.append(await copy_of(native, uploads, payload, target=X1C))
+        return set()
+
+    done = await sweep_print_copies(
+        native, uploads, subjects_in_use, no_slices, now=datetime.now(UTC), reuse_grace=NONE
+    )
+
+    assert done == CopySweep(superseded=0, orphans=0, released=0)
+    [copy_id] = new
+    row = native.rows.file(copy_id)
+    assert row is not None and row.print_subject == KEY
+    assert copy_id in {c.id for c in await uploads.for_output(KEY, native=True)}
+    assert live(native, old)
+    assert (await sweep(native, uploads)).superseded == 1
+    assert trashed(native, old) and live(native, copy_id)
