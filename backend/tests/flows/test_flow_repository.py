@@ -458,11 +458,14 @@ def test_a_details_write_swaps_flow_json_in_whole(
 
 
 def test_a_details_write_leaves_flow_json_readable_by_others(history: FlowHistory) -> None:
-    """The swapped-in ``flow.json`` is 0644, as a plain write left it, not mkstemp's
-    0600 (#5372)."""
+    """The swapped-in ``flow.json`` has the mode a plain write gives (0666 less the
+    umask, 0644 under 022), not mkstemp's 0600 (#5372, #5382)."""
     register(history, "swap", ONE)
     history.set_details("swap", display_name="Name")
-    assert (history.root / "swap" / "flow.json").stat().st_mode & 0o777 == 0o644
+    plain = history.root / "plain"
+    plain.write_text("")
+    expected = plain.stat().st_mode & 0o777
+    assert (history.root / "swap" / "flow.json").stat().st_mode & 0o777 == expected
 
 
 def test_a_failed_details_swap_leaves_flow_json_and_no_temp_file(
