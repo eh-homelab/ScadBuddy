@@ -565,5 +565,10 @@ def test_the_umask_is_read_without_setting_it(
 
     plain = tmp_path / "plain"
     plain.write_text("")
+    # A new directory's mode shows the umask's execute bits too, which a file's cannot.
+    folder = tmp_path / "folder"
+    folder.mkdir()
     monkeypatch.setattr("scadbuddy.flows.repository.os.umask", refuse)
-    assert 0o666 & ~repository._umask() == plain.stat().st_mode & 0o777
+    mask = repository._umask()
+    assert 0o666 & ~mask == plain.stat().st_mode & 0o777
+    assert 0o777 & ~mask == folder.stat().st_mode & 0o777
