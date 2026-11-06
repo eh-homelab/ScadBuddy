@@ -3383,19 +3383,27 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
   })
 
   it('gives up following after its budget, saying it may still start (review #2849)', async () => {
+    // The budget's clock moves only when a follow is answered, so a slow machine cannot
+    // spend it before the first follow (#5379): the third answer ends it.
+    let clock = 0
     let follows = 0
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
+        clock += 10
         return acceptingAnswer('op-delete_output-x', 'k')
       }),
     )
-    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 30, now: () => clock }),
+    )
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('ScadBuddy is still starting it')
-    expect(follows).toBeGreaterThan(0)
+    expect(follows).toBe(3)
   })
 
   it('takes no pause that would end past its budget (#3039)', async () => {
