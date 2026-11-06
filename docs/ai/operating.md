@@ -1801,8 +1801,11 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   - The body is read as a stream and stopped at `workspace_file_max_bytes` (`413`); a
     `Content-Length` over it is refused unread. The quota and the file count apply as to
     any write (`413`). An empty body is `400`; a `Content-Length: 0` is refused before the
-    caps or the body are read. A `Content-Length` that is not a byte count is `400`. A
-    form body (`multipart/form-data` or
+    caps or the body are read. A `Content-Length` that is not a byte count is `400`:
+    Node's HTTP parser answers it with a bare `400` before the route runs, so the
+    route's own audited `400` is a second guard (measured on Node 24.21.0: a raw
+    `Content-Length: 12abc` request got `HTTP/1.1 400 Bad Request` and never reached the
+    handler; #5467). A form body (`multipart/form-data` or
     `application/x-www-form-urlencoded`) or a `Content-Encoding` is `415`.
   - The stored type is ScadBuddy's own guess (the image signature, then the extension,
     then text or not), never the client's `Content-Type`. When the name's extension, the
