@@ -5,6 +5,7 @@ directory), the ServiceAccount map, and the callers' readers."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -22,10 +23,12 @@ from scadbuddy.auth.exchange import (
     AUDIENCE,
     BootstrapConfigError,
     BootstrapVerifier,
+    ProofLimiter,
     TokenReviewVerifier,
     VerifiedProof,
     VerifierUnavailableError,
     caller_for_service_account,
+    claimed_caller,
 )
 from scadbuddy.auth.models import Service
 from scadbuddy.auth.service_credentials import (
@@ -48,6 +51,76 @@ from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, PgPool
 
 KEK = Kek("k1", os.urandom(32))
 NAMESPACE = "bambuddy"
+
+
+def _b64(data: dict[str, Any]) -> str:
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+
+
+def fake_jwt(service_account: str, *, nonce: str = "", namespace: str = NAMESPACE) -> str:
+    """A token shaped like a projected one; its signature is junk, as nothing here checks it."""
+    claims = {
+        "aud": [AUDIENCE],
+        "sub": f"system:serviceaccount:{namespace}:{service_account}",
+        "kubernetes.io": {"namespace": namespace, "serviceaccount": {"name": service_account}},
+        "nonce": nonce,
+    }
+    return f"{_b64({'alg': 'RS256'})}.{_b64(claims)}.c2lnbmF0dXJl"
+
+
+# The claimed caller (an unverified bucket key) and the refusal limits.
+
+
+@pytest.mark.parametrize(
+    ("token", "claimed"),
+    [
+        (fake_jwt("scadbuddy-print"), "print"),
+        (fake_jwt("scadbuddy"), "agent"),
+        # Only `sub` names it.
+        (
+            f"{_b64({})}.{_b64({'sub': 'system:serviceaccount:bambuddy:scadbuddy-render'})}.x",
+            "render",
+        ),
+        # Anything else shares one bucket, so a forger cannot grow the table.
+        (fake_jwt("pgadmin"), "unknown"),
+        (fake_jwt("scadbuddy-print", namespace="other"), "unknown"),
+    ],
+)
+def test_the_claimed_caller_of_a_jwt(token: str, claimed: str) -> None:
+    assert claimed_caller(token, NAMESPACE) == claimed
+
+
+@pytest.mark.parametrize(
+    "token", ["jwt", "a.b", "a.!!!.c", f"a.{_b64({'x': 1})[:-1]}%.c", "a.WzFd.c"]
+)
+def test_a_token_that_is_not_a_jwt_claims_nothing(token: str) -> None:
+    assert claimed_caller(token, NAMESPACE) is None
+
+
+def test_the_verifier_budget_is_60_a_minute() -> None:
+    clock = Clock()
+    limiter = ProofLimiter(clock=clock)
+    for _ in range(60):
+        assert limiter.spend() is None
+    wait = limiter.spend()
+    assert wait == 60
+    clock.now += 30
+    assert limiter.spend() == 30
+    clock.now += 30
+    assert limiter.spend() is None
+
+
+def test_more_than_ten_refusals_a_minute_limit_the_claimed_caller() -> None:
+    clock = Clock()
+    limiter = ProofLimiter(clock=clock)
+    for _ in range(10):
+        assert limiter.check("print") is None
+        limiter.refused("print")
+    assert limiter.check("print") == 60
+    # Another caller's bucket is its own.
+    assert limiter.check("agent") is None
+    clock.now += 60
+    assert limiter.check("print") is None
 
 
 # The ServiceAccount map (§6.1).
@@ -485,6 +558,8 @@ def test_the_reader_exchanges_and_renews_at_half_life(tmp_path: Path) -> None:
         "grant_type": ["urn:ietf:params:oauth:grant-type:token-exchange"],
         "subject_token": ["jwt-1"],
         "subject_token_type": ["urn:ietf:params:oauth:token-type:jwt"],
+        # Names the refusal bucket a bootstrap proof is limited in; never believed.
+        "client_id": ["print"],
     }
     clock.now += 449
     assert reader.token() == first

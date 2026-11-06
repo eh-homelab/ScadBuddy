@@ -96,7 +96,12 @@ describe('ServiceCredential', () => {
 
 // #5494 (spec 2026-11-05 §6.3, §8 step 1): the exchange against a fake backend route.
 
-type Exchange = { grant_type: string | null; subject_token: string | null; subject_token_type: string | null }
+type Exchange = {
+  grant_type: string | null
+  subject_token: string | null
+  subject_token_type: string | null
+  client_id: string | null
+}
 
 function fakeBackend() {
   const state = {
@@ -114,6 +119,7 @@ function fakeBackend() {
       grant_type: form.get('grant_type'),
       subject_token: form.get('subject_token'),
       subject_token_type: form.get('subject_token_type'),
+      client_id: form.get('client_id'),
     })
     if (state.status !== 200) {
       return new Response('{}', {
@@ -163,6 +169,7 @@ describe('ExchangeCredential', () => {
         grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
         subject_token: 'jwt-1',
         subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+        client_id: 'agent',
       },
     ])
     clock.now = 449_000

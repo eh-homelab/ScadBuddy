@@ -495,7 +495,13 @@ The API takes a proof only when its own variable is set. The ServiceAccounts it 
 `scadbuddy-agent-worker` and `scadbuddy` (both `agent`); `default`, any other
 ServiceAccount and any other namespace are refused, and so is a token bound to no pod.
 Each Kubernetes credential is bound to its pod's name and uid. The route answers at most 6
-exchanges a minute per pod and 30 per caller, then `429` with `Retry-After`. The counter
+exchanges a minute per pod and 30 per caller, then `429` with `Retry-After`. Refused
+proofs are limited before any TokenReview, in each API process's memory. At most 60
+proofs a minute reach a verifier; a token that is not a JWT is refused but counts. A
+claimed caller (the JWT's unverified ServiceAccount claim, or a bootstrap request's
+`client_id`) with 10 refused proofs in a minute gets `429` for the rest of that minute,
+even for its real proof. A bootstrap `client_id` that differs from the proved caller is
+refused. The counter
 `scadbuddy_service_token_exchanges_total{caller, proof, result}` counts them. An exchange
 the API answers `404` (an older API pod during a roll) falls back to the view while the
 caller still has a database URL. The API's own in-process `projects` worker gets its

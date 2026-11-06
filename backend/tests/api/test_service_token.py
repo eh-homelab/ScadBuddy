@@ -18,9 +18,15 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.auth.component import AUTH
 from scadbuddy.core.settings import Settings
-from tests.auth.test_service_token_exchange import POD_EXTRA, FakeApiserver, _verifier
+from tests.auth.test_service_token_exchange import POD_EXTRA, FakeApiserver, _verifier, fake_jwt
 
 PUBLIC = "https://scadbuddy.test"
+# Shaped like projected tokens: the route reads the claimed ServiceAccount, unverified, to
+# pick a refusal bucket; only the fake apiserver decides who a token is.
+JWT_PRINT = fake_jwt("scadbuddy-print")
+JWT_RENDER = fake_jwt("scadbuddy-render")
+JWT_DEFAULT = fake_jwt("default")
+JWT_UNKNOWN = fake_jwt("scadbuddy-print", nonce="forged")
 GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 JWT = "urn:ietf:params:oauth:token-type:jwt"
 BOOTSTRAP = "urn:scadbuddy:params:token-type:bootstrap"
@@ -48,9 +54,9 @@ def settings(settings: Settings, tmp_path: Path) -> Settings:
 @pytest.fixture
 def apiserver() -> FakeApiserver:
     server = FakeApiserver()
-    server.add("jwt-print", "system:serviceaccount:bambuddy:scadbuddy-print")
-    server.add("jwt-render", "system:serviceaccount:bambuddy:scadbuddy-render")
-    server.add("jwt-default", "system:serviceaccount:bambuddy:default")
+    server.add(JWT_PRINT, "system:serviceaccount:bambuddy:scadbuddy-print")
+    server.add(JWT_RENDER, "system:serviceaccount:bambuddy:scadbuddy-render")
+    server.add(JWT_DEFAULT, "system:serviceaccount:bambuddy:default")
     return server
 
 
@@ -63,11 +69,17 @@ def client(app: FastAPI, apiserver: FakeApiserver, tmp_path: Path) -> Iterator[T
         yield test_client
 
 
-def _exchange(client: TestClient, token: str, token_type: str = JWT, grant: str = GRANT):  # type: ignore[no-untyped-def]
-    return client.post(
-        "/api/v1/auth/service-token",
-        data={"grant_type": grant, "subject_token": token, "subject_token_type": token_type},
-    )
+def _exchange(  # type: ignore[no-untyped-def]
+    client: TestClient,
+    token: str,
+    token_type: str = JWT,
+    grant: str = GRANT,
+    client_id: str | None = None,
+):
+    data = {"grant_type": grant, "subject_token": token, "subject_token_type": token_type}
+    if client_id is not None:
+        data["client_id"] = client_id
+    return client.post("/api/v1/auth/service-token", data=data)
 
 
 def _count(app: FastAPI, name: str, labels: dict[str, str]) -> float:
@@ -78,7 +90,7 @@ def _count(app: FastAPI, name: str, labels: dict[str, str]) -> float:
 def test_a_pod_token_is_exchanged_for_a_15_minute_credential(
     client: TestClient, app: FastAPI
 ) -> None:
-    response = _exchange(client, "jwt-print")
+    response = _exchange(client, JWT_PRINT)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["token_type"] == "Bearer"
@@ -115,7 +127,7 @@ def test_a_pod_token_is_exchanged_for_a_15_minute_credential(
 
 
 def test_the_render_credential_reaches_nothing_else(client: TestClient, app: FastAPI) -> None:
-    token = _exchange(client, "jwt-render").json()["access_token"]
+    token = _exchange(client, JWT_RENDER).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
     client.get("/api/v1/internal/outputs/nope/model.3mf", headers=headers)
     client.get("/api/v1/models", headers=headers)
@@ -133,7 +145,7 @@ def test_the_render_credential_reaches_nothing_else(client: TestClient, app: Fas
     )
 
 
-@pytest.mark.parametrize("token", ["jwt-default", "jwt-unknown"])
+@pytest.mark.parametrize("token", [JWT_DEFAULT, JWT_UNKNOWN])
 def test_a_bad_proof_is_401_and_says_nothing_more(
     client: TestClient, app: FastAPI, token: str
 ) -> None:
@@ -152,8 +164,8 @@ def test_a_bad_proof_is_401_and_says_nothing_more(
 
 
 def test_a_bad_request_is_400(client: TestClient) -> None:
-    assert _exchange(client, "jwt-print", grant="client_credentials").status_code == 400
-    assert _exchange(client, "jwt-print", token_type="urn:x").status_code == 400
+    assert _exchange(client, JWT_PRINT, grant="client_credentials").status_code == 400
+    assert _exchange(client, JWT_PRINT, token_type="urn:x").status_code == 400
     assert _exchange(client, "").status_code == 400
     assert client.post("/api/v1/auth/service-token", data={}).status_code == 400
 
@@ -176,13 +188,13 @@ def test_without_a_bootstrap_dir_the_bootstrap_proof_is_refused(
     with TestClient(app, base_url=PUBLIC) as client:
         assert _exchange(client, RENDER_SECRET, BOOTSTRAP).status_code == 401
         # Nor, outside a cluster, a JWT.
-        assert _exchange(client, "jwt-print").status_code == 401
+        assert _exchange(client, JWT_PRINT).status_code == 401
 
 
 def test_rate_limited_per_pod_with_retry_after(client: TestClient, app: FastAPI) -> None:
     for _ in range(6):
-        assert _exchange(client, "jwt-print").status_code == 200
-    response = _exchange(client, "jwt-print")
+        assert _exchange(client, JWT_PRINT).status_code == 200
+    response = _exchange(client, JWT_PRINT)
     assert response.status_code == 429, response.text
     assert 1 <= int(response.headers["retry-after"]) <= 60
     assert (
@@ -196,11 +208,11 @@ def test_rate_limited_per_pod_with_retry_after(client: TestClient, app: FastAPI)
 
 
 def test_suspend_and_resume_a_caller(client: TestClient, app: FastAPI) -> None:
-    token = _exchange(client, "jwt-print").json()["access_token"]
+    token = _exchange(client, JWT_PRINT).json()["access_token"]
     callers = client.put("/api/v1/auth/service-callers/print/suspension").json()
     (row,) = [c for c in callers if c["caller"] == "print"]
     assert row["suspended_at"] is not None
-    assert _exchange(client, "jwt-print").status_code == 401
+    assert _exchange(client, JWT_PRINT).status_code == 401
     rows = client.get("/api/v1/auth/service-credentials").json()
     assert not [r for r in rows if r["caller"] == "print" and r["live"]]
     # Its old credential is refused on the gate's lookup.
@@ -213,11 +225,11 @@ def test_suspend_and_resume_a_caller(client: TestClient, app: FastAPI) -> None:
     assert _count(app, "scadbuddy_service_token_exchanges_total", labels) == 1
     callers = client.delete("/api/v1/auth/service-callers/print/suspension").json()
     assert all(c["suspended_at"] is None for c in callers)
-    assert _exchange(client, "jwt-print").status_code == 200
+    assert _exchange(client, JWT_PRINT).status_code == 200
 
 
 def test_revoke_a_pods_credentials(client: TestClient) -> None:
-    _exchange(client, "jwt-print")
+    _exchange(client, JWT_PRINT)
     rows = client.delete(f"/api/v1/auth/service-credentials/pods/{POD_UID}").json()
     assert not [r for r in rows if r["pod_uid"] == POD_UID and r["live"]]
     assert client.delete(f"/api/v1/auth/service-credentials/pods/{POD_UID}").status_code == 404
@@ -226,3 +238,60 @@ def test_revoke_a_pods_credentials(client: TestClient) -> None:
 def test_rotate_takes_the_legacy_callers_only(client: TestClient) -> None:
     response = client.post("/api/v1/auth/service-credentials/rotate", json={"caller": "render"})
     assert response.status_code == 422
+
+
+# Refused proofs are limited before any TokenReview (review of #5498).
+
+
+def _limited(app: FastAPI, caller: str, proof: str = "k8s") -> float:
+    labels = {"caller": caller, "proof": proof, "result": "limited"}
+    return _count(app, "scadbuddy_service_token_exchanges_total", labels)
+
+
+def test_the_verifier_budget_stops_the_apiserver_calls(
+    client: TestClient, app: FastAPI, apiserver: FakeApiserver
+) -> None:
+    """60 proofs a minute reach a verifier per API process; a token that is not a JWT is
+    refused without a TokenReview but spends the budget too."""
+    for _ in range(60):
+        assert _exchange(client, "not-a-jwt").status_code == 401
+    assert apiserver.requests == []
+    response = _exchange(client, JWT_PRINT)
+    assert response.status_code == 429, response.text
+    assert 1 <= int(response.headers["retry-after"]) <= 60
+    assert apiserver.requests == []
+    assert _limited(app, "print") == 1
+
+
+def test_a_claimed_caller_with_ten_refusals_is_limited(
+    client: TestClient, app: FastAPI, apiserver: FakeApiserver
+) -> None:
+    for i in range(10):
+        forged = fake_jwt("scadbuddy-print", nonce=str(i))
+        assert _exchange(client, forged).status_code == 401
+    assert len(apiserver.requests) == 10
+    # Even its real token waits out the minute, and the apiserver is not asked.
+    response = _exchange(client, JWT_PRINT)
+    assert response.status_code == 429, response.text
+    assert 1 <= int(response.headers["retry-after"]) <= 60
+    assert len(apiserver.requests) == 10
+    assert _limited(app, "print") == 1
+    # Another caller's bucket is untouched.
+    assert _exchange(client, JWT_RENDER).status_code == 200
+
+
+def test_a_bootstrap_caller_is_limited_by_the_name_it_sends(
+    client: TestClient, app: FastAPI
+) -> None:
+    for _ in range(10):
+        wrong = secrets.token_urlsafe(32)
+        assert _exchange(client, wrong, BOOTSTRAP, client_id="render").status_code == 401
+    response = _exchange(client, RENDER_SECRET, BOOTSTRAP, client_id="render")
+    assert response.status_code == 429, response.text
+    assert _limited(app, "render", "bootstrap") == 1
+
+
+def test_a_bootstrap_secret_sent_under_another_name_is_refused(client: TestClient) -> None:
+    assert _exchange(client, RENDER_SECRET, BOOTSTRAP, client_id="print").status_code == 401
+    assert _exchange(client, RENDER_SECRET, BOOTSTRAP, client_id="nobody").status_code == 400
+    assert _exchange(client, RENDER_SECRET, BOOTSTRAP, client_id="render").status_code == 200

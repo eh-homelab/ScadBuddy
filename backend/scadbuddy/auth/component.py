@@ -27,6 +27,7 @@ from scadbuddy.auth.config import LoginConfig, LoginConfigStore
 from scadbuddy.auth.exchange import (
     BootstrapVerifier,
     ExchangeProof,
+    ProofLimiter,
     ProofVerifier,
     TokenReviewVerifier,
 )
@@ -84,6 +85,8 @@ class AuthComponent:
         # accepts, by proof. TokenReview only in a cluster with the namespace set; the
         # bootstrap secrets only with their directory set (a bad one stops the start).
         self.verifiers: dict[ExchangeProof, ProofVerifier] = {}
+        # Refused proofs are limited before any verifier is asked (review of #5498).
+        self.proof_limiter = ProofLimiter()
         review = TokenReviewVerifier.in_cluster(settings.service_account_namespace)
         if review is not None:
             self.verifiers["k8s"] = review

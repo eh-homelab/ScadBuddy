@@ -12,12 +12,18 @@ raises :class:`VerifierUnavailableError`. Nothing here logs a presented token.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
+import json
 import logging
+import math
 import os
 import ssl
-from collections.abc import Mapping
+import time
+from collections import deque
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -27,6 +33,102 @@ import httpx
 from scadbuddy.auth.service_credentials import CALLERS, ServiceCaller
 
 logger = logging.getLogger(__name__)
+
+#: Review of #5498: refused proofs are limited before any TokenReview. Per API process,
+#: at most this many proofs a minute reach a verifier ...
+VERIFIER_BUDGET = 60
+#: ... and a claimed caller with this many refusals in a minute is limited for the rest
+#: of it (all its proofs, its real one too, answer 429 without a TokenReview).
+REFUSALS_PER_CALLER = 10
+LIMIT_WINDOW = 60.0
+#: The bucket of every claim that names no caller, so a forger cannot grow the table.
+UNKNOWN = "unknown"
+
+
+class ProofLimiter:
+    """The two limits on proofs, in this process's memory (one event loop, no lock):
+    :meth:`spend` before each verifier call, :meth:`check` and :meth:`refused` per
+    claimed caller. Each answers the seconds to wait, or ``None``."""
+
+    def __init__(
+        self,
+        *,
+        budget: int = VERIFIER_BUDGET,
+        refusals: int = REFUSALS_PER_CALLER,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._budget = budget
+        self._refusals = refusals
+        self._clock = clock
+        self._spent: deque[float] = deque()
+        self._refused: dict[str, deque[float]] = {}
+
+    def _trim(self, times: deque[float], now: float) -> None:
+        while times and now - times[0] >= LIMIT_WINDOW:
+            times.popleft()
+
+    def _wait(self, times: deque[float], now: float) -> int:
+        return max(1, math.ceil(times[0] + LIMIT_WINDOW - now))
+
+    def spend(self) -> int | None:
+        """One proof reaches a verifier, or the seconds until one may."""
+        now = self._clock()
+        self._trim(self._spent, now)
+        if len(self._spent) >= self._budget:
+            return self._wait(self._spent, now)
+        self._spent.append(now)
+        return None
+
+    def check(self, claimed: str) -> int | None:
+        now = self._clock()
+        times = self._refused.get(claimed)
+        if times is None:
+            return None
+        self._trim(times, now)
+        if len(times) >= self._refusals:
+            return self._wait(times, now)
+        return None
+
+    def refused(self, claimed: str) -> None:
+        now = self._clock()
+        times = self._refused.setdefault(claimed, deque())
+        self._trim(times, now)
+        times.append(now)
+
+
+def _claims(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    try:
+        data = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        claims = json.loads(data)
+    except (binascii.Error, ValueError):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def claimed_caller(token: str, namespace: str) -> str | None:
+    """The caller a JWT's payload claims (``kubernetes.io.serviceaccount.name``, else
+    ``sub``), read WITHOUT checking its signature: only a refusal bucket's key, never who
+    the caller is. :data:`UNKNOWN` for a claim of no ScadBuddy ServiceAccount here, and
+    ``None`` for a token that is not a JWT."""
+    claims = _claims(token)
+    if claims is None:
+        return None
+    k8s = claims.get("kubernetes.io")
+    account = k8s.get("serviceaccount") if isinstance(k8s, dict) else None
+    name = account.get("name") if isinstance(account, dict) else None
+    claimed_namespace = k8s.get("namespace") if isinstance(k8s, dict) else None
+    if isinstance(name, str) and claimed_namespace == namespace:
+        username = f"system:serviceaccount:{namespace}:{name}"
+    elif isinstance(claims.get("sub"), str):
+        username = claims["sub"]
+    else:
+        return UNKNOWN
+    return caller_for_service_account(username, namespace) or UNKNOWN
+
 
 #: The audience every caller's projected token is issued for, and the only one accepted.
 AUDIENCE = "scadbuddy"
@@ -75,6 +177,11 @@ class VerifierUnavailableError(Exception):
 
 
 class ProofVerifier(Protocol):
+    def claim(self, token: str, client_id: str) -> str | None:
+        """The caller the proof claims to be, unverified: a refusal bucket's key, or
+        ``None`` for a token that cannot be a proof of this kind."""
+        ...
+
     async def verify(self, token: str) -> VerifiedProof | None: ...
 
 
@@ -133,6 +240,9 @@ class TokenReviewVerifier:
             token_file=IN_CLUSTER_TOKEN,
             ca_file=IN_CLUSTER_CA,
         )
+
+    def claim(self, token: str, client_id: str) -> str | None:
+        return claimed_caller(token, self.namespace)
 
     async def verify(self, token: str) -> VerifiedProof | None:
         try:
@@ -224,6 +334,10 @@ class BootstrapVerifier:
         if not hashes:
             logger.warning("SCADBUDDY_SERVICE_BOOTSTRAP_DIR holds no caller's secret")
         return cls(hashes)
+
+    def claim(self, token: str, client_id: str) -> str | None:
+        """The caller named in the request's ``client_id``; a bootstrap secret says nothing."""
+        return client_id if client_id in CALLERS else UNKNOWN
 
     async def verify(self, token: str) -> VerifiedProof | None:
         presented = hashlib.sha256(token.strip().encode()).digest()

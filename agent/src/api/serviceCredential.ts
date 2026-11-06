@@ -203,6 +203,8 @@ export class ExchangeCredential implements CredentialSource {
           grant_type: GRANT_TYPE,
           subject_token: proof,
           subject_token_type: TOKEN_TYPES[this.options.proof],
+          // The refusal bucket a bootstrap proof is limited in; the backend never believes it.
+          client_id: 'agent',
         }).toString(),
         signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
       })

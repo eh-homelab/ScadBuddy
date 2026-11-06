@@ -639,6 +639,8 @@ class ExchangeReader:
             "grant_type": GRANT_TYPE,
             "subject_token": proof,
             "subject_token_type": self._token_type,
+            # The refusal bucket a bootstrap proof is limited in; the API never believes it.
+            "client_id": self.caller,
         }
         try:
             with httpx.Client(transport=self._transport, timeout=EXCHANGE_TIMEOUT) as client:
