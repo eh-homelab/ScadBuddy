@@ -3,8 +3,9 @@
 
 In Kubernetes a caller presents its projected ServiceAccount token (audience
 :data:`AUDIENCE`). :class:`TokenReviewVerifier` first checks it offline against the
-cluster issuer's JWKS (signature RS256 or ES256, ``iss``, ``aud``, ``exp``/``nbf``, and a
-``sub`` that names a ScadBuddy caller); only such a token is then sent to TokenReview,
+cluster issuer's JWKS (signature RS256 or ES256, ``iss``, ``aud``, ``exp``/``nbf``, a
+``kubernetes.io.pod`` with a name and uid, and a ``sub`` that names a ScadBuddy caller);
+only such a token is then sent to TokenReview,
 with the API pod's own token, so a deleted pod's token is refused at once and the
 credential is bound to the pod's name and uid. A forged or junk token is refused without
 a TokenReview and spends nothing (review of #5498). Outside Kubernetes,
@@ -302,6 +303,18 @@ class TokenReviewVerifier:
             or exp is None
             or exp + LEEWAY_SECONDS <= at
             or (claims.get("nbf") is not None and (nbf is None or nbf - LEEWAY_SECONDS > at))
+        ):
+            return None
+        # Spec §6.2 step 0: bound to a pod (`kubernetes.io.pod` with a name and uid), or
+        # deleting a pod could not revoke it. TokenReview's `extra` is checked again.
+        k8s = claims.get("kubernetes.io")
+        pod = k8s.get("pod") if isinstance(k8s, dict) else None
+        if not (
+            isinstance(pod, dict)
+            and isinstance(pod.get("name"), str)
+            and pod["name"]
+            and isinstance(pod.get("uid"), str)
+            and pod["uid"]
         ):
             return None
         sub = claims.get("sub")

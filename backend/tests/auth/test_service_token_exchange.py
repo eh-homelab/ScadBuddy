@@ -79,7 +79,12 @@ def claims_for(
         "iat": now,
         "nbf": now,
         "exp": now + 3600,
-        "kubernetes.io": {"namespace": namespace, "serviceaccount": {"name": service_account}},
+        "kubernetes.io": {
+            "namespace": namespace,
+            "serviceaccount": {"name": service_account},
+            # A projected volume's token is bound to its pod.
+            "pod": {"name": "scadbuddy-print-6c9f-abcde", "uid": "0f6f2b7e-1111-2222-3333"},
+        },
         "nonce": nonce,
     }
     claims.update(override)
@@ -97,6 +102,16 @@ def signed(
     """A projected token as the cluster (or, with another key, a forger) signs it."""
     header = {"alg": alg, "kid": kid or key.kid}
     return jwt.encode(header, claims_for(service_account, **claims), key)
+
+
+def bound_to(pod: Any) -> str:
+    """A print token the cluster signed whose ``kubernetes.io.pod`` is ``pod`` (``None``:
+    no pod claim at all, as `kubectl create token` without --bound-object-* makes)."""
+    k8s: dict[str, Any] = {"namespace": NAMESPACE, "serviceaccount": {"name": "scadbuddy-print"}}
+    if pod is not None:
+        k8s["pod"] = pod
+    override: dict[str, Any] = {"kubernetes.io": k8s}
+    return signed("scadbuddy-print", **override)
 
 
 def unsigned(service_account: str) -> str:
@@ -275,6 +290,12 @@ async def test_a_signed_pod_bound_token_is_reviewed_and_mapped(tmp_path: Path) -
         pytest.param(signed("scadbuddy-print", namespace="other"), id="other-namespace"),
         pytest.param("not-a-jwt", id="junk"),
         pytest.param("a.b.c", id="junk-parts"),
+        # Signed by the cluster but bound to no pod (`kubectl create token` without
+        # --bound-object-*): deleting a pod could not revoke it (spec §6.2 step 0).
+        pytest.param(bound_to(None), id="unbound"),
+        pytest.param(bound_to({"name": "p"}), id="pod-without-uid"),
+        pytest.param(bound_to({"name": "p", "uid": ""}), id="pod-empty-uid"),
+        pytest.param(bound_to("p"), id="pod-not-an-object"),
     ],
 )
 async def test_a_token_that_fails_offline_never_reaches_tokenreview(

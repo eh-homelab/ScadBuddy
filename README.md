@@ -500,7 +500,8 @@ TokenReview the API checks a token offline against the cluster's JWKS, fetched f
 apiserver with its own token and kept an hour; an unknown `kid` refetches it at most
 every 30 s. The check covers the signature (RS256 or ES256 only), `iss` (from the
 apiserver's `/.well-known/openid-configuration`), `aud` containing `scadbuddy`,
-`exp`/`nbf` with 30 s of skew, and a `sub` that names a caller above. A token that fails
+`exp`/`nbf` with 30 s of skew, a `kubernetes.io.pod` claim with a `name` and `uid` (a
+token bound to no pod is refused), and a `sub` that names a caller above. A token that fails
 is refused `401` with no TokenReview and spends nothing, so forged or junk tokens never
 hold a real caller back. Each API process sends at most 60 TokenReviews a minute, then
 answers `429` (`result="limited"`). A bootstrap secret is checked locally against its
