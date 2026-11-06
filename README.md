@@ -726,10 +726,16 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
-  id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL` (the API's Service; the
-  worker reads the store settings through its CRUD route, #5298) and
-  `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it
-  exchanges for its service credential. Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
+  id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
+  (`http://scadbuddy:8082`; the worker reads the store settings through its CRUD
+  route, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
+  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
+  credential. The proof is required: without one the worker refuses to start, since
+  it has no other source of a credential. It needs no KEK
+  (`SCADBUDDY_SECRET_KEY_FILE`): the API opens the stored keys before it answers.
+  The store fields seeded from the environment (`SCADBUDDY_STORE_BACKEND`, the
+  Bambuddy and S3 settings, `SCADBUDDY_SOLID_CONCURRENCY` while no row is saved) come
+  from the API's environment, not the worker's. Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
@@ -752,8 +758,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
-  until the API has applied every migration its build has and its role holds
-  `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
+  until the API serves its CRUD areas (`settings`) and answers its first read of
+  the store settings, then until the API has applied every migration its build has
+  and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
   worker comes up first, it starts once the API has. On the API's own role (the
   same `SCADBUDDY_DATABASE_URL`) the grants are there already.
 - **Versioning:** workflows are pinned to the build that started them. At start

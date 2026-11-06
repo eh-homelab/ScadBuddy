@@ -34,7 +34,12 @@ from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
-from scadbuddy.auth.service_credentials import ServiceAuth, token_source
+from scadbuddy.auth.service_credentials import (
+    ExchangeReader,
+    ServiceAuth,
+    ServiceCredentialConfigError,
+    token_source,
+)
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -1041,16 +1046,25 @@ RENDER_CRUD_AREAS = frozenset({"settings"})
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
     """The render worker's client of the API's CRUD routes, with its service credential,
-    which it exchanges for its proof (#5494): it has no view to read one from."""
+    which it exchanges for its proof (#5494). The exchange is its only source: it has no
+    view to fall back to, and holds no KEK."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
             "SCADBUDDY_API_INTERNAL_URL is required for the render worker: it reads the"
             " store settings through the API's CRUD routes (#5298), e.g."
             " http://scadbuddy:8082"
         )
-    credential = ServiceAuth(
-        token_source("render", settings, settings_kek(settings.secret_key_file))
-    )
+    proof: Literal["k8s", "bootstrap"]
+    if settings.service_token_file is not None:
+        proof_file, proof = settings.service_token_file, "k8s"
+    elif settings.service_bootstrap_file is not None:
+        proof_file, proof = settings.service_bootstrap_file, "bootstrap"
+    else:
+        raise ServiceCredentialConfigError(
+            "SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE is required for"
+            " the render worker: it exchanges that proof for its service credential (#5494)"
+        )
+    credential = ServiceAuth(ExchangeReader("render", settings.api_internal_url, proof_file, proof))
     return CrudClient(settings.api_internal_url, "render", credential, metrics=metrics)
 
 
@@ -1075,7 +1089,16 @@ async def run_worker(
             logger.info("stopped before the API served this worker's CRUD areas")
             return
         source = RemoteRenderSettingsSource(crud)
-        current = await source.current()
+        reading = asyncio.create_task(source.current())
+        stopping = asyncio.create_task(stop.wait())
+        await asyncio.wait({reading, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        stopping.cancel()
+        if not reading.done():
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+            logger.info("stopped before the API answered this worker's store settings")
+            return
+        current = reading.result()
         # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
         # the rest opens the projection's pool and waits for the API's schema and grants
         # (#601). A stop meanwhile ends the wait.

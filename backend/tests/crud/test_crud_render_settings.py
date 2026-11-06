@@ -1,4 +1,4 @@
-"""The render worker's store settings route (#5298 Task 13, inventory R1, plan D8): it
+"""The render worker's store settings route (#5298 Task 13, inventory R2 (PR R1), plan D8): it
 answers what `load_render_store_settings` reads, secrets opened, only to the render
 caller, never cached, and logs which secrets it released, never their values.
 `RemoteRenderSettingsSource` keeps the SQL source's TTL and its last good settings."""
@@ -98,6 +98,11 @@ async def test_the_answer_is_what_the_api_reads(
         False,
     )
     assert current.s3 is not None and current.s3.secret_access_key == S3_SECRET
+    # No render key saved: the full key, as the API reads it.
+    _save_secrets(store, render_key=False)
+    current = await RemoteRenderSettingsSource(crud).current()
+    assert current == load_render_store_settings(store.pool, keyed)
+    assert (current.api_key, current.key_is_fallback) == (FULL_KEY, True)
 
 
 async def test_the_answer_is_never_cached(crud: CrudClient, store: SettingsStore) -> None:
@@ -113,8 +118,10 @@ async def test_the_log_names_the_secrets_released_never_their_values(
     _save_secrets(store)
     await crud.request("GET", f"{BASE}/settings")
     released = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.api.crud_render"]
+    # Who got them: the render credential the request carried.
+    [credential] = [c for c in ServiceCredentialStore(store.pool).list() if c.caller == "render"]
     assert released == [
-        "released the render settings to the render worker, secrets:"
+        f"released the render settings to service credential {credential.id}, secrets:"
         " bambuddy_render_api_key, store_s3_access_key_id, store_s3_secret_access_key"
     ]
     caplog.clear()

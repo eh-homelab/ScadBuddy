@@ -3,7 +3,7 @@ with a credential, or nobody."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -63,6 +63,8 @@ class Service:
 
     caller: str
     scopes: frozenset[str]
+    #: The credential's row id, for a log of what it was given (#5298 D8); not compared.
+    credential_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

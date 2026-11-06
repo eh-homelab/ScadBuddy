@@ -53,7 +53,11 @@ from temporalio.worker import (
 )
 
 from scadbuddy import worker as worker_module
-from scadbuddy.auth.service_credentials import ServiceAuth
+from scadbuddy.auth.service_credentials import (
+    ExchangeReader,
+    ServiceAuth,
+    ServiceCredentialConfigError,
+)
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import ROLE_SERIES, Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
@@ -407,6 +411,52 @@ async def test_the_render_worker_refuses_to_start_without_the_api_url(tmp_path: 
         await worker_module.run_worker(settings, health_port=None)
 
 
+async def test_the_render_worker_refuses_to_start_without_a_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Render is exchange-only (#5494): without a proof file it has no credential, so it
+    fails at once rather than waiting on 401s, and reads no database first."""
+
+    def build(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("built without a credential")
+
+    def connect(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("connected to the database")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    monkeypatch.setattr(psycopg, "connect", connect)
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        api_internal_url="http://scadbuddy:8082",
+    )
+    async with asyncio.timeout(5):
+        with pytest.raises(ServiceCredentialConfigError, match="SCADBUDDY_SERVICE_TOKEN_FILE"):
+            await worker_module.run_worker(settings, health_port=None)
+
+
+async def test_the_render_workers_credential_has_no_view_to_fall_back_to(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "token"
+    token.write_text("a-projected-token")
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        api_internal_url="http://scadbuddy:8082",
+        service_token_file=token,
+    )
+    crud = worker_module.render_crud(settings)
+    try:
+        reader = crud._auth._reader
+        assert isinstance(reader, ExchangeReader)
+        assert reader._fallback is None
+    finally:
+        await crud.aclose()
+
+
 async def test_the_render_worker_waits_for_the_settings_area(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -441,6 +491,41 @@ async def test_the_render_worker_waits_for_the_settings_area(
     stop.set()
     await asyncio.wait_for(worker, timeout=10)
     assert set(asked) == {"/api/v1/internal/crud/render/areas"}
+
+
+async def test_a_stop_ends_the_render_workers_first_settings_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+
+    async def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path.endswith("/areas"):
+            return httpx.Response(200, json={"areas": ["settings"]}, headers=CRUD_HEADERS)
+        await asyncio.Event().wait()  # the settings never come
+        raise AssertionError("unreachable")
+
+    def build(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("built without the store settings")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    crud = CrudClient(
+        "http://api", "render", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
+    )
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        worker_module.run_worker(settings, stop=stop, health_port=None, crud=crud)
+    )
+    async with asyncio.timeout(10):
+        while "/api/v1/internal/crud/render/settings" not in asked:
+            await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(worker, timeout=10)
 
 
 @pytest.mark.parametrize("queue", ["render", "bambuddy"])
