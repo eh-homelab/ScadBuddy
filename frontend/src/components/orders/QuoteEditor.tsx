@@ -3,6 +3,7 @@ import { api } from '../../api/client'
 import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
+import { useDebounced } from '../../lib/useDebounced'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
@@ -12,6 +13,9 @@ import { byCreated, parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price
 import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
+
+/** How long the typed price must stay still before the warning asks the route about it. */
+const CHECK_DEBOUNCE_MS = 300
 
 function startTime(at: number): string {
   return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -64,14 +68,19 @@ export function QuoteEditor({
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // #5328, job cost spec §6.3: the model's real cost in its past jobs, read once while
-  // the item takes a price. The warning judges the typed price, else the newest quote
-  // not yet accepted: what is about to be sent.
+  // #5328, job cost spec §6.3: the warning judges the typed price, else the newest quote
+  // not yet accepted: what is about to be sent. The route decides whether it warns
+  // (`warning`, `below_cost`); the browser never works out the thin rule itself. Each
+  // price, once typing stops, is a read of its own, so a job fulfilled meanwhile counts.
   const slug = editable ? item?.reference?.slug : undefined
-  const history = useAsync(() => (slug ? api.unitCostHistory(slug, currency) : Promise.resolve(null)), [slug, currency])
   const typed = price.trim() ? parseUnitPrice(price, exponent) : null
   const pending = quotes.some((q) => q.accepted) ? undefined : [...quotes].sort(byCreated).at(-1)
-  const checked = typed ?? pending?.unit_price_minor
+  const current = typed ?? pending?.unit_price_minor ?? null
+  const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
+  const history = useAsync(
+    () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked) : Promise.resolve(null)),
+    [slug, currency, checked],
+  )
 
   async function record(accept: boolean) {
     const minor = parseUnitPrice(price, exponent)
@@ -85,8 +94,6 @@ export function QuoteEditor({
       await recordQuote(orderId, itemId, { unit_price_minor: minor, ...(label.trim() ? { label: label.trim() } : {}) }, accept)
       setPrice('')
       setLabel('')
-      // A job fulfilled while the editor was open now counts in the next warning.
-      history.refresh()
       onChanged()
     } catch (err) {
       setError(refusalText(err))
@@ -224,8 +231,8 @@ export function QuoteEditor({
           </Button>
         </form>
       )}
-      {editable && checked != null && (
-        <QuoteWarning history={history.data} unitPrice={checked} currency={currency} exponent={exponent} onUse={(minor) => setPrice(toMajor(minor, exponent))} />
+      {editable && current !== null && (
+        <QuoteWarning history={history.data} unitPrice={current} currency={currency} exponent={exponent} onUse={(minor) => setPrice(toMajor(minor, exponent))} />
       )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">

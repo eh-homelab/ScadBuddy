@@ -12,7 +12,11 @@ is the cost part that most exceeded what the items' own accepted quotes priced f
 filament and machine time of the production attempts that did not fail (against the
 quote's ``filament`` and ``machine_time`` lines), labour (against its ``labour`` and
 ``setup`` lines), and in full the parts a quote never prices: failed attempts, test
-prints and cost entries. The **suggested unit price** is the unit cost marked up by
+prints and cost entries. A job whose accepted quote has no per-part lines (a ``manual``
+quote, a quote with a ``manual`` line, or no accepted quote) priced filament, machine time
+and labour together, if at all, so those three parts are left out of its comparison: only
+its failed prints, test prints and other costs can be its reason. Its price is never split
+across parts. The **suggested unit price** is the unit cost marked up by
 ``pricing_markup_percent``; with no markup, the lowest price whose margin is not thin.
 
 Advice only: nothing is stored and nothing is refused. With no history every figure is
@@ -95,6 +99,13 @@ class UnitCostHistory(BaseModel):
     @property
     def minor_exponent(self) -> int:
         return minor_exponent(self.currency)
+
+
+def _per_part(quote: Quote | None) -> bool:
+    """The quote prices filament, machine time and labour each on lines of their own."""
+    if quote is None or quote.source == "manual":
+        return False
+    return all(line.kind != "manual" for line in quote.lines)
 
 
 def _quoted(quote: Quote | None, part: CostReason, quantity: int) -> int:
@@ -190,7 +201,10 @@ def unit_cost_history(
     cost = sum(item.cost_minor for item, _ in history)
     over: dict[CostReason, int] = dict.fromkeys(REASONS, 0)
     for item, quote in history:
+        priced = _per_part(quote)
         for part, amount in _parts(item).items():
+            if part in _PRICED_BY and not priced:
+                continue
             over[part] += amount - _quoted(quote, part, item.quantity)
     reason = max(REASONS, key=lambda part: over[part])
 

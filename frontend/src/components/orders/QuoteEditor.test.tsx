@@ -246,6 +246,20 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     expect(warning).not.toHaveTextContent('is below')
   })
 
+  it('follows the route on the thin boundary and sends it the price', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    // 9.00 / 0.85 = 10.588…: 10.58 is a 14.9 % margin, thin; 10.59 is 15.0 %, not thin.
+    await user.type(field, '10.58')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$10.58 a unit leaves a thin margin')
+    await user.clear(field)
+    await user.type(field, '10.59')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+    // Nothing shows for 10.59 once its own answer has landed either.
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+  })
+
   it('reads the history again after a quote is recorded', async () => {
     const { user } = editor()
     const field = screen.getByLabelText('Price per unit (USD)')

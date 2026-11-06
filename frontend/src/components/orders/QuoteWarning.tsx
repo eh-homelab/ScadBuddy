@@ -13,22 +13,14 @@ const REASONS: Record<NonNullable<UnitCostHistory['main_reason']>, string> = {
 }
 
 /**
- * Whether `unitPrice` leaves a thin margin against the history's real cost per unit: a
- * margin below `thin_margin_percent`, a loss included. The backend's `orders/history.py`
- * `warns`, on the unrounded percent. False with no history.
- */
-function isThinMargin(history: UnitCostHistory | null | undefined, unitPrice: number): boolean {
-  const cost = history?.unit_cost_minor
-  if (cost == null || !history || history.jobs === 0) return false
-  if (unitPrice <= 0) return cost > 0
-  return ((unitPrice - cost) * 100) / unitPrice < Number(history.thin_margin_percent)
-}
-
-/**
  * The quote warning (job cost spec 2026-11-05 §6.3, #5328): the price is below what this
  * model really cost in its last fulfilled jobs, or above it with a thin margin. Each case
- * has its own words. Advice only: it never blocks the quote. Nothing shows without history
- * or when the margin is not thin.
+ * has its own words. Advice only: it never blocks the quote.
+ *
+ * `history` is the route's answer for a `unit_price_minor`; its `warning` and `below_cost`
+ * decide (`orders/history.py` `warns` is the one copy of the thin rule). Nothing shows
+ * without a warning, or while the answer is for a price other than `unitPrice` (the field
+ * changed and the next read has not landed).
  */
 export function QuoteWarning({
   history,
@@ -44,7 +36,7 @@ export function QuoteWarning({
   /** Puts the suggested unit price into the price field. */
   onUse: (minor: number) => void
 }) {
-  if (!history || !isThinMargin(history, unitPrice) || history.unit_cost_minor == null) return null
+  if (!history?.warning || history.unit_price_minor !== unitPrice || history.unit_cost_minor == null) return null
   const money = (minor: number) => formatMoney(minor, currency, exponent)
   const suggested = history.suggested_unit_price_minor
   const cost = (
@@ -56,7 +48,7 @@ export function QuoteWarning({
   return (
     <div role="alert" className="flex flex-col gap-1 rounded-md border border-warn/40 p-2 text-[13px]" data-testid="quote-warning">
       <p className="text-warn">
-        {unitPrice < history.unit_cost_minor ? (
+        {history.below_cost ? (
           <>
             {money(unitPrice)} a unit is below this model&apos;s real cost: {cost}.
           </>

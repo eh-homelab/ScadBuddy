@@ -7,12 +7,20 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.orders.costs import CostRates, order_costs
 from scadbuddy.orders.history import suggested_price, unit_cost_history, warns
 from scadbuddy.orders.integrations import NOT_LINKED
 from scadbuddy.orders.lifecycle import FulfilmentInput
-from scadbuddy.orders.models import CostEntryInput, Order, OrderItem, PricingPolicy
+from scadbuddy.orders.models import (
+    ColourSlot,
+    CostEntryInput,
+    FilamentInput,
+    Order,
+    OrderItem,
+    PricingPolicy,
+)
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -107,10 +115,10 @@ async def test_the_unit_cost_is_the_jobs_cost_over_their_units(shop: Shop, pool:
     # (900 + 300) over 4 units.
     assert (answer.jobs, answer.units, answer.unit_cost_minor) == (2, 4, 300)
     # Each job's cost is the order page's read of it.
-    for order in (first, second):
+    for order, own in ((first, 900), (second, 300)):
         costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
         assert costs is not None
-        assert costs.items[0].cost_minor in (900, 300)
+        assert costs.items[0].cost_minor == own
     # The jobs' attempts by hand have no grams: their prints are unknown.
     assert answer.estimated
     # A cost entry is never priced by a quote: it counts in full.
@@ -239,3 +247,52 @@ def test_no_part_over_its_quote_names_no_reason(shop: Shop, pool: PgPool) -> Non
 
     assert answer.unit_cost_minor == 16
     assert (answer.main_reason, answer.main_reason_minor) == (None, None)
+
+
+def manual_job(shop: Shop, pool: PgPool, *, other: int) -> None:
+    """A job priced by hand at 10.00, its 12 g at the price book's 30 a kilogram (36), and
+    ``other`` as a cost entry, done three days before NOW. Its quote has one ``manual``
+    line and no filament line."""
+    order, item = shop.accepted(quantity=1)
+    filament = shop.rows.insert_filament(
+        FilamentInput(material="PETG", colour="#00ff00", cost_per_kg="30")
+    )
+    slots = [ColourSlot(slot=0, colour="#ff0000", filament_id=filament.id)]
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            (Jsonb([s.model_dump() for s in slots]), item.id),
+        )
+    made = attempt(shop, order, item, "succeeded", 1, 12.0, 77)
+    shop.lifecycle.accept_fulfilment(order.id, item.id, made.id, BY)
+    shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(order_item_id=item.id, kind="material", amount_minor=other), BY
+    )
+    done_at(pool, item, NOW - timedelta(days=3))
+
+
+def test_a_manual_quote_is_never_over_on_filament(shop: Shop, pool: PgPool) -> None:
+    """The quote's 1000 covered the 36 of filament: one ``manual`` line prices every part
+    together, so filament is not compared. Only the cost entry can be the reason."""
+    manual_job(shop, pool, other=5)
+
+    answer = unit_cost_history(shop.rows, "demo", USD, markup_percent="0", now=NOW)
+
+    assert answer.unit_cost_minor == 41
+    assert (answer.main_reason, answer.main_reason_minor) == ("other", 5)
+
+
+def test_a_mixed_history_names_filament_from_the_slice_jobs_alone(shop: Shop, pool: PgPool) -> None:
+    """The slice job's 25 g (50) is 30 over its quote's 20. The manual job's 36 of filament
+    is left out, so filament is 30 over across the 2 units, 15 a unit (not 33)."""
+    order, item = priced_order(shop, PricingPolicy())
+    made = attempt(shop, order, item, "succeeded", 1, 25.0, 78)
+    shop.lifecycle.accept_fulfilment(order.id, item.id, made.id, BY)
+    done_at(pool, item, NOW - timedelta(days=2))
+    manual_job(shop, pool, other=20)
+
+    answer = unit_cost_history(shop.rows, "demo", USD, markup_percent="0", now=NOW)
+
+    # (50 + 36 + 20) over 2 units.
+    assert (answer.jobs, answer.unit_cost_minor) == (2, 53)
+    assert (answer.main_reason, answer.main_reason_minor) == ("filament", 15)

@@ -238,7 +238,12 @@ It is advice only; it never blocks a quote. With no history it shows nothing.
 As built (#5328): a job's time is its last accepted attempt's `accepted_at`. An item can
 become `fulfilled` only by accepting an attempt, so every fulfilled item has one. The
 warning tells a price below the real cost apart from a price above it with a thin margin
-(`below_cost`), and words each one differently.
+(`below_cost`), and words each one differently. A job whose accepted quote has no
+per-part lines (a `manual` quote, a quote with a `manual` line, or no accepted quote)
+priced filament, machine time and labour together. Those three parts are left out of that
+job's comparison, so only its failed prints, test prints and other costs can be its main
+reason. Its price is never split across parts. The browser asks the route whether a price
+warns (`warning`, `below_cost`); it does not work out the thin rule itself.
 
 ### 6.4 The products report (mockup D)
 
