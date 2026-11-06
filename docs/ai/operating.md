@@ -1722,12 +1722,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   link, which `http_response_read` refuses to page.
 - Uploads send workspace files (#2329 part 2,
   [`agent/src/tools/workspaceUploads.ts`](../../agent/src/tools/workspaceUploads.ts)):
-  `upload_asset`, `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`,
+  `upload_asset`, `add_model_media`, `add_readme_image`, `set_model_thumbnail`, `set_output_thumbnail`,
   `create_model`, `import_model`, `write_source_file`, `write_file` and `set_readme` take
   `workspace_path` with its `workspace_sha256`. The text tools (`create_model`,
   `import_model`, `write_source_file`, `write_file`, `set_readme`) take it instead of
   their inline text (exactly one of the two); the binary ones (`upload_asset`,
-  `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`, and
+  `add_model_media`, `add_readme_image`, `set_model_thumbnail`, `set_output_thumbnail`, and
   `create_model_from_mesh`'s upload) take it only (#2510): no tool takes bytes as a
   base64 argument, and `workspace_write` writes text only. Binary reaches the workspace
   by the user's upload in the panel (`routes/sessionFiles.ts`), an `/mcp` client's
@@ -1762,6 +1762,14 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     CSP and `Cache-Control: private, no-store`. The stored media type is sent, except
     HTML, SVG, XML and scripts, which go as `application/octet-stream`. The panel fetches
     it and saves it through `downloadBlob`, or previews an image through a blob URL.
+    With `?expected_sha256=` it is a pick (#4703): the file is about to go into
+    ScadBuddy, so a file that no longer has that sha256 is `409`. A file that holds a
+    saved Claude credential or a plugin secret is `422`. The plugin secrets are each
+    enabled remote plugin's and package http server's header value, and every OAuth
+    sign-in's access and refresh tokens and client secret
+    ([`agent/src/plugins/secrets.ts`](../../agent/src/plugins/secrets.ts)
+    `readPluginSecrets`). The same reader gives a turn's ToolCall tools the plugin secrets
+    they redact and refuse to upload.
   - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
     file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
     replaced one). A path that exists without it, or with a stale one, is `409`; past
@@ -1781,6 +1789,21 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.
+- **The workspace file picker** (#4703,
+  [`agent/src/routes/workspacePicker.ts`](../../agent/src/routes/workspacePicker.ts),
+  frontend `components/workspace/WorkspaceFilePicker.tsx`): wherever the UI takes a file
+  (a `// file` parameter, Media, the model and output thumbnails, a mesh import, a
+  library upload), the user can pick one from a session's workspace instead of the disk.
+  `GET /api/v1/ai/workspace-files[?resource_type=&resource_id=&q=&accept=&limit=]` lists
+  the sessions that touched the resource (archived ones left out), or with no resource
+  every session the browser user may see, archived ones too, with the files the target's
+  `accept` takes, searched by title and file name. `accept` and the search are matched in
+  the session list's own query, before its limit, so an older session that holds the
+  only file the target takes is found. It reads as the session routes do
+  (`uiReadProblem`, `SessionManager.list` as the browser user). A file whose bytes are a
+  sealed blob this agent cannot open is listed with `unavailable` and the reason. The
+  pick is the download above with `expected_sha256`; the browser then sends the bytes
+  through the target's own upload route.
 - **Uploads for `/mcp` clients** (#4550,
   [`agent/src/mcp/uploads.ts`](../../agent/src/mcp/uploads.ts)): an external client (the
   plugin in a user's own Claude Code) has no panel. It puts a local file into its own

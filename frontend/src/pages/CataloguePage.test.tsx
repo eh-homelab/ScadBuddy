@@ -1,3 +1,6 @@
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { seedSessionFile } from '../mocks/features/sessionFiles'
+import { seedPickerSession } from '../mocks/features/workspacePicker'
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
@@ -1227,5 +1230,28 @@ describe('CataloguePage pages on the server (#2290)', () => {
     )
     renderCatalogue()
     await waitFor(() => expect(screen.getByTestId('duplicated-from')).toHaveTextContent('Duplicated from Far Away'))
+  })
+
+  it("opens a mesh from an assistant session's workspace as a model (#4703)", async () => {
+    seedPickerSession({ id: 's-mesh', title: 'Bracket' })
+    seedSessionFile('s-mesh', 'bracket.stl', new TextEncoder().encode('solid bracket'), 'model/stl')
+    seedSessionFile('s-mesh', 'bracket.png', new Uint8Array([137, 80, 78, 71]), 'image/png')
+    const made = { ...models[0]!, slug: 'bracket', name: 'bracket' }
+    const create = vi.spyOn(api, 'createMeshModelFromUpload').mockResolvedValue(made)
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <Routes>
+          <Route path="/" element={<CataloguePage />} />
+          <Route path="/m/:slug" element={<p>model page</p>} />
+        </Routes>
+      </AssistantOpenerContext.Provider>,
+    )
+    await user.click(await screen.findByRole('button', { name: 'Open a mesh' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open a mesh as a model' })
+    await user.click(within(dialog).getByRole('button', { name: 'From a session…' }))
+    await user.click(await screen.findByRole('button', { name: 'Use bracket.stl' }))
+    expect(screen.queryByRole('button', { name: 'Use bracket.png' })).toBeNull()
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: 'bracket.stl' })))
+    expect(await screen.findByText('model page')).toBeInTheDocument()
   })
 })

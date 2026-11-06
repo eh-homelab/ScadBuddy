@@ -8,7 +8,7 @@ import { addMedia, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaF
 import { MediaPicker } from './media/MediaPicker'
 import { MEDIA_KEY, mediaIdOf, mediaPickerItems } from './media/pickerItems'
 import { Spinner } from './ui/spinner'
-import { FileTextIcon, PencilIcon } from 'lucide-react'
+import { FileTextIcon, ImageIcon, PencilIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -58,6 +58,18 @@ function readmeChange(
   return 'set'
 }
 
+/** What `POST /models/{slug}/images` answers (`library/readme_images.py` `IMAGE_NAME_PATTERN`). */
+const README_IMAGE_PATH = /^images\/[a-z0-9][a-z0-9_-]{0,63}\.(?:png|jpg|webp|gif)$/
+
+/** The types a README image may be (#5475): what the server takes. SVG never. */
+const README_IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif'
+
+/** A Markdown image's alt text from a file name: its stem, with nothing that ends the brackets. */
+function altText(name: string): string {
+  const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name
+  return stem.replace(/[[\]\\\r\n]+/g, ' ').trim() || 'image'
+}
+
 const sameTags = (a: string[], b: string[]) =>
   a.length === b.length && a.every((tag, index) => tag === b[index])
 
@@ -85,6 +97,8 @@ function sameDetails(a: Baseline, b: Baseline) {
 export function EditDetailsButton({ slug, onSaved }: Props) {
   const [open, setOpen] = useState(false)
   const readmeFile = useRef<HTMLInputElement>(null)
+  const readmeField = useRef<HTMLTextAreaElement>(null)
+  const [insertingImage, setInsertingImage] = useState(false)
   const [baseline, setBaseline] = useState<Baseline | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [name, setName] = useState('')
@@ -168,6 +182,29 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
       setCover(id)
       setRemoveThumbnail(false)
     }
+  }
+
+  /**
+   * #5475 — stores the image in the template's `images/` folder (its own revision, at
+   * once) and puts a link to it at the README's cursor, or over the selected text.
+   */
+  async function insertImage(file: File) {
+    const added = await api.addReadmeImage(slug, file)
+    if (!README_IMAGE_PATH.test(added.path)) throw new Error(`The server stored the image at an unexpected path: ${added.path}`)
+    setBaseline((current) => (current ? { ...current, model: added.model } : current))
+    const link = `![${altText(file.name)}](${added.path})`
+    const field = readmeField.current
+    let caret = 0
+    setReadme((text) => {
+      const start = Math.min(field?.selectionStart ?? text.length, text.length)
+      const end = Math.max(start, Math.min(field?.selectionEnd ?? start, text.length))
+      caret = start + link.length
+      return text.slice(0, start) + link + text.slice(end)
+    })
+    requestAnimationFrame(() => {
+      field?.focus()
+      field?.setSelectionRange(caret, caret)
+    })
   }
 
   async function loadReadme(file: File | undefined) {
@@ -369,6 +406,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                   accept: 'image/png,image/jpeg,image/webp',
                   hint: 'PNG, JPEG or WebP, up to 10 MB. Added to the template’s media.',
                   onFile: uploadCover,
+                  workspace: { resource: { type: 'model', id: slug }, label: 'this model' },
                 }}
               />
             </fieldset>
@@ -379,11 +417,26 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 id="details-readme"
                 className="sb-num min-h-40 font-mono text-xs"
                 rows={8}
+                ref={readmeField}
                 value={readme}
                 placeholder="Markdown. Leave empty for no README."
                 onChange={(e) => setReadme(e.target.value)}
               />
             </div>
+            <MediaPicker
+              open={insertingImage}
+              title="Insert an image"
+              description="The image is stored in the template's images/ folder at once, as a revision of its own. The README links it at the cursor."
+              onClose={() => setInsertingImage(false)}
+              sections={[]}
+              onPick={() => undefined}
+              upload={{
+                accept: README_IMAGE_ACCEPT,
+                hint: 'PNG, JPEG, WebP or GIF, up to 10 MB.',
+                onFile: insertImage,
+                workspace: { resource: { type: 'model', id: slug }, label: 'this model' },
+              }}
+            />
             {readmeTooLong && (
               <p role="alert" data-testid="readme-limit" className="text-xs text-destructive">
                 {readmeTooLong}
@@ -404,9 +457,14 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 Remove README
               </Button>
             )}
-            <Button size="sm" variant="outline" className="w-fit" onClick={() => readmeFile.current?.click()}>
-              <FileTextIcon /> Load README from file
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" className="w-fit" onClick={() => setInsertingImage(true)}>
+                <ImageIcon /> Insert image…
+              </Button>
+              <Button size="sm" variant="outline" className="w-fit" onClick={() => readmeFile.current?.click()}>
+                <FileTextIcon /> Load README from file
+              </Button>
+            </div>
             <input
               ref={readmeFile}
               type="file"

@@ -2390,6 +2390,7 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     ['set_model_thumbnail', { slug: 'w', png_base64: png }],
     ['set_output_thumbnail', { output_id: 'b'.repeat(32), png_base64: png }],
     ['add_model_media', { slug: 'w', filename: 'p.png', content_base64: png }],
+    ['add_readme_image', { slug: 'w', filename: 'p.png', content_base64: png }],
     ['upload_asset', { slug: 'w', filename: 'p.png', content_base64: png }],
     ['create_model_from_mesh', { name: 'X', filename: 'x.stl', content_base64: png }],
     ['workspace_write', { path: 'p.png', content_base64: png }],
@@ -2408,7 +2409,7 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     expect(tool('create_model_from_mesh').description).toContain(BYTES_NEVER_AN_ARGUMENT)
   })
 
-  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'upload_asset'])(
+  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'add_readme_image', 'upload_asset'])(
     '%s requires workspace_path and workspace_sha256',
     (name) => {
       const schema = z.toJSONSchema(z.object(tool(name).shape), { io: 'input' })
@@ -2962,6 +2963,7 @@ describe("a model's edits as operations (#1054)", () => {
     ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
     ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
     ['set_model_thumbnail', { slug: 'w', ...pngs.ref('p.png') }, 'put', '/api/v1/models/w/thumbnail'],
+    ['add_readme_image', { slug: 'w', ...pngs.ref('p.png') }, 'post', '/api/v1/models/w/images'],
     ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
     ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
     ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],

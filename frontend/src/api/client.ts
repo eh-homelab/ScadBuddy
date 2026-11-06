@@ -37,6 +37,7 @@ import type {
   NotifyChannelInput,
   WorkspaceFile,
   WorkspaceFileList,
+  PickerSession,
   WorkspaceSettings,
   AttachmentView,
   AiSessionEdit,
@@ -68,6 +69,7 @@ import type {
   LibrarySearch,
   LibraryMoveResult,
   LibraryRenameResult,
+  LibraryEntryUpdated,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -88,6 +90,7 @@ import type {
   BatchQueueProgress,
   ModelFacets,
   ModelSummary,
+  ReadmeImage,
   ModelVersion,
   Output,
   OutputPlate,
@@ -1309,11 +1312,32 @@ export const api = {
     return command<ModelSummary>('/models', { method: 'POST', body })
   },
 
+  /**
+   * #4703 — an uploaded 3MF or STL opened as an editable mesh model
+   * (`POST /models/from-mesh/upload`); its type is its name's extension.
+   */
+  createMeshModelFromUpload: (file: File, name?: string) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (name) body.append('name', name)
+    return command<ModelSummary>('/models/from-mesh/upload', { method: 'POST', body })
+  },
+
   /** Multipart with a `file` part, like the output thumbnail PUT. */
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
     return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+  },
+
+  /**
+   * #5475 — an image into the template's `images/` folder, for its README, as one
+   * revision. The answer's `path` is what the README links: `images/<name>`.
+   */
+  addReadmeImage: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return command<ReadmeImage>(`/models/${seg(slug)}/images`, { method: 'POST', body })
   },
 
   /**
@@ -2579,6 +2603,14 @@ export const api = {
   getBambuddyLibrary: (folderId: number | null) =>
     request<LibraryListing>(`/print/bambuddy-library${folderId === null ? '' : `?folder_id=${folderId}`}`),
 
+  /** #4703 — uploads a file into a library folder (`null` is the top level); its name is the library name. */
+  uploadLibraryFile: (file: File, folderId: number | null) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (folderId !== null) body.append('folder_id', String(folderId))
+    return command<LibraryEntryUpdated>('/print/library/files', { method: 'POST', body })
+  },
+
   /** #2670 — a new name for a file, its extension kept. */
   renameLibraryFile: (fileId: number, filename: string) =>
     command<LibraryRenameResult>('/print/library/rename', {
@@ -2992,6 +3024,33 @@ export const api = {
    */
   getAiSessionFile: async (id: string, path: string): Promise<Blob> => {
     const response = await send(`${API_BASE}${sessionFilePath(id, path)}`)
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    return await response.blob()
+  },
+
+  /**
+   * #4703 — the workspace file picker's list: the sessions that touched `resource`, or
+   * (without one, "Advanced") every session the user may see, each with the files
+   * `accept` takes, searched by `q` (title or file name).
+   */
+  listWorkspacePicks: (query: { resource?: ResourceRef | null; accept: string; q?: string }) => {
+    const params = new URLSearchParams()
+    if (query.resource) {
+      params.set('resource_type', query.resource.type)
+      params.set('resource_id', query.resource.id)
+    }
+    params.set('accept', query.accept)
+    if (query.q) params.set('q', query.q)
+    return request<{ sessions: PickerSession[] }>(`/ai/workspace-files?${params}`)
+  },
+
+  /**
+   * #4703 — a picked workspace file's bytes, as they were at `sha256`. The agent answers
+   * 409 when the file has changed since the list was read, and 422 when it holds a saved
+   * Claude credential or a plugin secret (a header value or an OAuth token); both throw `ApiError`.
+   */
+  pickAiSessionFile: async (id: string, path: string, sha256: string): Promise<Blob> => {
+    const response = await send(`${API_BASE}${sessionFilePath(id, path)}?expected_sha256=${encodeURIComponent(sha256)}`)
     if (!response.ok) throw new ApiError(await readProblem(response))
     return await response.blob()
   },

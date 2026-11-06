@@ -535,7 +535,7 @@ function initialSourceAt(): Record<string, string> {
  * #179 — one details change: records its revision and replaces the model's record,
  * the way every catalogue change lands as a commit on the real backend.
  */
-function reviseModel(
+export function reviseModel(
   slug: string,
   message: string,
   files: ModelVersion['files'],

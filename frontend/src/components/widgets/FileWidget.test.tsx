@@ -6,6 +6,9 @@ import { ApiError, api } from '../../api/client'
 import type { Param, ParamValue } from '../../api/types'
 import { GALLERY_SLUG } from '../../mocks/fixtures'
 import { ASSET_REFUSAL, storeAsset } from '../../mocks/handlers'
+import { AssistantOpenerContext } from '../../agent/chat/opener'
+import { seedSessionFile } from '../../mocks/features/sessionFiles'
+import { seedPickerSession } from '../../mocks/features/workspacePicker'
 import { ParamWidget } from './ParamWidget'
 
 const SLUG = 'gridfinity-bin'
@@ -404,5 +407,27 @@ describe('file parameter: the media picker', () => {
     const { user } = setup('', { ...param, accept: ['svg'] }, undefined, GALLERY_SLUG)
     const picker = await openPicker(user)
     expect(within(picker).queryByRole('region', { name: "Template's images" })).not.toBeInTheDocument()
+  })
+
+  it("takes a file from an assistant session's workspace (#4703)", async () => {
+    seedPickerSession({ id: 's-art', title: 'Label art', touched: [{ type: 'model', id: SLUG }] })
+    seedSessionFile('s-art', 'art/heart.svg', new TextEncoder().encode(HEART), 'image/svg+xml')
+    seedSessionFile('s-art', 'notes.txt', new TextEncoder().encode('no'), 'text/plain')
+    const onChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <Harness initial="" onChange={onChange} />
+      </AssistantOpenerContext.Provider>,
+    )
+    const picker = await openPicker(user)
+    await user.click(within(picker).getByRole('button', { name: 'From a session…' }))
+    const sessions = await screen.findByTestId('workspace-file-picker')
+    await user.click(await within(sessions).findByRole('button', { name: 'Use art/heart.svg' }))
+    expect(within(sessions).queryByRole('button', { name: 'Use notes.txt' })).toBeNull()
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/)))
+    expect(api.uploadAsset).toHaveBeenCalledWith(SLUG, expect.objectContaining({ name: 'heart.svg', type: 'image/svg+xml' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })

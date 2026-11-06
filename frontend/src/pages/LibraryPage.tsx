@@ -17,6 +17,7 @@ import {
   SearchIcon,
   Trash2Icon,
   XIcon,
+  UploadIcon,
 } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type {
@@ -46,6 +47,7 @@ import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { LibraryCopyDialog } from '../components/library/LibraryCopyDialog'
+import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Spinner } from '../components/ui/spinner'
@@ -218,6 +220,8 @@ export function LibraryPage() {
   const linked = fileParam ?? (seenDetails !== null ? null : detailsParam) ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
+  /** #4703 — a file is being uploaded into the folder on screen: from disk, or from an assistant session's workspace. */
+  const [uploading, setUploading] = useState(false)
   const [picked, setPicked] = useState<LibraryEntry[]>([])
   /** What Arrange opens on: the ticked files, or a folder's (#3650). */
   const [arranging, setArranging] = useState<LibraryEntry[] | null>(null)
@@ -843,6 +847,20 @@ export function LibraryPage() {
         onRan={() => (printing ? undefined : setArrangedSent(true))}
       />
       <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
+      <FileUploadDialog
+        open={uploading}
+        title={`Upload into ${folder ? folderLabel(tree ?? [], folder.id) : 'the top level'}`}
+        description="The file keeps its name in the library."
+        onClose={() => setUploading(false)}
+        // Any file, as the library takes any: a 3MF or G-code prints from it.
+        accept=""
+        hint="Any file. A sliced 3MF or G-code can be printed from the library."
+        onFile={async (file) => {
+          await api.uploadLibraryFile(file, folder?.id ?? null)
+          setReload((n) => n + 1)
+        }}
+        workspace={{ resource: null, label: 'this folder' }}
+      />
       <LibraryCopyDialog
         open={copying}
         onClose={() => setCopying(false)}
@@ -1073,6 +1091,7 @@ export function LibraryPage() {
               tree={tree}
               entries={folder ? folderEntries(folder, false) : undefined}
               onNewFolder={() => setFolderAction({ kind: 'create', folder: folder ?? null })}
+              onUpload={() => setUploading(true)}
             />
           )}
 
@@ -1312,6 +1331,7 @@ function WhereHeader({
   tree,
   entries,
   onNewFolder,
+  onUpload,
 }: {
   byProject: boolean
   project: LibraryProject | undefined
@@ -1320,6 +1340,8 @@ function WhereHeader({
   tree: LibraryFolderView[] | null
   entries: MenuEntry[] | undefined
   onNewFolder: () => void
+  /** #4703 — upload a file into this folder. */
+  onUpload: () => void
 }) {
   if (tree === null) return null
   if (byProject) {
@@ -1364,6 +1386,9 @@ function WhereHeader({
         </span>
       )}
       <span className="ml-auto flex items-center gap-1">
+        <Button size="sm" variant="ghost" onClick={onUpload} data-testid="library-upload">
+          <UploadIcon /> Upload…
+        </Button>
         <Button size="sm" variant="ghost" onClick={onNewFolder} data-testid="library-new-folder">
           <FolderPlusIcon /> New folder
         </Button>

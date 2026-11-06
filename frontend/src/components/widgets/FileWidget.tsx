@@ -342,6 +342,7 @@ export function FileWidget({
           accept: accept.map((kind) => PICKER_ACCEPT[kind] ?? `.${kind}`).join(','),
           hint: `${accept.join(' or ').toUpperCase()}, up to 8 MB`,
           onFile: store,
+          workspace: { resource: { type: 'model', id: slug }, label: 'this model' },
         }}
       />
     </Field>

@@ -1,6 +1,7 @@
 /**
  * #2329 — a session's workspace files, as the agent's `routes/sessionFiles.ts` serves them:
- * list, download (always an attachment), multipart upload (a taken path needs
+ * list, download (always an attachment; with `expected_sha256`, a pick (#4703) that is
+ * refused with 409 once the file changed), multipart upload (a taken path needs
  * `expected_sha256`, else 409) and delete, kept in memory per session. The caps are the
  * agent's defaults, or what `/api/v1/ai/settings/workspace` saved.
  */
@@ -28,6 +29,11 @@ export function reset(): void {
 export function seedSessionFile(sessionId: string, path: string, bytes: Uint8Array, mediaType: string, source: WorkspaceFile['source'] = null): void {
   const now = new Date().toISOString()
   workspace(sessionId).set(path, { path, media_type: mediaType, size: bytes.byteLength, sha256: fakeSha(bytes), source, created_at: now, updated_at: now, bytes })
+}
+
+/** A session's files as the list shows them, by path (the workspace file picker reads them, #4703). */
+export function sessionFilesOf(sessionId: string): WorkspaceFile[] {
+  return [...(state.files.get(sessionId)?.values() ?? [])].sort((a, b) => a.path.localeCompare(b.path)).map(view)
 }
 
 function workspace(sessionId: string): Map<string, Stored> {
@@ -84,6 +90,16 @@ export const handlers = [
     const path = pathOf(request.url)
     const file = path === undefined ? undefined : workspace(String(params.id)).get(path)
     if (!file) return HttpResponse.json({ detail: `no file ${path ?? ''} in this session's workspace` }, { status: 404 })
+    const expected = new URL(request.url).searchParams.get('expected_sha256')
+    if (expected !== null && !/^[0-9a-f]{64}$/.test(expected)) {
+      return HttpResponse.json({ detail: 'expected_sha256: a lowercase hex sha256' }, { status: 400 })
+    }
+    if (expected !== null && expected !== file.sha256) {
+      return HttpResponse.json(
+        { detail: `${file.path} changed since the list was read: its sha256 is now ${file.sha256}, not ${expected}` },
+        { status: 409 },
+      )
+    }
     const safe = /^(text\/html|image\/svg\+xml)$/.test(file.media_type) ? 'application/octet-stream' : file.media_type
     return new HttpResponse(file.bytes, {
       headers: {
