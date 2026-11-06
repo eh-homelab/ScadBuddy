@@ -5,7 +5,7 @@ the agent's names on a test queue. An outward tool waits for a person's approval
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +26,7 @@ from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.operations import (
     FLOW_DECIDE,
     PRINTER_CHANGED,
+    PRINTER_REFUSED,
     PRINTER_UNBOUND,
     flow_kinds,
     request_id,
@@ -200,13 +201,13 @@ def _api(linked: int) -> Callable[[], httpx.AsyncClient]:
     return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
 
 
-def _api_away(connect: bool) -> Callable[[], httpx.AsyncClient]:
-    """The API's printer route failing: it cannot be reached, or it answers 503."""
+def _api_away(code: int | None) -> Callable[[], httpx.AsyncClient]:
+    """The API's printer route failing: it cannot be reached (None), or it answers `code`."""
 
     def answer(request: httpx.Request) -> httpx.Response:
-        if connect:
+        if code is None:
             raise httpx.ConnectError("refused", request=request)
-        return httpx.Response(503, json={"detail": "away"})
+        return httpx.Response(code, json={"detail": "no"})
 
     return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
 
@@ -232,16 +233,33 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     async def away(printer: str) -> PrinterRow | None:
         raise psycopg.OperationalError("the database is away")
 
+    async def malformed(printer: str) -> PrinterRow | None:
+        # #5466: any failure, not only the database's (here a row that does not validate).
+        return PrinterRow.model_validate({"id": printer})
+
     # A failed printer read leaves the call shown, unnamed and unbound: never a failed page.
-    pending, live = await _pending(outward.client, parked, away, HASH_KEY)
-    assert live
-    assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [(call_id, None, None)]
-    pending, live = await _pending(outward.client, parked, lookup, HASH_KEY)
-    assert live
+    for failing in (away, malformed):
+        pending, live = await _pending(outward.client, parked, failing, HASH_KEY)
+        assert live
+        assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [(call_id, None, None)]
+
+    def path(lan: bool) -> Callable[[str], Awaitable[bool]]:
+        async def native(printer: str) -> bool:
+            assert printer == PRINTER
+            return lan
+
+        return native
+
     bound = input_hash(HASH_KEY, "print_output", {**call, "printer_id": 2})
-    assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [
-        (call_id, "Prints on Garage (Bambuddy printer 2)", bound)
-    ]
+    # #5466: the line names the path the run takes, as the agent's line does; the binding
+    # is the same either way.
+    for lan, line in [
+        (False, "Prints on Garage (Bambuddy printer 2)"),
+        (True, "Prints on Garage over the LAN"),
+    ]:
+        pending, live = await _pending(outward.client, parked, lookup, HASH_KEY, path(lan))
+        assert live
+        assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [(call_id, line, bound)]
     request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": bound}
     env = ActivityEnvironment(client=outward.client)
     # Without the API to read the row from, nothing is approved.
@@ -251,16 +269,30 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     assert refused.value.status == 503
     assert await outward.store.get_decision(request_id(parked, call_id)) is None
     # The printer's row cannot be read: a 503 that asks the person to try again.
-    for unreadable in (_api_away(connect=True), _api_away(connect=False)):
+    for code in (None, 503):
         kind = next(
             k
-            for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=unreadable)
+            for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api_away(code))
             if k.name == FLOW_DECIDE
         )
         with pytest.raises(ApiError) as unread:
             await env.run(kind.run, request, await env.run(kind.check, request))
         assert unread.value.status == 503
         assert "Try again" in unread.value.detail
+        assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    # #5466: the API refuses the worker's read (its credential): a fault no retry mends,
+    # so the person is not told to try again.
+    for code in (401, 403):
+        kind = next(
+            k
+            for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api_away(code))
+            if k.name == FLOW_DECIDE
+        )
+        with pytest.raises(ApiError) as refused_read:
+            await env.run(kind.run, request, await env.run(kind.check, request))
+        assert (refused_read.value.status, refused_read.value.type) == (500, PRINTER_REFUSED)
+        assert f"HTTP {code}" in refused_read.value.detail
+        assert "Try again" not in refused_read.value.detail
         assert await outward.store.get_decision(request_id(parked, call_id)) is None
     # Re-linked since the page showed it, or an approval that names no binding: a 409,
     # and nothing is recorded, so the person sees the printer that would print and decides again.
