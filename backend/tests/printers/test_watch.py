@@ -20,7 +20,7 @@ from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, advance_print
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.rack.usage import LanUsage, PickedHotend, RackUsageStore
 from scadbuddy.workflows.printer_watch import PrinterWatchInput
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
@@ -40,6 +40,8 @@ class Lan:
     def __init__(self, *, subscribes: bool, deltas: list[dict[str, Any]] | None = None) -> None:
         self.subscribes = subscribes
         self.deltas = deltas or []
+        #: Each report yielded, so a test can name the one that ended a print.
+        self.sent: list[LanReport] = []
 
     async def reports(self, connected: asyncio.Event | None = None) -> AsyncIterator[LanReport]:
         if not self.subscribes:  # a connect to an address that never answers
@@ -47,7 +49,9 @@ class Lan:
         if connected is not None:
             connected.set()
         for delta in self.deltas:
-            yield LanReport(serial=SERIAL, received_at=datetime.now(UTC), print=delta)
+            report = LanReport(serial=SERIAL, received_at=datetime.now(UTC), print=delta)
+            self.sent.append(report)
+            yield report
         await asyncio.Event().wait()
 
 
@@ -218,6 +222,75 @@ async def test_a_start_the_printer_moved_on_from_settles_untimed(
         assert row == (None,)
     finally:
         rack.close()
+
+
+class Settles:
+    """A rack that records each settle the watch asks for."""
+
+    def __init__(self) -> None:
+        self.ended: list[tuple[str, str, datetime, bool]] = []
+
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        self.ended.append((printer, subtask_name, ended_at, timed))
+        return 1
+
+
+async def test_a_failed_print_settles_timed_at_the_report_that_says_so(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#5261: a ``FAILED`` end is an end the printer timed, as ``FINISH`` is."""
+    printers, reports, pid = linked
+    lan = Lan(
+        subscribes=True,
+        deltas=[
+            {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+            {"gcode_state": "FAILED", "subtask_name": OLD_START},
+        ],
+    )
+    rack = Settles()
+    watches = WatchActivities(
+        printers,
+        reports,
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        rack=cast(LanUsage, rack),
+    )
+    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+    assert rack.ended == [(pid, OLD_START, lan.sent[1].received_at, True)]
+
+
+async def test_an_end_held_back_settles_when_the_quiet_watch_writes_it(
+    linked: tuple[PrinterStore, PrinterReportStore, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5261: a report that changes no card field waits for `write_every`. When the
+    printer then goes quiet, the `HEARD_EVERY` timeout writes it, and the end it shows
+    settles at that report's time, not at the flush."""
+    printers, reports, pid = linked
+    monkeypatch.setattr(watch_module, "HEARD_EVERY", 0.05)
+    lan = Lan(
+        subscribes=True,
+        deltas=[
+            {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+            {"gcode_state": "RUNNING", "subtask_name": "someone-elses-print"},
+        ],
+    )
+    rack = Settles()
+    watches = WatchActivities(
+        printers,
+        reports,
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        rack=cast(LanUsage, rack),
+        write_every=3600,
+    )
+    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+    assert rack.ended == [(pid, OLD_START, lan.sent[1].received_at, False)]
+    got = reports.get(pid)
+    assert got is not None and got[0]["subtask_name"] == "someone-elses-print"
 
 
 RUNNING_X = {"gcode_state": "RUNNING", "subtask_name": "x"}
