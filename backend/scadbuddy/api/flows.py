@@ -877,7 +877,11 @@ def _native(printers: Printers, settings: SettingsStore) -> NativeCheck:
     """Whether a run on a registry row goes over the LAN (`print_run.lan_printers`, as
     the print dialog's choices name them), read once per page and only when a parked
     print names a linked row. A read that fails is kept too, logged once: each later
-    linked entry on the page names no path, and reads nothing again (#5472)."""
+    linked entry on the page names no path, and reads nothing again (#5472).
+
+    The cache is a plain closure with no lock: "once per page" holds because
+    `_pending` binds its entries one at a time. Checks run at once (`asyncio.gather`)
+    could each find nothing read yet and each read (#5477)."""
     native: frozenset[str] | None = None
     failed = False
 
