@@ -61,7 +61,11 @@ class Runs:
         self.calls += 1
         self.observer.observe_subject(self.key, slug, self.reads)
         return PrintRun(
-            id=run_id, subject=f"output:{OUTPUT}", status="succeeded", created_at=AT, result=result
+            id=run_id,
+            subject=f"output:{OUTPUT}" if self.key == OUTPUT else self.key,
+            status="succeeded",
+            created_at=AT,
+            result=result,
         )
 
 

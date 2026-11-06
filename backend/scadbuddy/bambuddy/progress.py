@@ -592,7 +592,8 @@ def _is_of(ids: _PrintIds, run_id: str | None, queue_item_ids: Collection[int]) 
     read_run, read_items = ids
     if run_id is not None and read_run == run_id:
         return True
-    return bool(read_items) and read_items <= set(queue_item_ids)
+    queued = queue_item_ids if isinstance(queue_item_ids, frozenset) else frozenset(queue_item_ids)
+    return bool(read_items) and read_items <= queued
 
 
 #: Outputs whose last observed progress :class:`ProgressObserver` remembers.
@@ -627,7 +628,9 @@ class ProgressObserver:
     def started(
         self, meta: OutputMeta, *, run_id: str | None = None, queue_item_ids: Collection[int] = ()
     ) -> None:
-        """A print of ``meta`` was just started: whatever was seen before is stale."""
+        """A print of ``meta`` was just started: whatever was seen before is stale, unless
+        it is of this print, which run ``run_id`` started over the LAN or queued as
+        ``queue_item_ids``."""
         self.started_subject(meta.id, meta.slug, run_id=run_id, queue_item_ids=queue_item_ids)
 
     def started_subject(

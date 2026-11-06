@@ -693,7 +693,7 @@ class PrintActivities:
         finds nothing new publishes nothing."""
         spec = input.input.source
         run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
-        queued = input.result.queue_item_ids
+        queued = frozenset(input.result.queue_item_ids)
         if spec.kind == "output" and spec.output_id is not None and input.result.lan:
             await self._record_lan(spec.output_id, run, input.result)
         if spec.kind == "output" and spec.output_id is not None:
