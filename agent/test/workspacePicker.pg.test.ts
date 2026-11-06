@@ -8,7 +8,7 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { SessionResources } from '../src/sessions/touched.js'
 import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
 import { PluginStore } from '../src/plugins/registry.js'
-import { readPluginSecrets } from '../src/plugins/secrets.js'
+import { toolSecrets } from '../src/plugins/secrets.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 import { SessionFiles } from '../src/workspace/store.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -62,6 +62,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     oauth = new PluginOAuth(db.sql)
     plugins = new PluginStore(db.sql, { oauth })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, workspace: files })
+    const saved = new MemoryCredentials()
+    await saved.create({ kind: 'anthropic_api_key', secret: SECRET }, kek)
     app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -73,8 +75,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
       approvals: m.approvals,
       sessions: m,
       workspace: files,
-      // As main.ts builds it: the saved credentials, then every plugin secret.
-      workspaceSecrets: async () => [SECRET, ...(await readPluginSecrets({ kek, plugins, oauth }))],
+      // As main.ts wires it (plugins/secrets.ts `toolSecrets`, #5483): the saved credentials, then every plugin secret.
+      workspaceSecrets: toolSecrets({ kek, credentials: saved, plugins, oauth }).fresh,
     })
   })
   afterEach(async () => {
