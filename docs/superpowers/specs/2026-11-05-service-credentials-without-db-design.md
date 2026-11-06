@@ -366,6 +366,12 @@ Answer `200 {"access_token": "sbsvc_…", "token_type": "Bearer", "expires_in": 
 
 The CRUD service, for a JWT:
 
+0. Checks the JWT's signature offline against the cluster issuer's JWKS (cached; an unknown
+   `kid` refetches at most once per 30 s), with `iss`, `aud` containing `scadbuddy`, `exp`
+   and `nbf`, and RS256 or ES256 only. A forged or malformed token is refused here with no
+   TokenReview and no rate-limit cost, so unauthenticated traffic can never lock a caller out
+   or spend the TokenReview budget (60 a minute per API process, signature-valid tokens of a
+   mapped ServiceAccount only).
 1. Sends a TokenReview with `spec.audiences: ["scadbuddy"]`. Refuses unless
    `status.authenticated` is true and `status.audiences` contains `scadbuddy`.
 2. Maps `status.user.username` to the caller (§6.1). Refuses an unmapped one.
@@ -546,7 +552,8 @@ Each one takes the more secure option. The cost is stated with it.
    ServiceAccount token, checked by TokenReview (B1). Outside it, compose uses the per-caller
    bootstrap secret file (§7). The database view goes once every caller exchanges (§8).
    Cost: the API depends on the Kubernetes API for each exchange.
-2. **TokenReview, not offline JWKS.** The API's ServiceAccount gets `system:auth-delegator`.
+2. **TokenReview after an offline JWKS check.** The offline check refuses forgeries for free;
+   TokenReview then refuses a valid-looking token of a deleted pod. The API's ServiceAccount gets `system:auth-delegator`.
    A deleted pod's token is refused at once, and the pod name and uid are bound to each
    credential. Cost: one cluster-wide grant, held by the CRUD service only. That the ClusterRole grants
    `create` on TokenReview and SubjectAccessReview and nothing more is **not verified** here
