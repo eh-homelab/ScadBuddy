@@ -216,7 +216,8 @@ export const dollhouseSchema: CustomizerSchema = {
 
 /** #5376 — the bookmark's eight parameter groups (models/bookmark/model.scad), with a
  *  few of its parameters each: enough groups that the tab list wraps in the real panel.
- *  The groups mirror that file's sections, but the e2e tab wrap test needs only enough
+ *  The groups are a copy of that file's sections, kept by hand: nothing checks them, so
+ *  they may drift when the template changes. The e2e tab wrap test needs only enough
  *  of them to wrap, not an exact copy. */
 export const bookmarkSchema: CustomizerSchema = {
   title: 'Bookmark',
