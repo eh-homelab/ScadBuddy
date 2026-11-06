@@ -701,6 +701,10 @@ async def test_the_lists_margins_equal_the_per_order_read(shop: Shop) -> None:
     ok, _ = shop.accepted(quantity=2)
     made.append(ok.id)
 
+    # A loss: the quote (PricingPolicy() with every rate 0) has one filament line, 20 a
+    # unit, so it charges 40 for two. The attempts' 28.5 g at its 2 a gram cost 57. The
+    # quote has no machine_time line, so 1000 s at today's 36 an hour (1 a second) cost
+    # 1000. It has no labour line, so labour is today's 100 a unit, 200. Cost 1257.
     sliced, item = sliced_order(shop)
     attempt(shop, sliced, item, "failed", 0, 7.5, 81)
     attempt(shop, sliced, item, "succeeded", 2, 21.0, 82)
