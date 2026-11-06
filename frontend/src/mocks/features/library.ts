@@ -762,6 +762,11 @@ function descendants(id: number): Set<number> {
   return found
 }
 
+/** #5371 — a model delete's `delete_inbox_copies`: its outputs' copies to the mocked trash. */
+export function trashMockLibraryFiles(ids: Iterable<number>): void {
+  for (const id of ids) trashed.add(id)
+}
+
 function listedFiles(): LibraryEntry[] {
   return [...libraryFiles, ...copies]
     .filter((file) => !trashed.has(file.id) && !removed.has(file.id))

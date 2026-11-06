@@ -63,6 +63,7 @@ import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAG_FILTER_CHARS, MAX_TAG_FILTE
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
+import { trashMockLibraryFiles } from './features/library'
 import { attachmentsOf } from './features/printAttachments'
 import { mockRackCheck, mockRackPicks } from './features/rack'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
@@ -2432,6 +2433,12 @@ export const handlers = [
         { duplicates: slugs.length, slugs },
       )
     }
+    // #5371 — no library file names one of its outputs any more; with
+    // `delete_inbox_copies` those copies go to the trash. Bambuddy's inbox is left alone.
+    const outputIds = new Set(state.outputs.filter((o) => o.slug === params['slug']).map((o) => o.id))
+    const copies = [...state.libraryOutputs].filter(([, outputId]) => outputIds.has(outputId)).map(([fileId]) => fileId)
+    if (new URL(request.url).searchParams.get('delete_inbox_copies') === 'true') trashMockLibraryFiles(copies)
+    for (const fileId of copies) state.libraryOutputs.delete(fileId)
     state.models = state.models.filter((m) => m.slug !== params['slug'])
     return new HttpResponse(null, { status: 204 })
   }),

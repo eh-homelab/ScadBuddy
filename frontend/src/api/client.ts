@@ -1408,9 +1408,19 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
-  deleteModel: (slug: string, force = false) =>
-    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
+  /**
+   * 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway.
+   * #5371 — `deleteInboxCopies` also trashes its outputs' copies in ScadBuddy's own library
+   * (each copy still filed under the template's folder, and the per-print copies with their
+   * slices), refused with 409 while one of their print runs is open. Never Bambuddy's inbox.
+   */
+  deleteModel: (slug: string, force = false, deleteInboxCopies = false) => {
+    const query = new URLSearchParams()
+    if (force) query.set('force', 'true')
+    if (deleteInboxCopies) query.set('delete_inbox_copies', 'true')
+    const search = query.size ? `?${query.toString()}` : ''
+    return command<unknown>(`/models/${seg(slug)}${search}`, { method: 'DELETE' }).then(() => undefined)
+  },
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
