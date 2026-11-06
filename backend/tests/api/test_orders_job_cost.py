@@ -3,15 +3,19 @@ each on the audit line, and the costs read's charged, cost and margin."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import orders as orders_api
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order, pin_created
-from tests.api.test_orders_lifecycle import quote_and_accept
+from tests.api.test_orders_lifecycle import fulfil, quote_and_accept
 from tests.api.test_orders_reopen import item_of
 from tests.api.test_orders_unfulfil import accepted_order
+from tests.api.test_versions import SLUG
 
 pytestmark = pytest.mark.requires_git
 
@@ -144,6 +148,50 @@ def test_the_list_shows_each_orders_margin_and_filters_by_it(
     assert [r["id"] for r in second["items"]] == [loss]
     assert second["next_cursor"] is None
     assert client.get("/api/v1/orders?margin_state=nope").status_code == 422
+
+
+def test_the_unit_cost_history_warns_below_the_models_real_cost(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """§6.3, §7 (#5328): the model's fulfilled job, costed as its order's costs read, and a
+    price below it warns with a suggested price at the shop's markup."""
+    settings = {"pricing_markup_percent": "25", "pricing_labour_per_item": "0"}
+    assert client.put("/api/v1/settings", json=settings).status_code == 200
+    order, [item] = accepted_order(client)  # charged 1200 by the typed quote
+    cost = {"order_item_id": item, "kind": "material", "amount_minor": 1500}
+    assert client.post(f"/api/v1/orders/{order}/cost-entries", json=cost).status_code == 201
+    fulfil(client, order, item, 1)
+    # Pinned a day back: the window is judged against the wall clock, which jumps on WSL.
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET accepted_at = %s WHERE order_item_id = %s"
+            " AND accepted_at IS NOT NULL",
+            (datetime.now(UTC) - timedelta(days=1), item),
+        )
+    real = client.get(f"/api/v1/orders/{order}/costs").json()["items"][0]["cost_minor"]
+
+    answer = client.get(
+        "/api/v1/orders/history/unit-cost", params={"slug": SLUG, "unit_price_minor": 1200}
+    )
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert (body["jobs"], body["units"], body["unit_cost_minor"]) == (1, 1, real)
+    assert real == 1500
+    assert (body["main_reason"], body["main_reason_minor"]) == ("other", 1500)
+    # 1500 marked up 25 %.
+    assert (body["suggested_unit_price_minor"], body["markup_percent"]) == (1875, "25")
+    assert (body["warning"], body["margin_percent"], body["minor_exponent"]) == (True, -25.0, 2)
+    assert body["below_cost"]
+    # 1600 is above the cost, but 100 over 1600 is 6.3 %: thin, not below the cost.
+    thin = client.get(
+        "/api/v1/orders/history/unit-cost", params={"slug": SLUG, "unit_price_minor": 1600}
+    ).json()
+    assert (thin["warning"], thin["below_cost"], thin["margin_percent"]) == (True, False, 6.3)
+
+    none = client.get("/api/v1/orders/history/unit-cost", params={"slug": "nothing"}).json()
+    assert (none["jobs"], none["unit_cost_minor"], none["warning"]) == (0, None, False)
+    assert client.get("/api/v1/orders/history/unit-cost").status_code == 422
 
 
 def test_the_margin_filter_scans_a_bounded_number_of_orders(

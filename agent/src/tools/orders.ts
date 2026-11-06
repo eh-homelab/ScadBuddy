@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
 import { nozzles, presetRef, slotChoice, tier } from './print.js'
-import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
@@ -153,6 +153,34 @@ const sliceQuote = z
       ),
   })
   .strict()
+
+/**
+ * The quote warning (job cost spec 2026-11-05 §6.3, #5328): the model's real cost per unit
+ * in its past jobs against the quote's unit price, when that price is thin. Undefined with
+ * no warning, for an answer that is not a quote (a slice quote still running), and when the
+ * lookup fails: the quote is recorded by then, and a failed tool call would invite a second.
+ */
+async function priceWarning(ctx: ToolContext, orderId: string, answer: unknown): Promise<unknown> {
+  const quote = answer as { order_item_id?: unknown; unit_price_minor?: unknown } | null
+  if (typeof quote?.order_item_id !== 'string' || typeof quote.unit_price_minor !== 'number') return undefined
+  try {
+    // The whole order: no route reads one item, and the order holds the currency.
+    const order = await ok(ctx.backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id: orderId } } }), `get order ${orderId}`)
+    const slug = order.items.find((item) => item.id === quote.order_item_id)?.reference?.slug
+    if (!slug) return undefined
+    const history = await ok(
+      ctx.backend.GET('/api/v1/orders/history/unit-cost', {
+        params: { query: { slug, currency: order.order.currency, unit_price_minor: quote.unit_price_minor } },
+      }),
+      `read the unit cost history of ${slug}`,
+    )
+    if (!history.warning) return undefined
+    const { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, estimated, below_cost } = history
+    return { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, below_cost, estimated }
+  } catch {
+    return undefined
+  }
+}
 
 /** The quiet-path answer for a `delete`: openapi-fetch gives no body for a 204. */
 const deleted = (what: string) => json({ deleted: what })
@@ -629,7 +657,12 @@ export const orderTools: Tool[] = [
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
-      'item is quoted; order_item_accept_quote pins it.',
+      'item is quoted; order_item_accept_quote pins it. When the unit price leaves a margin below the thin ' +
+      "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
+      '`price_warning`: `unit_cost_minor` and `jobs`, `below_cost` (true: the price is below the real cost; ' +
+      'false: it is above it, but the margin is thin), the `main_reason` (the cost part that most exceeded what ' +
+      'their quotes priced) and a `suggested_unit_price_minor`. It is advice: tell the user, never re-quote ' +
+      'without asking.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -640,26 +673,28 @@ export const orderTools: Tool[] = [
       slice: sliceQuote.optional(),
     }),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes', 'POST /api/v1/orders/{order_id}/items/{item_id}/quote'],
+    routes: [
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quotes',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quote',
+      'GET /api/v1/orders/history/unit-cost',
+    ],
     title: ({ order_id, item_id, slice }) => `${slice ? 'Quote from a slice' : 'Price'} item ${item_id} of order ${order_id}`,
     handler: async ({ order_id, item_id, manual, slice }, ctx) => {
       if ((manual === undefined) === (slice === undefined)) {
         throw new ToolError('give exactly one of `manual` (a typed price) or `slice` (the print dialog\'s choices)')
       }
       const path = { order_id, item_id }
-      if (manual !== undefined) {
-        return json(
-          await ok(
-            ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
-            `quote item ${item_id}`,
-          ),
-        )
-      }
-      return json(
-        await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
-          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
-        ),
-      )
+      const quote =
+        manual !== undefined
+          ? await ok(
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
+              `quote item ${item_id}`,
+            )
+          : await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
+            )
+      const warning = await priceWarning(ctx, order_id, quote)
+      return json(warning === undefined ? quote : { ...(quote as object), price_warning: warning })
     },
   }),
   defineTool({

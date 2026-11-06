@@ -220,6 +220,7 @@ import type {
   OrderCreate,
   OrderDetail,
   OrderEstimate,
+  UnitCostHistory,
   OrderCosts,
   TimeEntry,
   TimeEntryCreate,
@@ -2499,6 +2500,12 @@ export const api = {
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
+  /** #5328, job cost spec §6.3: the model's real cost per unit in its last fulfilled jobs,
+   * in `currency`, and whether `unitPrice` warns (`warning`, `below_cost`). Advice only. */
+  unitCostHistory: (slug: string, currency: string, unitPrice: number) =>
+    request<UnitCostHistory>(
+      `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice) })}`,
+    ),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>

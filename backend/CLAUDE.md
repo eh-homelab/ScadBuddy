@@ -599,6 +599,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   can be short or empty while a cursor remains. Frontend: the list's Margin column, its sort (the
   rows loaded, `components/orders/marginSort.ts`) and the "Loss or thin" chip
   (`lib/ordersQuery.ts` `margin=loss_thin`); agent `order_list`'s `margin_state`.
+  Job cost phase 3 (#5328, §6.3): `GET /orders/history/unit-cost?slug=` (`orders/history.py`
+  `unit_cost_history`, `OrderStore.fulfilled_items`): the slug's last 10 items `fulfilled`
+  within 365 days of their last accepted attempt, on orders not cancelled, in one currency;
+  each item's cost is `_order_costs`'s, never a second formula. It gives the unit cost, the
+  main reason, the suggested price and, with `unit_price_minor`, `warning`. Advice only.
+  Frontend `components/orders/QuoteWarning.tsx` in `QuoteEditor` (mock
+  `mocks/features/orders/history.ts`); agent `order_item_quote` adds `price_warning`.
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
