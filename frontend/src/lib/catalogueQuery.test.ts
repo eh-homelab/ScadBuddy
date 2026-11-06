@@ -82,6 +82,7 @@ describe('filterModels', () => {
       'ui-demo',
       'builtin:keychain-template',
       'builtin:dollhouse-kit',
+      'bookmark',
       'ui-unmigrated',
     ])
   })
@@ -125,6 +126,7 @@ describe('filterModels', () => {
   it('sorts by name', () => {
     expect(slugs(filterModels(models, query({ sort: 'name' })))).toEqual([
       'builtin:maze-puzzle',
+      'bookmark',
       'creme-coaster',
       'builtin:dollhouse-kit',
       'gridfinity-bin',
@@ -168,6 +170,7 @@ describe('tagCounts', () => {
       { tag: 'custom-ui', count: 4 },
       { tag: 'keychain', count: 2 },
       { tag: 'kitchen', count: 2 },
+      { tag: 'bookmark', count: 1 },
       { tag: 'gridfinity', count: 1 },
       { tag: 'storage', count: 1 },
       { tag: 'Tea & Coffee', count: 1 },
