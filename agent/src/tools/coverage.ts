@@ -7,6 +7,10 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/print/library-copies',
+    reason: "The Library page's list of recent copies between the libraries (#5355); an agent follows the copy it started with get_library_copy.",
+  },
+  {
     operation: "POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
     reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
   },

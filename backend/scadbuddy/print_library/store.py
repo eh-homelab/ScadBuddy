@@ -270,6 +270,17 @@ class NativeLibraryStore:
             f"SELECT {_FILE_COLUMNS} FROM library_files WHERE {where} ORDER BY id", params
         )
 
+    def files_by_sha256(self, digests: list[str]) -> list[NativeFile]:
+        """The live files whose bytes are any of ``digests`` (#5355): what a copy into
+        this library skips."""
+        if not digests:
+            return []
+        return self._files(
+            f"SELECT {_FILE_COLUMNS} FROM library_files WHERE sha256 = ANY(%s)"
+            f" AND deleted_at IS NULL ORDER BY id",
+            (list(digests),),
+        )
+
     def files_by_ids(self, ids: list[int]) -> list[NativeFile]:
         return self._files(
             f"SELECT {_FILE_COLUMNS} FROM library_files WHERE id = ANY(%s) AND deleted_at IS NULL"

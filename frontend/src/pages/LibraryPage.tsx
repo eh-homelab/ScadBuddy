@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import {
+  ArrowLeftRightIcon,
   ChevronDownIcon,
   CopyIcon,
   FolderIcon,
@@ -44,6 +45,7 @@ import { LibraryTree } from '../components/library/LibraryTree'
 import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
+import { LibraryCopyDialog } from '../components/library/LibraryCopyDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Spinner } from '../components/ui/spinner'
@@ -226,6 +228,8 @@ export function LibraryPage() {
   const [confirming, setConfirming] = useState<LibraryEntry[]>([])
   const [deleted, setDeleted] = useState<Deleted | null>(null)
   const [transfer, setTransfer] = useState<{ mode: TransferMode; files: LibraryEntry[] } | null>(null)
+  // #5355 — a copy between Bambuddy's library and ScadBuddy's own.
+  const [copying, setCopying] = useState(false)
   const [renaming, setRenaming] = useState<LibraryEntry | null>(null)
   /** #1031 — the open details' file as a rename or move here left it, while no listing holds it. */
   const [detailsKept, setDetailsKept] = useState<LibraryEntry | null>(null)
@@ -839,6 +843,13 @@ export function LibraryPage() {
         onRan={() => (printing ? undefined : setArrangedSent(true))}
       />
       <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
+      <LibraryCopyDialog
+        open={copying}
+        onClose={() => setCopying(false)}
+        nativeFolders={tree ?? []}
+        picked={picked}
+        onCopied={() => setReload((n) => n + 1)}
+      />
       <TransferLibraryFilesDialog
         mode={transfer?.mode ?? 'move'}
         files={transfer?.files ?? []}
@@ -950,6 +961,14 @@ export function LibraryPage() {
               onClick={() => setTransfer({ mode: 'copy', files: picked })}
             >
               <CopyIcon /> Copy selected ({picked.length})
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="library-copy-between"
+              onClick={() => setCopying(true)}
+            >
+              <ArrowLeftRightIcon /> Copy between libraries…
             </Button>
             <Button
               size="sm"

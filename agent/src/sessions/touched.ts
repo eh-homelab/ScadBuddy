@@ -473,6 +473,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const target = str(input.target)
     return source && target ? setting(`store_migration:${source}:${target}`) : []
   },
+  // #5355: a copy between the libraries is one job row; what it copies lands later, server-side.
+  copy_library_files: (_input, result) => {
+    const id = str(field(result, 'copy_id'))
+    return id ? setting(`library_copy:${id}`) : []
+  },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>

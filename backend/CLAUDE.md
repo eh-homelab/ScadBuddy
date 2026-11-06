@@ -337,6 +337,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+  Copies between the two libraries (#5355): `print_library/copy.py` (the plan's walk,
+  the batch, the ``library`` queue activities), `copy_models.py`, `copy_store.py`
+  (`library_copies`, `library_copy_files`), `workflows/library_copy.py` (`LibraryCopy`,
+  AUTO_UPGRADE, one execution per distinct request: `copy_id`), routes
+  `api/library_copy.py` (`POST`/`GET /print/library-copies`, and `/print/bambuddy-library`,
+  Bambuddy's library browsed as a source on `native`). A file whose SHA-256 the target
+  holds is skipped (Bambuddy's `file_hash` and the native rows' `sha256` compare
+  directly), each selected folder's path is kept, nothing at the target is deleted or
+  overwritten. The bytes go into Bambuddy through `send.upload_raw`, the one raw upload
+  path (`ensure_raw_copy` uses it too), and into the native library through
+  `NativeLibrary.upload` (`StoreFullError` is a failed row naming the 507). Agent
+  `copy_library_files` and `get_library_copy` (`agent/src/tools/libraryCopy.ts`);
+  `list_library`'s `source: bambuddy`; frontend `components/library/LibraryCopyDialog.tsx`.
   A native run of several prints starts the later ones in `PrintLanSequence`
   (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`); its controls
   (#4942, #4939) are `POST /print/runs/{id}/stop` (cancels the sequence, which records

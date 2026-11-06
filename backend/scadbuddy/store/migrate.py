@@ -65,7 +65,7 @@ class MigrateBatchInput(BaseModel):
     started: datetime
 
 
-async def _beat_while(key: str, beat: Callable[[str], None]) -> None:
+async def beat_while(key: str, beat: Callable[[str], None]) -> None:
     """``beat(key)`` now and every `HEARTBEAT_EVERY` until cancelled, whether or not
     bytes moved: the activity's start-to-close timeout bounds a stalled copy."""
     while True:
@@ -92,7 +92,7 @@ async def migrate_batch(
     its sha256, or whose copy the target refused, records the error and is ``failed``;
     one that moved on meanwhile (its mark missed) is left for the next batch.
     ``heartbeat`` is called with the key, from the event loop, while each copy runs
-    (`_beat_while`)."""
+    (`beat_while`)."""
     rows = await asyncio.to_thread(
         index.unmigrated, source.backend, target.backend, limit=limit, started=started
     )
@@ -182,7 +182,7 @@ async def _copy(
     the source has no such object, else the error."""
     spool = await asyncio.to_thread(tempfile.TemporaryFile, "w+b")
     with spool:
-        beating = asyncio.create_task(_beat_while(row.key, beat))
+        beating = asyncio.create_task(beat_while(row.key, beat))
         try:
             return await _copy_through(index, source, target, row, spool)
         finally:

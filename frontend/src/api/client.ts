@@ -55,6 +55,9 @@ import type {
   LibraryFileEntry,
   LibraryFileObjects,
   LibraryCopyResult,
+  LibraryCopyRequest,
+  LibraryCopyStarted,
+  LibraryCopyStatus,
   LibraryDeleteResult,
   LibraryFileName,
   LibraryFolder,
@@ -2536,6 +2539,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
     }),
+
+  /** #5355 — a copy between Bambuddy's library and ScadBuddy's own, started as a job; the same request joins a running one. */
+  startLibraryCopy: (body: LibraryCopyRequest) =>
+    request<LibraryCopyStarted>('/print/library-copies', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #5355 — a library copy's counts, whether it runs, and its files' outcomes. */
+  getLibraryCopy: (copyId: string) => request<LibraryCopyStatus>(`/print/library-copies/${seg(copyId)}`),
+
+  /** #5355 — Bambuddy's library (every file type) as a copy's source, whichever library the page serves. */
+  getBambuddyLibrary: (folderId: number | null) =>
+    request<LibraryListing>(`/print/bambuddy-library${folderId === null ? '' : `?folder_id=${folderId}`}`),
 
   /** #2670 — a new name for a file, its extension kept. */
   renameLibraryFile: (fileId: number, filename: string) =>
