@@ -193,6 +193,7 @@ def test_the_happy_path_to_closed(shop: Shop) -> None:
     assert shop.kinds(order) == [
         "order.created",
         "item.added",
+        "revision.added",
         "quote.recorded",
         "quote.accepted",
         "order.status",  # quoted
@@ -833,6 +834,7 @@ def _slice_quote(shop: Shop, order: Order, item: OrderItem, key: str = "quote-a"
         sliced_sha256="a" * 64,
         sliced_blob_key=key,
         by=BY,
+        revision_id=shop.get_item(item).current_revision_id or "",
         quote_id=quote_id,
     )
 

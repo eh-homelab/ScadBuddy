@@ -10,6 +10,7 @@ function attempt(n: number, outcome: Fulfilment['outcome'], grams: number): void
   state.fulfilments.push({
     id: `f-${n}`,
     order_item_id: ITEM_APPROVED,
+    purpose: 'production',
     attempt: n,
     quantity: outcome === 'succeeded' ? 2 : 0,
     outcome,

@@ -11,6 +11,7 @@ import type {
   LibraryCopyResult,
   LibraryDeleteResult,
   LibraryEntry,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryFolder,
   LibraryFolderCreate,
@@ -165,19 +166,21 @@ function pngResponse() {
   return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }
 
+/** A folder's names from the top, as the backend's `folder_path`. */
+function folderPathOf(id: number | null | undefined): string[] {
+  const folder = listedFolders().find((row) => row.id === id)
+  return folder ? [...folderPathOf(folder.parent_id), folder.name] : []
+}
+
 /** The backend's `search_library` (#3630): every word in the name or the folder path. */
 function searchFiles(query: string, all: boolean): LibrarySearch {
   const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
   const terms = words(query).split(' ').filter(Boolean)
-  const pathOf = (id: number | null | undefined): string[] => {
-    const folder = listedFolders().find((row) => row.id === id)
-    return folder ? [...pathOf(folder.parent_id), folder.name] : []
-  }
   const matched = terms.length === 0
     ? []
     : listedFiles().filter((file) => {
         const name = words(file.filename)
-        const where = words(pathOf(file.folder_id).join(' '))
+        const where = words(folderPathOf(file.folder_id).join(' '))
         return terms.every((term) => name.includes(term) || where.includes(term))
       })
   const shown = matched.filter((file) => all || file.file_type?.toLowerCase() === '3mf')
@@ -189,7 +192,7 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
     files: shown.slice(0, 100).map((file) => ({
       ...file,
       output_id: mockLibraryOutput(file.id) ?? null,
-      folder_path: pathOf(file.folder_id),
+      folder_path: folderPathOf(file.folder_id),
     })),
     total: shown.length,
     hidden: matched.length - shown.length,
@@ -216,6 +219,18 @@ export const handlers = [
   http.get(`${base}/print/library/search`, ({ request }) => {
     const search = new URL(request.url).searchParams
     return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
+  }),
+
+  // #5321 — one file by id, whatever its type, with its folder's path. After `names` and
+  // `search`, which the pattern would otherwise take.
+  http.get(`${base}/print/library/:id`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return HttpResponse.json({
+      ...file,
+      output_id: mockLibraryOutput(file.id) ?? null,
+      folder_path: folderPathOf(file.folder_id),
+    } satisfies LibraryFileEntry)
   }),
 
   http.get(`${base}/print/library`, ({ request }) => {
@@ -377,6 +392,17 @@ export const handlers = [
 
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+  // #1031 — the file itself, always a download, as `get_library_file` serves it.
+  http.get(`${base}/print/library/:id/file`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return new HttpResponse(new TextEncoder().encode(`mock ${file.filename}`), {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename*=utf-8''${encodeURIComponent(file.filename)}`,
+      },
+    })
+  }),
   // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
   http.get(`${base}/print/library/:id/preview.glb`, ({ params, request }) => {
     const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']

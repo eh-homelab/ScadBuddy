@@ -3,7 +3,8 @@ import type { Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdat
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
-import { FilamentsRefused, event, itemOf, lock, notEnded, OPEN_FOR_EDITS, quotesOf, rederive, refused, SETTLED, withFilaments } from './orders'
+import { FilamentsRefused, event, itemOf, lock, notEnded, OPEN_FOR_EDITS, rederive, refused, SETTLED, withFilaments } from './orders'
+import { pushRevision } from './revisions'
 import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
 
 /**
@@ -283,14 +284,14 @@ export const handlers = [
       // The run: the filaments first (a change drops the accepted quote), then the quote.
       notEnded(order)
       if (changed) {
-        found.colours = colours
-        for (const q of quotesOf(found.id)) q.accepted = false
-        found.status = 'draft'
+        // A slot's filament is the item's next revision (#5280), which drops the accepted quote.
+        pushRevision(order, found, found.reference, colours, '')
         event(order, 'item.updated', { item_id: found.id, repinned: true })
       }
       const made: Quote = {
         id: newId('q'),
         order_item_id: found.id,
+        revision_id: found.current_revision_id,
         created_at: now(),
         accepted: false,
         quantity: found.quantity,

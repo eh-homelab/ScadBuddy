@@ -80,6 +80,10 @@ class MediaItem(BaseModel):
     caption: str = ""
     #: A poster image in ``media/``; videos only.
     poster: str | None = Field(default=None, pattern=MEDIA_FILE_PATTERN)
+    #: A photo added from an order's accepted design revision (storefront spec §4): the
+    #: commit of the template that revision pinned, and the revision's id. None otherwise.
+    source_commit: str | None = None
+    source_revision_id: str | None = None
 
 
 class MediaView(MediaItem):

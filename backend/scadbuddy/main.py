@@ -38,6 +38,7 @@ from scadbuddy.api import (
     mesh_models,
     metrics,
     models,
+    order_attachments,
     outputs,
     print_attachments,
     telemetry,
@@ -255,6 +256,8 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
     types, can only describe it through `openapi_extra`, which FastAPI copies in
     verbatim: the model would be inlined and never named, and the generated client
     would have no type for it. Named here, `openapi_extra` points at it by `$ref`.
+    A name already in the spec is refused: two models under one name would leave one
+    shape for both, and a client would build the wrong body (#5317).
     """
     generate = app.openapi
 
@@ -264,6 +267,8 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
         schema = generate()
         named = schema.setdefault("components", {}).setdefault("schemas", {})
         for model in extra:
+            if model.__name__ in named:
+                raise ValueError(f"the OpenAPI spec already names a {model.__name__}")
             named[model.__name__] = model.model_json_schema(
                 ref_template="#/components/schemas/{model}"
             )
@@ -2051,7 +2056,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         media.MediaUpload,
         mesh_models.MeshUpload,
         library_print.LibraryFileUploadForm,
-        print_attachments.AttachmentUpload,
+        print_attachments.PrintAttachmentUpload,
+        order_attachments.OrderAttachmentUpload,
+        order_attachments.RevisionAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

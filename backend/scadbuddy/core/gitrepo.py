@@ -691,9 +691,11 @@ class GitRepo:
         trailers: Sequence[str] = (),
         allow_empty: bool = False,
         date: datetime | None = None,
+        body: str | None = None,
     ) -> str | None:
         """Stage ``paths`` and commit them as the current author, under the write lock.
-        ``None`` when nothing changed and ``allow_empty`` is false."""
+        ``None`` when nothing changed and ``allow_empty`` is false. ``body`` is the
+        message's own paragraphs (:func:`body_text`), before the trailers."""
         targets = list(paths) or ["."]
         self._stage(targets)
         # The commit carries no pathspec: exactly what was just staged is what is
@@ -703,6 +705,8 @@ class GitRepo:
             return None
         parent = self.head()
         args = ["commit", "--no-verify", "-m", subject_line(message)]
+        if body is not None and (paragraphs := body_text(body)):
+            args += ["-m", paragraphs]
         if allow_empty:
             args.append("--allow-empty")
         env: dict[str, str] | None = None
@@ -1011,16 +1015,23 @@ class GitRepo:
         return RevisionRange(resolved_base, resolved_head)
 
     def diff(
-        self, revisions: RevisionRange, path: str | None = None, *, relative: str | None = None
+        self,
+        revisions: RevisionRange,
+        path: str | None = None,
+        *,
+        relative: str | None = None,
+        exclude: Sequence[str] = (),
     ) -> str:
-        """A unified patch across ``revisions``, optionally scoped to one path; with
-        ``relative``, headers name paths relative to that directory."""
+        """A unified patch across ``revisions``, optionally scoped to one path less the
+        ``exclude`` paths; with ``relative``, headers name paths relative to that
+        directory."""
         args = ["diff", "--no-color"]
         if relative is not None:
             args.append(f"--relative={relative}")
         args += [revisions.base, revisions.head]
-        if path is not None:
-            args += ["--", path]
+        if path is not None or exclude:
+            args += ["--", path if path is not None else "."]
+            args += [f":(exclude){excluded}" for excluded in exclude]
         return self._patch(*args)
 
     def diff_files(self, revisions: RevisionRange, path: str | None = None) -> list[FileChange]:
@@ -1080,6 +1091,20 @@ def _parse_log(text: str) -> list[Revision]:
 def _is_control(character: str) -> bool:
     """C0, DEL and C1: none of them belongs in a one-line subject."""
     return character < " " or "\x7f" <= character <= "\x9f"
+
+
+#: The longest commit body a caller may give (#3186).
+MAX_BODY = 10_000
+
+
+def body_text(body: str) -> str:
+    """A caller's commit body, safe to commit (#3186): control characters but newline
+    dropped, as :func:`subject_line` drops them, and trailing blanks trimmed. Its
+    paragraphs stay. Never parsed as trailers: they follow it in a paragraph of their
+    own, and git reads only the last one."""
+    kept = "".join(c for c in body.replace("\r\n", "\n") if c == "\n" or not _is_control(c))
+    lines = [line.rstrip() for line in kept.split("\n")]
+    return "\n".join(lines).strip("\n")[:MAX_BODY].strip()
 
 
 def subject_line(message: str) -> str:

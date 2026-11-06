@@ -420,3 +420,57 @@ def test_the_archive_copied_backfill_marks_every_attempt_from_before_it(
             "SELECT id, archive_copied FROM order_item_fulfilments ORDER BY attempt"
         ).fetchall()
     assert rows == [("before", True), ("none", False), ("since", False)]
+
+
+@pytest.mark.requires_postgres
+def test_the_revisions_migration_gives_every_model_item_revision_one(pg_conninfo: str) -> None:
+    # Storefront phase 1 (#5280): a model item's reference and colours become its
+    # revision 1, which its quotes name; a custom item has none.
+    colours = '[{"slot": 0, "colour": "#ff0000", "filament_id": null}]'
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("order_item_revisions")])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{\"kind\": \"browser\"}')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind, slug,"
+            " commit, inputs, template_name, render_key, colours) VALUES"
+            " ('model', 'o', 0, 1, 'Demo', 'model', 'demo', %s, '{\"params\": {}}', 'Demo',"
+            "  'k', %s)",
+            ("a" * 40, colours),
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('custom', 'o', 1, 1, 'Bracket', 'custom')"
+        )
+        for item in ("model", "custom"):
+            conn.execute(
+                "INSERT INTO order_item_quotes (order_item_id, source, plates, lines,"
+                " unit_cost_minor, unit_price_minor, quantity, total_minor, created_by)"
+                " VALUES (%s, 'manual', '[]', '[]', 1, 1, 1, 1, '{}')",
+                (item,),
+            )
+        conn.execute(
+            "INSERT INTO order_item_fulfilments (order_item_id, attempt, quantity, outcome,"
+            " created_by) VALUES ('model', 1, 1, 'succeeded', '{}')"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[_index("order_item_revisions")].id
+        rev = conn.execute(
+            "SELECT id, item_id, number, slug, colours, sent_at, answer FROM order_item_revisions"
+        ).fetchall()
+        assert len(rev) == 1
+        rev_id, item_id, number, slug, rev_colours, sent_at, answer = rev[0]
+        assert (item_id, number, slug) == ("model", 1, "demo")
+        assert rev_colours == [{"slot": 0, "colour": "#ff0000", "filament_id": None}]
+        assert sent_at is None and answer is None
+        assert conn.execute(
+            "SELECT id, current_revision_id, approval FROM order_items ORDER BY position"
+        ).fetchall() == [("model", rev_id, "together"), ("custom", None, "together")]
+        assert dict(
+            conn.execute("SELECT order_item_id, revision_id FROM order_item_quotes").fetchall()
+        ) == {"model": rev_id, "custom": None}
+        assert conn.execute(
+            "SELECT purpose, revision_id FROM order_item_fulfilments"
+        ).fetchone() == ("production", None)

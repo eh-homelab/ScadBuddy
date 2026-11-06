@@ -10,7 +10,9 @@ import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './st
  * it, served back as it was sent, and an item's image marked as what was delivered.
  */
 
-const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
+const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'render', 'test_print', 'other'])
+// A design revision's own roles, as `REVISION_ROLES` in `orders/models.py`.
+const REVISION_ROLES = new Set<OrderAttachmentRole>(['render', 'test_print'])
 
 /** `orders/attachments.py` `sniff`, over the first bytes. */
 function sniff(head: Uint8Array, name: string): [OrderAttachment['kind'], string] {
@@ -63,25 +65,38 @@ async function parts(request: Request): Promise<Part[]> {
   return found
 }
 
-async function upload(request: Request, orderId: string, itemId: string | null, fulfilmentId: string | null = null) {
+/**
+ * With `revisionId` (#5280) the file is on that revision of the item: its `render`, a
+ * `reference`, or beside a `fulfilmentId` the photo of that revision's test print.
+ */
+export async function upload(request: Request, orderId: string, itemId: string | null, fulfilmentId: string | null = null, revisionId: string | null = null) {
+  const sent = await parts(request)
+  const text = (name: string) => new TextDecoder().decode(sent.find((p) => p.name === name)?.bytes ?? new Uint8Array())
+  // On a revision's route the attempt it shows is a form field, not a path segment.
+  if (revisionId && !fulfilmentId) fulfilmentId = text('fulfilment_id').trim() || null
   let subject: string
   try {
     const order = lock(orderId)
     if (itemId) itemOf(order, itemId)
-    if (fulfilmentId && !state.fulfilments.some((f) => f.id === fulfilmentId && f.order_item_id === itemId)) {
-      throw new Refused('fulfilment_not_found', `no attempt ${fulfilmentId} of that item`, [], true)
+    if (revisionId && !state.revisions.some((r) => r.id === revisionId && r.item_id === itemId)) {
+      throw new Refused('revision_not_found', `no revision ${revisionId} of that item`, [], true)
     }
-    subject = fulfilmentId ? `order_item_fulfilment:${fulfilmentId}` : itemId ? `order_item:${itemId}` : `order:${orderId}`
+    if (fulfilmentId) {
+      const attempt = state.fulfilments.find((f) => f.id === fulfilmentId && f.order_item_id === itemId)
+      if (!attempt || (revisionId && (attempt.purpose !== 'test' || attempt.revision_id !== revisionId))) {
+        throw new Refused('fulfilment_not_found', `no attempt ${fulfilmentId} of that item`, [], true)
+      }
+    }
+    subject = revisionId ? `order_item_revision:${revisionId}` : fulfilmentId ? `order_item_fulfilment:${fulfilmentId}` : itemId ? `order_item:${itemId}` : `order:${orderId}`
   } catch (error) {
     return refused(request, error)
   }
-  const sent = await parts(request)
-  const text = (name: string) => new TextDecoder().decode(sent.find((p) => p.name === name)?.bytes ?? new Uint8Array())
   const part = sent.find((p) => p.name === 'file')
   if (!part || part.bytes.length === 0) return problem(request, 422, 'the upload has no `file` part, or it is empty')
   const file = new Blob([part.bytes])
   const role = text('role').trim() || 'other'
-  if (!ROLES.has(role as OrderAttachmentRole)) return fieldProblem(request, 'role', `role is one of ${[...ROLES].join(', ')}`)
+  const roles = [...ROLES].filter((r) => revisionId || !REVISION_ROLES.has(r))
+  if (!roles.includes(role as OrderAttachmentRole)) return fieldProblem(request, 'role', `role is one of ${roles.join(', ')}`)
   const filename = part.filename?.split(/[\\/]/).pop() || 'file'
   const [kind, mediaType] = sniff(part.bytes.slice(0, 16), filename)
   const attachment: OrderAttachment = {
@@ -90,6 +105,7 @@ async function upload(request: Request, orderId: string, itemId: string | null, 
     subject,
     item_id: itemId,
     fulfilment_id: fulfilmentId,
+    revision_id: revisionId,
     kind,
     role: role as OrderAttachmentRole,
     filename,
@@ -104,6 +120,14 @@ async function upload(request: Request, orderId: string, itemId: string | null, 
   state.files[attachment.id] = file
   event(lock(orderId), 'attachment.added', { attachment_id: attachment.id, item_id: itemId, role: attachment.role })
   return HttpResponse.json(attachment)
+}
+
+/** A file of a revision sent to the customer, or answered, is the record of what they saw. */
+function refuseSentRevision(attachment: OrderAttachment) {
+  const revision = state.revisions.find((r) => r.id === attachment.revision_id)
+  if (revision && (revision.sent_at != null || revision.answer != null)) {
+    throw new Refused('revision_sent', `revision ${revision.number} was sent to the customer: its files are the record of what they saw`)
+  }
 }
 
 function found(orderId: string, id: string): OrderAttachment {
@@ -150,8 +174,15 @@ export const handlers = [
   http.patch('/api/v1/orders/:id/attachments/:a', async ({ request, params }) => {
     const body = (await request.json()) as OrderAttachmentPatch
     if (body.role != null && !ROLES.has(body.role)) return fieldProblem(request, 'role', 'not a role')
+    const target = state.attachments.find((a) => a.id === String(params.a) && a.order_id === String(params.id))
+    if (target && !target.revision_id && body.role != null && REVISION_ROLES.has(body.role)) {
+      return fieldProblem(request, 'role', `a ${body.role} file is a design revision's: attach it to the revision`)
+    }
     return transition(request, () => {
       const attachment = found(String(params.id), String(params.a))
+      if ((body.role != null && body.role !== attachment.role) || (body.caption != null && body.caption !== attachment.caption)) {
+        refuseSentRevision(attachment)
+      }
       if (body.role != null && body.role !== attachment.role) {
         event(lock(String(params.id)), 'attachment.role', { attachment_id: attachment.id, from_role: attachment.role, to: body.role })
         attachment.role = body.role
@@ -166,6 +197,7 @@ export const handlers = [
   http.delete('/api/v1/orders/:id/attachments/:a', ({ request, params }) => {
     try {
       const attachment = found(String(params.id), String(params.a))
+      refuseSentRevision(attachment)
       const item = state.items.find((i) => i.id === attachment.item_id)
       const delivered = item?.delivered_attachment_id === attachment.id
       if (item && delivered) item.delivered_attachment_id = null
@@ -185,6 +217,7 @@ export const handlers = [
       if (id !== null) {
         const attachment = state.attachments.find((a) => a.id === id)
         if (!attachment || attachment.item_id !== item.id) return fieldProblem(request, 'attachment_id', `attachment ${id} is not attached to this item`)
+        if (attachment.revision_id != null) return fieldProblem(request, 'attachment_id', `attachment ${id} is a revision's file, not the delivered object`)
         if (attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) {
           return fieldProblem(request, 'attachment_id', `attachment ${id} is not an image a browser shows (PNG, JPEG, WebP, GIF or AVIF), so it cannot stand as the item's picture`)
         }

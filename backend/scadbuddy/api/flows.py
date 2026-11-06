@@ -36,7 +36,13 @@ from scadbuddy.api.operations import (
     still_accepting,
 )
 from scadbuddy.core.authorship import by_a_person, current_author, requester_record
-from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
+from scadbuddy.core.gitrepo import (
+    COMMIT_ID_PATTERN,
+    MAX_BODY,
+    MAX_SUBJECT,
+    GitError,
+    RevisionNotFoundError,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flow_triggers.component import Triggers, TriggersDep
@@ -70,6 +76,7 @@ from scadbuddy.flows.models import (
     TERMINAL,
     Definition,
     DefinitionSummary,
+    FlowDetails,
     FlowDiff,
     FlowState,
     FlowVersion,
@@ -129,7 +136,22 @@ def _seconds(value: ApprovalTimeout | None) -> int | None:
     return check_approval_timeout(value, "approval_timeout")
 
 
-class DefinitionCreate(BaseModel):
+#: The longest display name and description a flow takes (#3186).
+MAX_DISPLAY_NAME = 120
+MAX_DESCRIPTION = 20_000
+
+
+class CommitMessage(BaseModel):
+    """What a save is called in the flow's history (#3186): its commit message."""
+
+    #: The commit's subject, flattened to one line; a default saying what the save did
+    #: when omitted.
+    message: str | None = Field(default=None, max_length=MAX_SUBJECT)
+    #: The commit message's body: longer notes, kept as written.
+    body: str | None = Field(default=None, max_length=MAX_BODY)
+
+
+class DefinitionCreate(CommitMessage):
     """A flow version to register."""
 
     #: Lower-case letters, digits and dashes; a new version of an existing name.
@@ -145,12 +167,27 @@ class DefinitionCreate(BaseModel):
     #: the script reads them with `inputs()`, type-checked against it. Omitted, its runs
     #: take no inputs.
     inputs_schema: dict[str, Any] | None = None
+    #: The flow's display name and Markdown description (#3186), committed as
+    #: `flow.json` beside the script in a commit of their own after the version's when
+    #: they change it. Omitted, each stays as it is; an empty string clears it.
+    display_name: str | None = Field(default=None, max_length=MAX_DISPLAY_NAME)
+    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION)
 
     @field_validator("approval_timeout")
     @classmethod
     def _timeout(cls, value: ApprovalTimeout | None) -> ApprovalTimeout | None:
         _seconds(value)
         return value
+
+
+class DetailsUpdate(CommitMessage):
+    """A flow's display name and description to change (#3186)."""
+
+    #: Free text, shown in place of the flow's name; its name stays its id. Omitted, it
+    #: stays as it is; an empty string clears it.
+    display_name: str | None = Field(default=None, max_length=MAX_DISPLAY_NAME)
+    #: Markdown. Omitted, it stays as it is; an empty string clears it.
+    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION)
 
 
 class RunCreate(BaseModel):
@@ -255,6 +292,8 @@ class RunView(BaseModel):
     definition_id: str
     version: int
     name: str
+    #: Its flow's display name now (#3186), None when it has none.
+    display_name: str | None = None
     run: Run | None = None
     #: The parked calls, from the running workflow when `live`, else from the row.
     pending: list[PendingEntry] = []
@@ -317,6 +356,10 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
             _started_by(),
             approval_timeout_s=_seconds(body.approval_timeout),
             inputs_schema=body.inputs_schema,
+            message=body.message,
+            body=body.body,
+            display_name=body.display_name,
+            description=body.description,
         )
 
 
@@ -432,17 +475,50 @@ async def get_flow_version_diff(
     response_model=Definition,
     summary="Restore a flow's script at one of its versions, as a new version",
 )
-async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsDep) -> Definition:
+async def restore_flow_version(
+    name: NamePath,
+    commit: CommitPath,
+    flows: FlowsDep,
+    body: Annotated[CommitMessage | None, Body()] = None,
+) -> Definition:
     """A new commit with the script as it was at `commit`, and a new version row with
     that version's approval timeout: never a rewrite. Type-checked first, as a
-    registration is."""
+    registration is. The flow's display name and description stay as they are, except
+    for a deleted flow, which comes back with the ones it had at `commit`, in the
+    version's own commit; the optional body names the commit (#3186)."""
     with _versioned():
         script = await flows.definitions.source(name, commit)
         inputs_schema = await flows.definitions.inputs_schema(name, commit)
     if problems := await check_script(script, inputs_schema):
         raise _script_problems(problems, "That version no longer type-checks.")
     with _versioned():
-        return await flows.definitions.restore(name, commit, _started_by())
+        return await flows.definitions.restore(
+            name,
+            commit,
+            _started_by(),
+            message=body.message if body else None,
+            body=body.body if body else None,
+        )
+
+
+@router.patch(
+    "/workflows/names/{name}",
+    response_model=FlowDetails,
+    summary="Change a flow's display name or description",
+)
+async def update_flow_details(name: NamePath, body: DetailsUpdate, flows: FlowsDep) -> FlowDetails:
+    """One commit of `<name>/flow.json` in `data/flows` (#3186), named by `message` (a
+    default saying what changed when omitted): a change of the flow, not a new version.
+    A field omitted stays as it is, an empty string clears it; nothing changed commits
+    nothing (`commit` null). A deleted flow is refused: 409 `flow-deleted`."""
+    with _versioned():
+        return await flows.definitions.update_details(
+            name,
+            display_name=body.display_name,
+            description=body.description,
+            message=body.message,
+            body=body.body,
+        )
 
 
 @router.post(
@@ -476,15 +552,25 @@ async def unarchive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
     response_model=FlowState,
     summary="Delete a flow: a commit removing its script; its history keeps every version",
 )
-async def delete_flow(name: NamePath, flows: FlowsDep, triggers: TriggersDep) -> FlowState:
+async def delete_flow(
+    name: NamePath,
+    flows: FlowsDep,
+    triggers: TriggersDep,
+    body: Annotated[CommitMessage | None, Body()] = None,
+) -> FlowState:
     """One commit in `data/flows` removing `<name>/` (#2485). Its versions stay in the
     history and their records stay: runs in progress keep running the version they
     started with, finished runs still show the script they ran, and nothing new starts.
     Restoring one of its versions, or registering the name again, brings it back as its
     next version. A flow deleted already is answered as it is. Its triggers are paused
-    (#2484)."""
+    (#2484). The optional body names the commit (#3186)."""
     with _versioned():
-        state = await flows.definitions.delete(name, _started_by())
+        state = await flows.definitions.delete(
+            name,
+            _started_by(),
+            message=body.message if body else None,
+            body=body.body if body else None,
+        )
     await _pause_triggers(triggers, name, "flow deleted")
     return state
 
@@ -619,7 +705,9 @@ async def list_flow_runs(
     session: Annotated[str | None, Query(description="The agent session that started it.")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[Run]:
-    return await flows.store.list_runs(definition_id=definition_id, session=session, limit=limit)
+    runs = await flows.store.list_runs(definition_id=definition_id, session=session, limit=limit)
+    names = await flows.definitions.display_names({run.name for run in runs})
+    return [run.model_copy(update={"display_name": names.get(run.name)}) for run in runs]
 
 
 async def _starting(client: Client, run_id: str) -> RunView | None:
@@ -703,15 +791,19 @@ async def _run_view(run_id: str, flows: Flows) -> RunView:
     if run is None:
         if flows.client is None or (view := await _starting(flows.client, run_id)) is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+        view.display_name = (await flows.definitions.display_names({view.name})).get(view.name)
         if (grant := await flows.store.get_grant(run_id)) is not None:
             view.grant = _grant_view(grant, [])
         return view
+    display_name = (await flows.definitions.display_names({run.name})).get(run.name)
+    run = run.model_copy(update={"display_name": display_name})
     view = RunView(
         id=run.id,
         status=run.status,
         definition_id=run.definition_id,
         version=run.version,
         name=run.name,
+        display_name=display_name,
         run=run,
         images=await run_images(flows.connect, run.id) if flows.connect is not None else [],
     )

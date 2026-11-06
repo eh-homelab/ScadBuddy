@@ -393,7 +393,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
-  version; `flows/reconcile.py` indexes a commit whose row was never written;
+  version, each with an optional message and body; `<name>/flow.json` is the flow's
+  display name and description, each change a commit of its own that no version or
+  restore changes, except that restoring a deleted flow brings back the ones it had at
+  the restored commit, in the version's own commit, `PATCH /workflows/names/{name}`, #3186; `flows/reconcile.py` indexes a commit whose row was never written;
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).

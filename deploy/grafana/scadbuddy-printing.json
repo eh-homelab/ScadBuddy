@@ -583,7 +583,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\"}[$__rate_interval])) and on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=\"scadbuddy-print\"})",
+          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\"}[$__rate_interval])) and on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=\"scadbuddy-print\"}[1h]))",
           "legendFormat": "{{kind}}"
         }
       ]

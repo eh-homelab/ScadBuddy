@@ -607,3 +607,44 @@ def test_dropping_a_removed_built_ins_media_takes_the_overlay_lock(
 
     assert held == [True]
     assert not data.builtin_media_dir("builtin:keychain").exists()
+
+
+@pytest.mark.requires_postgres
+def test_a_media_items_source_survives_a_reorder(store: PostgresMediaStore) -> None:
+    store.replace(
+        "demo",
+        [
+            MediaItem(
+                id="a",
+                file="a.png",
+                kind="image",
+                source_commit="b" * 40,
+                source_revision_id="rev-1",
+            ),
+            _item("other"),
+        ],
+    )
+
+    store.replace("demo", list(reversed(store.items("demo"))))
+
+    by_id = {item.id: item for item in store.items("demo")}
+    assert by_id["a"].source_commit == "b" * 40 and by_id["a"].source_revision_id == "rev-1"
+    assert by_id["other"].source_commit is None
+    assert store.items_for(["demo"])["demo"][1].source_revision_id == "rev-1"
+
+
+@pytest.mark.requires_postgres
+def test_duplicating_a_built_in_keeps_the_source_of_its_added_photos(
+    catalogue: Catalogue, builtin: str
+) -> None:
+    catalogue.add_media(
+        builtin,
+        _stage(catalogue, PNG, "image", "png"),
+        source_commit="c" * 40,
+        source_revision_id="rev-9",
+    )
+
+    copy = catalogue.duplicate(builtin, "mine", "Mine")
+
+    added = copy.media[-1]
+    assert added.source_commit == "c" * 40 and added.source_revision_id == "rev-9"
