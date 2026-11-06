@@ -5,7 +5,7 @@ the agent's names on a test queue. An outward tool waits for a person's approval
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -590,6 +590,26 @@ async def test_a_read_tool_from_an_agent_that_does_not_say_its_declared_tier_run
     assert [c[0] for c in served.calls] == ["make_thing"]
 
 
+#: How long `_outlast_heartbeat` waits for the server to time an attempt out (#5506): well
+#: above the 1 s heartbeat timeout the tests set, plus WSL2's clock jumps.
+_HEARTBEAT_TIMEOUT_WAIT_S = 30
+
+#: Each attempt whose heartbeat timeout never fired. The failure is raised inside the
+#: activity, where the run may only see a failed attempt, so `_heartbeat_timeouts_fired`
+#: fails the test on it.
+_HEARTBEAT_NEVER_FIRED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _heartbeat_timeouts_fired() -> Iterator[None]:
+    _HEARTBEAT_NEVER_FIRED.clear()
+    yield
+    never_fired = list(_HEARTBEAT_NEVER_FIRED)
+    _HEARTBEAT_NEVER_FIRED.clear()
+    if never_fired:
+        pytest.fail("; ".join(never_fired))
+
+
 async def _outlast_heartbeat() -> None:
     """Send no beat, and answer only once Temporal has timed this attempt out (#5474).
 
@@ -597,20 +617,30 @@ async def _outlast_heartbeat() -> None:
     or when WSL2's wall clock jumped back, the timer fired late and the attempt answered
     first. Here the attempt waits until the server no longer runs it (the next attempt,
     or the call's end), so its answer always comes too late. An attempt with no heartbeat
-    timeout answers at once."""
+    timeout answers at once. The wait stops after `_HEARTBEAT_TIMEOUT_WAIT_S` (#5506): the
+    attempt then fails, not retried, and the test fails with it."""
     info = activity.info()
     if not info.heartbeat_timeout:
         return
     assert info.workflow_id is not None
     handle = activity.client().get_workflow_handle(info.workflow_id, run_id=info.workflow_run_id)
-    while True:
-        described = await handle.describe()
-        if not any(
-            pending.activity_id == info.activity_id and pending.attempt == info.attempt
-            for pending in described.raw_description.pending_activities
-        ):
-            return
-        await asyncio.sleep(0.05)
+    try:
+        async with asyncio.timeout(_HEARTBEAT_TIMEOUT_WAIT_S):
+            while True:
+                described = await handle.describe()
+                if not any(
+                    pending.activity_id == info.activity_id and pending.attempt == info.attempt
+                    for pending in described.raw_description.pending_activities
+                ):
+                    return
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        message = (
+            f"heartbeat timeout never fired for activity {info.activity_id}"
+            f" (attempt {info.attempt}) within {_HEARTBEAT_TIMEOUT_WAIT_S} s"
+        )
+        _HEARTBEAT_NEVER_FIRED.append(message)
+        raise ApplicationError(message, non_retryable=True) from None
 
 
 class TurnTools:
