@@ -626,6 +626,67 @@ def test_a_full_gallery_that_holds_the_copy_returns_it(
     assert "at most" in refused.json()["detail"]
 
 
+@pytest.mark.parametrize("change", ["removed", "renamed"])
+def test_a_copy_gone_by_the_run_falls_back_to_the_files(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """#5359: the copy the check found is gone when the run holds the lock, so the run
+    reads the files again. With no copy left, the photo is added again. With the same
+    file under another id, that item is the copy and nothing is added."""
+    order, item = shop(client)
+    rev, photo = _revision_photo(client, order, item)
+    _answer(client, order, item, rev)
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+    first = client.post(path, headers={"Idempotency-Key": "first"})
+    assert first.status_code == 200, first.text
+    first_id = first.json()["media"][-1]["id"]
+    catalogue = _state(client).catalogue
+    held = catalogue.media_store.items(SLUG)
+    fillers = [
+        MediaItem(id=media_id, file=f"{media_id}.png", kind="image")
+        for media_id in (
+            new_media_id() for _ in range(MAX_MEDIA_ITEMS - len(catalogue.list_media(SLUG)))
+        )
+    ]
+    catalogue.media_store.replace(SLUG, [*held, *fillers])
+    assert len(catalogue.list_media(SLUG)) == MAX_MEDIA_ITEMS
+
+    renamed_id = new_media_id()
+    digest = hashlib.file_digest
+    hashed: list[object] = []
+    check = catalogue.source_copy_id
+
+    def counted(handle: Any, name: str) -> Any:
+        hashed.append(handle)
+        return digest(handle, name)
+
+    def check_then_change(slug: str, source_revision_id: str, sha256: str) -> str | None:
+        found = check(slug, source_revision_id, sha256)
+        assert found == first_id
+        items = catalogue.media_store.items(SLUG)
+        if change == "removed":
+            kept = [m for m in items if m.id != found]
+        else:
+            kept = [m.model_copy(update={"id": renamed_id}) if m.id == found else m for m in items]
+        catalogue.media_store.replace(SLUG, kept)
+        monkeypatch.setattr(hashlib, "file_digest", counted)
+        return found
+
+    monkeypatch.setattr(catalogue, "source_copy_id", check_then_change)
+    again = client.post(path, headers={"Idempotency-Key": "second"})
+    monkeypatch.undo()
+
+    assert again.status_code == 200, again.text
+    copies = [m["id"] for m in again.json()["media"] if m["source_revision_id"] == rev]
+    assert len(again.json()["media"]) == MAX_MEDIA_ITEMS
+    if change == "removed":
+        assert len(copies) == 1 and copies[0] != first_id
+        assert hashed == []
+    else:
+        assert copies == [renamed_id]
+        assert len(hashed) == 1
+
+
 def test_a_second_add_to_a_built_in_returns_the_existing_copy(app: FastAPI, seed_dir: Path) -> None:
     """#5318 on a built-in (#722): the copy goes to the overlay, once."""
     bundled = seed_dir / "keychain"
