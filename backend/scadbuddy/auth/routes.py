@@ -12,6 +12,7 @@ name here that matches no route, and for an endpoint that refuses agents
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from fastapi.routing import APIRoute, APIWebSocketRoute
@@ -27,12 +28,20 @@ RouteClass = Literal[
     "internal.workspace",
     "transfer",
     "exchange",
+    # The CRUD routes (#5298): one class per caller, `/internal/crud/<caller>/…`.
+    "crud.projects",
+    "crud.render",
+    "crud.print",
+    # The projects worker's flow host routes (#5298 Task 8).
+    "flow.host",
 ]
 Reason = Literal[
     "signed_out",
     "not_a_person",
     "no_credential",
     "out_of_scope",
+    # Another caller's CRUD routes (#5298): no fresh credential clears it.
+    "wrong_caller",
     "no_request_header",
     # The author headers' refusals (#4975 phase 5, `core/authorship.py` `AuthorRefusal`).
     "author_header",
@@ -144,6 +153,15 @@ SCRIPTLESS_GETS = frozenset(
     }
 )
 
+#: A CRUD route's path (#5298): the class is its caller's, whatever the module.
+CRUD_PATH = re.compile(r"(?:/api/v1)?/internal/crud/([a-z]+)(?:/|$)")
+CRUD_CLASSES: dict[str, RouteClass] = {
+    "projects": "crud.projects",
+    "render": "crud.render",
+    "print": "crud.print",
+}
+CRUD_CALLERS = frozenset(CRUD_CLASSES)
+
 Route = APIRoute | APIWebSocketRoute
 
 
@@ -159,6 +177,8 @@ def route_class(route: Route) -> RouteClass:
         return "exchange"
     if endpoint_name(route) in PERSON_ENDPOINTS:
         return "person"
+    if (match := CRUD_PATH.match(route.path)) and match.group(1) in CRUD_CALLERS:
+        return CRUD_CLASSES[match.group(1)]
     return INTERNAL_MODULES.get(module, "api")
 
 
@@ -196,6 +216,14 @@ def would_refuse(
         if isinstance(caller, Service) and route_cls in caller.scopes:
             return None
         return "no_credential"
+    if route_cls.startswith("crud.") or route_cls == "flow.host":
+        # A live service credential of another caller, or without the class, is a 403
+        # as `crud/guard.py` answers it in `off`; only no live credential is a 401.
+        if not isinstance(caller, Service):
+            return "no_credential"
+        if route_cls.startswith("crud.") and route_cls != f"crud.{caller.caller}":
+            return "wrong_caller"
+        return None if route_cls in caller.scopes else "out_of_scope"
     if isinstance(caller, Anonymous):
         return "signed_out"
     # A credential whose scopes leave out the public routes (the print worker's).

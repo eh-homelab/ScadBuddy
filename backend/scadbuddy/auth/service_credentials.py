@@ -29,7 +29,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,11 +63,12 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 
 #: What each caller may reach, as route classes (§7.1, `auth/routes.py`). The projects
 #: worker's flow host routes are `api` routes; phase 5 narrows what it may assert. The
-#: render worker's `crud.render` names no route yet (#5298 adds them), so it reaches none.
+#: `crud.<caller>` classes are the CRUD routes under `/internal/crud/<caller>/` (#5298); the
+#: render worker has no other class.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace"}),
-    "print": frozenset({"internal.outputs", "internal.library"}),
-    "projects": frozenset({"api"}),
+    "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
+    "projects": frozenset({"api", "crud.projects"}),
     "render": frozenset({"crud.render"}),
 }
 #: The Postgres role of each caller, granted its view when the deployment made it.
@@ -840,3 +841,19 @@ class ServiceAuth(httpx.Auth):
         response = yield request
         if token is not None and response.status_code == 401:
             await asyncio.to_thread(self._reader.invalidate, token)
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        """The same, for a sync client (`crud/client.py` `CrudSyncClient`)."""
+        token = self._reader.token()
+        if token is not None:
+            request.headers["Authorization"] = f"Bearer {token}"
+        response = yield request
+        if token is not None and response.status_code == 401:
+            self._reader.invalidate(token)
+
+    def refresh(self, request: httpx.Request) -> None:
+        """Drops the token ``request`` carried, so the next request exchanges for a new
+        one: for a 403 that says the credential's scopes are stale (`crud/client.py`)."""
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            self._reader.invalidate(header.removeprefix("Bearer "))
