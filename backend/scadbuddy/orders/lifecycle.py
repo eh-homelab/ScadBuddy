@@ -72,6 +72,7 @@ from scadbuddy.orders.store import (
     fulfilment_subject,
     item_subject,
     order_subject,
+    quote_file_keys,
     revision_subject,
 )
 from scadbuddy.store.refs import BlobRefs
@@ -1462,15 +1463,20 @@ class Lifecycle:
         open for items, the item not settled, allowed on hold (it advances nothing). It names
         the revision the run sliced; one since superseded is `revision_not_newest`.
         A ``quote_id`` already recorded (by an earlier attempt of the same operation,
-        #5353) is answered with, under the order's lock, and nothing is written. The
-        quote's holds are taken again in its own transaction, so a row never commits
-        without them, whatever another attempt dropped before it."""
+        #5353) is answered with, under the order's lock, and nothing is written but the
+        drop of this holder's holds on keys the recorded quote does not name (#5415: a
+        re-slice that gave other bytes). The quote's holds are taken again in its own
+        transaction, so a row never commits without them, whatever another attempt
+        dropped before it."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if quote_id is not None:
                 recorded = self.store.quote(quote_id, conn=conn)
                 if recorded is not None and recorded.order_item_id == item_id:
+                    self.store.drop_holds(
+                        conn, QUOTE_HOLDER, quote_id, keep=quote_file_keys(recorded)
+                    )
                     return recorded
             self._not_ended(order)
             self._open_for_items(order, "an item's price")
@@ -1505,12 +1511,15 @@ class Lifecycle:
 
     def drop_unrecorded_quote_holds(self, order_id: str, quote_id: str) -> bool:
         """A failed quote run's holds (Ruling 3), unless its quote was recorded (#5353:
-        another attempt of the same operation may have recorded it). Under the order's
-        lock, which :meth:`record_slice_quote` takes too, so a drop never lands between
-        that record's check and its commit. Whether it dropped them."""
+        another attempt of the same operation may have recorded it): then only those on
+        keys the quote does not name (#5415). Under the order's lock, which
+        :meth:`record_slice_quote` takes too, so a drop never lands between that
+        record's check and its commit. Whether it dropped them all."""
         with self.store.transaction() as conn:
             self._lock(conn, order_id)
-            if self.store.quote(quote_id, conn=conn) is not None:
+            recorded = self.store.quote(quote_id, conn=conn)
+            if recorded is not None:
+                self.store.drop_holds(conn, QUOTE_HOLDER, quote_id, keep=quote_file_keys(recorded))
                 return False
             self.store.drop_holds(conn, QUOTE_HOLDER, quote_id)
         return True

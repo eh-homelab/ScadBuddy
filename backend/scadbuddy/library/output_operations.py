@@ -180,7 +180,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # The Parts outlive the job that rendered them: Arrange reads them later (§7).
         # They are held before the write, so a failed hold leaves nothing saved to retry
         # over; inside the `try`, so a hold that fails part way is released too.
-        output_id = uuid.uuid4().hex
+        # A quote's run names the id (`orders/quote.py` `operation_output_id`, #5390), so
+        # its next attempt finds this output; `POST /outputs`'s body cannot.
+        output_id = request.get("output_id") or uuid.uuid4().hex
         manifest = chosen.manifest if chosen is not None else []
         # An arranged output has no template inputs to reopen; it records its sources (§7).
         arranged = job.kind == "arrange"

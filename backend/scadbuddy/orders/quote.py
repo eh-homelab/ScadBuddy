@@ -350,6 +350,7 @@ async def ensure_output(
     follow_every: float = FOLLOW_EVERY,
     schema: CustomizerSchema | None = None,
     revision_id: str | None = None,
+    saved_as: str | None = None,
 ) -> str:
     """The output the item slices (Ruling 7): its own while it matches the reference,
     else the reference rendered at its commit, waited on through the projection, saved
@@ -357,10 +358,24 @@ async def ensure_output(
     as the item's ``output_id``. An item with no colour slots takes the render's, with
     ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`.
     With ``revision_id`` (the quote's run) the render is of that revision: once the
-    item has another, nothing is written and the run is refused `revision_not_newest`."""
+    item has another, nothing is written and the run is refused `revision_not_newest`.
+    ``saved_as`` is the id a new output is saved under (:func:`operation_output_id`,
+    #5390): an output of that id that matches is one an earlier attempt of the same
+    operation saved before it stopped, and is set on the item without a second render
+    or save. One that does not match is left alone, and the new one gets an id of its
+    own."""
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
+    if saved_as is not None and await asyncio.to_thread(
+        output_matches, outputs, saved_as, item, schema
+    ):
+        meta = await asyncio.to_thread(outputs.get, saved_as)
+        return await _set_output(
+            lifecycle, order, item, saved_as, list(meta.colors), filaments, by, revision_id
+        )
+    if saved_as is not None and await asyncio.to_thread(_exists, outputs, saved_as):
+        saved_as = None
     reference = reference_of(item)
     params = reference.inputs.get("params", {})
     pipeline = reference.render_key == inputs_key(
@@ -390,10 +405,43 @@ async def ensure_output(
             "index": 0,
             "inputs": reference.inputs,
             "name": f"{order.number} {item.title}",
+            **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )
-    output_id = str(saved["id"])
-    colours = saved.get("colors") or []
+    return await _set_output(
+        lifecycle,
+        order,
+        item,
+        str(saved["id"]),
+        saved.get("colors") or [],
+        filaments,
+        by,
+        revision_id,
+    )
+
+
+def _exists(outputs: OutputsRead, output_id: str) -> bool:
+    try:
+        outputs.get(output_id)
+    except OutputNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    return True
+
+
+async def _set_output(
+    lifecycle: Lifecycle,
+    order: Order,
+    item: OrderItem,
+    output_id: str,
+    colours: Sequence[str],
+    filaments: Mapping[int, str],
+    by: Actor,
+    revision_id: str | None,
+) -> str:
+    """The item's ``output_id`` set to the saved output, with its colour slots when the
+    item has none."""
     try:
         await asyncio.to_thread(
             lambda: lifecycle.update_item(
@@ -597,6 +645,14 @@ def operation_quote_id(operation: str | None) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote:{operation}").hex
 
 
+def operation_output_id(quote_id: str) -> str:
+    """The id a quote's run saves a new output under (#5390): one per quote id, so per
+    operation (:func:`operation_quote_id`). An attempt that runs again after its worker
+    stopped between the save and the item's ``output_id`` write finds the output the
+    earlier attempt saved (:func:`ensure_output`) instead of saving a second."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote_output:{quote_id}").hex
+
+
 def subject_of(item_id: str) -> str:
     """The quote's subject (§5.4's, Ruling 1): an item's quote and its print are the
     same subject's work."""
@@ -652,6 +708,7 @@ async def quote_run(
         follow_every=run.follow_every,
         schema=schema,
         revision_id=revision_id,
+        saved_as=operation_output_id(quote_id),
     )
     subject = subject_of(item_id)
     sliced = await slice_item(
@@ -716,7 +773,8 @@ async def quote_run(
 async def _drop(lifecycle: Lifecycle, order_id: str, quote_id: str, held: bool) -> None:
     """A run that fails after its first add drops its own holder before it raises
     (Ruling 3), unless its quote was recorded: every attempt of one operation holds
-    under one id, and another may have recorded it (#5353). One the drop misses is the
+    under one id, and another may have recorded it (#5353). Then it drops only the
+    holds on keys that quote does not name (#5415). One the drop misses is the
     reaper's. Off the loop, as every other store call of the run: a slow database must
     not stall the worker."""
     if not held:

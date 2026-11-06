@@ -26,11 +26,13 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.outputs import OutputNotFoundError
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.orders import operations as order_operations
-from scadbuddy.orders.lifecycle import QUOTE_HOLDER
+from scadbuddy.orders.lifecycle import QUOTE_HOLDER, Lifecycle
 from scadbuddy.orders.models import Quote
 from scadbuddy.orders.quote import quote_run
+from scadbuddy.store.content_models import BlobMissingError
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
@@ -479,6 +481,61 @@ def test_a_bug_in_the_quotes_run_is_not_tried_again(
     assert op["error"]["status"] == 500
     assert len(calls) == 1
     assert shop.get_item()["quotes"] == []
+
+
+@pytest.mark.parametrize(
+    "gone",
+    [OutputNotFoundError("an output deleted mid-run"), BlobMissingError("a blob swept mid-run")],
+    ids=["output", "blob"],
+)
+def test_an_output_or_blob_gone_mid_run_is_tried_again(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch, gone: Exception
+) -> None:
+    """#5415: an output deleted, or a blob swept, while the run read it is a
+    ``LookupError`` but no bug: the next attempt saves and slices again."""
+    shop = Shop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    real = quote_run
+    calls: list[str] = []
+
+    async def run(*args: Any, **kwargs: Any) -> Quote:
+        calls.append(kwargs["quote_id"])
+        if len(calls) == 1:
+            raise gone
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(order_operations, "quote_run", run)
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    assert len(calls) == 2
+    assert [q["id"] for q in shop.get_item()["quotes"]] == [op["result"]["id"]]
+
+
+def test_a_quote_whose_pod_stopped_after_saving_the_output_saves_it_once(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5390: the pod stops after the item's output was saved and before the item's
+    ``output_id`` write. The next attempt finds that output by the id the operation
+    saves under, sets it on the item, and saves no second output."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    before = output_ids(bambuddy)
+    real = Lifecycle.update_item
+    stops: list[str] = []
+
+    def update_item(self: Lifecycle, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("output_id") is not None and not stops:
+            stops.append(kwargs["output_id"])
+            raise worker_stopped()
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Lifecycle, "update_item", update_item)
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    assert len(stops) == 1
+    added = [output for output in output_ids(bambuddy) if output not in before]
+    assert added == stops
+    assert shop.get_item()["output_id"] == stops[0]
 
 
 def test_a_quote_renders_when_the_item_has_no_output(bambuddy: TestClient) -> None:
