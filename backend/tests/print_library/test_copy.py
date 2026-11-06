@@ -4,6 +4,7 @@ fake Bambuddy library and a native library over S3."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -15,7 +16,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
-from scadbuddy.print_library.copy import copy_batch, plan_copy
+from scadbuddy.print_library.copy import GONE_FROM_SOURCE, TARGET_FOLDER_GONE, copy_batch, plan_copy
 from scadbuddy.print_library.copy_models import LibraryCopyBatchInput, LibraryCopyRequest
 from scadbuddy.print_library.copy_store import LibraryCopyStore
 from scadbuddy.print_library.native import NativeLibrary
@@ -55,8 +56,9 @@ async def _run(
 ) -> dict[int, tuple[str, str | None]]:
     """Plan and copy ``request`` to the end; each source id's (status, reason)."""
     store.start(copy_id, request)
-    source = bambuddy if request.direction == "bb_to_sb" else native
-    store.plan(copy_id, await plan_copy(request, source))
+    bb_to_sb = request.direction == "bb_to_sb"
+    source, target = (bambuddy, native) if bb_to_sb else (native, bambuddy)
+    store.plan(copy_id, await plan_copy(request, source, target))
     beats: list[str] = []
     while True:
         batch = await copy_batch(
@@ -223,7 +225,9 @@ async def test_the_plan_refuses_ids_on_the_wrong_side_and_a_missing_folder(
     native: NativeLibrary, bambuddy: BambuddyClient
 ) -> None:
     with pytest.raises(ApiError) as wrong:
-        await plan_copy(LibraryCopyRequest(direction="bb_to_sb", file_ids=[1000000001]), bambuddy)
+        await plan_copy(
+            LibraryCopyRequest(direction="bb_to_sb", file_ids=[1000000001]), bambuddy, native
+        )
     assert wrong.value.status == 422
     with pytest.raises(ApiError) as target:
         await plan_copy(
@@ -231,23 +235,67 @@ async def test_the_plan_refuses_ids_on_the_wrong_side_and_a_missing_folder(
                 direction="sb_to_bb", file_ids=[1000000001], target_folder_id=1000000002
             ),
             native,
+            bambuddy,
         )
     assert target.value.status == 422
     with pytest.raises(ApiError) as missing:
-        await plan_copy(LibraryCopyRequest(direction="bb_to_sb", folder_ids=[77]), bambuddy)
+        await plan_copy(LibraryCopyRequest(direction="bb_to_sb", folder_ids=[77]), bambuddy, native)
     assert missing.value.status == 404
+    # A target folder the target library does not have is its own 404, before any file.
+    loose = await bambuddy.upload_library_file("loose.3mf", b"bytes")
+    with pytest.raises(ApiError) as no_target:
+        await plan_copy(
+            LibraryCopyRequest(
+                direction="bb_to_sb", file_ids=[loose.id], target_folder_id=1000000999
+            ),
+            bambuddy,
+            native,
+        )
+    assert no_target.value.status == 404
+    assert no_target.value.detail == TARGET_FOLDER_GONE.format(id=1000000999)
     with pytest.raises(ValueError, match="at least one"):
         LibraryCopyRequest(direction="bb_to_sb")
 
 
+async def test_a_target_folder_deleted_after_the_plan_fails_each_file_with_its_own_reason(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient
+) -> None:
+    """The target's 404 is not the source's: no file is reported gone from the source."""
+    one = await bambuddy.upload_library_file("one.3mf", b"one")
+    two = await bambuddy.upload_library_file("two.3mf", b"two")
+    target = await native.create_folder("Doomed", None)
+    request = LibraryCopyRequest(
+        direction="bb_to_sb", file_ids=[one.id, two.id], target_folder_id=target.id
+    )
+    store = LibraryCopyStore(pool)
+    store.start("library-copy-test", request)
+    store.plan("library-copy-test", await plan_copy(request, bambuddy, native))
+    await native.delete_folder(target.id)
+    batch = await copy_batch(
+        store,
+        LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
+        client=bambuddy,
+        native=native,
+        uploads=_uploads(),
+        heartbeat=lambda _: None,
+    )
+    assert (batch.copied, batch.failed, batch.remaining) == (0, 2, 0)
+    for row in store.files("library-copy-test"):
+        assert row.status == "failed"
+        assert row.reason is not None and row.reason != GONE_FROM_SOURCE
+        assert str(target.id) in row.reason
+    assert await asyncio.to_thread(native.rows.files, None, every_folder=True) == []
+
+
 async def test_a_file_in_a_selected_folder_is_planned_once_under_its_path(
-    bambuddy: BambuddyClient,
+    bambuddy: BambuddyClient, native: NativeLibrary
 ) -> None:
     folder = await bambuddy.create_folder(FolderCreate(name="Both"))
     file = await bambuddy.upload_library_file("twice.3mf", b"x", folder_id=folder.id)
     planned = await plan_copy(
         LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id], folder_ids=[folder.id]),
         bambuddy,
+        native,
     )
     assert [(p.source_id, p.path) for p in planned] == [(file.id, "Both"), (file.id, "")]
     # The store keeps the first of a source id: the folder's path wins.

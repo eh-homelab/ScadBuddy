@@ -138,23 +138,27 @@ export function LibraryCopyDialog({ open, onClose, nativeFolders, picked, onCopi
     }
   }, [open, native, direction, sourceFolder])
 
-  // A running copy is read until it ends.
+  // Every read of the job, the first included: once it ended with something copied, the
+  // page lists it. Then a running copy is read again until it ends.
+  function read(next: LibraryCopyStatus) {
+    setStatus(next)
+    if (!next.running && next.copied > 0 && !copied.current) {
+      copied.current = true
+      onCopied?.()
+    }
+  }
   useEffect(() => {
     if (!status?.running) return
     const id = status.copy_id
     const timer = window.setTimeout(() => {
       api
         .getLibraryCopy(id)
-        .then((next) => {
-          setStatus(next)
-          if (!next.running && next.copied > 0 && !copied.current) {
-            copied.current = true
-            onCopied?.()
-          }
-        })
+        .then(read)
         .catch((caught: unknown) => setError(caught instanceof ApiError ? caught.detail : String(caught)))
     }, POLL_MS)
     return () => window.clearTimeout(timer)
+    // `read` is this render's; the effect keys on the status it reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, onCopied])
 
   const sourceFolders = direction === 'bb_to_sb' ? (bambuddyFolders ?? []) : nativeFolders
@@ -191,7 +195,7 @@ export function LibraryCopyDialog({ open, onClose, nativeFolders, picked, onCopi
         folder_ids: [...folderIds],
         target_folder_id: target,
       })
-      setStatus(await api.getLibraryCopy(started.copy_id))
+      read(await api.getLibraryCopy(started.copy_id))
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : String(caught))
     } finally {

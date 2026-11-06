@@ -103,13 +103,33 @@ class CopySource(LibraryListingSource, Protocol):
     async def library_file(self, file_id: int) -> LibraryFile: ...
 
 
-async def plan_copy(request: LibraryCopyRequest, source: CopySource) -> list[PlannedFile]:
+TARGET_FOLDER_GONE = "library folder {id} is not in the target library"
+
+
+async def check_target_folder(request: LibraryCopyRequest, target: LibraryListingSource) -> None:
+    """The 404 for a ``target_folder_id`` the target library does not have: checked at
+    the start and again when the plan runs, so a folder deleted in between fails the job
+    with this reason rather than each file with a wrong one."""
+    if request.target_folder_id is None:
+        return
+    if request.target_folder_id not in _flat(await target.folders()):
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            TARGET_FOLDER_GONE.format(id=request.target_folder_id),
+            folder_id=request.target_folder_id,
+        )
+
+
+async def plan_copy(
+    request: LibraryCopyRequest, source: CopySource, target: LibraryListingSource
+) -> list[PlannedFile]:
     """Every source file the request names: those of each selected folder's subtree
     with their path under it (the folder's own name first), then the files named on
-    their own at the root. A folder the source does not have is the 404; a file it does
-    not have is planned ``failed``, so the rest still copy. More than `MAX_COPY_FILES`
-    is the 413."""
+    their own at the root. A folder the source does not have, or a target folder the
+    target does not have, is the 404; a file the source does not have is planned
+    ``failed``, so the rest still copy. More than `MAX_COPY_FILES` is the 413."""
     check_request(request)
+    await check_target_folder(request, target)
     planned: list[PlannedFile] = []
     if request.folder_ids:
         folders = _flat(await source.folders())
@@ -253,7 +273,9 @@ class _BambuddyTarget(_Target):
             if row.id not in self._hashes:
                 try:
                     self._hashes[row.id] = (await self.client.library_file(row.id)).file_hash
-                except ApiError:
+                except ApiError as error:
+                    if error.status != status.HTTP_404_NOT_FOUND:
+                        raise  # unread, not absent: the batch is retried
                     self._hashes[row.id] = None
             if self._hashes[row.id] == digest:
                 return row.id
@@ -301,15 +323,26 @@ async def _copy_bb_to_sb(
     client: BambuddyClient, target: _NativeTarget, row: PlannedFile
 ) -> tuple[str, int | None, int | None, str | None]:
     """One Bambuddy file into the native library: (status, target id, target folder,
-    reason)."""
-    source = await client.library_file(row.source_id)
+    reason). Only the source's own 404s (the read, the download) mean the file is gone;
+    a 404 from the target (a folder deleted since the plan) keeps its own reason."""
+    try:
+        source = await client.library_file(row.source_id)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            return "failed", None, None, GONE_FROM_SOURCE
+        raise
     folder_id = await target.folder_for(row.path)
     if source.file_hash is not None:
         held = await target.has(source.file_hash, source.file_size)
         if held is not None:
             return "skipped_same_hash", held, folder_id, None
     with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
-        digest = await _spool(client.download_library_file(source.id), spool)
+        try:
+            digest = await _spool(client.download_library_file(source.id), spool)
+        except ApiError as error:
+            if error.status == status.HTTP_404_NOT_FOUND:
+                return "failed", None, folder_id, GONE_FROM_SOURCE
+            raise
         if source.file_hash is not None and digest != source.file_hash:
             return "failed", None, folder_id, f"sha256 mismatch: Bambuddy served {digest}"
         if source.file_hash is None:
@@ -389,12 +422,11 @@ async def copy_batch(
             else:
                 outcome = await _copy_sb_to_bb(native, target, row)
         except ApiError as error:
-            if error.status == status.HTTP_404_NOT_FOUND:
-                outcome = ("failed", None, None, GONE_FROM_SOURCE)
-            elif error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
+            # A 404 here is the target's (the source's own are answered above): a
+            # folder deleted since the plan, say. The row says which.
+            if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
                 raise  # the library is down, not this file: the batch is retried
-            else:
-                outcome = ("failed", None, None, _reason(error))
+            outcome = ("failed", None, None, _reason(error))
         except (StoreFullError, ValueError, OSError) as error:
             logger.warning("a library copy failed on one file", exc_info=True)
             outcome = ("failed", None, None, _reason(error))
@@ -445,9 +477,15 @@ def library_copy_activities(
             native = await _native()
             settings = await asyncio.to_thread(settings_of)
             async with client_for(settings) as client:
-                source = client if input.request.direction == "bb_to_sb" else native
-                planned = await plan_copy(input.request, source)
+                bb_to_sb = input.request.direction == "bb_to_sb"
+                planned = await plan_copy(
+                    input.request,
+                    client if bb_to_sb else native,
+                    native if bb_to_sb else client,
+                )
         except ApiError as error:
+            if error.status >= 500:
+                raise  # a library down at plan time: the plan is retried, not failed
             await asyncio.to_thread(store.finish, input.copy_id, "failed", error.detail)
             raise ApplicationError(error.detail, non_retryable=True) from error
         total = await asyncio.to_thread(store.plan, input.copy_id, planned)

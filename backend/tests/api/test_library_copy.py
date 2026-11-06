@@ -48,7 +48,7 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
     plans: list[Any] = []
     batches: list[LibraryCopyBatchInput] = []
 
-    async def plan(request: Any, source: Any) -> list[PlannedFile]:
+    async def plan(request: Any, source: Any, target: Any) -> list[PlannedFile]:
         plans.append(request)
         return [
             PlannedFile(source_id=7, path="Dinos", name="rex.3mf", size=3),
@@ -142,6 +142,16 @@ def test_an_id_on_the_wrong_side_is_refused_before_anything_starts(
     native_client: TestClient, body: dict[str, Any]
 ) -> None:
     assert native_client.post("/api/v1/print/library-copies", json=body).status_code == 422
+
+
+def test_a_target_folder_the_target_does_not_have_is_refused_before_anything_starts(
+    native_client: TestClient,
+) -> None:
+    body = {"direction": "bb_to_sb", "file_ids": [7], "target_folder_id": 1000000999}
+    refused = native_client.post("/api/v1/print/library-copies", json=body)
+    assert refused.status_code == 404, refused.text
+    assert "1000000999" in refused.json()["detail"]
+    assert native_client.get("/api/v1/print/library-copies").json() == []
 
 
 @respx.mock

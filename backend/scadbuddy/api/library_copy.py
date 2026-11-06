@@ -19,7 +19,7 @@ from scadbuddy.bambuddy.client import BambuddyConfig, client_for
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.print_library.component import PrintLibraryDep
-from scadbuddy.print_library.copy import NOT_NATIVE, check_request
+from scadbuddy.print_library.copy import NOT_NATIVE, check_request, check_target_folder
 from scadbuddy.print_library.copy_models import (
     LibraryCopyInput,
     LibraryCopyRequest,
@@ -54,6 +54,7 @@ router = APIRouter(prefix="/print", tags=["print"])
     responses={
         status.HTTP_409_CONFLICT: {"description": "No native library, or no Bambuddy."},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": "An id on the wrong side."},
+        status.HTTP_404_NOT_FOUND: {"description": "`target_folder_id` is not in the target."},
     },
 )
 async def post_library_copy(
@@ -63,10 +64,17 @@ async def post_library_copy(
     library: PrintLibraryDep,
     store: SettingsStoreDep,
 ) -> LibraryCopyStarted:
-    if await library.serving_native() is None:
+    native = await library.serving_native()
+    if native is None:
         raise HTTPException(status.HTTP_409_CONFLICT, NOT_NATIVE)
-    BambuddyConfig.from_settings(await asyncio.to_thread(store.load))  # the 409 when unset
+    settings = await asyncio.to_thread(store.load)
+    BambuddyConfig.from_settings(settings)  # the 409 when unset
     check_request(request)
+    if request.direction == "bb_to_sb":
+        await check_target_folder(request, native)
+    else:
+        async with client_for(settings) as client:
+            await check_target_folder(request, client)
     job_id = copy_id(request)
     rows = LibraryCopyStore(state.settings_store.pool)
     # The row before the start, so a status read right after the 202 finds it. A start
@@ -105,7 +113,7 @@ async def get_library_copies(
 ) -> list[LibraryCopySummary]:
     rows = LibraryCopyStore(state.settings_store.pool)
     recent = await asyncio.to_thread(rows.recent, limit=limit)
-    return [row.model_copy(update={"running": await _running(ops, row.copy_id)}) for row in recent]
+    return [_settled(row, await _running(ops, row.copy_id)) for row in recent]
 
 
 @router.get(
@@ -124,9 +132,22 @@ async def get_library_copy(copy_id: str, state: StateDep, ops: OperationsDep) ->
     if summary is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"no library copy {copy_id}")
     files = await asyncio.to_thread(rows.files, copy_id)
-    return LibraryCopyStatus(
-        **summary.model_dump(exclude={"running"}), running=await _running(ops, copy_id), files=files
-    )
+    settled = _settled(summary, await _running(ops, copy_id))
+    return LibraryCopyStatus(**settled.model_dump(), files=files)
+
+
+#: What a job whose execution ended without its finish activity (terminated, timed out)
+#: shows: its row still says `running`, which the execution's state contradicts.
+ENDED_UNFINISHED = "the copy's workflow ended before it finished; start it again"
+
+
+def _settled(summary: LibraryCopySummary, running: bool) -> LibraryCopySummary:
+    """``summary`` with the execution's word on whether it runs; a row left `running`
+    by an execution that is not is shown `failed`, saying so."""
+    update: dict[str, object] = {"running": running}
+    if summary.status == "running" and not running:
+        update.update(status="failed", error=ENDED_UNFINISHED)
+    return summary.model_copy(update=update)
 
 
 async def _running(ops: OperationsDep, copy_id: str) -> bool:
