@@ -286,33 +286,35 @@ async def test_a_signed_pod_bound_token_is_reviewed_and_mapped(tmp_path: Path) -
 
 @pytest.mark.parametrize(
     "token",
+    # Made when the test runs, not at collection: a session that runs past a
+    # token's `nbf` + 120 s or `exp` would test the clock instead.
     [
-        pytest.param(signed("scadbuddy-print", key=FORGER_KEY), id="another-key"),
-        pytest.param(unsigned("scadbuddy-print"), id="alg-none"),
-        pytest.param(hs256("scadbuddy-print"), id="hs256"),
-        pytest.param(signed("scadbuddy-print", iss="https://elsewhere"), id="issuer"),
-        pytest.param(signed("scadbuddy-print", aud=["https://kubernetes"]), id="audience"),
-        pytest.param(signed("scadbuddy-print", exp=int(time.time()) - 120), id="expired"),
-        pytest.param(signed("scadbuddy-print", nbf=int(time.time()) + 120), id="not-yet"),
-        pytest.param(signed("default"), id="default-sa"),
-        pytest.param(signed("pgadmin"), id="unknown-sa"),
-        pytest.param(signed("scadbuddy-print", namespace="other"), id="other-namespace"),
-        pytest.param("not-a-jwt", id="junk"),
-        pytest.param("a.b.c", id="junk-parts"),
+        pytest.param(lambda: signed("scadbuddy-print", key=FORGER_KEY), id="another-key"),
+        pytest.param(lambda: unsigned("scadbuddy-print"), id="alg-none"),
+        pytest.param(lambda: hs256("scadbuddy-print"), id="hs256"),
+        pytest.param(lambda: signed("scadbuddy-print", iss="https://elsewhere"), id="issuer"),
+        pytest.param(lambda: signed("scadbuddy-print", aud=["https://kubernetes"]), id="audience"),
+        pytest.param(lambda: signed("scadbuddy-print", exp=int(time.time()) - 120), id="expired"),
+        pytest.param(lambda: signed("scadbuddy-print", nbf=int(time.time()) + 120), id="not-yet"),
+        pytest.param(lambda: signed("default"), id="default-sa"),
+        pytest.param(lambda: signed("pgadmin"), id="unknown-sa"),
+        pytest.param(lambda: signed("scadbuddy-print", namespace="other"), id="other-namespace"),
+        pytest.param(lambda: "not-a-jwt", id="junk"),
+        pytest.param(lambda: "a.b.c", id="junk-parts"),
         # Signed by the cluster but bound to no pod (`kubectl create token` without
         # --bound-object-*): deleting a pod could not revoke it (spec §6.2 step 0).
-        pytest.param(bound_to(None), id="unbound"),
-        pytest.param(bound_to({"name": "p"}), id="pod-without-uid"),
-        pytest.param(bound_to({"name": "p", "uid": ""}), id="pod-empty-uid"),
-        pytest.param(bound_to("p"), id="pod-not-an-object"),
+        pytest.param(lambda: bound_to(None), id="unbound"),
+        pytest.param(lambda: bound_to({"name": "p"}), id="pod-without-uid"),
+        pytest.param(lambda: bound_to({"name": "p", "uid": ""}), id="pod-empty-uid"),
+        pytest.param(lambda: bound_to("p"), id="pod-not-an-object"),
     ],
 )
 async def test_a_token_that_fails_offline_never_reaches_tokenreview(
-    tmp_path: Path, token: str
+    tmp_path: Path, token: Callable[[], str]
 ) -> None:
     apiserver = FakeApiserver()
     verifier = _verifier(apiserver, tmp_path)
-    assert await verifier.verify(token) is None
+    assert await verifier.verify(token()) is None
     assert apiserver.requests == []
     # Nor does it spend the TokenReview budget.
     assert verifier.budget.spent == 0
