@@ -188,8 +188,13 @@ def test_available_cpus_without_a_cgroup_limit_is_the_affinity_mask(
     (v1 / "cpu" / "cpu.cfs_quota_us").write_text("-1\n", encoding="utf-8")
 
     assert available_cpus(v2) == available_cpus(v1) == available_cpus(tmp_path / "none") >= 1
-    # An explicit "no limit" is silent; no readable controller at all is not.
-    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    # An explicit "no limit" is silent; no readable controller at all is not. Only this
+    # module's records count: another test's pool can log a warning here too (#5412).
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and r.name == "scadbuddy.core.config"
+    ]
     assert len(warnings) == 1
     assert "no cgroup CPU limit is readable" in warnings[0]
     assert str(tmp_path / "none") in warnings[0]
