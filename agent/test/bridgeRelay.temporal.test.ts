@@ -198,8 +198,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
       // #5428: what ended the wait is the call's history, not the test's clock. The wall clock also
       // counts the workflow tasks, the start and the unsealing, which are CPU work: under a loaded
-      // suite they took 1.5-3 s beside the 3 s ack window (measured on one shared CPU), so an
-      // `ACK_TIMEOUT_MS + 1 s` bound failed while the ack window itself was 3.0 s.
+      // suite they added 1-4.3 s to the 3 s ack window (whole call 4.0-7.3 s, measured on one
+      // shared CPU), so an `ACK_TIMEOUT_MS + 1 s` bound failed while the ack window itself was
+      // 3.0 s.
       expect(started).toHaveLength(1)
       const { events } = JSON.parse(historyToJSON(await client.workflow.getHandle(started[0]!).fetchHistory())) as {
         events: {
