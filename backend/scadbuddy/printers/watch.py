@@ -202,6 +202,10 @@ class WatchActivities:
         if ended is not None:
             # The print's rack picks, up to the report that ended it: the run's follow
             # may read it late, or no longer read it at all (a newer run of the subject).
+            # Awaited inline on purpose: one insert per print end, so the next report
+            # waits at most that long. Move it to a tracked background task (kept in a
+            # set, awaited or cancelled on shutdown) only if it shows on the watch's
+            # latency (#5261).
             await settle_lan_end(
                 self.rack,
                 printer_id,
