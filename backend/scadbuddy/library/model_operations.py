@@ -131,7 +131,13 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         return {}
 
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        await models_api.delete_template(request["slug"], request["force"], state)
+        await models_api.delete_template(
+            request["slug"],
+            request["force"],
+            state,
+            # Absent from a delete started before #5117.
+            delete_inbox_copies=request.get("delete_inbox_copies", False),
+        )
         return {}
 
     async def source_put_check(request: dict[str, Any]) -> dict[str, Any]:

@@ -134,6 +134,8 @@ from scadbuddy.library.url_import import (
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import Operation
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.filing import trash_filed
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
@@ -1465,6 +1467,15 @@ async def delete_model(
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
+    delete_inbox_copies: Annotated[
+        bool,
+        Query(
+            description=(
+                "On ScadBuddy's own library, also trash each output's copy still filed "
+                "under the template's folder, as an output delete with this flag does"
+            )
+        ),
+    ] = False,
     idempotency_key: IdempotencyKey = None,
 ) -> Response:
     require_mine(slug)
@@ -1473,7 +1484,7 @@ async def delete_model(
         response,
         kind=ops.kinds["model_delete"],
         subject=slug,
-        request={"slug": slug, "force": force},
+        request={"slug": slug, "force": force, "delete_inbox_copies": delete_inbox_copies},
         idempotency_key=idempotency_key,
     )
     if isinstance(result, Operation):
@@ -1481,11 +1492,15 @@ async def delete_model(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-async def delete_template(slug: str, force: bool, state: AppState) -> None:
+async def delete_template(
+    slug: str, force: bool, state: AppState, *, delete_inbox_copies: bool = False
+) -> None:
     """The ``model_delete`` operation's run (#1054). The model's unfinished renders are
     cancelled first (#2387); one that has not settled after the wait still refuses. A
     delete the run refuses for another reason (a duplicate made since the check, the
-    model no longer the caller's) cancels nothing: that half is asked first."""
+    model no longer the caller's) cancels nothing: that half is asked first.
+    ``delete_inbox_copies`` does to each output's native filed copy what an output
+    delete with it does (#5117)."""
     await asyncio.to_thread(
         refuse_delete, slug, state.catalogue, state.render, force, renders=False
     )
@@ -1520,12 +1535,36 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
                     "could not release a deleted model's output Parts",
                     extra={"slug": slug, "id": output_id},
                 )
+        await _forget_filed_copies(slug, output_ids, state, trash=delete_inbox_copies)
     # And the projects it was filed into (#1660), or Settings keeps listing its id.
     try:
         await asyncio.to_thread(state.settings_store.forget_model_projects, slug)
     except psycopg.Error:
         logger.exception("could not forget a deleted model's projects", extra={"slug": slug})
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
+
+
+async def _forget_filed_copies(
+    slug: str, output_ids: list[str], state: AppState, *, trash: bool
+) -> None:
+    """Each deleted output's copies in the native library, as an output delete leaves
+    them (`library/output_operations.py`, #5117): with ``trash`` the ones still
+    ``filed`` go to the trash (`trash_filed`); in every case no row names the output
+    any more (`forget_output`). After the model's own delete, so a refusal trashes
+    nothing; best effort, as the cleanup above. Bambuddy's library has none."""
+    native = await state.components.get(PRINT_LIBRARY).serving_native()
+    if native is None:
+        return
+    for output_id in output_ids:
+        try:
+            if trash:
+                await trash_filed(native, output_id)
+            await asyncio.to_thread(native.rows.forget_output, output_id)
+        except psycopg.Error:
+            logger.exception(
+                "could not forget a deleted model's filed library copies",
+                extra={"slug": slug, "id": output_id},
+            )
 
 
 def refuse_delete(

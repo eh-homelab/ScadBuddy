@@ -1185,6 +1185,49 @@ def test_output_delete_trashes_only_unmoved_copies(native_client: TestClient, wi
     assert [f["output_id"] for f in _all_files(native_client)] == [None]
 
 
+def _filed_and_moved(client: TestClient, slug: str) -> tuple[int, int]:
+    """Two saved outputs of ``slug``: the id of one's copy still filed, and of the
+    other's copy moved out of the template's folder."""
+    filed = _save(client, slug, "One").json()
+    moved = _save(client, slug, "Two").json()
+    by_output = {f["output_id"]: f["id"] for f in _all_files(client)}
+    r = client.post(
+        "/api/v1/print/library/move", json={"file_ids": [by_output[moved["id"]]]}, headers=press()
+    )
+    assert r.status_code == 200, r.text
+    return by_output[filed["id"]], by_output[moved["id"]]
+
+
+@pytest.mark.requires_git
+def test_model_delete_with_inbox_copies_trashes_its_outputs_filed_copies(
+    native_client: TestClient, widget: str
+) -> None:
+    """#5117: as an output delete with the flag does, for every output of the model."""
+    filed, moved = _filed_and_moved(native_client, widget)
+
+    r = native_client.delete(f"/api/v1/models/{widget}?delete_inbox_copies=true", headers=press())
+
+    assert r.status_code == 204, r.text
+    assert _native(native_client).rows.file(filed) is None
+    assert _all_files(native_client) == [{"id": moved, "output_id": None, "folder_id": None}]
+
+
+@pytest.mark.requires_git
+def test_model_delete_keeps_its_outputs_copies_naming_no_output(
+    native_client: TestClient, widget: str
+) -> None:
+    """#5117: without the flag every copy stays, and none names a deleted output."""
+    filed, moved = _filed_and_moved(native_client, widget)
+
+    r = native_client.delete(f"/api/v1/models/{widget}", headers=press())
+
+    assert r.status_code == 204, r.text
+    files = {f["id"]: f["output_id"] for f in _all_files(native_client)}
+    assert files == {filed: None, moved: None}
+    still_filed = _native(native_client).rows.file(filed)
+    assert still_filed is not None and still_filed.output_id is None
+
+
 @pytest.mark.requires_git
 def test_a_failed_filing_does_not_fail_the_save(
     native_client: TestClient,
