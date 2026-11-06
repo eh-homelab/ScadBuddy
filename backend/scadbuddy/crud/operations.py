@@ -10,8 +10,9 @@ event commits with it (D7). The insert prunes past the API's own
 
 A caller writes only the records of the kinds its worker runs: those whose
 `OperationKind.queue` is its own (`CALLER_QUEUE`). Its insert of an unknown kind is a 422,
-of another caller's kind a 403. Its finish of another caller's row is the same 404 as a
-missing row, so it learns nothing of rows that are not its own. Over SQL, each worker's
+of another caller's kind a 403. Its finish of another caller's row, and its insert that names
+another execution's workflow ids, are the same 404 as a missing row, so it learns nothing
+of rows that are not its own. Over SQL, each worker's
 role could end any row.
 """
 
@@ -88,7 +89,7 @@ def operations_router(caller: CrudCaller) -> APIRouter:
                 reason=OTHER_CALLERS_KIND,
             )
         seconds = (await asyncio.to_thread(settings.load)).operation_retention_seconds
-        return await ops.store.insert(
+        held = await ops.store.insert(
             body.op_id,
             kind=body.kind,
             subject=body.subject,
@@ -101,6 +102,11 @@ def operations_router(caller: CrudCaller) -> APIRouter:
             author=body.author,
             person=body.person,
         )
+        # The execution's row, inserted or found: a resend's only if the workflow input
+        # matches. Not the op id: a retried activity mints a new one for the same row.
+        if held.kind != body.kind or held.subject != body.subject or not mine(ops, held.kind):
+            raise _no_such()
+        return held
 
     @router.post("/operations/{op_id}/finish", name=f"crud_{caller}_finish_operation")
     async def finish(op_id: str, body: OperationEnd, ops: OperationsDep) -> Operation:

@@ -52,7 +52,7 @@ class _Settings:
     """The API's `SettingsStore`, as far as the insert route reads it."""
 
     def __init__(self) -> None:
-        self.retention: int | None = None
+        self.retention: float | None = None
         self.loads = 0
 
     def load(self) -> SimpleNamespace:
@@ -162,7 +162,7 @@ async def test_the_api_prunes_past_its_own_retention(
     # No retention keeps every finished row.
     await _insert(remote, "kept", key="kept")
     assert _rows(jobs) == ["kept", "old"]
-    settings.retention = int(timedelta(hours=1).total_seconds())
+    settings.retention = timedelta(hours=1).total_seconds()
     await _insert(remote, "new", key="new")
     assert _rows(jobs) == ["kept", "new"]
     assert settings.loads == 3
@@ -239,3 +239,28 @@ async def test_another_callers_row_is_missing_and_unchanged(
     held = await operations.get("printed")
     assert held is not None and held.status == "running" and held.finished_at is None
     assert _events(jobs) == ["printed"]
+
+
+async def test_another_executions_workflow_ids_answer_nothing_of_its_row(
+    remote: RemoteOperationStore, operations: OperationStore, jobs: JobProjection
+) -> None:
+    """The insert is natural on the workflow ids, so a caller naming a print row's ids
+    with a kind of its own must not get that row back."""
+    printed = await _insert(operations, "printed", kind=PRINT)
+    with pytest.raises(CrudRefusedError) as refused:
+        await remote.insert(
+            "mine",
+            kind=FLOW,
+            subject="other",
+            operation_key="k",
+            request={},
+            workflow_id=f"op-{PRINT}-k",
+            workflow_run_id="r1",
+        )
+    assert refused.value.status == 404
+    leaked = str(refused.value.problem)
+    assert "printed" not in leaked and PRINT not in leaked and "archive:5" not in leaked
+    assert _rows(jobs) == ["printed"] and await operations.get("printed") == printed
+    # A genuine resend (a retried activity: a new op id) still answers its own row.
+    first = await _insert(remote, "a")
+    assert (await _insert(remote, "b")).id == first.id == "a"
