@@ -21,6 +21,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.operations import operations_router
 from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import Decision, Proposal, Run
@@ -57,6 +58,8 @@ RESET_REFUSALS = frozenset(
 )
 
 router = crud_router("projects")
+# The `Operation` records of the flow kinds the worker runs (J24, J25).
+router.routes.extend(operations_router("projects").routes)
 
 
 class Floor(BaseModel):

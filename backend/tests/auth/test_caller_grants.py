@@ -137,13 +137,12 @@ def test_the_role_holds_its_list_and_cannot_migrate(
         pool.close()
 
 
-@pytest.mark.parametrize("caller", ["print", "projects"])
 def test_a_worker_on_its_own_role_opens_reads_settings_and_runs_an_operation(
-    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path, caller: ServiceCaller
+    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
 ) -> None:
-    _grant(owner, role, caller)
+    _grant(owner, role, "print")
     store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
-    open_for_caller(store, caller)
+    open_for_caller(store, "print")
     try:
         store.snapshot()
         operations = OperationStore(store.pool)
@@ -208,13 +207,28 @@ def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path
         store.close()
 
 
+def test_a_projects_worker_on_its_own_role_opens(
+    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
+) -> None:
+    """#5298: it only waits for the API's migrations and grants; it reads no settings."""
+    _grant(owner, role, "projects")
+    store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
+    try:
+        open_for_caller(store, "projects")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            store.snapshot()
+    finally:
+        store.close()
+
+
 def test_print_and_projects_lists_differ_where_their_work_does() -> None:
-    # The print worker rewrites settings in a printer merge; flow runs only read them.
-    assert "UPDATE" in PRINT_GRANTS["settings"] and PROJECTS_GRANTS["settings"] == ("SELECT",)
+    # The print worker rewrites settings in a printer merge; flow runs read none (#5298).
+    assert "UPDATE" in PRINT_GRANTS["settings"] and "settings" not in PROJECTS_GRANTS
 
 
-#: The flow relations the projects worker reaches only through the CRUD routes (#5298).
-FLOW_RELATIONS = (
+#: The relations the projects worker reaches only through the CRUD routes (#5298): the
+#: flow relations, and its operations, its events and the settings snapshot.
+CRUD_RELATIONS = (
     "workflow_runs",
     "workflow_definitions",
     "workflow_run_decisions",
@@ -222,19 +236,26 @@ FLOW_RELATIONS = (
     "flow_grants",
     "flow_grant_uses",
     "flow_trigger_grants",
+    "operations",
+    "events",
+    "settings",
+    "model_print_choices",
+    "printer_bed_types",
+    "printers",
 )
 
 
-def test_the_projects_role_reaches_no_flow_relation(
+def test_the_projects_role_reaches_no_relation_of_the_crud_routes(
     owner: Pool, role: str, pg_conninfo: str
 ) -> None:
-    """#5298: flow runs, decisions and grants go through the API; its list names none."""
-    assert not set(FLOW_RELATIONS) & set(PROJECTS_GRANTS)
+    """#5298: flow runs, decisions, grants and operations go through the API, and the
+    worker has no event bus; its list names none of their relations."""
+    assert not set(CRUD_RELATIONS) & set(PROJECTS_GRANTS)
     _grant(owner, role, "projects")
     pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
     try:
         with pool.connection() as conn:
-            for name in FLOW_RELATIONS:
+            for name in CRUD_RELATIONS:
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(name)))
     finally:

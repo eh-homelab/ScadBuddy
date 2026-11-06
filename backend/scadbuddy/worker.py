@@ -63,6 +63,7 @@ from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
+from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.operations import flow_kinds
@@ -1385,7 +1386,7 @@ class ProjectsKeyMissingError(ValueError):
 
 
 #: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PROJECTS_CRUD_AREAS = frozenset({"flows"})
+PROJECTS_CRUD_AREAS = frozenset({"flows", "operations"})
 
 
 async def run_projects_worker(
@@ -1415,16 +1416,14 @@ async def run_projects_worker(
             " http://scadbuddy:8080"
         )
     metrics = worker_metrics(settings, "projects")
-    events = PgNotifyEventBus(
-        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
-    )
-    settings_store = SettingsStore(settings, events=events)
+    # #5298: no event bus. The API makes every write that announces, and the event
+    # commits there.
+    settings_store = SettingsStore(settings)
     # #5210: on a role of its own, wait for the API's migrations and grants.
     await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
     crud: CrudClient | None = None
     routes: FlowRoutes | None = None
     try:
-        await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
         # #4975 phase 4: the projects worker's service credential on the API's routes,
         # exchanged for its proof when one is configured (#5494).
@@ -1434,7 +1433,7 @@ async def run_projects_worker(
         client = await connect_flows(
             settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
         )
-        # #5298: flow runs, decisions and grants through the API's CRUD routes.
+        # #5298: flow runs, decisions, grants and operations through the API's CRUD routes.
         crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
         store = RemoteFlowStore(crud)
         queue = settings.temporal_task_queue_projects
@@ -1447,13 +1446,8 @@ async def run_projects_worker(
                 api=lambda: api_client(settings.api_internal_url, credential),
             )
         }
-        # This worker ends its kinds' records, so it counts them (#2295).
-        metrics.operation_kinds(kinds)
-        decisions = operation_activities(
-            OperationStore(settings_store.pool, events=events, metrics=metrics),
-            settings_store,
-            kinds,
-        )
+        # The API ends the records and counts them (#2295), past its own retention.
+        decisions = operation_activities(RemoteOperationStore(crud, "projects"), None, kinds)
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)
         grants = FlowGrants(store, api, approval_key(settings))
@@ -1495,7 +1489,6 @@ async def run_projects_worker(
             await routes.aclose()
         if crud is not None:
             await crud.aclose()
-        await events.aclose()
         await asyncio.to_thread(settings_store.close)
 
 

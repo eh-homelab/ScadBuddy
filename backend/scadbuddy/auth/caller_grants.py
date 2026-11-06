@@ -97,17 +97,11 @@ PRINT_SEQUENCES = (
 )
 
 #: What the projects worker (`--queue projects`, flow runs) touches of the backend's. Its
-#: flow runs, decisions and grants go through the API's CRUD routes (#5298,
-#: `crud/projects.py`); the grants it held for them are never revoked from a live role.
+#: flow runs, decisions, grants and operations go through the API's CRUD routes (#5298,
+#: `crud/projects.py`, `crud/operations.py`), and it has no event bus; the grants it held
+#: for them are never revoked from a live role.
 PROJECTS_GRANTS: Grants = {
-    # The settings snapshot (operation retention, `workflows/operation_activities.py`).
-    "settings": _READ,
-    "model_print_choices": _READ,
-    "printer_bed_types": _READ,
-    "printers": _READ,
     "scadbuddy_migrations": _READ,
-    "events": ("SELECT", "INSERT"),
-    "operations": _ALL,
 }
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads

@@ -400,7 +400,8 @@ class Metrics:
 
         # Operations (#1053, #2295): `kind` is a registered `OperationKind`'s name, a
         # closed set each process pre-creates (`operation_kinds`). Counted where the
-        # record ends (`OperationStore.finish`), in the process whose worker ran it.
+        # record ends (`OperationStore.finish`): in the process whose worker ran it, or
+        # in the API for a worker that ends it through the CRUD routes (#5298).
         self.operation_duration = Histogram(
             "scadbuddy_operation_duration_seconds",
             "Time from an operation's record to its end, by kind and outcome (succeeded, failed).",
