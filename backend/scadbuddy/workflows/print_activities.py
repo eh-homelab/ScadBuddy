@@ -684,30 +684,31 @@ class PrintActivities:
 
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:
-        """The subject's progress marked new, then the result recorded (retried without
-        limit: every plate is queued, so a Postgres blip must not turn the run into a
-        failure, review #1061). The workflow then starts its `FollowPrint` (#1053).
+        """The result recorded (retried without limit: every plate is queued, so a
+        Postgres blip must not turn the run into a failure, review #1061), then the
+        print followed (an output's).
 
-        Marked first (#5521): once the run's end is recorded, a reader that saw it ended
-        reads the new print's progress, and the observer keeps that read. Marking it new
-        after that dropped the read, so the next read, which found nothing new,
-        published ``print.progress`` again."""
+        The observer's token is taken before the end is recorded (#5521): a progress
+        read that sees the run ended can land before `started`, and `started` keeps it,
+        so the next read that finds nothing new publishes nothing."""
         spec = input.input.source
+        since = self.d.observer.begin()
+        run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
+        if spec.kind == "output" and spec.output_id is not None and input.result.lan:
+            await self._record_lan(spec.output_id, run, input.result)
         if spec.kind == "output" and spec.output_id is not None:
-            # Best effort: a retry would not change it. An output deleted while it
-            # printed has nothing left to follow.
+            # Best effort: the run is recorded, and a retry would not change it. An
+            # output deleted while it printed has nothing left to follow.
+            # The workflow then starts its `FollowPrint` (#1053).
             try:
                 meta = await require(self.d.outputs, spec.output_id)
-                self.d.observer.started(meta)
+                self.d.observer.started(meta, since)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
         elif spec.kind == "library" and spec.file_id is not None:
             # As an output's (#1751): its progress, on `print:library:<file id>`, is new.
             subject = PrintSubject.library(spec.file_id)
-            self.d.observer.started_subject(subject.run_subject, library_slug(subject))
-        run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
-        if spec.kind == "output" and spec.output_id is not None and input.result.lan:
-            await self._record_lan(spec.output_id, run, input.result)
+            self.d.observer.started_subject(subject.run_subject, library_slug(subject), since)
         return run
 
     async def _record_lan(self, output_id: str, run: PrintRun, result: PrintRunResult) -> None:

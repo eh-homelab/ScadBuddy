@@ -63,10 +63,13 @@ class Prints:
 
 
 class Observer:
-    def started(self, meta: object) -> None:
+    def begin(self) -> int:
+        return 0
+
+    def started(self, meta: object, since: int | None = None) -> None:
         pass
 
-    def started_subject(self, key: str, slug: str) -> None:
+    def started_subject(self, key: str, slug: str, since: int | None = None) -> None:
         pass
 
 

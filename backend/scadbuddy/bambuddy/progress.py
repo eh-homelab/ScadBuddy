@@ -590,24 +590,41 @@ class ProgressObserver:
     ``print.settled`` is published once, on the read that first finds the print
     settled. Once per process, not once per print, and with no outcome: what acts on a
     print ending (flow triggers) hears ``print.outcome`` instead (#2665, ``outcomes.py``).
+
+    A new print is marked in two steps (#5521): `begin` before its run's end is
+    recorded, `started_subject` with that token after. A read that found something new
+    in between may already be the new print's, so it is kept, and the next read that
+    finds nothing new publishes nothing. A read in between that found what was seen
+    before (the previous print, read before the end) is forgotten as before.
     """
 
     def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
         self.events = events
         self.capacity = capacity
-        #: Per output: the last progress seen, as JSON, and whether it was settled.
-        self._seen: OrderedDict[str, tuple[str, bool]] = OrderedDict()
+        #: Per output: the last progress seen, as JSON, whether it was settled, and
+        #: the number of the read that first saw it (`_reads` then).
+        self._seen: OrderedDict[str, tuple[str, bool, int]] = OrderedDict()
+        #: How many reads found something new: what `begin` hands out.
+        self._reads = 0
         self._lock = threading.Lock()
 
-    def started(self, meta: OutputMeta) -> None:
-        """A print of ``meta`` was just started: whatever was seen before is stale."""
-        self.started_subject(meta.id, meta.slug)
-
-    def started_subject(self, key: str, slug: str) -> None:
-        """A print of the run subject ``key`` (an output's id, or ``library:<file id>``,
-        #1751) was just started: whatever was seen before is stale."""
+    def begin(self) -> int:
+        """A token for `started_subject`, taken before a run's end is recorded."""
         with self._lock:
-            self._seen.pop(key, None)
+            return self._reads
+
+    def started(self, meta: OutputMeta, since: int | None = None) -> None:
+        """A print of ``meta`` was just started: whatever was seen before is stale."""
+        self.started_subject(meta.id, meta.slug, since)
+
+    def started_subject(self, key: str, slug: str, since: int | None = None) -> None:
+        """A print of the run subject ``key`` (an output's id, or ``library:<file id>``,
+        #1751) was just started: whatever was seen before is stale. With ``since`` (a
+        `begin` token), a read that found something new after the token is kept."""
+        with self._lock:
+            seen = self._seen.get(key)
+            if seen is None or since is None or seen[2] <= since:
+                self._seen.pop(key, None)
         emit(self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug))
 
     def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> bool:
@@ -627,10 +644,14 @@ class ProgressObserver:
         kinds: list[Literal["print.progress", "print.settled"]] = []
         with self._lock:
             previous = self._seen.pop(key, None)
-            self._seen[key] = (fingerprint, progress.settled)
+            changed = previous is None or previous[0] != fingerprint
+            if changed:
+                self._reads += 1
+            number = previous[2] if previous is not None and not changed else self._reads
+            self._seen[key] = (fingerprint, progress.settled, number)
             while len(self._seen) > self.capacity:
                 self._seen.popitem(last=False)
-            if previous is None or previous[0] != fingerprint:
+            if changed:
                 kinds.append("print.progress")
                 was_settled = previous is not None and previous[1]
                 if progress.settled and not was_settled:
