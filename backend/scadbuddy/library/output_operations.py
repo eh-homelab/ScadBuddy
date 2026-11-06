@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -180,7 +181,19 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # The Parts outlive the job that rendered them: Arrange reads them later (§7).
         # They are held before the write, so a failed hold leaves nothing saved to retry
         # over; inside the `try`, so a hold that fails part way is released too.
+        # A quote's run names the id (`orders/quote.py` `operation_output_id`, #5390), so
+        # its next attempt finds this output; `POST /outputs`'s body cannot. Saved under
+        # it only by the save that claims it: an overlapping attempt already writing it
+        # has the claim, and this save gets an id of its own, so a failure here never
+        # removes that output or releases its Parts.
         output_id = uuid.uuid4().hex
+        requested: str | None = request.get("output_id")
+        claimed = requested is not None and await asyncio.to_thread(
+            state.outputs.claim, job.slug, requested
+        )
+        if claimed:
+            assert requested is not None
+            output_id = requested
         manifest = chosen.manifest if chosen is not None else []
         # An arranged output has no template inputs to reopen; it records its sources (§7).
         arranged = job.kind == "arrange"
@@ -208,6 +221,10 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 await asyncio.to_thread(release_parts, state.refs, output_id)
             except psycopg.Error:
                 logger.exception("could not release a failed save's Parts", extra={"id": output_id})
+            if claimed:
+                # The directory this save claimed, so a later attempt can claim it again.
+                directory = state.outputs.paths.output_dir(job.slug, output_id)
+                await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
             if isinstance(error, OSError):
                 # Evicted or swept after the check above, or unreadable: the same answer,
                 # not the copy's path. Only after the release, so this path leaks no holds.

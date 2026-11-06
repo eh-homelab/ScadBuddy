@@ -44,6 +44,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
+from scadbuddy.library.outputs import OutputNotFoundError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
@@ -74,6 +75,7 @@ from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
 from scadbuddy.store.cache import StaleBlobError
+from scadbuddy.store.content_models import BlobMissingError
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import PrintCommands
@@ -90,7 +92,8 @@ ORDER_ATTEMPT_COPY = "order_attempt_copy"
 #: database refuses as written. Not ``OSError``, ``httpx`` or ``psycopg.OperationalError``
 #: (a volume, Bambuddy or the database briefly away), nor the worker's own stop: those are
 #: what the next attempt is for. Each attempt renders and slices again, for up to
-#: ``QUOTE_TIMEOUT``, so a bug fails the operation at once instead.
+#: ``QUOTE_TIMEOUT``, so a bug fails the operation at once instead. Except
+#: ``QUOTE_RETRYABLE``, which are ``LookupError``s too.
 QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
     AssertionError,
     AttributeError,
@@ -102,6 +105,10 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
     psycopg.IntegrityError,
     psycopg.ProgrammingError,
 )
+#: ``LookupError``s that another attempt can get past (#5415): an output deleted, or a
+#: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
+#: saves the output again, and slices again.
+QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
 #: One ``order_item_print`` run: the print run's accept, which answers within the command
 #: deadline, and the attempt's row. Its slices and queueing are the print run's own.
 PRINT_TIMEOUT = timedelta(minutes=5)
@@ -409,6 +416,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 Actor.model_validate(request["by"]),
                 quote_id=operation_quote_id(OPERATION_RUN.get()),
             )
+        except QUOTE_RETRYABLE:
+            raise
         except QUOTE_DETERMINISTIC as error:
             # Recorded as the unexpected failure, as before; only not tried again.
             raise ApplicationError(

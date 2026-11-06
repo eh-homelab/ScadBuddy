@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -278,6 +278,13 @@ def fulfilment_subject(fulfilment_id: str) -> str:
 def revision_subject(revision_id: str) -> str:
     """A design revision's attachment subject (storefront spec §4)."""
     return f"order_item_revision:{revision_id}"
+
+
+def quote_file_keys(quote: Quote) -> set[str]:
+    """The blob keys a quote names: every plate's ``blob_key`` and its
+    ``sliced_blob_key`` (what its holds keep, §3.4)."""
+    keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
+    return {key for key in keys if isinstance(key, str) and key}
 
 
 def _project_of(row: DictRow) -> OrderProject:
@@ -890,8 +897,7 @@ class OrderStore:
         arrays' ordinality), which in practice locks overlapping keys in one order."""
         pairs: set[tuple[str, str]] = set()
         for quote in quotes:
-            keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
-            pairs |= {(key, quote.id) for key in keys if isinstance(key, str) and key}
+            pairs |= {(key, quote.id) for key in quote_file_keys(quote)}
         if not pairs:
             return
         ordered = sorted(pairs)
@@ -2093,11 +2099,15 @@ class OrderStore:
         assert row is not None
         return _attachment_of(row)[0]
 
-    def drop_holds(self, conn: Conn, holder_kind: str, holder_id: str) -> None:
-        """Every hold of ``(holder_kind, holder_id)``, in the caller's transaction."""
+    def drop_holds(
+        self, conn: Conn, holder_kind: str, holder_id: str, *, keep: Collection[str] = ()
+    ) -> None:
+        """Every hold of ``(holder_kind, holder_id)`` but those on ``keep``'s keys, in
+        the caller's transaction."""
         conn.execute(
-            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
-            (holder_kind, holder_id),
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+            " AND NOT (key = ANY(%s::text[]))",
+            (holder_kind, holder_id, sorted(keep)),
         )
 
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:

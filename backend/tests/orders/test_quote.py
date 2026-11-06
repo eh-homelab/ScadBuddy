@@ -37,6 +37,7 @@ from scadbuddy.orders.quote import (
     SlicedPlate,
     SliceQuoteRequest,
     ensure_output,
+    operation_output_id,
     output_matches,
     quote_check,
     quote_run,
@@ -726,10 +727,16 @@ class PausedSlicer(FakeSlicer):
         return await super().fetch(sliced)
 
 
-async def paused_attempt(shop: Shop, tmp_path: Path) -> tuple[PausedSlicer, asyncio.Task[Quote]]:
-    """An attempt of the operation, started and run to its pause."""
-    files = {1: sliced_plate(1, 600, [1.0, 1.0]), 2: sliced_plate(2, 600, [1.0, 1.0])}
-    run = run_of(shop, tmp_path, files)
+async def paused_attempt(
+    shop: Shop, tmp_path: Path, seconds: int = 600, **extra: Any
+) -> tuple[PausedSlicer, asyncio.Task[Quote]]:
+    """An attempt of the operation, started and run to its pause. Another ``seconds``
+    is a re-slice that gave other bytes, so other keys; ``extra`` goes to `run_of`."""
+    files = {
+        1: sliced_plate(1, seconds, [1.0, 1.0]),
+        2: sliced_plate(2, seconds, [1.0, 1.0]),
+    }
+    run = run_of(shop, tmp_path, files, **extra)
     slicer = PausedSlicer(files)
     run.slicer = slicer
     task = asyncio.create_task(
@@ -799,3 +806,125 @@ async def test_attempts_that_end_after_another_recorded_keep_its_holds(
         await failing
     assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
     assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]
+
+
+async def test_an_attempt_whose_reslice_differs_keeps_only_the_recorded_quotes_holds(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#5415: overlapping attempts whose re-slices gave other bytes hold keys the quote
+    another attempt recorded does not name. One that reaches its record afterwards, and
+    one that fails afterwards, drop those holds; the recorded quote keeps its own."""
+
+    class Broken(Book):
+        def policy(self) -> tuple[str, PricingPolicy, str]:
+            raise RuntimeError("this attempt's worker stopped")
+
+    first, recording = await paused_attempt(shop, tmp_path)
+    second, late = await paused_attempt(shop, tmp_path, seconds=601)
+    # Fails after it kept both plates' files: at the price.
+    third, failing = await paused_attempt(shop, tmp_path, seconds=602, book=Broken())
+    first.go.set()
+    quote = await recording
+    second.go.set()
+    assert (await late).id == quote.id
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    third.go.set()
+    with pytest.raises(RuntimeError):
+        await failing
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]
+
+
+# -- an output saved once per operation (#5390) -----------------------------------------------
+
+
+class SavedOutputs:
+    """``OutputsRead`` over the outputs ``create`` saved, each the reference's render."""
+
+    def __init__(self) -> None:
+        self.metas: dict[str, OutputMeta] = {}
+        self.created: list[str] = []
+
+    def get(self, output_id: str) -> OutputMeta:
+        if output_id not in self.metas:
+            raise OutputNotFoundError(output_id)
+        return self.metas[output_id]
+
+    def inputs(self, output_id: str) -> dict[str, Any]:
+        return INPUTS
+
+    def arranged_from(self, output_id: str) -> list[str]:
+        return []
+
+    async def create(self, body: dict[str, Any]) -> dict[str, Any]:
+        # As `output_create`'s run: an id already there is another save's claim.
+        output_id = body.get("output_id") or ""
+        if not output_id or output_id in self.metas:
+            output_id = f"out-{len(self.created)}"
+        colours = ["#ff0000", "#00ff00"]
+        self.metas[output_id] = OutputMeta.model_construct(
+            id=output_id, slug="demo", model_version="a" * 40, colors=colours
+        )
+        self.created.append(output_id)
+        return {"id": output_id, "colors": colours}
+
+
+async def test_an_attempt_that_stopped_after_saving_the_output_is_not_saved_twice(
+    shop: Shop, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5390: an attempt saves the item's output and stops before the item's
+    ``output_id`` write. The next attempt of the operation finds that output by the id
+    the operation saves under and sets it on the item, with no second render or save."""
+    outputs = SavedOutputs()
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 600, [1.0, 1.0])}, outputs=outputs)
+    run.create_output = outputs.create
+    renders = run.renders
+    assert isinstance(renders, FakeRenders)
+    real = shop.lifecycle.update_item
+
+    def stopped(*args: Any, **kwargs: Any) -> OrderItem:
+        if kwargs.get("output_id") is not None:
+            raise RuntimeError("this attempt's worker stopped")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(shop.lifecycle, "update_item", stopped)
+    request = shop.request(s0=shop.pla, s1=shop.petg)
+    with pytest.raises(RuntimeError):
+        await quote_run(run, shop.order.id, shop.item.id, request, BY, quote_id=ONE_OPERATION)
+    assert shop.get_item().output_id is None
+    monkeypatch.setattr(shop.lifecycle, "update_item", real)
+
+    quote = await quote_run(run, shop.order.id, shop.item.id, request, BY, quote_id=ONE_OPERATION)
+    saved = operation_output_id(ONE_OPERATION)
+    assert outputs.created == [saved]
+    assert len(renders.submitted) == 1
+    assert shop.get_item().output_id == saved
+    assert quote.id == ONE_OPERATION
+
+
+async def test_an_output_of_the_operations_id_that_does_not_match_is_left_alone(
+    shop: Shop,
+) -> None:
+    """#5390: an output already saved under the operation's id that is not the item's
+    render (another reference's) is never overwritten: the new one gets an id of its
+    own."""
+    outputs = SavedOutputs()
+    keyed = operation_output_id(ONE_OPERATION)
+    outputs.metas[keyed] = OutputMeta.model_construct(
+        id=keyed, slug="other", model_version="a" * 40, colors=[]
+    )
+    found = await ensure_output(
+        lifecycle=shop.lifecycle,
+        outputs=outputs,
+        renders=FakeRenders(),
+        create_output=outputs.create,
+        order=shop.get_order(),
+        item=shop.get_item(),
+        filaments={},
+        by=BY,
+        follow_every=0.0,
+        saved_as=keyed,
+    )
+    assert found != keyed and outputs.created == [found]
+    assert outputs.metas[keyed].slug == "other"
+    assert shop.get_item().output_id == found

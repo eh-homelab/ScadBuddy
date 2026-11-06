@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -18,7 +21,9 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_render
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OUTPUT_HOLDER, THUMBNAIL_NAME, OutputStore, _cover_from_3mf
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
@@ -344,3 +349,65 @@ def test_layout_plates_is_documented_in_the_api(tmp_path: Path) -> None:
     assert "OutputDetail" in carrying
     for description in carrying.values():
         assert "without opening the 3MF" in description and "`plates`" in description
+
+
+@pytest.mark.parametrize("paused", ["before_the_write", "after_the_write"])
+def test_overlapping_saves_under_one_id_never_touch_each_others_output(
+    client: TestClient,
+    app: FastAPI,
+    pool: Pool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    paused: str,
+) -> None:
+    """#5390 review: two attempts of one quote save under the operation's output id at
+    once. The first is in the middle of its save when the second starts, and the
+    second's write fails. The first claimed the id, so the second saves under an id of
+    its own: its failure removes only its own directory and releases only its own
+    Parts, and the first output and its holds survive."""
+    job_id, parts = finished(app, tmp_path)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    kind = state.components.get(OPERATIONS).kinds["output_create"]
+    real = state.outputs.create
+    inside = threading.Event()
+    go = threading.Event()
+    calls: list[str | None] = []
+
+    def create(job: Job, **kwargs: Any) -> Any:
+        calls.append(kwargs.get("output_id"))
+        if len(calls) == 1:
+            inside.set()
+            if paused == "before_the_write":
+                assert go.wait(30)
+                return real(job, **kwargs)
+            meta = real(job, **kwargs)
+            assert go.wait(30)
+            return meta
+        # The second save's copy fails part way: the job's preview is gone.
+        [chosen] = job.outputs
+        gone = chosen.result.model_copy(update={"preview_glb": "gone/preview.glb"})
+        broken = job.model_copy(update={"outputs": [chosen.model_copy(update={"result": gone})]})
+        return real(broken, **kwargs)
+
+    monkeypatch.setattr(state.outputs, "create", create)
+    shared = uuid.uuid4().hex
+    body = {
+        "slug": "demo",
+        "job_id": job_id,
+        "index": 0,
+        "inputs": None,
+        "name": None,
+        "output_id": shared,
+    }
+    assert client.portal is not None
+    first = client.portal.start_task_soon(kind.run, body, {})
+    assert inside.wait(30)
+    with pytest.raises(ApiError):
+        client.portal.call(kind.run, body, {})
+    go.set()
+    saved = first.result(30)
+
+    assert saved["id"] == shared
+    assert client.get(f"/api/v1/outputs/{shared}").status_code == 200
+    assert held(pool) == {(part, shared) for part in parts}
+    assert calls[0] == shared and calls[1] != shared
