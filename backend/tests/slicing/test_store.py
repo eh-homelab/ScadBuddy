@@ -178,6 +178,7 @@ async def test_a_fresh_start_on_a_completed_row_starts_a_row_of_its_own(
 
 async def test_fresh_starts_at_once_on_a_completed_row_make_one_row(
     store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
 ) -> None:
     """#5456: the key's starts take one lock, so Reslices that land together on a
     completed row make one new row, and every one of them answers it."""
@@ -187,7 +188,7 @@ async def test_fresh_starts_at_once_on_a_completed_row_make_one_row(
     assert len(set(ids)) == 1
     assert ids[0] != old
     # And no stray insert that no start answered (#5464).
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         rows = conn.execute(
             "SELECT id FROM native_slices WHERE reslice_of = %s", ("slice-1-a",)
         ).fetchall()
@@ -281,6 +282,7 @@ async def test_a_fresh_start_leaves_another_subjects_row_alone(store: NativeSlic
 
 async def test_a_completed_row_answered_again_is_kept_from_the_ttl_sweep(
     store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
 ) -> None:
     """Task 12 review M5: the grace runs from its last use, so a dialog reopened on it
     past `PREVIEW_GRACE` does not lose it to the next sweep."""
@@ -288,7 +290,7 @@ async def test_a_completed_row_answered_again_is_kept_from_the_ttl_sweep(
     await store.finish(
         slice_id, status="completed", sliced_blob_key="slice-abc", failure=None, warnings=[]
     )
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         conn.execute(
             "UPDATE native_slices SET finished_at = now() - interval '2 days' WHERE id = %s",
             (slice_id,),
@@ -407,9 +409,12 @@ async def test_a_stop_of_a_lost_row_spares_a_newer_execution(
     assert refs.referenced() == set()
 
 
-async def test_lost_reads_the_executions_start_not_the_rows(store: NativeSliceStore) -> None:
+async def test_lost_reads_the_executions_start_not_the_rows(
+    store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
+) -> None:
     slice_id = await _start(store)
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         conn.execute(
             "UPDATE native_slices SET created_at = now() - interval '1 day' WHERE id = %s",
             (slice_id,),
@@ -425,10 +430,11 @@ async def test_running_a_row_swept_away_says_so(store: NativeSliceStore) -> None
 
 async def test_a_restart_of_a_finished_row_keeps_it_from_the_ttl_sweep(
     store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
 ) -> None:
     slice_id = await _start(store)
     await store.finish(slice_id, status="failed", sliced_blob_key=None, failure="x", warnings=[])
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         conn.execute(
             "UPDATE native_slices SET finished_at = now() - interval '2 days' WHERE id = %s",
             (slice_id,),
