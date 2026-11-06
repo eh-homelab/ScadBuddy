@@ -224,6 +224,10 @@ class FlowDefinitions:
             for name in names
             if name not in known
         }
+        # details_at reads a deleted flow's details at the HEAD of the moment, not at
+        # `head`, so a commit between the two reads can store a value under the old
+        # `head`. That is harmless only because the next read that sees the new HEAD
+        # empties the map; keep that reset if this cache changes.
         with self._names_lock:
             if head == self._names_head:
                 self._names.update(found)

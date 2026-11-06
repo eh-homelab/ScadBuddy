@@ -390,6 +390,8 @@ class FlowHistory(GitRepo):
         crash left behind."""
         handle, staged = tempfile.mkstemp(dir=self.root / ".git", prefix="flow-json-")
         try:
+            # mkstemp makes the file 0600; give it the 0644 a plain write had.
+            os.fchmod(handle, 0o644)
             with os.fdopen(handle, "w", encoding="utf-8") as writer:
                 writer.write(text)
             os.replace(staged, path)
