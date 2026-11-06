@@ -353,8 +353,17 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
-  /** What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`). */
-  prepareApproval(args: unknown, ctx: ToolContext, needs?: ApprovalNeeds): Promise<{ input: Record<string, unknown>; summary: string }>
+  /**
+   * What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`).
+   * `added` is what the tool's own resolution filled in that the parsed arguments left out
+   * (a registry printer's `printer_id`), not the schema's defaults: a flow's call binds to its
+   * raw arguments with these (#4445).
+   */
+  prepareApproval(
+    args: unknown,
+    ctx: ToolContext,
+    needs?: ApprovalNeeds,
+  ): Promise<{ input: Record<string, unknown>; summary: string; added: Record<string, unknown> }>
   /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
   readonly resolvesApproval: boolean
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
@@ -412,7 +421,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     resolvesApproval: spec.prepareApproval !== undefined,
     async prepareApproval(args, ctx, needs = { summary: true }) {
       const parsed = spec.input.parse(args)
-      if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }
+      if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args), added: {} }
       const prepared = await spec.prepareApproval(parsed, ctx, needs)
       const input = spec.input.parse(prepared.input)
       // It may fill what the call left out, never change what the model chose (#4442 gate review).
@@ -420,7 +429,9 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const changed = Object.entries(parsed).find(([key, value]) => value !== undefined && JSON.stringify(resolved[key]) !== JSON.stringify(value))
       // A bug in the tool, never the backend away: a refusal (no status), so it ends at once (#4442 N2).
       if (changed) throw new ToolError(`${spec.name}'s prepareApproval changed the supplied argument ${changed[0]}`)
-      return { input, summary: prepared.summary }
+      const given: Record<string, unknown> = parsed
+      const added = Object.fromEntries(Object.entries(resolved).filter(([key, value]) => value !== undefined && given[key] === undefined))
+      return { input, summary: prepared.summary, added }
     },
     title(args) {
       const parsed = spec.input.safeParse(args)

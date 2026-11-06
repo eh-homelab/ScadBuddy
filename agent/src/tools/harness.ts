@@ -78,7 +78,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
         const effective = await effectiveTool(tool, services)
         if (effective.disabled || !hasTier(principal, effective.risk)) return undefined
         try {
-          return await tool.prepareApproval(input, {
+          const { input: prepared, summary } = await tool.prepareApproval(input, {
             ...services,
             principal,
             ...(session.id !== undefined ? { session: session.id } : {}),
@@ -87,6 +87,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
             lookup,
             gate: 'harness',
           })
+          return { input: prepared, summary }
         } catch (err) {
           // An interrupted turn is not the backend away: the abort goes on as it is (#4442 review).
           if (signal.aborted) throw err

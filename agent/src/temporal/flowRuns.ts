@@ -10,7 +10,9 @@ import type { Owner } from '../sessions/protocol.js'
 // write. The decision is bound to the call as it was parked (#2318): its `input_hash` is
 // inputHash (approvals/service.ts) of the tool and arguments the person approved, made
 // by the backend (flows/approval_hash.py), and it must equal the hash of the call being
-// run. Both tables are the backend's; this reads them and never writes.
+// run. A person's approval of a print_output call that names a registry printer binds to
+// the arguments plus the printer_id the row links (flows/print_binding.py, #4445). Both
+// tables are the backend's; this reads them and never writes.
 
 // Lowercase only, as the backend's run ids (uuid4) and the codec's subjects are.
 const FLOW_WORKFLOW = /^flow-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/

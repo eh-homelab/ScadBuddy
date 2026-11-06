@@ -69,6 +69,7 @@ from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Proposal, Run
 from scadbuddy.flows.narrowing import narrowing_problem
+from scadbuddy.flows.print_binding import api_lookup, bind_call, named_printer
 from scadbuddy.flows.store import (
     FlowStore,
     HopMovedError,
@@ -218,7 +219,9 @@ def flow_kinds(
     them. `hash_key` makes an approval's input hash (`approval_hash.py`); None records
     none, and the agent then runs no approved tool call. `api` makes a client on
     ScadBuddy's own API, which a parent's narrowing is matched through (the grant's
-    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person."""
+    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person.
+    A person's approval of a `print_output` call that names a registry printer reads
+    that printer through it too (#4445); None, and that approval is refused."""
 
     async def answer_of(request: dict[str, Any]) -> str:
         if "answer" in request:
@@ -354,10 +357,23 @@ def flow_kinds(
                 continue
             if parked.tool_name != APPROVED_TOOL or hash_key is None:
                 return None
+            name = str(parked.tool_input.get("name"))
             args = parked.tool_input.get("args")
-            return input_hash(
-                hash_key, str(parked.tool_input.get("name")), args if isinstance(args, dict) else {}
-            )
+            args = args if isinstance(args, dict) else {}
+            if named_printer(name, args) is not None:
+                # Bound to the registry printer's link as it is now (#4445), which the
+                # agent's gate checks again when the call runs.
+                client = None if api is None else api()
+                if client is None:
+                    raise ApiError(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "Approving a print on a registry printer needs SCADBUDDY_API_INTERNAL_URL.",
+                    )
+                try:
+                    args = (await bind_call(name, args, api_lookup(client))).args
+                finally:
+                    await client.aclose()
+            return input_hash(hash_key, name, args)
         raise _stale()
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:

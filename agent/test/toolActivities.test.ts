@@ -962,6 +962,43 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
       expect(refused.message).toContain('Garage is Bambuddy printer 5, not printer_id 2')
       expect(state.posted).toEqual([])
     })
+
+    // #4445: a person's approval of a call that names only `printer` binds to the pair the
+    // backend resolved (flows/print_binding.py): the raw arguments plus the linked printer_id.
+    describe('named by printer alone (#4445)', () => {
+      const named = { ...chosen, printer: PRINTER }
+      const bound: FlowRuns = {
+        startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+        approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', { ...named, printer_id: 2 }),
+      }
+
+      it('runs the pair the approval was bound to', async () => {
+        const state = registry()
+        const h = harness({ flows: bound, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        await env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named)
+        expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
+      })
+
+      it('refuses it, and sends nothing, once the row was re-linked since the approval', async () => {
+        const state = registry(5)
+        const h = harness({ flows: bound, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named))
+        expect(refused.nonRetryable).toBe(true)
+        expect(refused.type).toBe('NotApproved')
+        expect(state.posted).toEqual([])
+      })
+
+      it('runs one approved for the raw arguments (a run grant, a narrowing) as they were sent', async () => {
+        const grant: FlowRuns = {
+          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+          approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', named),
+        }
+        const state = registry()
+        const h = harness({ flows: grant, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        await env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named)
+        expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
+      })
+    })
   })
 })
 

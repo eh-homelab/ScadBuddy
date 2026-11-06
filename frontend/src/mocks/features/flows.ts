@@ -300,6 +300,8 @@ const messages = new Map<string, { message: string; body: string | null }>()
 const moved = new Set<string>()
 /** Runs whose view says the workflow did not answer (`live: false`). */
 const offline = new Set<string>()
+/** #4445: each parked call's line from ScadBuddy's records, by `<run>:<call>`. */
+const summaries = new Map<string, string>()
 /** Runs that exist only as an accepted start (`starting`, no row yet). */
 const starting = new Set<string>()
 let requests: { path: string; key: string | null; body: Record<string, unknown> }[] = []
@@ -342,6 +344,11 @@ export function setFlowRunChildren(id: string, next: Extract<FlowQueueEntry, { s
   children.set(id, next)
 }
 
+/** Tests: the line the view gives a run's parked call (#4445: a print's registry printer). */
+export function setFlowPendingSummary(id: string, callId: string, summary: string): void {
+  summaries.set(`${id}:${callId}`, summary)
+}
+
 /** #2477: each run's images, as the view lists them. */
 const images = new Map<string, FlowRunView['images']>()
 /** One grey pixel, what every image route answers. */
@@ -355,6 +362,7 @@ export function reset(): void {
   moved.clear()
   offline.clear()
   starting.clear()
+  summaries.clear()
   images.clear()
   children.clear()
   defaultChildren()
@@ -471,6 +479,7 @@ function view(id: string): FlowRunView | undefined {
     reason,
     proposed,
     hops,
+    summary: summaries.get(`${id}:${call_id}`) ?? null,
   }))
   return {
     id,

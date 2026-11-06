@@ -6,9 +6,10 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity, workflow
@@ -17,9 +18,12 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer, Worker
 
+from scadbuddy.api.flows import _pending
+from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.flow_tools import (
     FLOW_BEATLESS_CALL_PATCH,
     FLOW_BEATLESS_TIER_PATCH,
@@ -76,7 +80,12 @@ class Tools:
             # As the agent answers a flow call that returned images (#2477): pointers only.
             return {"text": f"a view\n[image {IMAGE['name']}]", "images": [IMAGE]}
 
-        return [get_model, send_to_bambuddy, make_thing, broken, snapshot]
+        @activity.defn(name="print_output")
+        async def print_output(args: dict[str, Any]) -> str:
+            self._record("print_output", args)
+            return "printing"
+
+        return [get_model, send_to_bambuddy, make_thing, broken, snapshot, print_output]
 
 
 @pytest.fixture
@@ -89,6 +98,7 @@ def agent() -> AgentTiers:
             "make_thing": "write",
             "broken": "read",
             "snapshot": "read",
+            "print_output": "outward",
         }
     )
 
@@ -156,6 +166,75 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     )
     again = await outward_since(outward.client, run, point)
     assert [(c.fn, c.call_id) for c in again.calls] == [("tool:send_to_bambuddy", call_id)]
+
+
+PRINTER = "00000000-0000-4000-8000-0000000000aa"
+
+
+def _printer(bambuddy: int | None) -> PrinterRow:
+    now = datetime.now(UTC)
+    return PrinterRow(
+        id=PRINTER,
+        serial="01P00A0000000AA",
+        name="Garage",
+        bambuddy_printer_id=bambuddy,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _api(linked: int) -> Callable[[], httpx.AsyncClient]:
+    """The API's printer route, as the projects worker reads it: the row links `linked`."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/v1/printers/{PRINTER}"
+        return httpx.Response(200, json=_printer(linked).model_dump(mode="json"))
+
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
+
+
+async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_links(
+    outward: Outward, tools: tuple[Tools, str]
+) -> None:
+    """#4445: the run page names the printer, and the approval binds the pair the row
+    links when the person decides, as the agent's gate hashes it again when it runs."""
+    served, queue = tools
+    call = {"output_id": "o1", "printer": PRINTER}
+    run_id = await outward.run(
+        script(f"return await tool('print_output', {call!r})"), tools_queue=queue
+    )
+    call_id = await outward.approval(run_id)
+    parked = await outward.store.get_run(run_id)
+    assert parked is not None
+
+    async def lookup(printer: str) -> PrinterRow | None:
+        assert printer == PRINTER
+        return _printer(2)
+
+    pending, live = await _pending(outward.client, parked, lookup)
+    assert live
+    assert [(p.call_id, p.summary) for p in pending] == [
+        (call_id, "Prints on Garage (Bambuddy printer 2)")
+    ]
+    request = {"run_id": run_id, "call_id": call_id, "approved": True}
+    env = ActivityEnvironment(client=outward.client)
+    # Without the API to read the row from, nothing is approved.
+    blind = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    with pytest.raises(ApiError) as refused:
+        await env.run(blind.run, request, await env.run(blind.check, request))
+    assert refused.value.status == 503
+    assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    decide = next(
+        k for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api(2)) if k.name == FLOW_DECIDE
+    )
+    await env.run(decide.run, request, await env.run(decide.check, request))
+    decision = await outward.store.get_decision(request_id(parked, call_id))
+    assert decision is not None
+    assert decision.input_hash == input_hash(HASH_KEY, "print_output", {**call, "printer_id": 2})
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'printing'"
+    # The workflow sends the script's arguments: the agent adds the pair and checks it.
+    assert served.calls == [("print_output", f"tool-{call_id}", call)]
 
 
 async def test_an_unknown_tool_is_a_script_error_and_sends_nothing(

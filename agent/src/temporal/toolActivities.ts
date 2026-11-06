@@ -531,8 +531,9 @@ async function runGated(
   const services = deps.services
   // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
   // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
-  // approval is of the script's raw arguments (the backend hashes those), so a flow's call
-  // runs them as sent, resolved only to refuse a pair its registry row no longer links.
+  // call is the script's raw arguments plus what the resolution added (a registry printer's
+  // `printer_id`), which the backend binds a person's approval to (flows/print_binding.py,
+  // #4445): a printer re-linked since the approval hashes otherwise, and is refused.
   //
   // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
   // is tried again here, within the one approval: safe, since nothing is checked or sent before
@@ -553,8 +554,9 @@ async function runGated(
     for (let attempt = 0; ; attempt++) {
       try {
         // Only the input: the line naming the printer was the approval's, so its reads are skipped.
-        const resolved = (await tool.prepareApproval(input, ctx, { summary: false })).input
+        const { input: resolved, added } = await tool.prepareApproval(input, ctx, { summary: false })
         if (flow === undefined) runInput = resolved
+        else if (Object.keys(added).length > 0) runInput = { ...(input as Record<string, unknown>), ...added }
         break
       } catch (err) {
         // A refusal, or an error no retry would change (arguments that do not parse), ends it now.
@@ -570,7 +572,17 @@ async function runGated(
   }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
   // describe_call gave the parked call, computed again from what this call was given.
-  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (runInput ?? {}) as Record<string, unknown>) } : undefined
+  let binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (runInput ?? {}) as Record<string, unknown>) } : undefined
+  if (effective.gated && flow !== undefined && runInput !== input && deps.audit && !(await caller.approvals?.approved(requestId, binding))) {
+    // An approval of the script's raw arguments: a run grant's, a parent's narrowing, or a
+    // person's from before #4445. It runs them as sent, as before; the handler still refuses
+    // a pair its registry row no longer links.
+    const raw = { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (input ?? {}) as Record<string, unknown>) }
+    if (await caller.approvals?.approved(requestId, raw)) {
+      runInput = input
+      binding = raw
+    }
+  }
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
     if (await caller.approvals?.lapsed?.(requestId, binding)) {
       await refuse(

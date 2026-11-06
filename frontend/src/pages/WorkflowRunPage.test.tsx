@@ -14,6 +14,7 @@ import {
   childEntries,
   setFlowRunChildren,
   setFlowDetails,
+  setFlowPendingSummary,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -126,6 +127,14 @@ describe('WorkflowRunPage', () => {
       key: expect.stringMatching(KEY),
       body: { call_id: 'call-1', approved: true },
     })
+  })
+
+  // #4445 — a print_output call says which registry printer prints, as the backend resolved it.
+  it("names the printer an outward call prints on, under the card's heading", async () => {
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 2)')
+    render('run-print')
+    const card = await screen.findByRole('region', { name: /^Waiting for approval/ })
+    expect(card).toHaveTextContent('Prints on Garage (Bambuddy printer 2)')
   })
 
   // #2482 — a call outside the run's grant: where it waits, why, and its way up.
