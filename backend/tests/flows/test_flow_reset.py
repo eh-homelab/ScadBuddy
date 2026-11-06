@@ -28,7 +28,7 @@ pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 
 def kind(flows: Outward, name: str) -> OperationKind:
-    return next(k for k in flow_kinds(flows.store, Keys(), HASH_KEY) if k.name == name)
+    return next(k for k in flow_kinds(flows.remote, Keys(), HASH_KEY) if k.name == name)
 
 
 async def operate(flows: Outward, name: str, request: dict[str, Any]) -> dict[str, Any]:

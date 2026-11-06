@@ -1,9 +1,11 @@
-"""The projects worker's flow-run routes (#5298, inventory J6-J15, J21-J23): thin calls
-to the flows component's `FlowStore`, for `crud/projects.py` `RemoteFlowStore`.
+"""The projects worker's flow-run routes (#5298, inventory J6-J23): thin calls to the
+flows component's `FlowStore`, for `crud/projects.py` `RemoteFlowStore`.
 
 Every write is natural (plan D5): sent again, it answers as it did the first time. A
 write that announces the run (`insert_run`, `project`, `move_hop`) runs here, so its
-`flow_run.changed` event still commits with it (D7).
+`flow_run.changed` event still commits with it (D7). Logic that holds a lock runs here
+too (D6): a grant's consume chooses its rule under the grant's row lock, and a Reset's
+Temporal call runs under the run's row lock.
 """
 
 from __future__ import annotations
@@ -16,8 +18,10 @@ from pydantic import BaseModel
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.flows.component import FlowsDep
+from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import Decision, Proposal, Run
-from scadbuddy.flows.store import HopMovedError
+from scadbuddy.flows.operations import reset_execution
+from scadbuddy.flows.store import HopMovedError, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.workflows.flow_models import (
     FlowRecord,
     FlowWaiting,
@@ -28,6 +32,10 @@ from scadbuddy.workflows.flow_models import (
 
 #: A decision refused because its call left the hop it was made for.
 HOP_MOVED = "hop_moved"
+#: A Reset refused because another Reset replaced the execution first.
+RESET_SUPERSEDED = "reset-superseded"
+#: A Reset refused because its point is before the entries the row keeps.
+RESET_BEFORE_FLOOR = "reset-before-floor"
 
 router = crud_router("projects")
 
@@ -49,6 +57,20 @@ class DecisionWrite(BaseModel):
 
 class Recorded(BaseModel):
     recorded: bool
+
+
+class Used(BaseModel):
+    use: GrantUse
+
+
+class NotUsed(BaseModel):
+    outside: str
+
+
+class ResetWrite(BaseModel):
+    replaced: str
+    point: int
+    request_id: str
 
 
 class Tiers(BaseModel):
@@ -94,6 +116,53 @@ async def reset_floor(run_id: str, flows: FlowsDep) -> Floor:
     return Floor(floor=await flows.store.reset_floor(run_id))
 
 
+@router.post("/runs/{run_id}/reset", name="crud_projects_reset_run")
+async def reset_run(run_id: str, body: ResetWrite, flows: FlowsDep) -> Run | None:
+    """`FlowStore.reset_run`, with Temporal's Reset made here under the row's lock. Sent
+    again with its `request_id`, it answers the row as that Reset left it."""
+    client = flows.client
+    if client is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "Flows are not connected.")
+    run = await flows.store.get_run(run_id)
+    if run is None:
+        return None
+    workflow_id = run.workflow_id
+
+    async def reset() -> str:
+        return await reset_execution(
+            client,
+            workflow_id,
+            replaced=body.replaced,
+            point=body.point,
+            request_id=body.request_id,
+            # The operation's id: its row names who asked.
+            reason=f"flow reset by operation {body.request_id}",
+        )
+
+    try:
+        return await flows.store.reset_run(
+            run_id,
+            replaced=body.replaced,
+            point=body.point,
+            request_id=body.request_id,
+            reset=reset,
+        )
+    except ResetSupersededError as err:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "Another Reset moved the run first.",
+            reason=RESET_SUPERSEDED,
+            run=err.run.model_dump(mode="json"),
+        ) from None
+    except ResetBeforeFloorError as err:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(err),
+            reason=RESET_BEFORE_FLOOR,
+            floor=err.floor,
+        ) from None
+
+
 @router.post("/runs/{run_id}/hops", name="crud_projects_move_hop")
 async def move_hop(run_id: str, body: HopMove, flows: FlowsDep) -> FlowWaiting | None:
     moved = await flows.store.move_hop(run_id, body.call_id, body.record, proposal=body.proposal)
@@ -133,6 +202,11 @@ async def record_decision(body: DecisionWrite, flows: FlowsDep) -> Recorded:
         ) from None
 
 
+@router.post("/decisions/grant", name="crud_projects_record_grant_decision")
+async def record_grant_decision(body: Decision, flows: FlowsDep) -> Recorded:
+    return Recorded(recorded=await flows.store.record_grant_decision(body))
+
+
 def _same(held: Decision, decision: Decision) -> bool:
     """This very decision: as `FlowStore.record_decision` tells it from another, and by
     who made it (as `flows/operations.py` `run_escalate` checks its own denial)."""
@@ -147,6 +221,33 @@ def _same(held: Decision, decision: Decision) -> bool:
 )
 async def delete_decision(request_id: str, flows: FlowsDep) -> None:
     await flows.store.delete_decision(request_id)
+
+
+@router.delete(
+    "/decisions/{request_id}/grant",
+    name="crud_projects_withdraw_grant_decision",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def withdraw_grant_decision(request_id: str, flows: FlowsDep) -> None:
+    await flows.store.withdraw_grant_decision(request_id)
+
+
+@router.get("/grants/{run_id}", name="crud_projects_get_grant")
+async def get_grant(run_id: str, flows: FlowsDep) -> Grant | None:
+    return await flows.store.get_grant(run_id)
+
+
+@router.get("/grant-uses/{request_id}", name="crud_projects_grant_use")
+async def grant_use(request_id: str, flows: FlowsDep) -> GrantUse | None:
+    return await flows.store.grant_use(request_id)
+
+
+@router.post("/grants/{run_id}/consume", name="crud_projects_consume_grant")
+async def consume_grant(run_id: str, body: ConsumeRequest, flows: FlowsDep) -> Used | NotUsed:
+    """The call's rule chosen and spent under the grant's row lock, here; natural by
+    `request_id` (`FlowStore.consume`)."""
+    taken = await flows.store.consume(run_id, body)
+    return NotUsed(outside=taken) if isinstance(taken, str) else Used(use=taken)
 
 
 @router.get("/proposals/{request_id}", name="crud_projects_get_proposal")

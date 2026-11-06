@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -26,7 +26,16 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
-from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse, RuleUse
+from scadbuddy.flows.grants import (
+    ConsumeRequest,
+    Consumption,
+    Grant,
+    GrantSpec,
+    GrantStatus,
+    GrantUse,
+    RuleUse,
+    picker,
+)
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
@@ -417,6 +426,15 @@ class FlowStore:
         one `pick` chooses against the counters as they are, recorded with them; else
         `pick`'s reason."""
         return await asyncio.to_thread(self._consume_grant, run_id, request_id, pick)
+
+    async def consume(self, run_id: str, request: ConsumeRequest) -> GrantUse | str:
+        """`consume_grant` with the pick `request` describes, checked against now. The use
+        recorded for its request id answers first, whatever the grant's state since: sent
+        again after a lost answer (D5, #5298), it answers the first call's use."""
+        if (prior := await self.grant_use(request.request_id)) is not None:
+            return prior
+        pick = picker(run_id, request, datetime.now(UTC))
+        return await self.consume_grant(run_id, request.request_id, pick)
 
     async def orphan_grants(self, older_than: timedelta) -> list[str]:
         """The run ids of grants older than `older_than` whose run has no row: a start

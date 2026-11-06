@@ -18,6 +18,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.models import TERMINAL, Run, StoredDefinition
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_tools import FLOW_TOOL_TIER
@@ -89,10 +90,19 @@ async def define(store: FlowStore, name: str) -> StoredDefinition:
 
 
 class Flows:
-    def __init__(self, client: Client, queue: str, store: FlowStore) -> None:
+    def __init__(
+        self,
+        client: Client,
+        queue: str,
+        store: FlowStore,
+        remote: RemoteFlowStore | None = None,
+    ) -> None:
         self.client = client
         self.queue = queue
         self.store = store
+        #: The projects worker's store: the CRUD routes over `store`'s schema (#5298),
+        #: when the fixture serves them; `store` otherwise.
+        self.remote: FlowStore | RemoteFlowStore = store if remote is None else remote
         #: Workers a test started beside the fixture's, shut down after it.
         self.cleanup: list[tuple[Any, Any]] = []
 

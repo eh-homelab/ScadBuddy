@@ -96,7 +96,9 @@ PRINT_SEQUENCES = (
     "native_slices_id_seq",
 )
 
-#: What the projects worker (`--queue projects`, flow runs) touches of the backend's.
+#: What the projects worker (`--queue projects`, flow runs) touches of the backend's. Its
+#: flow runs, decisions and grants go through the API's CRUD routes (#5298,
+#: `crud/projects.py`); the grants it held for them are never revoked from a live role.
 PROJECTS_GRANTS: Grants = {
     # The settings snapshot (operation retention, `workflows/operation_activities.py`).
     "settings": _READ,
@@ -106,18 +108,6 @@ PROJECTS_GRANTS: Grants = {
     "scadbuddy_migrations": _READ,
     "events": ("SELECT", "INSERT"),
     "operations": _ALL,
-    # A run's row and its steps (`flows/store.py`; FOR UPDATE needs UPDATE).
-    "workflow_runs": ("SELECT", "INSERT", "UPDATE"),
-    "workflow_definitions": _READ,
-    "workflow_run_decisions": ("SELECT", "INSERT", "DELETE"),
-    "workflow_run_proposals": ("SELECT", "INSERT"),
-    # A run grant is read FOR SHARE, which needs UPDATE.
-    "flow_grants": ("SELECT", "UPDATE"),
-    # `FLOW_GRANT_CHECK` → `FlowStore.consume_grant` (`flows/store.py`): the use recorded
-    # (INSERT ... RETURNING) and, for a trigger-seeded run, its standing grant locked
-    # FOR UPDATE and its counters spent.
-    "flow_grant_uses": ("SELECT", "INSERT"),
-    "flow_trigger_grants": ("SELECT", "UPDATE"),
 }
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads

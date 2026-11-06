@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from scadbuddy.crud.guard import CrudCaller, crud_router
 
 #: Each caller's complete areas.
-CRUD_AREAS: dict[CrudCaller, list[str]] = {"projects": [], "render": [], "print": []}
+CRUD_AREAS: dict[CrudCaller, list[str]] = {"projects": ["flows"], "render": [], "print": []}
 
 
 class Areas(BaseModel):

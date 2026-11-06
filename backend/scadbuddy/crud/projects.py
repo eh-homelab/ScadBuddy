@@ -8,6 +8,7 @@ answer, and the route answers as it did the first time.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from typing import Any
 from urllib.parse import quote
 
@@ -15,13 +16,16 @@ import httpx
 
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.guard import PREFIX
+from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import Decision, Proposal, Run
-from scadbuddy.flows.store import HopMovedError
+from scadbuddy.flows.store import HopMovedError, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, Hop, HopRecord, ProjectionWrite
 
 BASE = f"/api/v1{PREFIX}/projects"
-#: `api/crud_projects.py` `HOP_MOVED`.
+#: `api/crud_projects.py` `HOP_MOVED`, `RESET_SUPERSEDED`, `RESET_BEFORE_FLOOR`.
 HOP_MOVED = "hop_moved"
+RESET_SUPERSEDED = "reset-superseded"
+RESET_BEFORE_FLOOR = "reset-before-floor"
 
 
 def _part(value: str) -> str:
@@ -74,6 +78,30 @@ class RemoteFlowStore:
         body = response.json()
         return None if body is None else Run.model_validate(body)
 
+    async def reset_run(
+        self,
+        run_id: str,
+        *,
+        replaced: str,
+        point: int,
+        request_id: str,
+        reset: Callable[[], Coroutine[Any, Any, str]],
+    ) -> Run | None:
+        """`FlowStore.reset_run`, but the API makes Temporal's Reset under the row's lock
+        (D6), with what `reset` would send: `reset` itself is not called."""
+        body = {"replaced": replaced, "point": point, "request_id": request_id}
+        try:
+            response = await self._send("POST", f"/runs/{_part(run_id)}/reset", json=body)
+        except CrudRefusedError as error:
+            reason = error.problem.get("reason")
+            if error.status == 409 and reason == RESET_SUPERSEDED:
+                raise ResetSupersededError(Run.model_validate(error.problem["run"])) from error
+            if error.status == 422 and reason == RESET_BEFORE_FLOOR:
+                raise ResetBeforeFloorError(int(error.problem["floor"])) from error
+            raise
+        moved = response.json()
+        return None if moved is None else Run.model_validate(moved)
+
     # -- decisions ---------------------------------------------------------------
 
     async def record_decision(self, decision: Decision, *, at_hop: Hop | None = None) -> bool:
@@ -95,6 +123,39 @@ class RemoteFlowStore:
 
     async def delete_decision(self, request_id: str) -> None:
         await self._send("DELETE", f"/decisions/{_part(request_id)}")
+
+    async def record_grant_decision(self, decision: Decision) -> bool:
+        response = await self._send(
+            "POST", "/decisions/grant", json=decision.model_dump(mode="json")
+        )
+        return bool(response.json()["recorded"])
+
+    async def withdraw_grant_decision(self, request_id: str) -> None:
+        await self._send("DELETE", f"/decisions/{_part(request_id)}/grant")
+
+    # -- grants (#2481) -----------------------------------------------------------
+
+    async def get_grant(self, run_id: str) -> Grant | None:
+        response = await self._send("GET", f"/grants/{_part(run_id)}")
+        body = response.json()
+        return None if body is None else Grant.model_validate(body)
+
+    async def grant_use(self, request_id: str) -> GrantUse | None:
+        response = await self._send("GET", f"/grant-uses/{_part(request_id)}")
+        body = response.json()
+        return None if body is None else GrantUse.model_validate(body)
+
+    async def consume(self, run_id: str, request: ConsumeRequest) -> GrantUse | str:
+        """The API chooses the rule and spends it under the grant's row lock."""
+        response = await self._send(
+            "POST",
+            f"/grants/{_part(run_id)}/consume",
+            json=request.model_dump(mode="json", by_alias=True),
+        )
+        body = response.json()
+        if "use" in body:
+            return GrantUse.model_validate(body["use"])
+        return str(body["outside"])
 
     # -- escalation (#2482) -------------------------------------------------------
 

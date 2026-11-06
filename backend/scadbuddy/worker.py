@@ -62,9 +62,10 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.operations import flow_kinds
-from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
@@ -1427,7 +1428,9 @@ async def run_projects_worker(
         client = await connect_flows(
             settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
         )
-        store = FlowStore(settings_store.pool, events=events)
+        # #5298: flow runs, decisions and grants through the API's CRUD routes.
+        crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
+        store = RemoteFlowStore(crud)
         queue = settings.temporal_task_queue_projects
         kinds = {
             kind.name: kind
@@ -1479,6 +1482,7 @@ async def run_projects_worker(
                 server.should_exit = True
                 await serving
             await routes.aclose()
+            await crud.aclose()
     finally:
         await events.aclose()
         await asyncio.to_thread(settings_store.close)
