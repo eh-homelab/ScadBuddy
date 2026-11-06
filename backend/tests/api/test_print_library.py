@@ -495,6 +495,34 @@ def test_one_file_is_read_by_id_whatever_its_type_with_its_folder_path(
 
 
 @respx.mock
+def test_a_file_its_folder_no_longer_lists_is_a_404(client: TestClient) -> None:
+    """#5333 review: the file was moved or deleted between the two reads. Bambuddy names
+    its folder, but that folder's listing no longer holds it."""
+    configure(client)
+    listing_routes(_folder_rows(1, folder_id=4))
+    respx.get(f"{API}/library/files/3001").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 3001,
+                "filename": "box.3mf",
+                "file_type": "3mf",
+                "folder_id": 4,
+                "file_size": 10,
+                "print_count": 0,
+                "created_at": "2026-09-28T00:00:00",
+                "file_hash": None,
+            },
+        )
+    )
+
+    r = client.get("/api/v1/print/library/3001")
+
+    assert r.status_code == 404
+    assert r.json()["detail"] == "library file 3001 is not listed"
+
+
+@respx.mock
 def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
     client: TestClient,
 ) -> None:

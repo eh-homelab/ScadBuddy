@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -1743,6 +1744,44 @@ class Catalogue:
                 else:
                     (self.media_dir(slug) / name).unlink(missing_ok=True)
 
+    def source_copy_id(self, slug: str, source_revision_id: str, sha256: str) -> str | None:
+        """The id of the template's copy of that revision's file, if it holds one
+        (#5318)."""
+        for view in self.list_media(slug):
+            if self._source_copy([view], self._dir_of(slug, view), source_revision_id, sha256):
+                return view.id
+        return None
+
+    @staticmethod
+    def _source_copy(
+        items: Sequence[MediaItem],
+        directory: Path,
+        source_revision_id: str | None,
+        sha256: str | None,
+        held_id: str | None = None,
+    ) -> bool:
+        """Whether ``items`` holds a copy made from ``source_revision_id`` (#5318): an
+        item of that revision whose file in ``directory`` has the bytes ``sha256``. Only
+        the files of that revision's items are read. ``held_id`` names a copy that a
+        check before the lock found. An item's file never changes, so while that item
+        is there, no file is read again."""
+        if source_revision_id is None or sha256 is None:
+            return False
+        if any(
+            held.id == held_id and held.source_revision_id == source_revision_id for held in items
+        ):
+            return True
+        for held in items:
+            if held.source_revision_id != source_revision_id:
+                continue
+            try:
+                with (directory / held.file).open("rb") as handle:
+                    if hashlib.file_digest(handle, "sha256").hexdigest() == sha256:
+                        return True
+            except FileNotFoundError:
+                continue
+        return False
+
     def add_media(
         self,
         slug: str,
@@ -1752,9 +1791,17 @@ class Catalogue:
         *,
         source_commit: str | None = None,
         source_revision_id: str | None = None,
+        source_sha256: str | None = None,
+        source_copy_id: str | None = None,
     ) -> ModelRecord:
         """Move a staged upload (and its poster) into ``media/`` as the last item,
         as one revision. :class:`TooManyMediaError` at :data:`MAX_MEDIA_ITEMS`.
+
+        With ``source_revision_id`` and ``source_sha256`` (#5318), an item already made
+        from that revision with those bytes is kept and nothing is added: the check is
+        under the history's write lock with the write, so two requests at once still
+        add one copy. ``source_copy_id`` is the copy that :meth:`source_copy_id` found
+        before the lock. While that copy is there, no file is read again.
 
         On a built-in (#722) the item goes after what it ships and what was added
         before, into ``builtin-media/<slug>/`` and with no revision."""
@@ -1771,11 +1818,22 @@ class Catalogue:
         )
         if is_builtin(slug):
             return self._overlay_change(
-                slug, partial(self._overlay_add, slug, item, upload, poster)
+                slug,
+                partial(
+                    self._overlay_add, slug, item, upload, poster, source_sha256, source_copy_id
+                ),
             )
 
         def change() -> None:
             edit = self._edit_media(slug)
+            if self._source_copy(
+                edit.items,
+                self.media_dir(slug),
+                source_revision_id,
+                source_sha256,
+                source_copy_id,
+            ):
+                return
             if len(edit.items) >= MAX_MEDIA_ITEMS:
                 raise TooManyMediaError(slug)
             directory = self._media_directory(slug)
@@ -1921,12 +1979,22 @@ class Catalogue:
         return list(self.media_store.items(slug))
 
     def _overlay_add(
-        self, slug: str, item: MediaItem, upload: StagedMedia, poster: StagedMedia | None
+        self,
+        slug: str,
+        item: MediaItem,
+        upload: StagedMedia,
+        poster: StagedMedia | None,
+        source_sha256: str | None = None,
+        source_copy_id: str | None = None,
     ) -> None:
         added = self._added_for_write(slug)
+        directory = self.paths.builtin_media_dir(slug)
+        if self._source_copy(
+            added, directory, item.source_revision_id, source_sha256, source_copy_id
+        ):
+            return
         if len(self._shipped(slug)) + len(added) >= MAX_MEDIA_ITEMS:
             raise TooManyMediaError(slug)
-        directory = self.paths.builtin_media_dir(slug)
         directory.mkdir(parents=True, exist_ok=True)
         moved = [item.file]
         os.replace(upload.path, directory / item.file)

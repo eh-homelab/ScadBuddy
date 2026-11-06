@@ -138,6 +138,8 @@ describe('revisions mock (#5280)', () => {
     await api.answerOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id, { answer: 'accepted', note: '' })
     const model = await api.revisionPhotoToModel(ORDER_DRAFT, shot.id)
     expect(model.media?.at(-1)).toMatchObject({ source_revision_id: revision.id })
+    const again = await api.revisionPhotoToModel(ORDER_DRAFT, shot.id)
+    expect(again.media).toEqual(model.media)
   })
 
   it('refuses a production print while a test print is open', async () => {
