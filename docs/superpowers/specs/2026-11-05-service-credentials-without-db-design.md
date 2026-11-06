@@ -562,7 +562,9 @@ Each one takes the more secure option. The cost is stated with it.
    TokenReview then refuses a valid-looking token of a deleted pod. The API's ServiceAccount gets `system:auth-delegator`, and
    `system:service-account-issuer-discovery` for the offline check's JWKS.
    A deleted pod's token is refused at once, and the pod name and uid are bound to each
-   credential. Cost: one cluster-wide grant, held by the CRUD service only. That the ClusterRole grants
+   credential. Cost: two cluster-wide bindings on the API's ServiceAccount: `system:auth-delegator`,
+   held by the CRUD service only, and `system:service-account-issuer-discovery`, which every
+   ServiceAccount already holds by default. That the ClusterRole grants
    `create` on TokenReview and SubjectAccessReview and nothing more is **not verified** here
    (§2.5, §12); check `kubectl get clusterrole system:auth-delegator -o yaml` before the
    binding.
