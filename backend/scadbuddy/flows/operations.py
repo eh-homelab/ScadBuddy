@@ -185,6 +185,13 @@ def _printer_unbound() -> ApiError:
     )
 
 
+def _printer_unreadable() -> ApiError:
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "Could not read the printer this call prints on, so nothing was approved. Try again.",
+    )
+
+
 def _unavailable_key() -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -387,16 +394,22 @@ def flow_kinds(
             if named_printer(name, args) is not None:
                 # Bound to the registry printer's link as it is now (#4445), which the
                 # agent's gate checks again when the call runs.
-                client = None if api is None else api()
-                if client is None:
+                registry = None if api is None else api()
+                if registry is None:
                     raise ApiError(
                         status.HTTP_503_SERVICE_UNAVAILABLE,
                         "Approving a print on a registry printer needs SCADBUDDY_API_INTERNAL_URL.",
                     )
                 try:
-                    args = (await bind_call(name, args, api_lookup(client))).args
+                    args = (await bind_call(name, args, api_lookup(registry))).args
+                except httpx.HTTPError:
+                    # Nothing is recorded: the person approves again once the row reads.
+                    activity.logger.warning(
+                        "could not read the printer a flow's print names", exc_info=True
+                    )
+                    raise _printer_unreadable() from None
                 finally:
-                    await client.aclose()
+                    await registry.aclose()
                 bound = input_hash(hash_key, name, args)
                 if not isinstance(shown, str):
                     # The page showed no binding (its read of the run or of the printer

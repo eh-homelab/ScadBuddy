@@ -1012,6 +1012,28 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
         expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER.toUpperCase(), printer_id: 2 })])
       })
 
+      // #5450 review: a run grant's raw-argument approval that lapsed says so, as before #4445.
+      it("refuses a lapsed run grant's call GrantRevoked, and sends nothing", async () => {
+        const lapsedAsked: string[] = []
+        const revoked: FlowRuns = {
+          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+          approved: async () => false,
+          approvedUnresolved: async () => false,
+          lapsed: async (requestId, inputHash) => {
+            lapsedAsked.push(inputHash ?? '')
+            return requestId.endsWith(':call_ok') && inputHash === hash('print_output', named)
+          },
+        }
+        const state = registry()
+        const h = harness({ flows: revoked, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named))
+        expect(refused.nonRetryable).toBe(true)
+        expect(refused.type).toBe('GrantRevoked')
+        expect(refused.message).toContain("the run's grant was revoked or expired")
+        expect(state.posted).toEqual([])
+        expect(lapsedAsked).toContain(hash('print_output', named))
+      })
+
       it("refuses a person's decision on the raw arguments: it never falls back past the resolution", async () => {
         const person: FlowRuns = {
           startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),

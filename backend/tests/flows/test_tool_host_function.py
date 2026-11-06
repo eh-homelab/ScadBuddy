@@ -200,6 +200,17 @@ def _api(linked: int) -> Callable[[], httpx.AsyncClient]:
     return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
 
 
+def _api_away(connect: bool) -> Callable[[], httpx.AsyncClient]:
+    """The API's printer route failing: it cannot be reached, or it answers 503."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if connect:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(503, json={"detail": "away"})
+
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
+
+
 async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_links(
     outward: Outward, tools: tuple[Tools, str]
 ) -> None:
@@ -239,6 +250,18 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
         await env.run(blind.run, request, await env.run(blind.check, request))
     assert refused.value.status == 503
     assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    # The printer's row cannot be read: a 503 that asks the person to try again.
+    for unreadable in (_api_away(connect=True), _api_away(connect=False)):
+        kind = next(
+            k
+            for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=unreadable)
+            if k.name == FLOW_DECIDE
+        )
+        with pytest.raises(ApiError) as unread:
+            await env.run(kind.run, request, await env.run(kind.check, request))
+        assert unread.value.status == 503
+        assert "Try again" in unread.value.detail
+        assert await outward.store.get_decision(request_id(parked, call_id)) is None
     # Re-linked since the page showed it, or an approval that names no binding: a 409,
     # and nothing is recorded, so the person sees the printer that would print and decides again.
     moved = next(

@@ -589,6 +589,10 @@ async function runGated(
     if (await deps.flows?.approvedUnresolved?.(requestId, raw.inputHash)) {
       runInput = input
       binding = raw
+    } else if (await caller.approvals?.lapsed?.(requestId, raw)) {
+      // A run grant's raw-argument approval, revoked or expired since: refused GrantRevoked
+      // below, as any lapsed grant's call is, never "no approval is recorded".
+      binding = raw
     }
   }
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
