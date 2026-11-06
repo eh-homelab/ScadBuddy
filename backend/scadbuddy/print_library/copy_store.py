@@ -305,6 +305,8 @@ class TargetLocks:
         #: Set while no `acquire` waits on the connection.
         self._idle = threading.Event()
         self._idle.set()
+        #: Guards `_conn` and `_held` between `acquire` and `_stop_wait`.
+        self._lock = threading.Lock()
 
     def acquire(self, direction: str, sha256: str) -> None:
         if self._conn is None:
@@ -322,13 +324,17 @@ class TargetLocks:
                 # the settings pool finds one, and the server then frees the lock.
                 **TCP_KEEPALIVE,  # type: ignore[arg-type]
             )
+        conn = self._conn
         key = _key(direction, sha256)
         self._idle.clear()
         try:
-            self._conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+            conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+            with self._lock:
+                # A wait that won after `_stop_wait` closed its connection holds nothing.
+                if self._conn is conn:
+                    self._held.append(key)
         finally:
             self._idle.set()
-        self._held.append(key)
 
     def _stop_wait(self) -> None:
         """Cancel an `acquire` that still waits, and let it end first. A wait that does
@@ -341,9 +347,11 @@ class TargetLocks:
         with contextlib.suppress(psycopg.Error):
             self._conn.cancel_safe(timeout=TARGET_LOCK_CONNECT_TIMEOUT)
         if not self._idle.wait(TARGET_LOCK_CONNECT_TIMEOUT):
-            self._conn.close()
-            self._conn = None
-            self._held.clear()
+            with self._lock:
+                # On purpose: the `acquire` thread is still in `execute`; its next poll fails.
+                self._conn.close()
+                self._conn = None
+                self._held.clear()
 
     def release_all(self) -> None:
         """Every lock taken since the last release. The caller releases them once the
