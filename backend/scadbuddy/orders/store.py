@@ -854,7 +854,8 @@ class OrderStore:
             elif product.kind == "sku":
                 add(item.format("i.slug IS NULL AND i.sku = %s"), product.key)
             else:
-                add(item.format("i.slug IS NULL AND i.sku IS NULL"))
+                # An empty SKU is no SKU, as ``report.py`` ``product_of`` reads it.
+                add(item.format("i.slug IS NULL AND (i.sku IS NULL OR i.sku = '')"))
         if cursor is not None:
             add("(o.created_at, o.id) < (%s, %s)", *decode_cursor(cursor))
         query = sql.SQL(

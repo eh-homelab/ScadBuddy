@@ -62,8 +62,9 @@ export function ProfitPage() {
       header: 'Orders',
       className: 'text-right tabular-nums',
       headerClassName: 'text-right',
+      // The `order` row's orders are those with figures of their own: no list filter matches them.
       cell: (row) =>
-        data ? (
+        data && row.group !== 'order' ? (
           <Link to={rowLink(data, row)} className="underline-offset-4 hover:underline" aria-label={`The ${row.orders} orders of this row`}>
             {row.orders}
           </Link>

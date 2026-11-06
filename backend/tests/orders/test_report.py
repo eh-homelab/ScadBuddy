@@ -270,8 +270,9 @@ async def test_each_row_sums_its_items_per_order_reads(shop: Shop, pool: PgPool)
         assert found.revenue_minor == sum(li.revenue_minor or 0 for li in by_title[key])
         assert found.cost_minor == sum(li.cost_minor for li in by_title[key])
     own = row(answer, "order")
-    # 500 shipping charged (tax left out); 40 fee and 450 shipping cost.
-    assert (own.revenue_minor, own.cost_minor, own.orders) == (500, 490, 3)
+    # 500 shipping charged (tax left out); 40 fee and 450 shipping cost; only the mixed
+    # order has figures of its own.
+    assert (own.revenue_minor, own.cost_minor, own.orders) == (500, 490, 1)
     total = row(answer, "total")
     assert total.revenue_minor == sum(c.revenue_minor or 0 for c in reads.values())
     assert total.cost_minor == sum(c.cost_minor for c in reads.values())
@@ -303,6 +304,7 @@ def test_the_list_filters_to_a_rows_orders(shop: Shop, pool: PgPool) -> None:
     model_order(shop, pool, 120)  # outside the period
     sku = custom_order(shop, pool, 4, sku="DES-1")
     plain = custom_order(shop, pool, 5, sku=None)
+    empty = custom_order(shop, pool, 6, sku="")
     answer = report(shop)
 
     def listed(product: str) -> list[str]:
@@ -316,7 +318,10 @@ def test_the_list_filters_to_a_rows_orders(shop: Shop, pool: PgPool) -> None:
 
     assert listed("model:demo") == [demo.id]
     assert listed("sku:DES-1") == [sku.id]
-    assert listed("custom") == [plain.id]
+    # An empty SKU is no SKU: in the custom row, and in its list.
+    assert row(answer, "custom").orders == 2
+    # Newest made first.
+    assert listed("custom") == [empty.id, plain.id]
     for found in answer.rows:
         if found.product is not None and found.currency == "USD":
             assert len(listed(found.product)) == found.orders

@@ -16,7 +16,7 @@ const PARAMS = new Set(['from', 'to', 'group'])
 
 type Part = 'prints' | 'labour'
 
-/** `report.py` `product_of`: a slug first, then a SKU, else `custom`. */
+/** `report.py` `product_of`: a slug first, then a SKU, else `custom` (an empty SKU is none). */
 export function productOf(item: Pick<OrderItem, 'reference' | 'sku'>): string {
   if (item.reference) return `model:${item.reference.slug}`
   if (item.sku) return `sku:${item.sku}`
@@ -109,7 +109,10 @@ class Currency {
     const itemsRevenue = costs.items.reduce((s, l) => s + (l.revenue_minor ?? 0), 0)
     const itemsCost = costs.items.reduce((s, l) => s + (l.cost_minor ?? 0), 0)
     const own = (costs.unknown ?? []).filter((p) => !costs.items.some((l) => (l.unknown ?? []).includes(p)))
-    this.order.add(id, { cost: (costs.cost_minor ?? 0) - itemsCost, revenue: costs.revenue_minor == null ? null : costs.revenue_minor - itemsRevenue, unknown: own })
+    const ownCost = (costs.cost_minor ?? 0) - itemsCost
+    const ownRevenue = costs.revenue_minor == null ? null : costs.revenue_minor - itemsRevenue
+    // Only an order with figures of its own is behind the `order` row.
+    if (ownCost !== 0 || ownRevenue || own.length) this.order.add(id, { cost: ownCost, revenue: ownRevenue, unknown: own })
     this.total.add(id, {
       cost: costs.cost_minor ?? 0,
       revenue: costs.revenue_minor ?? null,
@@ -124,7 +127,7 @@ class Currency {
   rows(currency: string, thin: number): ProfitRow[] {
     const products = [...this.products].map(([product, sums]) => sums.row(product.split(':')[0] as ProfitRow['group'], currency, thin, product))
     products.sort((a, b) => b.revenue_minor - a.revenue_minor || a.group.localeCompare(b.group) || (a.key ?? '').localeCompare(b.key ?? ''))
-    const shown = this.order.cost !== 0 || this.order.revenue !== 0 || this.order.unknown.length > 0
+    const shown = this.order.orders.size > 0
     return [...products, ...(shown ? [this.order.row('order', currency, thin, null)] : []), this.total.row('total', currency, thin, null)]
   }
 }

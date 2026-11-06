@@ -339,7 +339,8 @@ export const orderTools: Tool[] = [
       'with no SKU (`custom`), with its `orders`, `units`, what was charged (`revenue_minor`), the real cost ' +
       '(`cost_minor`), `margin_minor`, `margin_percent`, `margin_state` and the waste (`waste_minor`, ' +
       '`waste_percent`: the cost of test and failed prints). Each item counts as order_costs gives it. The `order` ' +
-      "row is the orders' own entries, shipments' cost and charges, and the `total` row each currency's sum. Pass a " +
+      "row is the orders' own entries, shipments' cost and charges (its `orders` counts only the orders that have " +
+      "any; no order_list filter matches them), and the `total` row each currency's sum. Pass a product " +
       "row's `product`, `period_from`, `period_to` and `currency` to order_list for its orders. With `complete` " +
       'false the report stopped at `max_orders` and covers the orders accepted from `read_from` only.',
     input: z.object({ from: datetime.optional(), to: datetime.optional() }),

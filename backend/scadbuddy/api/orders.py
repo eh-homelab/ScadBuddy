@@ -22,7 +22,7 @@ import asyncio
 import logging
 import zipfile
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
@@ -117,6 +117,7 @@ from scadbuddy.orders.report import (
     DEFAULT_DAYS,
     ProfitReport,
     ReportGroup,
+    default_period,
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
@@ -853,9 +854,10 @@ async def unit_cost(
         "orders, units, what was charged, the real cost, the margin and the waste (the "
         "cost of test and failed attempts). Each item's figures are those "
         "`GET /orders/{id}/costs` gives it. The `order` row is the orders' own figures "
-        "(their entries, shipments' cost and charges), and the `total` row each "
-        "currency's orders' own figures summed. `product` is the row's `GET /orders` "
-        "filter. The report reads at most `max_orders` orders, newest accepted first: "
+        "(their entries, shipments' cost and charges), over the orders that have any, and "
+        "the `total` row each currency's orders' own figures summed. A product row's "
+        "`product` is its `GET /orders` filter (`custom` also matches an empty SKU). "
+        "The report reads at most `max_orders` orders, newest accepted first: "
         "with `complete` false it covers the orders accepted from `read_from` only."
     ),
 )
@@ -869,8 +871,9 @@ async def profit(
 ) -> ProfitReport:
     _no_nul(request)
     _unknown(request, REPORT_PARAMS)
-    until = to if to is not None else datetime.now(UTC)
-    since = from_ if from_ is not None else until - timedelta(days=DEFAULT_DAYS)
+    since, until = default_period(to if to is not None else datetime.now(UTC))
+    if from_ is not None:
+        since = from_
     if since.tzinfo is None or until.tzinfo is None:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from and to need a time zone")
     if since >= until:

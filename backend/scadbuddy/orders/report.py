@@ -10,8 +10,10 @@ model ``slug`` is in that model's row, else an item with a ``sku`` in that SKU's
 in the ``custom`` row ("Custom, no SKU"). A row's figures are its items' figures, summed:
 charged (``revenue_minor``), real cost, and waste, the cost of its test and failed
 attempts. An order's own entries, its shipments' cost and its charges are on no item, so
-they are the ``order`` row: the order's figures less its items'. A currency's ``total`` is
-the sum of its orders' own figures, so with every order charged its rows add up to it.
+they are the ``order`` row: the order's figures less its items', over the orders that have
+any. No list filter matches those orders, so the page gives that row no link. A
+currency's ``total`` is the sum of its orders' own figures, so with every order charged
+its rows add up to it.
 
 Margins are not stored (§9). The report reads the period's orders in batches of
 ``REPORT_BATCH``, newest accepted first, and computes each batch's costs; it stops after
@@ -225,12 +227,11 @@ class _Currency:
         own_unknown: list[CostPart] = [
             part for part in costs.unknown if not any(part in line.unknown for line in costs.items)
         ]
-        self.order.add(
-            order_id,
-            cost=costs.cost_minor - sum(line.cost_minor for line in costs.items),
-            revenue=None if costs.revenue_minor is None else costs.revenue_minor - items_revenue,
-            unknown=own_unknown,
-        )
+        own_cost = costs.cost_minor - sum(line.cost_minor for line in costs.items)
+        own_revenue = None if costs.revenue_minor is None else costs.revenue_minor - items_revenue
+        # Only an order with figures of its own is behind the ``order`` row.
+        if own_cost != 0 or own_revenue or own_unknown:
+            self.order.add(order_id, cost=own_cost, revenue=own_revenue, unknown=own_unknown)
         self.total.add(
             order_id,
             cost=costs.cost_minor,
@@ -253,8 +254,8 @@ class _Currency:
         ]
         products.sort(key=lambda row: (-row.revenue_minor, row.group, row.key or ""))
         own = self.order
-        # The orders' own row only when they have figures of their own.
-        shown = own.cost != 0 or own.revenue != 0 or bool(own.unknown)
+        # The orders' own row only when some order has figures of its own.
+        shown = bool(own.orders)
         return [
             *products,
             *([own.row("order", currency, thin, None)] if shown else []),

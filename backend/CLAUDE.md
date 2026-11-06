@@ -609,12 +609,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Job cost phase 4 (#5329, §6.4): `GET /orders/reports/profit?from=&to=&group=model`
   (`orders/report.py` `profit_report`): the orders accepted in `[from, to)` (default the
   last 90 days), cancelled ones too, per currency (never summed across currencies) and per
-  product (`product_of`: a model `slug`, else a `sku`, else `custom`). Each row sums its
+  product (`product_of`: a model `slug`, else a `sku`, else `custom`, an empty SKU too;
+  the list's `custom` filter matches `sku` null or `''`). Each row sums its
   items' figures from `_order_costs`, never a second formula. Waste is the cost of test and
   failed attempts. The `order` row is each order's read less its items' (entries, shipping
-  cost, charges); `total` is the orders' reads summed. It reads batches of `REPORT_BATCH`
-  (`OrderStore.accepted_orders`) and stops at `MAX_REPORT_ORDERS` (`complete`,
-  `read_from`). `GET /orders` takes `product`, `accepted_from`, `accepted_to` and
+  cost, charges), over the orders with figures of their own; it has no list link. `total`
+  is the orders' reads summed. It reads batches of `REPORT_BATCH`
+  (`OrderStore.accepted_orders`, index `orders_accepted_at`) and stops at
+  `MAX_REPORT_ORDERS` (`complete`, `read_from`). `GET /orders` takes `product`, `accepted_from`, `accepted_to` and
   `currency` (`OrderFilter`, `models.py` `Product`), which list a row's orders. Frontend
   `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
   `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
