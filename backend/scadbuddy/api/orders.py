@@ -51,12 +51,19 @@ from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import SettingsPatch
+from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.costs import CostRates, OrderCosts, order_costs
+from scadbuddy.orders.costs import (
+    CostRates,
+    MarginState,
+    OrderCosts,
+    OrderMargin,
+    order_costs,
+    order_margins,
+)
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
@@ -106,7 +113,14 @@ from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
-from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
+from scadbuddy.orders.store import (
+    UNSET,
+    FilamentExistsError,
+    OrderStore,
+    UnsetType,
+    decode_cursor,
+    encode_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +129,9 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
-LIST_PARAMS = frozenset({"status", "customer_id", "q", "from", "to", "cursor", "limit"})
+LIST_PARAMS = frozenset(
+    {"status", "customer_id", "q", "from", "to", "margin_state", "cursor", "limit"}
+)
 #: A line item's largest quantity: `order_items.quantity` is an `integer` column
 #: (migration 20261020T0446Z_orders.sql), so a larger one is a 422, never a 500 (#4763).
 MAX_QUANTITY = 2**31 - 1
@@ -328,8 +344,22 @@ class OrderDetail(BaseModel):
     projects: list[OrderProject] = Field(default_factory=list)
 
 
+class OrderRow(Order):
+    """A row of ``GET /orders``: the order and its margin, the same figures as its
+    ``GET /orders/{id}/costs`` (job cost spec §6.2, §7)."""
+
+    #: Charged less real cost; None without a charged figure.
+    margin_minor: Money | None = None
+    #: Of what was charged, to a tenth; None without a charged figure above zero.
+    margin_percent: float | None = None
+    #: ``loss``, ``unknown``, ``thin`` or ``ok``; None without a charged figure.
+    margin_state: MarginState | None = None
+    #: The margin is built on an estimated part (a default labour, a quote's grams).
+    margin_estimated: bool = False
+
+
 class OrderPage(BaseModel):
-    items: list[Order]
+    items: list[OrderRow]
     next_cursor: str | None
 
 
@@ -360,28 +390,91 @@ def _path(*values: str) -> None:
 # -- orders ------------------------------------------------------------------------------------
 
 
+def _cost_rates(settings: SettingsStore) -> CostRates:
+    runtime = settings.snapshot().runtime
+    return CostRates(
+        shop_currency=runtime.orders_currency,
+        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
+        labour_per_item=runtime.pricing_labour_per_item,
+        thin_margin_percent=runtime.orders_thin_margin_percent,
+    )
+
+
+def _row(order: Order, margin: OrderMargin) -> OrderRow:
+    return OrderRow(
+        **order.model_dump(exclude={"minor_exponent"}),
+        margin_minor=margin.margin_minor,
+        margin_percent=margin.margin_percent,
+        margin_state=margin.margin_state,
+        margin_estimated=bool(margin.estimated),
+    )
+
+
+def _order_page(
+    store: OrderStore,
+    filters: OrderFilter,
+    margin_state: list[MarginState] | None,
+    cursor: str | None,
+    limit: int,
+    rates: CostRates,
+) -> OrderPage:
+    """A page of rows. With ``margin_state``, the store's pages are read in turn and
+    each order's margin computed until ``limit`` orders match or none are left: a margin
+    is computed on read, never stored (§5), so it cannot be a SQL filter."""
+    if not margin_state:
+        orders, next_cursor = store.orders(filters, cursor, limit)
+        margins = order_margins(store, orders, rates)
+        return OrderPage(items=[_row(o, margins[o.id]) for o in orders], next_cursor=next_cursor)
+    wanted = set(margin_state)
+    found: list[OrderRow] = []
+    while True:
+        orders, more = store.orders(filters, cursor, MAX_LIMIT)
+        margins = order_margins(store, orders, rates)
+        for order in orders:
+            if margins[order.id].margin_state not in wanted:
+                continue
+            if len(found) == limit:
+                last = found[-1]
+                return OrderPage(items=found, next_cursor=encode_cursor(last.created_at, last.id))
+            found.append(_row(order, margins[order.id]))
+        if more is None:
+            return OrderPage(items=found, next_cursor=None)
+        cursor = more
+
+
 @router.get("", response_model=OrderPage, summary="List orders")
 async def list_orders(
     request: Request,
     orders: OrdersDep,
+    settings: SettingsStoreDep,
     status_: Annotated[list[OrderStatus] | None, Query(alias="status")] = None,
     customer_id: str | None = None,
     q: str | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: datetime | None = None,
+    margin_state: Annotated[list[MarginState] | None, Query()] = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
     """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. ``status``
-    may be repeated, for orders of any of them (#5276)."""
+    may be repeated, for orders of any of them (#5276). Each row carries its margin
+    (``margin_minor``, ``margin_percent``, ``margin_state``, ``margin_estimated``): the
+    figures ``GET /orders/{id}/costs`` gives the order, read from Postgres only (job cost
+    spec §6.2, §8). ``margin_state`` may be repeated, for orders in any of those states
+    (``margin_state=loss&margin_state=thin`` is the list's "Loss or thin"). An order with
+    no charged figure has no state and never matches it."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)
-    try:
-        rows, next_cursor = await asyncio.to_thread(orders.store.orders, filters, cursor, limit)
-    except ValueError:
-        raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
-    return OrderPage(items=rows, next_cursor=next_cursor)
+    if cursor is not None:
+        try:
+            decode_cursor(cursor)
+        except ValueError:
+            raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
+    rates = await asyncio.to_thread(_cost_rates, settings)
+    return await asyncio.to_thread(
+        _order_page, orders.store, filters, margin_state, cursor, limit, rates
+    )
 
 
 @router.post(
@@ -778,13 +871,7 @@ async def get_order_costs(
     order_id: str, orders: OrdersDep, settings: SettingsStoreDep
 ) -> OrderCosts:
     _path(order_id)
-    runtime = settings.snapshot().runtime
-    rates = CostRates(
-        shop_currency=runtime.orders_currency,
-        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
-        labour_per_item=runtime.pricing_labour_per_item,
-        thin_margin_percent=runtime.orders_thin_margin_percent,
-    )
+    rates = _cost_rates(settings)
     costs = await order_costs(orders.store, orders.integrations, order_id, rates)
     if costs is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")

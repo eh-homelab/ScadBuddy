@@ -13,6 +13,7 @@ import base64
 import binascii
 from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
@@ -71,6 +72,21 @@ from scadbuddy.orders.numbers import next_number
 
 Conn = Connection[DictRow]
 Pool = ConnectionPool[Conn]
+
+
+@dataclass
+class CostRows:
+    """:meth:`OrderStore.cost_rows`: the orders, and their rows keyed by order id (items,
+    entries, charges, the shipments' summed cost) or item id (quotes, attempts)."""
+
+    orders: dict[str, Order]
+    items: dict[str, list[OrderItem]] = field(default_factory=dict)
+    quotes: dict[str, list[Quote]] = field(default_factory=dict)
+    fulfilments: dict[str, list[Fulfilment]] = field(default_factory=dict)
+    time_entries: dict[str, list[TimeEntry]] = field(default_factory=dict)
+    cost_entries: dict[str, list[CostEntry]] = field(default_factory=dict)
+    shipping_minor: dict[str, int] = field(default_factory=dict)
+    charges: dict[str, list[Charge]] = field(default_factory=dict)
 
 
 class UnsetType(Enum):
@@ -1242,20 +1258,6 @@ class OrderStore:
             ).fetchall()
         return [Quote.model_validate(r) for r in rows]
 
-    def order_quotes(self, order_id: str, *, conn: Conn | None = None) -> dict[str, list[Quote]]:
-        """Every item's quotes, by item id, in one query (the costs read)."""
-        with self._read(conn) as c:
-            rows = c.execute(
-                f"SELECT {_QUOTE} FROM order_item_quotes WHERE order_item_id IN"
-                " (SELECT id FROM order_items WHERE order_id = %s) ORDER BY created_at, id",
-                (order_id,),
-            ).fetchall()
-        quotes: dict[str, list[Quote]] = {}
-        for row in rows:
-            quote = Quote.model_validate(row)
-            quotes.setdefault(quote.order_item_id, []).append(quote)
-        return quotes
-
     def accept_quote(self, conn: Conn, item_id: str, quote_id: str) -> Quote:
         """Marks ``quote_id`` accepted and the item's others not, in the caller's
         transaction: the others first, since the partial unique index is checked per
@@ -1709,21 +1711,65 @@ class OrderStore:
             ).fetchall()
         return [Fulfilment.model_validate(r) for r in rows]
 
-    def order_fulfilments(
-        self, order_id: str, *, conn: Conn | None = None
-    ) -> dict[str, list[Fulfilment]]:
-        """Every item's attempts, test prints too, by item id, in one query."""
-        with self._read(conn) as c:
-            rows = c.execute(
+    # -- the costs read's rows (job cost spec §5, §8; #5326, #5327) ----------------------
+
+    def cost_rows(self, orders: Sequence[Order]) -> CostRows:
+        """Every row the costs read needs of ``orders``, in one query per table on one
+        connection, whatever their number: the order page reads one order, the list a page."""
+        ids = [order.id for order in orders]
+        rows = CostRows(orders={order.id: order for order in orders})
+        if not ids:
+            return rows
+        with self._pool.connection() as c:
+            for row in c.execute(
+                f"SELECT {_ITEM} FROM order_items WHERE order_id = ANY(%s) ORDER BY position, id",
+                (ids,),
+            ).fetchall():
+                item = _item_of(row)
+                rows.items.setdefault(item.order_id, []).append(item)
+            for row in c.execute(
+                f"SELECT {_QUOTE} FROM order_item_quotes WHERE order_item_id IN"
+                " (SELECT id FROM order_items WHERE order_id = ANY(%s)) ORDER BY created_at, id",
+                (ids,),
+            ).fetchall():
+                quote = Quote.model_validate(row)
+                rows.quotes.setdefault(quote.order_item_id, []).append(quote)
+            # Every attempt, test prints too (#5280): no purpose filter.
+            for row in c.execute(
                 f"SELECT {_FULFILMENT} FROM order_item_fulfilments WHERE order_item_id IN"
-                " (SELECT id FROM order_items WHERE order_id = %s) ORDER BY attempt",
-                (order_id,),
-            ).fetchall()
-        attempts: dict[str, list[Fulfilment]] = {}
-        for row in rows:
-            attempt = Fulfilment.model_validate(row)
-            attempts.setdefault(attempt.order_item_id, []).append(attempt)
-        return attempts
+                " (SELECT id FROM order_items WHERE order_id = ANY(%s)) ORDER BY attempt",
+                (ids,),
+            ).fetchall():
+                attempt = Fulfilment.model_validate(row)
+                rows.fulfilments.setdefault(attempt.order_item_id, []).append(attempt)
+            for row in c.execute(
+                f"SELECT {_TIME_ENTRY} FROM order_time_entries WHERE order_id = ANY(%s)"
+                " ORDER BY created_at, id",
+                (ids,),
+            ).fetchall():
+                time = TimeEntry.model_validate(row)
+                rows.time_entries.setdefault(time.order_id, []).append(time)
+            for row in c.execute(
+                f"SELECT {_COST_ENTRY} FROM order_cost_entries WHERE order_id = ANY(%s)"
+                " ORDER BY created_at, id",
+                (ids,),
+            ).fetchall():
+                cost = CostEntry.model_validate(row)
+                rows.cost_entries.setdefault(cost.order_id, []).append(cost)
+            for row in c.execute(
+                "SELECT order_id, cost_minor FROM order_shipments WHERE order_id = ANY(%s)",
+                (ids,),
+            ).fetchall():
+                shipped = rows.shipping_minor.get(row["order_id"], 0)
+                rows.shipping_minor[row["order_id"]] = shipped + (row["cost_minor"] or 0)
+            for row in c.execute(
+                f"SELECT {_CHARGE} FROM order_charges WHERE order_id = ANY(%s)"
+                " ORDER BY position, id",
+                (ids,),
+            ).fetchall():
+                charge = Charge.model_validate(row)
+                rows.charges.setdefault(charge.order_id, []).append(charge)
+        return rows
 
     # -- shipments (§6.3) -------------------------------------------------------------
 

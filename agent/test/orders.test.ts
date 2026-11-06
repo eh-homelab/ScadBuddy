@@ -173,6 +173,10 @@ describe('order tools (#4249)', () => {
     expect(firstText(result)).toEqual({ items: [{ id: ORDER, number: 'ORD-2026-1' }], next_cursor: 'abc' })
     const query = new URL(url).searchParams
     expect(Object.fromEntries(query)).toEqual({ status: 'quoted', customer_id: CUSTOMER, cursor: 'xyz', limit: '5' })
+
+    // #5327: "Loss or thin" is `margin_state` repeated.
+    await tool('order_list').execute({ margin_state: ['loss', 'thin'] }, ctx())
+    expect(new URL(url).searchParams.getAll('margin_state')).toEqual(['loss', 'thin'])
   })
 
   it('edits, holds and records a payment through their own routes', async () => {

@@ -35,6 +35,9 @@ else ``thin`` below ``orders_thin_margin_percent``, else ``ok``.
 Today's settings are in the shop's ``orders_currency``: for an order in another currency,
 a part that needs one is ``unknown``. Bambuddy's own cost of an attempt's archives is shown
 beside the sums and never added to them (``bambuddy/costs.py``).
+
+The orders list's margins (§6.2, #5327) are ``order_margins``: the same ``_order_costs`` as
+the order's own read, over rows read once for every order of the page, and no Bambuddy call.
 """
 
 from __future__ import annotations
@@ -258,13 +261,12 @@ def _unit(quote: Quote | None) -> _Unit | None:
 
 
 class _Rows:
-    """The order's quotes and attempts, each read once for every item, and the price
-    book, read only when an item needs it."""
+    """The orders' rows (``OrderStore.cost_rows``), each table read once for every order,
+    and the price book, read only when an item needs it and then once for them all."""
 
-    def __init__(self, store: OrderStore, order_id: str) -> None:
+    def __init__(self, store: OrderStore, orders: Sequence[Order]) -> None:
         self.store = store
-        self.quotes = store.order_quotes(order_id)
-        self.fulfilments = store.order_fulfilments(order_id)
+        self.of = store.cost_rows(orders)
         self._filaments: dict[str, Filament] | None = None
 
     def filament(self, filament_id: str) -> Filament | None:
@@ -284,9 +286,9 @@ class _Item:
         self.exponent = minor_exponent(order.currency)
         #: Today's settings apply only in the shop's own currency (§5).
         self.today = order.currency == rates.shop_currency
-        self.quotes = rows.quotes.get(item.id, [])
+        self.quotes = rows.of.quotes.get(item.id, [])
         self.accepted = next((q for q in self.quotes if q.accepted), None)
-        self.attempts = rows.fulfilments.get(item.id, [])
+        self.attempts = rows.of.fulfilments.get(item.id, [])
         self.rows = rows
         #: The item's slots' price-book prices per kilogram, read once.
         self._prices: dict[int, Decimal] | None = None
@@ -516,14 +518,12 @@ def _item_cost(
     return line
 
 
-def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | None:
-    order = store.order(order_id)
-    if order is None:
-        return None
+def _order_costs(rows: _Rows, order: Order, rates: CostRates) -> OrderCosts:
+    """One order's costs from rows read for it (and maybe others): the order page's read
+    and the list's margins are this one computation (§8)."""
     thin = Decimal(rates.thin_margin_percent)
-    time = store.time_entries(order.id)
-    other = store.cost_entries(order.id)
-    rows = _Rows(store, order.id)
+    time = rows.of.time_entries.get(order.id, [])
+    other = rows.of.cost_entries.get(order.id, [])
     items = [
         _item_cost(
             _Item(rows, order, item, rates),
@@ -531,13 +531,13 @@ def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | No
             [e for e in other if e.order_item_id == item.id],
             thin,
         )
-        for item in store.items(order.id)
+        for item in rows.of.items.get(order.id, [])
     ]
     own_time = [e for e in time if e.order_item_id is None]
     own_other = [e for e in other if e.order_item_id is None]
     own_labour, own_unknown = _entries_labour(own_time)
-    shipping = sum(s.cost_minor or 0 for s in store.shipments(order.id))
-    charges = sum(c.amount_minor for c in store.charges(order.id) if c.kind != "tax")
+    shipping = rows.of.shipping_minor.get(order.id, 0)
+    charges = sum(c.amount_minor for c in rows.of.charges.get(order.id, []) if c.kind != "tax")
     open_items = [i for i in items if i.status != "cancelled"]
     revenue: Money | None = None
     if order.status == "cancelled" or (items and not open_items):
@@ -580,6 +580,42 @@ def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | No
     )
     _margin(costs, thin)
     return costs
+
+
+def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | None:
+    order = store.order(order_id)
+    if order is None:
+        return None
+    return _order_costs(_Rows(store, [order]), order, rates)
+
+
+class OrderMargin(BaseModel):
+    """An order's margin as the orders list shows it (§6.2): the figures of its
+    ``OrderCosts``, never computed apart from them."""
+
+    revenue_minor: Money | None = None
+    cost_minor: Money = 0
+    margin_minor: Money | None = None
+    margin_percent: float | None = None
+    margin_state: MarginState | None = None
+    estimated: list[CostPart] = []
+    unknown: list[CostPart] = []
+
+
+def order_margins(
+    store: OrderStore, orders: Sequence[Order], rates: CostRates
+) -> dict[str, OrderMargin]:
+    """Each order's margin by id, from one read of every order's rows (§8: Postgres
+    only, no Bambuddy call). Blocking: run it off the event loop."""
+    rows = _Rows(store, orders)
+    margins: dict[str, OrderMargin] = {}
+    for order in orders:
+        costs = _order_costs(rows, order, rates)
+        margins[order.id] = OrderMargin.model_validate(costs.model_dump(include=_MARGIN_FIELDS))
+    return margins
+
+
+_MARGIN_FIELDS = set(OrderMargin.model_fields)
 
 
 async def _bambuddy(integrations: ArchiveCosts, items: list[ItemCost]) -> bool:

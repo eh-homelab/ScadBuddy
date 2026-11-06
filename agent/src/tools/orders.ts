@@ -267,13 +267,17 @@ export const orderTools: Tool[] = [
     label: 'List orders',
     description:
       'Orders, newest first, a page at a time (`limit` up to 100): pass `next_cursor` back as `cursor`. Filter by ' +
-      '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made.',
+      '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made. ' +
+      "Each order carries its margin, the figures order_costs gives: `margin_minor`, `margin_percent`, `margin_state` " +
+      '(`loss`, `thin`, `unknown`, `ok`; null with no charged figure) and `margin_estimated`. `margin_state` filters by ' +
+      'any of the states given (`["loss", "thin"]` is the orders list\'s "Loss or thin").',
     input: z.object({
       status: z.enum(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']).optional(),
       customer_id: customerId.optional(),
       q: z.string().max(200).optional(),
       from: datetime.optional(),
       to: datetime.optional(),
+      margin_state: z.array(z.enum(['loss', 'thin', 'unknown', 'ok'])).min(1).max(4).optional(),
       cursor: z.string().max(400).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     }),

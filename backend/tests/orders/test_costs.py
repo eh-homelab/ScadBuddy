@@ -9,7 +9,14 @@ from decimal import Decimal
 import pytest
 from psycopg.types.json import Jsonb
 
-from scadbuddy.orders.costs import CostRates, Margin, _margin, order_costs
+from scadbuddy.orders.costs import (
+    CostRates,
+    Margin,
+    OrderMargin,
+    _margin,
+    order_costs,
+    order_margins,
+)
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError
 from scadbuddy.orders.lifecycle import QUOTE_HOLDER, FulfilmentInput, OrderEdit, ShipmentInput
 from scadbuddy.orders.models import (
@@ -672,3 +679,64 @@ async def test_another_currency_leaves_todays_rates_unknown(shop: Shop) -> None:
     # A default with no source is unknown, never also estimated (#5338's review).
     assert line.estimated == []
     assert line.margin_state == "unknown"
+
+
+async def test_the_lists_margins_equal_the_per_order_read(shop: Shop) -> None:
+    """§8 (#5327): the orders list's margins, from one read of every order's rows, are
+    the figures each order's own costs read gives, in every state and with no charged
+    figure."""
+    rates = USD.model_copy(update={"labour_per_item": "1", "machine_rate_per_hour": "36"})
+    made: list[str] = []
+
+    loss, item = shop.accepted(quantity=1)  # charged 1000; labour 100 by default
+    entry = CostEntryInput(order_item_id=item.id, kind="material", amount_minor=1200)
+    shop.lifecycle.add_cost_entry(loss.id, entry, BY)
+    made.append(loss.id)
+
+    thin, item = shop.accepted(quantity=1)
+    entry = CostEntryInput(order_item_id=item.id, kind="material", amount_minor=850)
+    shop.lifecycle.add_cost_entry(thin.id, entry, BY)
+    made.append(thin.id)
+
+    ok, _ = shop.accepted(quantity=2)
+    made.append(ok.id)
+
+    sliced, item = sliced_order(shop)
+    attempt(shop, sliced, item, "failed", 0, 7.5, 81)
+    attempt(shop, sliced, item, "succeeded", 2, 21.0, 82)
+    made.append(sliced.id)
+
+    unknown, item = shop.accepted(quantity=1)
+    by_hand(shop, unknown, item, "succeeded", 1)
+    made.append(unknown.id)
+
+    uncharged = shop.order()
+    item = shop.item(uncharged)
+    shop.lifecycle.add_time_entry(
+        uncharged.id,
+        TimeEntryInput(order_item_id=item.id, kind="design", minutes=30),
+        BY,
+        labour_rate=usd_rate("20"),
+    )
+    made.append(uncharged.id)
+
+    cancelled, item = sliced_order(shop, quantity=1)
+    attempt(shop, cancelled, item, "failed", 0, 7.5, 83)
+    shop.lifecycle.cancel_order(cancelled.id, BY, None)
+    made.append(cancelled.id)
+
+    made.append(shop.order().id)  # no items
+
+    orders = [o for o in (shop.rows.order(i) for i in made) if o is not None]
+    margins = order_margins(shop.rows, orders, rates)
+
+    states = []
+    for order in orders:
+        costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+        assert costs is not None
+        listed = margins[order.id]
+        assert listed.model_dump() == costs.model_dump(include=set(OrderMargin.model_fields))
+        states.append(listed.margin_state)
+    assert states == ["loss", "thin", "ok", "loss", "unknown", None, "loss", None]
+    assert margins[uncharged.id].revenue_minor is None
+    assert order_margins(shop.rows, [], rates) == {}
