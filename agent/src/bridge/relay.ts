@@ -1,4 +1,4 @@
-import type { Client } from '@temporalio/client'
+import { type Client, TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
 import { TASK_QUEUE } from '../temporal/names.js'
 import {
@@ -190,10 +190,16 @@ export class TemporalTabRelay implements TabRelay {
    * The host worker polls `hostQueue` with `hostActivities()` (main.ts, once the worker runs):
    * from now on this replica claims its tabs in ai_tab_owners, and claims the ones it already
    * holds. Never before: a claim with nothing polling the queue would send every call there to
-   * wait out the ack timeout.
+   * wait out the ack timeout. Never without a sealing client (`useClient`) either: a replica
+   * with no KEK cannot decode the sealed calls other replicas send it, so each would answer
+   * no_answer (#4949). Its tabs then reach only the calls made on this replica.
    */
   startHosting(): void {
     if (this.#hosting) return
+    if (!this.#client) {
+      this.#log('bridge relay: no sealing client (no secret key), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
+      return
+    }
     this.#hosting = true
     // The tabs are read when the write runs, after any release queued before it.
     const refresh = () => void this.#write(() => this.#owners.refresh(this.#owner?.tabs() ?? [], this.hostQueue))
@@ -310,7 +316,15 @@ export class TemporalTabRelay implements TabRelay {
           signal.removeEventListener('abort', onAbort)
           // The workflow failed or timed out (a rollout's old replica failing its tasks): the
           // owner may have run the call, so it is never sent again.
-          this.#failed(err)
+          if (executionTimedOut(err)) {
+            // Named apart from an owner's failure (#4950): WORKFLOW_SLACK_MS covers about one
+            // failed workflow task, so a run of them during a rollout ends here.
+            this.#log(
+              `bridge relay: the call to tab ${tabId} on ${queue} timed out as a workflow (rollout? its workflow tasks may have failed): ${errorMessage(err)}`,
+            )
+          } else {
+            this.#failed(err)
+          }
           resolve('failed')
         },
       )
@@ -328,8 +342,17 @@ export class TemporalTabRelay implements TabRelay {
   }
 
   #failed(err: unknown): void {
-    this.#log(`bridge relay: ${err instanceof Error ? err.message : String(err)}`)
+    this.#log(`bridge relay: ${errorMessage(err)}`)
   }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Whether a workflow's result failed on its execution timeout (the client's WorkflowFailedError of a TimeoutFailure). */
+function executionTimedOut(err: unknown): boolean {
+  return err instanceof WorkflowFailedError && err.cause instanceof TimeoutFailure
 }
 
 function jsonBytes(value: unknown): number {

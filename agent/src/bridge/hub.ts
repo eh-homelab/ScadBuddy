@@ -45,6 +45,13 @@ import { type SessionImage, sessionImage } from '../sessions/blobs.js'
 
 /** How long a call waits for the tab when the tool names no wait of its own. */
 export const CALL_TIMEOUT_MS = 30_000
+/**
+ * How long a status read of a tab on another replica waits for that replica's answer
+ * (#4950): the relay's ack timeout (relay.ts ACK_TIMEOUT_MS, 3 s) and the owner's
+ * immediate reply. Past it the tab reads as not connected, so a dead or slow owner
+ * cannot hold a probe for the whole BridgeCall workflow (about 21 s).
+ */
+export const STATUS_PROBE_MS = 6_000
 /** How often connected tabs are sent the pairing requests, when they changed. */
 export const PAIRINGS_POLL_MS = 3_000
 /** Calls one tab may have waiting at once. */
@@ -133,6 +140,8 @@ export type TabHubOptions = {
   /** Where a tab's images wait for the call that asked; this process's memory by default. */
   images?: TabImageStore | undefined
   callTimeoutMs?: number
+  /** `STATUS_PROBE_MS` when omitted. */
+  statusProbeMs?: number
   pollMs?: number
   log?: (message: string) => void
 }
@@ -301,6 +310,7 @@ export class TabHub implements BrowserTabs {
    */
   readonly #sessionTabsUnstored = new Set<string>()
   readonly #callTimeoutMs: number
+  readonly #statusProbeMs: number
   readonly #pollMs: number
   readonly #log: (message: string) => void
   #poll: NodeJS.Timeout | undefined
@@ -322,6 +332,7 @@ export class TabHub implements BrowserTabs {
       run: (tabId, request) => this.#runHere(tabId, request),
     })
     this.#callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS
+    this.#statusProbeMs = options.statusProbeMs ?? STATUS_PROBE_MS
     this.#pollMs = options.pollMs ?? PAIRINGS_POLL_MS
     this.#log = options.log ?? ((m) => console.error(m))
   }
@@ -493,11 +504,7 @@ export class TabHub implements BrowserTabs {
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false
     try {
-      const answer = await this.#relay.forward(tabId, { op: 'status' }, {
-        signal: new AbortController().signal,
-        timeoutMs: this.#callTimeoutMs,
-      })
-      return answer?.op === 'status'
+      return (await this.#probe(tabId, undefined))?.op === 'status'
     } catch (err) {
       // As for a call: a relay that cannot be asked is a tab not connected.
       this.logError(err)
@@ -651,10 +658,7 @@ export class TabHub implements BrowserTabs {
     if ('problem' in resolved) return { attached: false, reason: resolved.problem }
     let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
     if (!resolved.tab) {
-      const answer = await this.#relay!.forward(resolved.tabId, { op: 'status' }, {
-        signal: signal ?? new AbortController().signal,
-        timeoutMs: this.#callTimeoutMs,
-      })
+      const answer = await this.#probe(resolved.tabId, signal)
       if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
       state = answer
     }
@@ -664,6 +668,25 @@ export class TabHub implements BrowserTabs {
       route: state.route,
       live: state.live,
       ...(resolved.pairing ? { pairing: resolved.pairing } : {}),
+    }
+  }
+
+  /**
+   * A status read of `tabId` on another replica, cut short after `STATUS_PROBE_MS`: undefined
+   * then, as for a tab no replica holds. Rejects with the abort error only when `signal` aborts.
+   */
+  async #probe(tabId: string, signal: AbortSignal | undefined): Promise<RelayAnswer | undefined> {
+    const bound = AbortSignal.timeout(this.#statusProbeMs)
+    try {
+      return await this.#relay!.forward(tabId, { op: 'status' }, {
+        signal: signal ? AbortSignal.any([signal, bound]) : bound,
+        timeoutMs: this.#callTimeoutMs,
+      })
+    } catch (err) {
+      if (signal?.aborted) throw abortError()
+      if (!bound.aborted) throw err
+      this.#log(`bridge: tab ${tabId}'s replica gave no status within ${this.#statusProbeMs} ms; read as not connected`)
+      return undefined
     }
   }
 
