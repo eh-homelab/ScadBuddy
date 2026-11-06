@@ -77,9 +77,10 @@ def _umask() -> int:
     is safe only because this module is imported at start, before any thread writes a
     file."""
     try:
-        with open("/proc/self/status", encoding="ascii") as status:
+        # Bytes: the Name: line may hold a process name that is not ASCII.
+        with open("/proc/self/status", "rb") as status:
             for line in status:
-                if line.startswith("Umask:"):
+                if line.startswith(b"Umask:"):
                     return int(line.split()[1], 8)
     except OSError:
         pass
