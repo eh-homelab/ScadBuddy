@@ -479,7 +479,11 @@ Every step merges with the mode where it is today, and old and new builds run si
 1. **Backend and agent, one PR each.** The exchange route, the `exchange` class, the
    TokenReview and bootstrap verifiers, the in-process provider, the caller `render`, and
    the new columns (a new migration that also widens the `caller` CHECK, CLAUDE.md
-   "Migrations"). The readers (`TokenReader`, `ServiceCredential`) get an exchange source,
+   "Migrations"). The same migration drops NOT NULL on `secret_sealed`, `dek_sealed` and
+   `kek_id` (`20261102T0645Z_service_credentials.sql:10-12`), so an exchanged row with no
+   sealed copy can be written, and adds a CHECK that a `proof = 'legacy'` row carries all
+   three and any other row carries none. Every `service_credentials_<caller>` view filters
+   on `proof = 'legacy'`, so `TokenReader` never reads an unsealed row. The readers (`TokenReader`, `ServiceCredential`) get an exchange source,
    used when `SCADBUDDY_SERVICE_TOKEN_FILE` or `_BOOTSTRAP_FILE` is set; **otherwise they
    read the view as today**. An exchange that answers `404` (an old API pod during the
    roll) falls back to the view while the caller still has a database URL. Both kinds of
@@ -494,8 +498,8 @@ Every step merges with the mode where it is today, and old and new builds run si
    `scadbuddy_service_token_exchanges_total{caller, proof, result}` in `core/metrics.py`.
 4. **Stop the database path.** When every caller exchanges (no `legacy` row used for a
    week; `last_used_at` shows it), the API stops minting sealed 30-day rows; a new
-   migration drops the views, `grant_caller_views` and the sealed columns' NOT NULL; then a
-   later one drops the columns. `TokenReader`'s database path and
+   migration drops the views and `grant_caller_views`; then a later one drops the sealed
+   columns. `TokenReader`'s database path and
    `ServiceCredential.read` are removed. This step is the prerequisite #5298 and #5299 need
    before they remove a caller's database secret.
 
