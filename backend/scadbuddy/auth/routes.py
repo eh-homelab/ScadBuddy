@@ -40,6 +40,8 @@ Reason = Literal[
     "not_a_person",
     "no_credential",
     "out_of_scope",
+    # Another caller's CRUD routes (#5298): no fresh credential clears it.
+    "wrong_caller",
     "no_request_header",
     # The author headers' refusals (#4975 phase 5, `core/authorship.py` `AuthorRefusal`).
     "author_header",
@@ -219,6 +221,8 @@ def would_refuse(
         # as `crud/guard.py` answers it in `off`; only no live credential is a 401.
         if not isinstance(caller, Service):
             return "no_credential"
+        if route_cls.startswith("crud.") and route_cls != f"crud.{caller.caller}":
+            return "wrong_caller"
         return None if route_cls in caller.scopes else "out_of_scope"
     if isinstance(caller, Anonymous):
         return "signed_out"

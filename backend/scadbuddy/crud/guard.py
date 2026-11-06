@@ -46,7 +46,14 @@ def require_crud(caller: CrudCaller) -> Any:
                 headers={"WWW-Authenticate": 'Bearer realm="scadbuddy"'},
                 reason="no_credential",
             )
-        if principal.caller != caller or route_class not in principal.scopes:
+        if principal.caller != caller:
+            raise ApiError(
+                403,
+                "These routes belong to another service.",
+                type_=FORBIDDEN,
+                reason="wrong_caller",
+            )
+        if route_class not in principal.scopes:
             raise ApiError(
                 403,
                 "This credential's scope does not cover this route.",

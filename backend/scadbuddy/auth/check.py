@@ -42,6 +42,7 @@ _DETAILS: dict[Reason, str] = {
     "no_credential": "This route needs a service credential with its scope.",
     "not_a_person": "Only a person signed in themselves may do this.",
     "out_of_scope": "This credential's scope does not cover this request.",
+    "wrong_caller": "These routes belong to another service.",
     "no_request_header": "A signed-in request from the page carries X-ScadBuddy-Request: 1.",
     "author_header": "This caller may not name an author.",
     "wrong_author": "This caller may not name that author.",
@@ -51,7 +52,8 @@ _DETAILS: dict[Reason, str] = {
 def refusal(route_cls: RouteClass, reason: Reason, *, bearer: bool) -> ApiError:
     """``enforce``'s answer to a request :func:`would_refuse` refuses (§8.2)."""
     if reason in UNAUTHENTICATED:
-        wants_bearer = bearer or route_cls.startswith(("internal.", "crud."))
+        service_only = route_cls.startswith(("internal.", "crud.")) or route_cls == "flow.host"
+        wants_bearer = bearer or service_only
         return ApiError(
             401,
             _DETAILS[reason],

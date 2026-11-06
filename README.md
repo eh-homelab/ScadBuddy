@@ -849,7 +849,7 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Each of those route groups takes only the
   service credential whose scope names it (#4975: the print worker's covers
-  `internal.outputs` and `internal.library`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
+  `internal.outputs`, `internal.library` and `crud.print`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
   and `observe` they still serve anyone who reaches the API, so until `enforce` they are
   internal by path only. The agent's workspace blob routes
   (`/api/v1/internal/workspace-blobs/…`, #4789) are the agent's credential's

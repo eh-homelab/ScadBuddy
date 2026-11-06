@@ -147,8 +147,11 @@ async def test_a_403_out_of_scope_that_never_clears_is_unavailable() -> None:
     assert len(script.requests) > 2
 
 
-async def test_another_403_is_refused_without_a_refresh() -> None:
-    script = Script(problem(403, reason="other"))
+@pytest.mark.parametrize("reason", ["other", "wrong_caller"])
+async def test_another_403_is_refused_without_a_refresh(reason: str) -> None:
+    """Another caller's routes (`wrong_caller`) are refused at once: no new credential
+    of this caller clears them."""
+    script = Script(problem(403, reason=reason))
     client, source = make(script)
     with pytest.raises(CrudRefusedError):
         await client.request("GET", PATH)

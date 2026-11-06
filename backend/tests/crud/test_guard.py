@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from scadbuddy.auth.check import auth_check
+from scadbuddy.auth.check import auth_check, refusal
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import install_problem_handlers
@@ -81,10 +81,16 @@ def test_the_guard_refuses_in_every_mode(mode: str) -> None:
     dead = _get(client, "sbsvc_dead")
     assert dead.status_code == 401
     assert none.headers["WWW-Authenticate"] == 'Bearer realm="scadbuddy"'
-    for token in ("sbsvc_print", "sbsvc_render", "sbsvc_agent", "sbsvc_projects_bare"):
+    for token, reason in (
+        ("sbsvc_print", "wrong_caller"),
+        ("sbsvc_render", "wrong_caller"),
+        ("sbsvc_agent", "wrong_caller"),
+        ("sbsvc_projects_bare", "out_of_scope"),
+    ):
         refused = _get(client, token)
         assert refused.status_code == 403, token
         assert refused.json()["type"].endswith("/auth/forbidden")
+        assert refused.json()["reason"] == reason, token
     ok = _get(client, "sbsvc_projects")
     assert ok.status_code == 200
     assert ok.json() == {"ok": True}
@@ -109,3 +115,11 @@ def test_a_path_no_route_matches_carries_no_header() -> None:
     response = _client().get("/api/v1/internal/crud/projects/nope")
     assert response.status_code == 404
     assert "X-ScadBuddy-Crud" not in response.headers
+
+
+@pytest.mark.parametrize("route_cls", ["crud.projects", "flow.host", "internal.outputs"])
+def test_a_service_class_refusal_asks_for_a_bearer(route_cls: str) -> None:
+    """`enforce`'s 401 on a service-only class names the scheme, browser cookie or not."""
+    error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
+    assert error.status == 401
+    assert error.headers == {"WWW-Authenticate": 'Bearer realm="scadbuddy"'}
