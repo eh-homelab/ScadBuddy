@@ -283,7 +283,8 @@ export const catalogueTools: Tool[] = [
     routes: ['DELETE /api/v1/models/{slug}'],
     summarize: ({ slug, delete_inbox_copies }) =>
       `Delete the model "${slug}" and its outputs` +
-      (delete_inbox_copies ? ", trashing their copies in ScadBuddy's library" : ''),
+      // #5422 — the tool does not know the library backend; the flag does nothing on Bambuddy's.
+      (delete_inbox_copies ? "; on ScadBuddy's own library, also trashing their copies there" : ''),
     handler: async ({ slug, force, delete_inbox_copies }, ctx) => {
       await command(ctx, `delete ${slug}`, (headers) =>
         ctx.backend.DELETE('/api/v1/models/{slug}', {

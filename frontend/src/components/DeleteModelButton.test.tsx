@@ -8,13 +8,13 @@ import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { DELETE_RETRY_MS, DELETE_WAIT_LIMIT_MS, DeleteModelButton } from './DeleteModelButton'
 
-function render(userEventOptions?: { advanceTimers: (ms: number) => unknown }) {
+function render(userEventOptions?: { advanceTimers: (ms: number) => unknown }, nativeLibrary = true) {
   return renderPage(
     <Routes>
       <Route path="/" element={<CataloguePage />} />
       <Route
         path="/m/:slug"
-        element={<DeleteModelButton slug="name-keychain" name="Name Keychain" />}
+        element={<DeleteModelButton slug="name-keychain" name="Name Keychain" nativeLibrary={nativeLibrary} />}
       />
     </Routes>,
     { route: '/m/name-keychain', ...(userEventOptions ? { userEventOptions } : {}) },
@@ -75,6 +75,23 @@ describe('DeleteModelButton', () => {
     const box = within(dialog).getByRole('checkbox', { name: INBOX_COPIES })
     expect(box).not.toBeChecked()
     expect(dialog).toHaveTextContent("Copies in Bambuddy's inbox are never deleted from here")
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+
+    expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
+    expect(searches).toEqual([''])
+  })
+
+  it("leaves the inbox copies out on Bambuddy's library (#5422)", async () => {
+    const searches: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE') searches.push(new URL(request.url).search)
+    })
+    const { user } = render(undefined, false)
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete Name Keychain?' })
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent("Bambuddy's inbox are never deleted")
     await user.click(screen.getByRole('button', { name: 'Delete model' }))
 
     expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
