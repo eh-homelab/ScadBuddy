@@ -35,6 +35,7 @@ function inFlight(itemId: string, extra: Partial<Fulfilment> = {}): Fulfilment {
     finished_at: null,
     notes: 'first go',
     accepted_at: null,
+    print_request_id: 'req-open',
     print_run_id: 'run-open',
     copies: 2,
     purpose: 'production',
@@ -181,7 +182,9 @@ describe('EndAttempt (#5316)', () => {
     state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
     state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
     const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
-    await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
+    const button = await screen.findByRole('button', { name: 'End attempt 1' })
+    expect(screen.queryByTestId('print-item')).toBeNull()
+    await user.click(button)
     const form = await screen.findByRole('form', { name: 'End attempt 1' })
     await choose(user, within(form).getByRole('combobox', { name: 'Outcome' }), 'failed')
     await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
@@ -211,6 +214,22 @@ describe('EndAttempt (#5316)', () => {
     await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
     const form = await screen.findByRole('form', { name: 'End attempt 1' })
     await user.clear(within(form).getByLabelText('Made'))
+    await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Enter how many were made, 0 or more.')
+    expect(updated).not.toHaveBeenCalled()
+  })
+
+  it.each(['1e1', '0x2', '-1', '1.5'])('refuses the count %s: digits only', async (typed) => {
+    inFlight(ITEM_APPROVED)
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+    const updated = vi.spyOn(api, 'updateFulfilment')
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
+    const form = await screen.findByRole('form', { name: 'End attempt 1' })
+    const made = within(form).getByLabelText('Made')
+    await user.clear(made)
+    await user.type(made, typed)
     await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
     expect(await within(form).findByRole('alert')).toHaveTextContent('Enter how many were made, 0 or more.')
     expect(updated).not.toHaveBeenCalled()
