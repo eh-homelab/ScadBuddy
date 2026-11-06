@@ -857,7 +857,10 @@ class SavedOutputs:
         return []
 
     async def create(self, body: dict[str, Any]) -> dict[str, Any]:
-        output_id = body.get("output_id") or f"out-{len(self.created)}"
+        # As `output_create`'s run: an id already there is another save's claim.
+        output_id = body.get("output_id") or ""
+        if not output_id or output_id in self.metas:
+            output_id = f"out-{len(self.created)}"
         colours = ["#ff0000", "#00ff00"]
         self.metas[output_id] = OutputMeta.model_construct(
             id=output_id, slug="demo", model_version="a" * 40, colors=colours

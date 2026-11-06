@@ -309,22 +309,30 @@ def output_matches(
     With ``schema`` (the commit's), both inputs are compared at its defaults where they
     omit one (#4774): an output saved before renders filled them records only the params
     it was sent, and is still the render of a reference that names its defaults."""
-    if output_id is None:
-        return False
+    return output_id is not None and _matching(outputs, output_id, item, schema) is not None
+
+
+def _matching(
+    outputs: OutputsRead, output_id: str, item: OrderItem, schema: CustomizerSchema | None
+) -> OutputMeta | None:
+    """The output's ``meta.json`` when it matches (:func:`output_matches`), from one
+    read of it."""
     try:
         meta = outputs.get(output_id)
         inputs = outputs.inputs(output_id)
         arranged = not is_commit_id(meta.model_version) and bool(outputs.arranged_from(output_id))
     except (OutputNotFoundError, OSError, ValueError):
-        return False
+        return None
     reference = item.reference
     if reference is None:
-        return False
-    return (
+        return None
+    if (
         meta.slug == reference.slug
         and (meta.model_version == reference.commit or arranged)
         and _at_defaults(inputs, schema) == _at_defaults(reference.inputs, schema)
-    )
+    ):
+        return meta
+    return None
 
 
 def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> dict[str, Any]:
@@ -362,20 +370,18 @@ async def ensure_output(
     ``saved_as`` is the id a new output is saved under (:func:`operation_output_id`,
     #5390): an output of that id that matches is one an earlier attempt of the same
     operation saved before it stopped, and is set on the item without a second render
-    or save. One that does not match is left alone, and the new one gets an id of its
-    own."""
+    or save. The save claims the id first (``OutputStore.claim``): a directory already
+    there (another attempt's save still writing, or an output that does not match) is
+    left alone, and the new output gets an id of its own."""
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
-    if saved_as is not None and await asyncio.to_thread(
-        output_matches, outputs, saved_as, item, schema
-    ):
-        meta = await asyncio.to_thread(outputs.get, saved_as)
-        return await _set_output(
-            lifecycle, order, item, saved_as, list(meta.colors), filaments, by, revision_id
-        )
-    if saved_as is not None and await asyncio.to_thread(_exists, outputs, saved_as):
-        saved_as = None
+    if saved_as is not None:
+        earlier = await asyncio.to_thread(_matching, outputs, saved_as, item, schema)
+        if earlier is not None:
+            return await _set_output(
+                lifecycle, order, item, saved_as, list(earlier.colors), filaments, by, revision_id
+            )
     reference = reference_of(item)
     params = reference.inputs.get("params", {})
     pipeline = reference.render_key == inputs_key(
@@ -418,16 +424,6 @@ async def ensure_output(
         by,
         revision_id,
     )
-
-
-def _exists(outputs: OutputsRead, output_id: str) -> bool:
-    try:
-        outputs.get(output_id)
-    except OutputNotFoundError:
-        return False
-    except (OSError, ValueError):
-        return True
-    return True
 
 
 async def _set_output(

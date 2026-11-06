@@ -434,6 +434,18 @@ class OutputStore:
             if entry.is_dir() and re.fullmatch(OUTPUT_ID_PATTERN, entry.name)
         ]
 
+    def claim(self, slug: str, output_id: str) -> bool:
+        """Make the output's directory, only if it is not there yet (#5390): whether this
+        call made it. A caller that names an id another may also name (a quote's
+        attempts, `orders/quote.py` `operation_output_id`) saves under it only once it
+        holds the claim, so it never writes into, or removes on a failure, a directory
+        another save made."""
+        try:
+            self.paths.output_dir(slug, output_id).mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            return False
+        return True
+
     def create(
         self,
         job: Job,
@@ -450,7 +462,9 @@ class OutputStore:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
         files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
-        that holds the output's Parts first name the output before it exists.
+        that holds the output's Parts first name the output before it exists: a fresh id,
+        or one the caller holds the :meth:`claim` of, since a failed write removes the
+        directory.
         ``print_settings`` are the template's (#770), written into the saved 3MF."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
