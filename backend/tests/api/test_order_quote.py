@@ -180,7 +180,9 @@ class BambuddySlices:
         self.posted = respx.route(
             method="POST", path__regex=r"/api/v1/library/files/\d+/slice"
         ).mock(side_effect=self._slice)
-        respx.route(method="GET", path__regex=r"/api/v1/slice-jobs/\d+$").mock(
+        #: Every read of a job: the start's own read, then the follow's polls, which come
+        #: only once the start has recorded the job (`bambuddy/preview.py` `_start_plate`).
+        self.read = respx.route(method="GET", path__regex=r"/api/v1/slice-jobs/\d+$").mock(
             side_effect=self._job
         )
         for plate, payload in self.files.items():
@@ -405,12 +407,18 @@ def test_a_quote_whose_pod_stopped_mid_slice_finishes_on_the_next_attempt(
     ) -> None:
         slices.running = True
         task = asyncio.ensure_future(real(*args, **kwargs))
-        while slices.posted.call_count == 0 and not task.done():
-            await asyncio.sleep(0.05)
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        slices.running = False
+        try:
+            # Stopped once the slice is started and recorded: the follow's first poll
+            # (#5442). Stopped as soon as Bambuddy took the job, the start may not have
+            # recorded it yet, and the next attempt then slices again.
+            while slices.read.call_count < 2 and not task.done():
+                await asyncio.sleep(0.05)
+            assert not task.done(), "the first attempt ended before its slice was followed"
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        finally:
+            slices.running = False
 
     ids = first_attempt_dies(monkeypatch, mid_slice)
     started = shop.post("quote-rollout")
