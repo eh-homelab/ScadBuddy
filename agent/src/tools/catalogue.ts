@@ -266,13 +266,30 @@ export const catalogueTools: Tool[] = [
     name: 'delete_model',
     label: 'Delete a model',
     description: 'Delete a model and its outputs. Irreversible, so it needs a human approval.',
-    input: z.object({ slug, force: z.boolean().default(false) }),
+    input: z.object({
+      slug,
+      force: z.boolean().default(false),
+      delete_inbox_copies: z
+        .boolean()
+        .default(false)
+        .describe(
+          "On ScadBuddy's own library, also trash each output's copy still filed under the template's " +
+            'folder and its per-print copies with their slices, as an output delete with this flag does; ' +
+            'refused with 409 while one of their print runs is open. Unlike an output delete, it never ' +
+            "deletes copies in Bambuddy's inbox",
+        ),
+    }),
     risk: 'outward',
     routes: ['DELETE /api/v1/models/{slug}'],
-    summarize: ({ slug }) => `Delete the model "${slug}" and its outputs`,
-    handler: async ({ slug, force }, ctx) => {
+    summarize: ({ slug, delete_inbox_copies }) =>
+      `Delete the model "${slug}" and its outputs` +
+      (delete_inbox_copies ? ", trashing their copies in ScadBuddy's library" : ''),
+    handler: async ({ slug, force, delete_inbox_copies }, ctx) => {
       await command(ctx, `delete ${slug}`, (headers) =>
-        ctx.backend.DELETE('/api/v1/models/{slug}', { params: { path: { slug }, query: { force } }, headers }),
+        ctx.backend.DELETE('/api/v1/models/{slug}', {
+          params: { path: { slug }, query: { force, delete_inbox_copies } },
+          headers,
+        }),
       )
       return json({ deleted: slug })
     },

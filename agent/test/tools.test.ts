@@ -2924,6 +2924,30 @@ describe("a model's lifecycle as operations (#1054)", () => {
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
+
+  it.each([
+    [{ slug: 'w' }, 'false'],
+    [{ slug: 'w', delete_inbox_copies: true }, 'true'],
+  ] as const)('delete_model passes delete_inbox_copies (#5371): %o', async (args, sent) => {
+    let asked: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        asked = new URL(request.url).searchParams.get('delete_inbox_copies')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(asked).toBe(sent)
+  })
+
+  it("delete_model's summary says when it trashes the library copies (#5371)", () => {
+    const summarize = tool('delete_model').summarize!
+    expect(summarize({ slug: 'w', force: false, delete_inbox_copies: false })).toBe('Delete the model "w" and its outputs')
+    expect(summarize({ slug: 'w', force: false, delete_inbox_copies: true })).toBe(
+      "Delete the model \"w\" and its outputs, trashing their copies in ScadBuddy's library",
+    )
+  })
 })
 
 describe("a model's edits as operations (#1054)", () => {

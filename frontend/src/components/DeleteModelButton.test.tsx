@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -34,6 +34,8 @@ const renderRunning = () =>
     { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
   )
 
+const INBOX_COPIES = "Also delete the inbox copies in ScadBuddy's library"
+
 describe('DeleteModelButton', () => {
   it('asks first, naming the model, and deletes nothing on cancel', async () => {
     const deletes: string[] = []
@@ -59,6 +61,75 @@ describe('DeleteModelButton', () => {
 
     expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Name Keychain' })).not.toBeInTheDocument()
+  })
+
+  it('offers the inbox copies in ScadBuddy\'s library, off by default', async () => {
+    const searches: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE') searches.push(new URL(request.url).search)
+    })
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete Name Keychain?' })
+    const box = within(dialog).getByRole('checkbox', { name: INBOX_COPIES })
+    expect(box).not.toBeChecked()
+    expect(dialog).toHaveTextContent("Copies in Bambuddy's inbox are never deleted from here")
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+
+    expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
+    expect(searches).toEqual([''])
+  })
+
+  it('sends delete_inbox_copies when ticked', async () => {
+    const searches: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE') searches.push(new URL(request.url).search)
+    })
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('checkbox', { name: INBOX_COPIES }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+
+    expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
+    expect(searches).toEqual(['?delete_inbox_copies=true'])
+  })
+
+  it('unticks the inbox copies on cancel', async () => {
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('checkbox', { name: INBOX_COPIES }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+
+    expect(screen.getByRole('checkbox', { name: INBOX_COPIES })).not.toBeChecked()
+  })
+
+  it('shows the refusal while a print run of an output is open', async () => {
+    server.use(
+      http.delete('/api/v1/models/:slug', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Conflict',
+            status: 409,
+            detail: 'print run r-1 of an output of this model is still running',
+            run_id: 'r-1',
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('checkbox', { name: INBOX_COPIES }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('print run r-1')
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
   })
 
   it('stays put and says why when the server refuses', async () => {

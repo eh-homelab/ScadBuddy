@@ -643,6 +643,28 @@ describe('mock API: delete a template duplicates track (#223)', () => {
   })
 })
 
+describe('mock API: a model delete\'s library copies (#5371)', () => {
+  beforeEach(() => resetMockState())
+
+  const rootFiles = async () =>
+    ((await api.listLibrary({ folderId: null, all: true })).files ?? [])
+      .filter((file) => file.id === 89 || file.id === 91)
+      .map((file) => ({ id: file.id, output_id: file.output_id }))
+
+  it('leaves its outputs\' copies naming no output', async () => {
+    await api.deleteModel('name-keychain')
+    expect(await rootFiles()).toEqual([
+      { id: 89, output_id: null },
+      { id: 91, output_id: null },
+    ])
+  })
+
+  it('trashes them with delete_inbox_copies', async () => {
+    await api.deleteModel('name-keychain', false, true)
+    expect(await rootFiles()).toEqual([])
+  })
+})
+
 describe('mock API: a preset\'s description and tags (#327)', () => {
   beforeEach(() => resetMockState())
 
