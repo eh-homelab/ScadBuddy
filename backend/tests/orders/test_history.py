@@ -127,9 +127,15 @@ def test_a_price_below_the_thin_threshold_warns(shop: Shop, pool: PgPool) -> Non
         shop.rows, "demo", USD, markup_percent="0", now=NOW, unit_price_minor=400
     )
 
-    # 40 over 340 is 11.8 %, below 15; 100 over 400 is 25 %.
-    assert (thin.margin_percent, thin.warning) == (11.8, True)
-    assert (ok.margin_percent, ok.warning) == (25.0, False)
+    below = unit_cost_history(
+        shop.rows, "demo", USD, markup_percent="0", now=NOW, unit_price_minor=250
+    )
+
+    # 40 over 340 is 11.8 %, below 15, though 340 is above the cost of 300: thin, not a
+    # loss. 100 over 400 is 25 %. 250 is below the cost itself.
+    assert (thin.margin_percent, thin.warning, thin.below_cost) == (11.8, True, False)
+    assert (ok.margin_percent, ok.warning, ok.below_cost) == (25.0, False, False)
+    assert (below.margin_percent, below.warning, below.below_cost) == (-20.0, True, True)
 
 
 def test_the_suggested_price_marks_up_or_reaches_the_thin_threshold(

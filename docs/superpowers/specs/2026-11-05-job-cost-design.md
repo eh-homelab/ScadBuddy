@@ -235,6 +235,11 @@ leave most models with no history **(call)**.)
 
 It is advice only; it never blocks a quote. With no history it shows nothing.
 
+As built (#5328): a job's time is its last accepted attempt's `accepted_at`. An item can
+become `fulfilled` only by accepting an attempt, so every fulfilled item has one. The
+warning tells a price below the real cost apart from a price above it with a thin margin
+(`below_cost`), and words each one differently.
+
 ### 6.4 The products report (mockup D)
 
 A new page, Orders → Profit, `GET /orders/reports/profit?from=&to=&group=model`:

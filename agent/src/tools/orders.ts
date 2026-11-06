@@ -164,6 +164,7 @@ async function priceWarning(ctx: ToolContext, orderId: string, answer: unknown):
   const quote = answer as { order_item_id?: unknown; unit_price_minor?: unknown } | null
   if (typeof quote?.order_item_id !== 'string' || typeof quote.unit_price_minor !== 'number') return undefined
   try {
+    // The whole order: no route reads one item, and the order holds the currency.
     const order = await ok(ctx.backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id: orderId } } }), `get order ${orderId}`)
     const slug = order.items.find((item) => item.id === quote.order_item_id)?.reference?.slug
     if (!slug) return undefined
@@ -174,8 +175,8 @@ async function priceWarning(ctx: ToolContext, orderId: string, answer: unknown):
       `read the unit cost history of ${slug}`,
     )
     if (!history.warning) return undefined
-    const { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, estimated } = history
-    return { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, estimated }
+    const { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, estimated, below_cost } = history
+    return { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, below_cost, estimated }
   } catch {
     return undefined
   }
@@ -656,7 +657,8 @@ export const orderTools: Tool[] = [
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
       'item is quoted; order_item_accept_quote pins it. When the unit price leaves a margin below the thin ' +
       "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
-      '`price_warning`: `unit_cost_minor` and `jobs`, the `main_reason` (the cost part that most exceeded what ' +
+      '`price_warning`: `unit_cost_minor` and `jobs`, `below_cost` (true: the price is below the real cost; ' +
+      'false: it is above it, but the margin is thin), the `main_reason` (the cost part that most exceeded what ' +
       'their quotes priced) and a `suggested_unit_price_minor`. It is advice: tell the user, never re-quote ' +
       'without asking.',
     input: z.object({

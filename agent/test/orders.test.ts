@@ -550,10 +550,10 @@ describe('pricing tools (#4250)', () => {
   })
 
   // #5328, job cost spec §6.3: the quote warning in the result, advice only.
-  it("adds a price warning when the quote is below the model's real cost", async () => {
+  it("adds a price warning when the quote is below the model's real cost, or above it with a thin margin", async () => {
     const quote = { id: 'q3', order_item_id: ITEM, source: 'manual', unit_price_minor: 800 }
     const asked: Record<string, string>[] = []
-    const history = (warning: boolean) => ({
+    const history = (warning: boolean, price = 800) => ({
       slug: 'tag',
       currency: 'EUR',
       jobs: 4,
@@ -565,12 +565,14 @@ describe('pricing tools (#4250)', () => {
       markup_percent: '0',
       thin_margin_percent: '15',
       suggested_unit_price_minor: 1059,
-      unit_price_minor: 800,
-      margin_percent: -12.5,
+      unit_price_minor: price,
+      margin_percent: price === 800 ? -12.5 : 10,
       warning,
+      below_cost: price < 900,
       minor_exponent: 2,
     })
     let warn = true
+    let price = 800
     server.use(
       http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, () => HttpResponse.json(quote, { status: 201 })),
       http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
@@ -578,7 +580,7 @@ describe('pricing tools (#4250)', () => {
       ),
       http.get(`${BACKEND}/api/v1/orders/history/unit-cost`, ({ request }) => {
         asked.push(Object.fromEntries(new URL(request.url).searchParams))
-        return HttpResponse.json(history(warn))
+        return HttpResponse.json(history(warn, price))
       }),
     )
     const input = { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 800 } }
@@ -591,15 +593,22 @@ describe('pricing tools (#4250)', () => {
         main_reason_minor: 250,
         suggested_unit_price_minor: 1059,
         margin_percent: -12.5,
+        below_cost: true,
         estimated: false,
       },
     })
     expect(asked).toEqual([{ slug: 'tag', currency: 'EUR', unit_price_minor: '800' }])
+    // 10.00 over a cost of 9.00 is a 10 % margin: above the cost, and still thin.
+    price = 1000
+    const thin = { ...quote, unit_price_minor: 1000 }
+    server.use(http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, () => HttpResponse.json(thin, { status: 201 })))
+    const answer = firstText(await tool('order_item_quote').execute(input, ctx())) as { price_warning: Record<string, unknown> }
+    expect(answer.price_warning).toMatchObject({ below_cost: false, margin_percent: 10, unit_cost_minor: 900 })
     warn = false
-    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(quote)
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(thin)
     // A lookup that fails leaves the recorded quote as it is.
     server.use(http.get(`${BACKEND}/api/v1/orders/history/unit-cost`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
-    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(quote)
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(thin)
   })
 
   it('reads the book, and sets the policy over what it was', async () => {

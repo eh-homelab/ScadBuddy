@@ -55,6 +55,7 @@ export const handlers = [
       suggested_unit_price_minor: null,
       margin_percent: null,
       warning: false,
+      below_cost: false,
     }
     if (!seed || seed.unit_cost_minor == null) return HttpResponse.json(answer)
     const cost = seed.unit_cost_minor
@@ -64,6 +65,7 @@ export const handlers = [
       const percent = unit > 0 ? ((unit - cost) * 100) / unit : null
       answer.margin_percent = percent === null ? null : Math.round(percent * 10) / 10
       answer.warning = percent === null ? cost > 0 : percent < Number(thin)
+      answer.below_cost = unit < cost
     }
     return HttpResponse.json(answer)
   }),

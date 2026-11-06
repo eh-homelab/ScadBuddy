@@ -175,6 +175,12 @@ def test_the_unit_cost_history_warns_below_the_models_real_cost(
     # 1500 marked up 25 %.
     assert (body["suggested_unit_price_minor"], body["markup_percent"]) == (1875, "25")
     assert (body["warning"], body["margin_percent"], body["minor_exponent"]) == (True, -25.0, 2)
+    assert body["below_cost"]
+    # 1600 is above the cost, but 100 over 1600 is 6.3 %: thin, not below the cost.
+    thin = client.get(
+        "/api/v1/orders/history/unit-cost", params={"slug": SLUG, "unit_price_minor": 1600}
+    ).json()
+    assert (thin["warning"], thin["below_cost"], thin["margin_percent"]) == (True, False, 6.3)
 
     none = client.get("/api/v1/orders/history/unit-cost", params={"slug": "nothing"}).json()
     assert (none["jobs"], none["unit_cost_minor"], none["warning"]) == (0, None, False)

@@ -85,6 +85,8 @@ export function QuoteEditor({
       await recordQuote(orderId, itemId, { unit_price_minor: minor, ...(label.trim() ? { label: label.trim() } : {}) }, accept)
       setPrice('')
       setLabel('')
+      // A job fulfilled while the editor was open now counts in the next warning.
+      history.refresh()
       onChanged()
     } catch (err) {
       setError(refusalText(err))

@@ -1719,7 +1719,10 @@ class OrderStore:
         """The newest ``limit`` items of ``slug`` that are ``fulfilled`` on an order in
         ``currency`` that is not cancelled, each with its order, newest first. An item's
         time is its last accepted attempt's ``accepted_at``, which must be at or after
-        ``since`` (job cost spec §6.3, #5328)."""
+        ``since`` (job cost spec §6.3, #5328). An item with no accepted attempt is left
+        out. That excludes nothing today: ``Lifecycle.accept_fulfilment`` is the only
+        write that makes an item ``fulfilled``, and it sets ``accepted_at``. No update time
+        stands in for it, since any later edit moves ``updated_at``."""
         with self._pool.connection() as c:
             rows = c.execute(
                 "SELECT i.id AS item_id, i.order_id FROM order_items i"

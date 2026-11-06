@@ -759,8 +759,9 @@ async def estimate(
         "count in full. `suggested_unit_price_minor` is the unit cost marked up by "
         "`pricing_markup_percent`, or with no markup the lowest price that is not thin. "
         "With `unit_price_minor`, `warning` says that price leaves a margin below "
-        "`orders_thin_margin_percent`. Advice only. With no history, `jobs` is 0 and "
-        "nothing warns."
+        "`orders_thin_margin_percent`, and `below_cost` that it is below the unit cost "
+        "itself (a price above the cost can still warn with a thin margin). Advice only. "
+        "With no history, `jobs` is 0 and nothing warns."
     ),
 )
 async def unit_cost(

@@ -237,6 +237,33 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
   })
 
+  it('calls a price above the cost but under the thin threshold a thin margin, not a loss', async () => {
+    const { user } = editor()
+    // 10.00 over 9.00: a 10 % margin, under 15 %, and above the cost.
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '10')
+    const warning = await screen.findByTestId('quote-warning')
+    expect(warning).toHaveTextContent("$10.00 a unit leaves a thin margin, below 15 %, over this model's real cost: $9.00 a unit over its last 4 jobs.")
+    expect(warning).not.toHaveTextContent('is below')
+  })
+
+  it('reads the history again after a quote is recorded', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    await user.type(field, '8')
+    // The first read has landed: 8.00 is below its 9.00.
+    await screen.findByTestId('quote-warning')
+    await user.clear(field)
+    await user.type(field, '11')
+    // 11.00 over the 9.00 read at first is an 18 % margin: no warning.
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    // A job fulfilled while the editor is open: the real cost is now 12.00.
+    seedUnitCost('name-keychain', { jobs: 5, units: 7, unit_cost_minor: 1200, estimated: false, main_reason: null, main_reason_minor: null })
+    await user.click(screen.getByRole('button', { name: 'Record only' }))
+    await waitFor(() => expect(field).toHaveValue(''))
+    await user.type(field, '11')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$11.00 a unit is below this model')
+  })
+
   it('shows nothing for a model with no history', async () => {
     reset()
     const { user } = editor()

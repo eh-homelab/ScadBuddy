@@ -13,11 +13,11 @@ const REASONS: Record<NonNullable<UnitCostHistory['main_reason']>, string> = {
 }
 
 /**
- * Whether `unitPrice` leaves a margin below the thin threshold against the history's real
- * cost per unit: the backend's `orders/history.py` `warns`, on the unrounded percent. False
- * with no history.
+ * Whether `unitPrice` leaves a thin margin against the history's real cost per unit: a
+ * margin below `thin_margin_percent`, a loss included. The backend's `orders/history.py`
+ * `warns`, on the unrounded percent. False with no history.
  */
-function isBelowCost(history: UnitCostHistory | null | undefined, unitPrice: number): boolean {
+function isThinMargin(history: UnitCostHistory | null | undefined, unitPrice: number): boolean {
   const cost = history?.unit_cost_minor
   if (cost == null || !history || history.jobs === 0) return false
   if (unitPrice <= 0) return cost > 0
@@ -26,8 +26,9 @@ function isBelowCost(history: UnitCostHistory | null | undefined, unitPrice: num
 
 /**
  * The quote warning (job cost spec 2026-11-05 §6.3, #5328): the price is below what this
- * model really cost in its last fulfilled jobs. Advice only: it never blocks the quote.
- * Nothing shows without history or when the price is not thin.
+ * model really cost in its last fulfilled jobs, or above it with a thin margin. Each case
+ * has its own words. Advice only: it never blocks the quote. Nothing shows without history
+ * or when the margin is not thin.
  */
 export function QuoteWarning({
   history,
@@ -43,15 +44,27 @@ export function QuoteWarning({
   /** Puts the suggested unit price into the price field. */
   onUse: (minor: number) => void
 }) {
-  if (!history || !isBelowCost(history, unitPrice) || history.unit_cost_minor == null) return null
+  if (!history || !isThinMargin(history, unitPrice) || history.unit_cost_minor == null) return null
   const money = (minor: number) => formatMoney(minor, currency, exponent)
   const suggested = history.suggested_unit_price_minor
+  const cost = (
+    <>
+      {history.estimated ? 'about ' : ''}
+      <span className="sb-num">{money(history.unit_cost_minor)}</span> a unit over its last {history.jobs} {history.jobs === 1 ? 'job' : 'jobs'}
+    </>
+  )
   return (
     <div role="alert" className="flex flex-col gap-1 rounded-md border border-warn/40 p-2 text-[13px]" data-testid="quote-warning">
       <p className="text-warn">
-        {money(unitPrice)} a unit is below this model&apos;s real cost: {history.estimated ? 'about ' : ''}
-        <span className="sb-num">{money(history.unit_cost_minor)}</span> a unit over its last {history.jobs}{' '}
-        {history.jobs === 1 ? 'job' : 'jobs'}.
+        {unitPrice < history.unit_cost_minor ? (
+          <>
+            {money(unitPrice)} a unit is below this model&apos;s real cost: {cost}.
+          </>
+        ) : (
+          <>
+            {money(unitPrice)} a unit leaves a thin margin, below {history.thin_margin_percent} %, over this model&apos;s real cost: {cost}.
+          </>
+        )}
       </p>
       {history.main_reason && history.main_reason_minor != null && (
         <p className="text-muted-foreground">

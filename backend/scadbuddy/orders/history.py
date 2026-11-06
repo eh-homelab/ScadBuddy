@@ -83,10 +83,13 @@ class UnitCostHistory(BaseModel):
     thin_margin_percent: str
     suggested_unit_price_minor: Money | None = None
     #: The price asked about, its margin per unit against ``unit_cost_minor`` as a percent
-    #: of the price, and whether that margin is below the thin threshold.
+    #: of the price, and whether that margin is below the thin threshold. A price above
+    #: the cost can still warn, with a thin margin: ``below_cost`` tells the two apart.
     unit_price_minor: Money | None = None
     margin_percent: float | None = None
     warning: bool = False
+    #: The price is below ``unit_cost_minor`` itself: a loss, not only a thin margin.
+    below_cost: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -205,4 +208,5 @@ def unit_cost_history(
         answer.margin_percent, answer.warning = warns(
             answer.unit_cost_minor, unit_price_minor, rates.thin_margin_percent
         )
+        answer.below_cost = unit_price_minor < answer.unit_cost_minor
     return answer
