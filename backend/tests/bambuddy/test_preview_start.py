@@ -77,24 +77,27 @@ async def test_a_step_that_fails_past_the_cancel_still_raises_the_cancel() -> No
     loop = asyncio.get_running_loop()
     lost: list[dict[str, Any]] = []
     loop.set_exception_handler(lambda _, context: lost.append(context))
-    running = asyncio.Event()
-    fail = asyncio.Event()
+    try:
+        running = asyncio.Event()
+        fail = asyncio.Event()
 
-    async def record() -> None:
-        running.set()
-        await fail.wait()
-        raise RuntimeError("the record failed")
+        async def record() -> None:
+            running.set()
+            await fail.wait()
+            raise RuntimeError("the record failed")
 
-    step = asyncio.ensure_future(record())
-    caller = asyncio.create_task(await_to_end(step))
-    await running.wait()
-    caller.cancel()
-    await asyncio.sleep(0)
-    assert not caller.done()
-    fail.set()
-    with pytest.raises(asyncio.CancelledError):
-        await caller
-    assert step.done() and not step.cancelled()
-    del step
-    gc.collect()
-    assert lost == []
+        step = asyncio.ensure_future(record())
+        caller = asyncio.create_task(await_to_end(step))
+        await running.wait()
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done()
+        fail.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert step.done() and not step.cancelled()
+        del step
+        gc.collect()
+        assert lost == []
+    finally:
+        loop.set_exception_handler(None)
