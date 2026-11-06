@@ -1,5 +1,5 @@
 import type { Context, Hono } from 'hono'
-import type { AuditLog, AuditOutcome } from '../audit/log.js'
+import type { AuditOutcome, AuditSink } from '../audit/log.js'
 import { authenticate, type McpAuthSettings, mcpTransportProblem, type OidcRuntime } from '../auth/authenticate.js'
 import { hasTier, type Principal } from '../auth/principal.js'
 import type { TokenStore } from '../auth/tokens.js'
@@ -23,7 +23,8 @@ import type { McpHttpContext } from './http.js'
 // #2510). The answer is the pointer the tools take:
 //
 //   PUT /mcp/workspace/<path>[?expected_sha256=<hex>]
-//       body: the file's bytes (not multipart), Content-Type optional
+//       body: the file's bytes (not multipart, not a form), Content-Type optional;
+//       `curl -T <file>` sends that (curl's -d and --data-binary send a form type)
 //       → 201 {name, mediaType, size, sha256} (200 when it replaced a file)
 //
 // A later tool call passes `workspace_path: name` and `workspace_sha256: sha256`
@@ -44,7 +45,8 @@ import type { McpHttpContext } from './http.js'
 //   extension or first bytes disagree about a raster image type is refused 415.
 // - A new path must not exist yet; replacing a file needs the sha256 it has now
 //   (`expected_sha256`), as the panel's upload does (routes/sessionFiles.ts).
-// - Each write, and each refused write after auth, is a `resource` audit row.
+// - Each write, and each refusal after auth (every status above), is a `resource`
+//   audit row.
 //
 // The file is swept 24 h after its last write (WORKSPACE_TTL_MS), as every file of
 // a principal's workspace is.
@@ -66,7 +68,7 @@ const STATUS_OF: Record<WorkspaceError['code'], 400 | 404 | 409 | 413 | 503> = {
 
 export type McpUploadDeps = {
   workspace: SessionFiles | undefined
-  audit?: AuditLog | undefined
+  audit?: AuditSink | undefined
   /** The configured auth, or fail-closed bearer when it cannot be read (mcp/http.ts `resolveAuth`). */
   resolveAuth: () => Promise<{ settings: McpAuthSettings; tokens: TokenStore }>
   oidc?: OidcRuntime | undefined
@@ -121,7 +123,8 @@ export async function readCapped(body: ReadableStream<Uint8Array> | null, max: n
 export function uploadMediaType(name: string, bytes: Uint8Array, declared: string | undefined): string | undefined {
   const sniffed = sniffImage(bytes)
   const byName = mediaTypeOfName(name)
-  const claimed = declared === 'application/octet-stream' ? undefined : declared
+  // `image/jpg` is not a registered type, but clients send it for JPEG.
+  const claimed = declared === 'application/octet-stream' ? undefined : declared === 'image/jpg' ? 'image/jpeg' : declared
   for (const type of [byName, claimed]) {
     if (type === undefined) continue
     if ((RASTER.has(type) || sniffed !== undefined) && type !== sniffed) return undefined
@@ -155,31 +158,42 @@ export function mountMcpUploads(app: Hono, deps: McpUploadDeps, http: McpHttpCon
     const auth = await authenticate(request, { settings, tokens, clientAddress: facts.peer, oidc: deps.oidc })
     if (!auth.ok) return auth.response
     const principal = auth.principal
+    let name = uploadPathOf(request.url) ?? ''
+    /** A refusal after auth: its audit row, then the answer. */
+    const refuse = async (status: Parameters<typeof problem>[1], error: string, why: string) => {
+      await audited(c, principal, 'refused', `${JSON.stringify(name.slice(0, 200))}: ${why}`)
+      return problem(c, status, error)
+    }
     if (principal.kind === 'anonymous') {
-      return problem(
-        c,
+      return refuse(
         403,
         'uploads need a credential: /mcp is in disabled auth mode, so no principal owns a workspace across requests. ' +
           'Use a bearer token (Settings, "MCP tokens"), or save the file with http_request save_to_workspace',
+        'anonymous',
       )
     }
-    if (!hasTier(principal, 'write')) return problem(c, 403, 'an upload writes to your workspace: it needs a token with the write tier')
-    if (!deps.workspace) return problem(c, 503, 'the workspace is not available on this server')
+    if (!hasTier(principal, 'write')) return refuse(403, 'an upload writes to your workspace: it needs a token with the write tier', 'tier')
+    if (!deps.workspace) return refuse(503, 'the workspace is not available on this server', 'no_workspace')
     const files = deps.workspace
 
     const expected = c.req.query('expected_sha256')
-    if (expected !== undefined && !SHA256.test(expected)) return problem(c, 400, 'expected_sha256: a lowercase hex sha256')
+    if (expected !== undefined && !SHA256.test(expected)) return refuse(400, 'expected_sha256: a lowercase hex sha256', 'expected_sha256')
     if ((c.req.header('content-encoding') ?? 'identity').trim().toLowerCase() !== 'identity') {
-      return problem(c, 415, 'send the file as it is: Content-Encoding is not accepted')
+      return refuse(415, 'send the file as it is: Content-Encoding is not accepted', 'content_encoding')
     }
     const rawType = c.req.header('content-type')
     const declared = cleanMediaType(rawType)
     if (declared === 'multipart/form-data' || declared === 'application/x-www-form-urlencoded') {
-      return problem(c, 415, "send the file's bytes as the body (curl --data-binary @file), not a form")
+      return refuse(
+        415,
+        "send the file's bytes as the body with no form type: curl -T <file> (curl's -d and --data-binary send a form type)",
+        'form',
+      )
     }
-    if (rawType !== undefined && declared === undefined) return problem(c, 415, `Content-Type ${JSON.stringify(rawType.slice(0, 100))} is not a media type`)
+    if (rawType !== undefined && declared === undefined) {
+      return refuse(415, `Content-Type ${JSON.stringify(rawType.slice(0, 100))} is not a media type`, 'content_type')
+    }
 
-    let name = uploadPathOf(request.url) ?? ''
     const ws: WorkspaceRef = { kind: 'principal', principalKind: principal.kind, principalId: principal.id }
     try {
       name = workspacePath(name)
@@ -192,11 +206,10 @@ export function mountMcpUploads(app: Hono, deps: McpUploadDeps, http: McpHttpCon
       if (bytes === 'too_large') {
         throw new WorkspaceError('too_large', `the upload is larger than a workspace file may be (${fileMaxBytes} bytes)`)
       }
-      if (bytes.byteLength === 0) return problem(c, 400, 'the upload is empty: send the file as the body')
+      if (bytes.byteLength === 0) return await refuse(400, 'the upload is empty: send the file as the body', 'empty')
       const mediaType = uploadMediaType(name, bytes, declared)
       if (mediaType === undefined) {
-        await audited(c, principal, 'refused', `${JSON.stringify(name)}: media type mismatch`)
-        return problem(c, 415, `${name}: its name, its Content-Type and its first bytes do not agree on one image type`)
+        return await refuse(415, `${name}: its name, its Content-Type and its first bytes do not agree on one image type`, 'media_type')
       }
       const stored: WorkspaceFileInfo = await files.write(ws, name, bytes, {
         mediaType,
@@ -209,8 +222,7 @@ export function mountMcpUploads(app: Hono, deps: McpUploadDeps, http: McpHttpCon
       return c.json(answer, expected === undefined ? 201 : 200, { 'Cache-Control': 'no-store' })
     } catch (err) {
       if (!(err instanceof WorkspaceError)) throw err
-      await audited(c, principal, 'refused', `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
-      return problem(c, STATUS_OF[err.code], err.message)
+      return refuse(STATUS_OF[err.code], err.message, err.code)
     }
   })
 }

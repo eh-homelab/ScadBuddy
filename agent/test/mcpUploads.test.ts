@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
+import type { AuditLog } from '../src/audit/log.js'
 import { readCapped, uploadMediaType } from '../src/mcp/uploads.js'
 import { type SessionFiles, type WorkspaceFileInfo, WorkspaceError, type WorkspaceRef, type WriteOptions } from '../src/workspace/store.js'
 import { appFetch, INGRESS, services, testApp } from './helpers/mcp.js'
+import { MemoryAudit } from './support/memoryAudit.js'
 
 // PUT /mcp/workspace/<path> (#4550, src/mcp/uploads.ts): an /mcp client's binary
 // file into its own principal workspace, answered with the pointer the tools take.
@@ -37,12 +39,20 @@ function fakeWorkspace(fileMaxBytes = 1000) {
 
 async function setup(options: { tier?: 'read' | 'write' | 'outward'; mode?: 'bearer' | 'disabled'; fileMaxBytes?: number } = {}) {
   const { workspace, written } = fakeWorkspace(options.fileMaxBytes)
-  const t = testApp({ services: services({ workspace }), settings: { mode: options.mode ?? 'bearer' } })
+  const audit = new MemoryAudit()
+  const t = testApp({
+    services: services({ workspace }),
+    settings: { mode: options.mode ?? 'bearer' },
+    // The route reads only `record`, which MemoryAudit has.
+    mcp: { audit: audit as unknown as AuditLog },
+  })
   const { token, record } = await t.tokens.mint({ name: 'plugin', tier: options.tier ?? 'write' })
   const headers = { ...HTTPS, authorization: `Bearer ${token}` }
   const put = (path: string, body: RequestInit['body'], extra: Record<string, string> = {}, method = 'PUT') =>
     appFetch(t.app, { address: INGRESS, headers: { ...headers, ...extra } })(`${UPLOAD_URL}/${path}`, { method, body, duplex: 'half' } as RequestInit)
-  return { ...t, written, put, record }
+  /** The route's audit rows (tool calls over /mcp would add their own). */
+  const uploads = () => audit.entries.filter((e) => e.action === 'workspace_upload')
+  return { ...t, written, put, record, uploads }
 }
 
 describe('PUT /mcp/workspace/<path>', () => {
@@ -101,12 +111,28 @@ describe('PUT /mcp/workspace/<path>', () => {
       expect(written).toHaveLength(0)
     })
 
-    it('refuses a read-tier token', async () => {
-      const { put, written } = await setup({ tier: 'read' })
+    it('refuses a read-tier token, and audits the refusal', async () => {
+      const { put, written, uploads, record } = await setup({ tier: 'read' })
       const res = await put('a.png', PNG)
       expect(res.status).toBe(403)
       expect(((await res.json()) as { error: string }).error).toContain('write tier')
       expect(written).toHaveLength(0)
+      expect(uploads()).toEqual([
+        expect.objectContaining({
+          kind: 'resource',
+          surface: 'mcp',
+          outcome: 'refused',
+          actor: { kind: 'bearer', id: `token:${record.id}`, label: `token:${record.id}` },
+          inputSummary: '"a.png": tier',
+        }),
+      ])
+    })
+
+    it('audits a successful upload', async () => {
+      const { put, uploads } = await setup()
+      expect((await put('a.png', PNG)).status).toBe(201)
+      expect(uploads()).toEqual([expect.objectContaining({ outcome: 'ok', surface: 'mcp' })])
+      expect(uploads()[0]!.inputSummary).toMatch(/^a\.png \(32 bytes, image\/png, sha256 [0-9a-f]{64}\)$/)
     })
 
     it('refuses disabled auth mode: no credential names a workspace', async () => {
@@ -206,10 +232,33 @@ describe('PUT /mcp/workspace/<path>', () => {
       expect((await put('a', PNG, { 'content-type': 'image/jpeg' })).status).toBe(415)
     })
 
-    it('refuses a form body and a Content-Encoding', async () => {
-      const { put } = await setup()
+    it('refuses a form body and a Content-Encoding, and audits each refusal', async () => {
+      const { put, uploads } = await setup()
       expect((await put('a.png', PNG, { 'content-type': 'multipart/form-data; boundary=x' })).status).toBe(415)
       expect((await put('a.png', PNG, { 'content-encoding': 'gzip' })).status).toBe(415)
+      expect(uploads().map((e) => [e.outcome, e.inputSummary])).toEqual([
+        ['refused', '"a.png": form'],
+        ['refused', '"a.png": content_encoding'],
+      ])
+    })
+
+    it("refuses curl's --data-binary form type and names curl -T", async () => {
+      const { put, written, uploads } = await setup()
+      const res = await put('a.png', PNG, { 'content-type': 'application/x-www-form-urlencoded' })
+      expect(res.status).toBe(415)
+      expect(((await res.json()) as { error: string }).error).toContain('curl -T')
+      expect(written).toHaveLength(0)
+      expect(uploads()).toEqual([expect.objectContaining({ outcome: 'refused', inputSummary: '"a.png": form' })])
+    })
+
+    it('takes image/jpg as image/jpeg', async () => {
+      const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(16, 2)])
+      expect(uploadMediaType('photo', JPEG, 'image/jpg')).toBe('image/jpeg')
+      expect(uploadMediaType('photo', PNG, 'image/jpg')).toBeUndefined()
+      const { put } = await setup()
+      const res = await put('photo.jpg', JPEG, { 'content-type': 'image/jpg' })
+      expect(res.status).toBe(201)
+      expect(await res.json()).toMatchObject({ mediaType: 'image/jpeg' })
     })
 
     it('keeps its own guess over a declared type that is not an image', async () => {

@@ -218,7 +218,7 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
   through the conversation. Save it there (`http_request` with `save_to_workspace`, or
   `workspace_save` for a ScadBuddy file; over an external `/mcp` install, a local file
   goes in by `PUT <scadbuddy_url>/mcp/workspace/<name>` with your token and the raw
-  bytes as the body, #4550, `agent/src/mcp/uploads.ts`), view it with `workspace_read` or fix it with `workspace_edit`, then send it
+  bytes as the body, `curl -T <file>`, #4550, `agent/src/mcp/uploads.ts`), view it with `workspace_read` or fix it with `workspace_edit`, then send it
   with `workspace_path` and the `workspace_sha256` you read it at, in place of the
   inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
   `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image
@@ -674,7 +674,8 @@ Workflow:
    are never a tool argument, #2510, `agent/src/tools/workspaceUploads.ts`). Over an
    external `/mcp` install there is no panel: put a local file in with
    `PUT <scadbuddy_url>/mcp/workspace/<name>` and your token, the raw bytes as the body
-   (`curl -X PUT --data-binary @part.stl -H "Authorization: Bearer $TOKEN" …`); it
+   (`curl -T part.stl -H "Authorization: Bearer $TOKEN" …`; not `-d` or
+   `--data-binary`, which send a form type that is refused); it
    answers `{name, mediaType, size, sha256}`, which are the `workspace_path` and
    `workspace_sha256` to pass (#4550, `agent/src/mcp/uploads.ts`). Each object
    in the file becomes a scene object.
