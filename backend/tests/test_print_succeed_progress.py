@@ -27,7 +27,7 @@ from scadbuddy.core.events import Event, InProcessEventBus
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers.lan_models import LanStarted
-from scadbuddy.printers.progress import _ended, _waiting
+from scadbuddy.printers.progress import ended_plate, waiting_plate
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import PrintRunInput, SourceSpec, SucceedInput
 
@@ -52,7 +52,7 @@ def _lan_plates(run_id: str) -> PrintProgress:
     first = LanStarted(
         subtask_name=f"scadbuddy-{run_id}-p1", started_at=AT, plate_id=1, ended="done"
     )
-    plates = [_ended(first, "H2C"), _waiting("H2C", None)]
+    plates = [ended_plate(first, "H2C"), waiting_plate("H2C", None)]
     merged = from_plates(plates, [1, 2], slice_job_id=None, queue_item_id=None, bambuddy_url="")
     return merged.model_copy(update={"route": "lan", "run_id": run_id})
 
