@@ -693,6 +693,19 @@ async def test_a_wait_that_does_not_cancel_closes_the_locks_connection(
             await asyncio.sleep(0.1)
         else:
             pytest.fail("the closed connection's lock was never freed")
+        # The holder keeps its own lock.
+        assert not await asyncio.to_thread(free, f"scadbuddy:library-copy:sb_to_bb:{'ab' * 32}")
+        assert waiter._held == []
+
+        # The batch goes on with its next file: a new connection takes the lock.
+        next_key = f"scadbuddy:library-copy:sb_to_bb:{'ef' * 32}"
+        await asyncio.to_thread(waiter.acquire, "sb_to_bb", "ef" * 32)
+        assert waiter._conn is not None
+        assert waiter._held == [next_key]
+        assert not await asyncio.to_thread(free, next_key)
+        await asyncio.to_thread(waiter.release_all)
+        assert waiter._held == []
+        assert await asyncio.to_thread(free, next_key)
     finally:
         await asyncio.to_thread(waiter.close)
         await asyncio.to_thread(holder.close)
