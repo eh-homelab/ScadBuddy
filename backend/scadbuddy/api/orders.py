@@ -129,6 +129,11 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
+#: A ``margin_state`` request reads at most this many store pages of this size (#5515).
+#: When it reaches the cap, it returns the rows found so far (maybe none) and the cursor
+#: it reached, and the client carries on from there.
+SCAN_PAGE_SIZE = MAX_LIMIT
+MAX_SCAN_PAGES = 10
 LIST_PARAMS = frozenset(
     {"status", "customer_id", "q", "from", "to", "margin_state", "cursor", "limit"}
 )
@@ -419,16 +424,18 @@ def _order_page(
     rates: CostRates,
 ) -> OrderPage:
     """A page of rows. With ``margin_state``, the store's pages are read in turn and
-    each order's margin computed until ``limit`` orders match or none are left: a margin
-    is computed on read, never stored (§5), so it cannot be a SQL filter."""
+    each order's margin computed until ``limit`` orders match, none are left, or
+    ``MAX_SCAN_PAGES`` pages were read: a margin is computed on read, never stored (§5),
+    so it cannot be a SQL filter. At the cap the page can be short or empty and still
+    have a ``next_cursor``."""
     if not margin_state:
         orders, next_cursor = store.orders(filters, cursor, limit)
         margins = order_margins(store, orders, rates)
         return OrderPage(items=[_row(o, margins[o.id]) for o in orders], next_cursor=next_cursor)
     wanted = set(margin_state)
     found: list[OrderRow] = []
-    while True:
-        orders, more = store.orders(filters, cursor, MAX_LIMIT)
+    for _ in range(MAX_SCAN_PAGES):
+        orders, more = store.orders(filters, cursor, SCAN_PAGE_SIZE)
         margins = order_margins(store, orders, rates)
         for order in orders:
             if margins[order.id].margin_state not in wanted:
@@ -440,6 +447,7 @@ def _order_page(
         if more is None:
             return OrderPage(items=found, next_cursor=None)
         cursor = more
+    return OrderPage(items=found, next_cursor=cursor)
 
 
 @router.get("", response_model=OrderPage, summary="List orders")
@@ -462,7 +470,9 @@ async def list_orders(
     figures ``GET /orders/{id}/costs`` gives the order, read from Postgres only (job cost
     spec §6.2, §8). ``margin_state`` may be repeated, for orders in any of those states
     (``margin_state=loss&margin_state=thin`` is the list's "Loss or thin"). An order with
-    no charged figure has no state and never matches it."""
+    no charged figure has no state and never matches it. A ``margin_state`` request reads
+    a bounded number of orders, so its page can be short or empty while ``next_cursor``
+    remains: follow the cursor until it is null."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)
