@@ -100,7 +100,7 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
 
   const submission = useSubmission()
 
-  async function save(count: number, startedAt: string | null, source: string) {
+  async function save(count: number, startedAt: string | null, source: string): Promise<boolean> {
     setBusy(true)
     setError(null)
     try {
@@ -120,7 +120,8 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
       onDone()
       return true
     } catch (e) {
-      setError(refusalText(e))
+      // A failed Stop keeps the timer: say so, or the time may be logged twice by hand.
+      setError(startedAt ? `${refusalText(e)} The timer is still running; stop it again to log it.` : refusalText(e))
       return false
     } finally {
       setBusy(false)

@@ -184,9 +184,10 @@ class Settings(BaseSettings):
     pricing_rounding: Literal["to_minor_unit", "to_major"] = "to_minor_unit"
     # Job cost (spec 2026-11-05 §4.3, §4.4, §5, #5326), decimal strings in the shop's
     # `orders_currency`: the labour rate per hour a time entry copies when it is written
-    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which
-    # converts the assistant's spend (`SCADBUDDY_PRICING_USD_RATE`, more than 0), and the
-    # margin percent below which a job is thin (`SCADBUDDY_ORDERS_THIN_MARGIN_PERCENT`).
+    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which will
+    # convert the assistant's spend once it is recorded on a job (#5327 to #5330; nothing
+    # reads it yet; `SCADBUDDY_PRICING_USD_RATE`, more than 0), and the margin percent
+    # below which a job is thin (`SCADBUDDY_ORDERS_THIN_MARGIN_PERCENT`).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
     orders_thin_margin_percent: str = "15"

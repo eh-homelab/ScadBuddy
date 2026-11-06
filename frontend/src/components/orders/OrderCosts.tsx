@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { AttemptCost, CostEntry, ItemCost, OrderCosts as Costs, TimeEntry } from '../../api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -78,12 +78,20 @@ function Entries({
   onChanged: () => void
 }) {
   const [error, setError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
   if (!time.length && !other.length) return null
-  const remove = (run: () => Promise<unknown>) => {
+  const remove = (id: string, run: () => Promise<unknown>) => {
+    if (removing) return
+    setRemoving(id)
     setError(null)
     run()
       .then(onChanged)
-      .catch((e: unknown) => setError(refusalText(e)))
+      .catch((e: unknown) => {
+        // Already gone (a second tab, or a click whose reply was lost): nothing to say.
+        if (e instanceof ApiError && e.status === 404) onChanged()
+        else setError(refusalText(e))
+      })
+      .finally(() => setRemoving(null))
   }
   return (
     <ul className="flex flex-col gap-0.5" aria-label="Entries">
@@ -94,7 +102,7 @@ function Entries({
             {e.rate_minor_per_hour != null ? ` · ${money(Math.round((e.minutes * e.rate_minor_per_hour) / 60))}` : ' · no rate'}
             {e.note ? ` · ${e.note}` : ''}
           </span>
-          <Button size="sm" variant="ghost" aria-label={`Remove ${TIME_KINDS[e.kind]} time, ${e.minutes} min`} onClick={() => remove(() => api.removeTimeEntry(orderId, e.id))}>
+          <Button size="sm" variant="ghost" aria-label={`Remove ${TIME_KINDS[e.kind]} time, ${e.minutes} min`} disabled={removing !== null} onClick={() => remove(e.id, () => api.removeTimeEntry(orderId, e.id))}>
             Remove
           </Button>
         </li>
@@ -105,7 +113,7 @@ function Entries({
             {COST_KINDS[e.kind]}, {money(e.amount_minor)}
             {e.note ? ` · ${e.note}` : ''}
           </span>
-          <Button size="sm" variant="ghost" aria-label={`Remove ${COST_KINDS[e.kind]} cost, ${money(e.amount_minor)}`} onClick={() => remove(() => api.removeCostEntry(orderId, e.id))}>
+          <Button size="sm" variant="ghost" aria-label={`Remove ${COST_KINDS[e.kind]} cost, ${money(e.amount_minor)}`} disabled={removing !== null} onClick={() => remove(e.id, () => api.removeCostEntry(orderId, e.id))}>
             Remove
           </Button>
         </li>

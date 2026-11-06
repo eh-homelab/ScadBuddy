@@ -50,6 +50,7 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.integrations import NotLinkedError
 from scadbuddy.orders.models import (
     CostEntry,
+    Filament,
     Fulfilment,
     FulfilmentPurpose,
     ItemStatus,
@@ -160,11 +161,14 @@ class ItemCost(Margin):
     quoted_cost_minor: Money | None
     quoted_price_minor: Money | None
     #: Every attempt's recorded figures, failures included; None when no attempt says.
+    #: Only recorded grams: an attempt whose grams were estimated is left out here.
     actual_seconds: int | None
     actual_grams: float | None
-    #: Every attempt's ``filament_minor``, estimated ones included.
+    #: Every attempt's ``filament_minor``, estimated grams included, so it can cover more
+    #: attempts than ``actual_grams`` (each attempt's ``grams`` is what was priced).
     actual_filament_minor: Money | None
     failed_attempts: int
+    #: As ``actual_grams`` and ``actual_filament_minor``, for the failed attempts.
     failed_grams: float | None
     failed_filament_minor: Money | None
     #: The labour is the default (no time entry yet), not entries.
@@ -252,19 +256,37 @@ def _unit(quote: Quote | None) -> _Unit | None:
     return _Unit(quote)
 
 
+class _Rows:
+    """The order's quotes and attempts, each read once for every item, and the price
+    book, read only when an item needs it."""
+
+    def __init__(self, store: OrderStore, order_id: str) -> None:
+        self.store = store
+        self.quotes = store.order_quotes(order_id)
+        self.fulfilments = store.order_fulfilments(order_id)
+        self._filaments: dict[str, Filament] | None = None
+
+    def filament(self, filament_id: str) -> Filament | None:
+        if self._filaments is None:
+            book = self.store.filaments(include_archived=True)
+            self._filaments = {f.id: f for f in book}
+        return self._filaments.get(filament_id)
+
+
 class _Item:
     """One item's read, with what pricing it falls back on."""
 
-    def __init__(self, store: OrderStore, order: Order, item: OrderItem, rates: CostRates) -> None:
+    def __init__(self, rows: _Rows, order: Order, item: OrderItem, rates: CostRates) -> None:
         self.item = item
         self.order = order
         self.rates = rates
         self.exponent = minor_exponent(order.currency)
         #: Today's settings apply only in the shop's own currency (§5).
         self.today = order.currency == rates.shop_currency
-        self.quotes = store.quotes(item.id)
+        self.quotes = rows.quotes.get(item.id, [])
         self.accepted = next((q for q in self.quotes if q.accepted), None)
-        self.store = store
+        self.attempts = rows.fulfilments.get(item.id, [])
+        self.rows = rows
         #: The item's slots' price-book prices per kilogram, read once.
         self._prices: dict[int, Decimal] | None = None
 
@@ -297,7 +319,7 @@ class _Item:
         if self._prices is None:
             self._prices = {}
             for slot in self.item.colours:
-                record = None if slot.filament_id is None else self.store.filament(slot.filament_id)
+                record = None if slot.filament_id is None else self.rows.filament(slot.filament_id)
                 if record is not None:
                     self._prices[slot.slot] = Decimal(record.cost_per_kg)
         prices = self._prices
@@ -426,7 +448,7 @@ def _item_cost(
     unit = _unit(quote)
     attempts: list[AttemptCost] = []
     priced: list[Decimal | None] = []
-    for fulfilment in reader.store.fulfilments(item.id, purpose=None):
+    for fulfilment in reader.attempts:
         cost, filament = reader.attempt(fulfilment)
         attempts.append(cost)
         priced.append(filament)
@@ -500,9 +522,10 @@ def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | No
     thin = Decimal(rates.thin_margin_percent)
     time = store.time_entries(order.id)
     other = store.cost_entries(order.id)
+    rows = _Rows(store, order.id)
     items = [
         _item_cost(
-            _Item(store, order, item, rates),
+            _Item(rows, order, item, rates),
             [e for e in time if e.order_item_id == item.id],
             [e for e in other if e.order_item_id == item.id],
             thin,

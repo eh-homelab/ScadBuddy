@@ -1,9 +1,11 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import type { Fulfilment } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { resetMockState } from '../../mocks/handlers'
+import { server } from '../../mocks/server'
 import { BROWSER, ITEM_APPROVED, ORDER_ACCEPTED, QUOTE_ACCEPTED, state } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { timerKey } from './CostEntryForms'
@@ -86,6 +88,33 @@ describe('OrderCosts', () => {
 
     await user.click(screen.getByRole('button', { name: 'Remove Setup time, 45 min' }))
     await waitFor(() => expect(state.timeEntries).toEqual([]))
+  })
+
+  it('treats removing an entry that is already gone as done, and blocks a second click', async () => {
+    const entry = await api.addCostEntry(ORDER_ACCEPTED, { kind: 'material', amount_minor: 125 })
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 40 })
+    const { user } = renderPage(<Card />)
+    const remove = await screen.findByRole('button', { name: 'Remove Materials cost, $1.25' })
+    // Gone behind the page's back: another tab removed it.
+    state.costEntries = state.costEntries.filter((e) => e.id !== entry.id)
+
+    await user.click(remove)
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove Materials cost, $1.25' })).toBeNull())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('says the timer is still running when Stop fails', async () => {
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 5 * 60_000).toISOString())
+    server.use(http.post('/api/v1/orders/:id/time-entries', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    await user.click(await screen.findByRole('button', { name: /Stop timer/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The timer is still running')
+    expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).not.toBeNull()
   })
 
   it('adds a cost to the order', async () => {

@@ -1236,6 +1236,20 @@ class OrderStore:
             ).fetchall()
         return [Quote.model_validate(r) for r in rows]
 
+    def order_quotes(self, order_id: str, *, conn: Conn | None = None) -> dict[str, list[Quote]]:
+        """Every item's quotes, by item id, in one query (the costs read)."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_QUOTE} FROM order_item_quotes WHERE order_item_id IN"
+                " (SELECT id FROM order_items WHERE order_id = %s) ORDER BY created_at, id",
+                (order_id,),
+            ).fetchall()
+        quotes: dict[str, list[Quote]] = {}
+        for row in rows:
+            quote = Quote.model_validate(row)
+            quotes.setdefault(quote.order_item_id, []).append(quote)
+        return quotes
+
     def accept_quote(self, conn: Conn, item_id: str, quote_id: str) -> Quote:
         """Marks ``quote_id`` accepted and the item's others not, in the caller's
         transaction: the others first, since the partial unique index is checked per
@@ -1688,6 +1702,22 @@ class OrderStore:
                 (item_id, purpose, purpose),
             ).fetchall()
         return [Fulfilment.model_validate(r) for r in rows]
+
+    def order_fulfilments(
+        self, order_id: str, *, conn: Conn | None = None
+    ) -> dict[str, list[Fulfilment]]:
+        """Every item's attempts, test prints too, by item id, in one query."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_FULFILMENT} FROM order_item_fulfilments WHERE order_item_id IN"
+                " (SELECT id FROM order_items WHERE order_id = %s) ORDER BY attempt",
+                (order_id,),
+            ).fetchall()
+        attempts: dict[str, list[Fulfilment]] = {}
+        for row in rows:
+            attempt = Fulfilment.model_validate(row)
+            attempts.setdefault(attempt.order_item_id, []).append(attempt)
+        return attempts
 
     # -- shipments (§6.3) -------------------------------------------------------------
 
