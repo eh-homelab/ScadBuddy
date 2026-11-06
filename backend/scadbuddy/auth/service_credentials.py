@@ -217,10 +217,6 @@ class ServiceCredentialStore:
             ).fetchone()
         return None if row is None else row["caller"]
 
-    def has_live(self, caller: ServiceCaller, *, now: datetime | None = None) -> bool:
-        with self._pool.connection() as conn:
-            return _has_live(conn, caller, _now(now))
-
     def delete_expired(
         self, *, older_than: timedelta = LIFETIME, now: datetime | None = None
     ) -> int:
