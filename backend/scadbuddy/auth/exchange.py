@@ -269,7 +269,8 @@ class TokenReviewVerifier:
         """The issuer (from its discovery document) and its JWKS, both read from the
         apiserver itself (`kubernetes.default.svc`), never from the discovery's
         ``jwks_uri``. Kept :data:`JWKS_CACHE_SECONDS`; ``refetch`` (an unknown ``kid``)
-        reads them again at most every :data:`JWKS_REFETCH_SECONDS`, and a failed
+        reads them again no sooner than :data:`JWKS_REFETCH_SECONDS` after any fetch
+        (the hourly one included), and a failed
         refetch keeps the cached ones (the unknown ``kid`` is then refused). When the
         hour's refresh fails, the last good ones serve for up to
         :data:`JWKS_STALE_SECONDS` after that first failure, the refresh retried at most
@@ -301,18 +302,17 @@ class TokenReviewVerifier:
                     and now - self._refetched_at < JWKS_REFETCH_SECONDS
                 ):
                     return self._stale(cached, now)
+            # Every fetch, the hourly one too, starts the floor for an unknown `kid`.
+            self._refetched_at = now
             try:
                 issuer, keys = await self._fetch()
             except VerifierUnavailableError as error:
                 if cached is None:
                     raise
                 logger.warning("could not refresh the cluster's JWKS (%s)", error)
-                self._refetched_at = now
                 if self._stale_since is None:
                     self._stale_since = now
                 return self._stale(cached, now)
-            if refetch:
-                self._refetched_at = now
             self._keys, self._stale_since = (now, issuer, keys), None
             return issuer, keys
 
@@ -397,9 +397,16 @@ class TokenReviewVerifier:
         if response.status_code not in (200, 201):
             raise VerifierUnavailableError(f"TokenReview answered {response.status_code}")
         try:
-            status = response.json().get("status") or {}
+            data = response.json()
         except ValueError as error:
             raise VerifierUnavailableError("TokenReview answered no JSON") from error
+        if not isinstance(data, dict):
+            raise VerifierUnavailableError("TokenReview answered no object")
+        status = data.get("status")
+        if status is None:
+            status = {}
+        if not isinstance(status, dict):
+            raise VerifierUnavailableError("TokenReview answered a status that is no object")
         proof = self._proof(status)
         if proof is not None and proof.caller != caller:
             logger.warning("refused a service-token exchange: TokenReview named another caller")

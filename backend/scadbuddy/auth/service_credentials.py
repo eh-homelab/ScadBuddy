@@ -608,15 +608,35 @@ class ExchangeReader:
         self._delay = EXCHANGE_RETRY_FIRST
         self._exchanged_at: float | None = None
         self._on_fallback = False
+        # One exchange at a time, run outside the lock: while it is in flight a caller
+        # with a still-valid token gets it at once; only one without waits.
+        self._exchanging = False
+        self._exchanged = threading.Condition(self._lock)
+
+    def _valid(self, now: float) -> bool:
+        return self._token is not None and now < self._expires_at
 
     def token(self) -> str | None:
         with self._lock:
             now = self._clock()
+            while self._exchanging and not self._valid(now):
+                self._exchanged.wait()
+                now = self._clock()
             if self._token is not None and now < self._renew_at:
                 return self._token
-            if now >= self._next_try:
-                self._exchange(now)
-            if self._token is not None and now < self._expires_at:
+            exchange = not self._exchanging and now >= self._next_try
+            self._exchanging = self._exchanging or exchange
+        if exchange:
+            outcome: httpx.Response | str = "no answer"
+            try:
+                outcome = self._request()
+            finally:
+                with self._lock:
+                    self._exchanging = False
+                    self._apply(now, outcome)
+                    self._exchanged.notify_all()
+        with self._lock:
+            if self._valid(now):
                 return self._token
             on_fallback, fallback = self._on_fallback, self._fallback
         if on_fallback and fallback is not None:
@@ -638,15 +658,14 @@ class ExchangeReader:
         self._next_try = now + self._delay
         self._delay = min(self._delay * 2, EXCHANGE_RETRY_MAX)
 
-    def _exchange(self, now: float) -> None:
+    def _request(self) -> httpx.Response | str:
+        """The exchange's answer, or why there is none. Outside the lock."""
         try:
             proof = self._proof_file.read_text().strip()
         except OSError as error:
-            self._failed(now, f"no proof: {type(error).__name__}")
-            return
+            return f"no proof: {type(error).__name__}"
         if not proof:
-            self._failed(now, "empty proof")
-            return
+            return "empty proof"
         form = {
             "grant_type": GRANT_TYPE,
             "subject_token": proof,
@@ -656,9 +675,14 @@ class ExchangeReader:
         }
         try:
             with httpx.Client(transport=self._transport, timeout=EXCHANGE_TIMEOUT) as client:
-                response = client.post(self._url, data=form)
+                return client.post(self._url, data=form)
         except httpx.HTTPError as error:
-            self._failed(now, type(error).__name__)
+            return type(error).__name__
+
+    def _apply(self, now: float, response: httpx.Response | str) -> None:
+        """Takes the exchange's answer in. Under the lock."""
+        if isinstance(response, str):
+            self._failed(now, response)
             return
         if response.status_code == 200:
             try:
