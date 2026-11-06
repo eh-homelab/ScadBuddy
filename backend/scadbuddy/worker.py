@@ -1093,6 +1093,7 @@ async def run_worker(
         stopping = asyncio.create_task(stop.wait())
         await asyncio.wait({reading, stopping}, return_when=asyncio.FIRST_COMPLETED)
         stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
         if not reading.done():
             reading.cancel()
             await asyncio.gather(reading, return_exceptions=True)

@@ -1328,10 +1328,11 @@ worker, which opens the same store) seals any key still stored in plaintext, onc
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the **same** file into the API, the render worker and the print worker, in one
-  rollout. They all read the keys from the database; a process without the key (or with
-  another one) cannot open a sealed key, logs `ignoring a stored secret this process
-  cannot open` and falls back to its own `SCADBUDDY_<FIELD>`.
+- Mount the **same** file into the API and the print worker, in one rollout. Both read the
+  keys from the database; a process without the key (or with another one) cannot open a
+  sealed key, logs `ignoring a stored secret this process cannot open` and falls back to
+  its own `SCADBUDDY_<FIELD>`. The render worker needs no key: the API opens its store
+  keys and answers them on its CRUD route (#5298).
 - Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
