@@ -876,14 +876,25 @@ def _registry(printers: Printers) -> PrinterLookup:
 def _native(printers: Printers, settings: SettingsStore) -> NativeCheck:
     """Whether a run on a registry row goes over the LAN (`print_run.lan_printers`, as
     the print dialog's choices name them), read once per page and only when a parked
-    print names a linked row."""
+    print names a linked row. A read that fails is kept too, logged once: each later
+    linked entry on the page names no path, and reads nothing again (#5472)."""
     native: frozenset[str] | None = None
+    failed = False
 
-    async def check(printer: str) -> bool:
-        nonlocal native
+    async def check(printer: str) -> bool | None:
+        nonlocal native, failed
+        if failed:
+            return None
         if native is None:
-            stored = await asyncio.to_thread(settings.load)
-            native = frozenset(await lan_printers(stored, printers.store, printers.reports))
+            try:
+                stored = await asyncio.to_thread(settings.load)
+                native = frozenset(await lan_printers(stored, printers.store, printers.reports))
+            except Exception:
+                failed = True
+                logger.warning(
+                    "could not read which printers a run reaches over the LAN", exc_info=True
+                )
+                return None
         return printer in native
 
     return check

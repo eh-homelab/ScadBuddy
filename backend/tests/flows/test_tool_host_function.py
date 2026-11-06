@@ -269,7 +269,7 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     assert refused.value.status == 503
     assert await outward.store.get_decision(request_id(parked, call_id)) is None
     # The printer's row cannot be read: a 503 that asks the person to try again.
-    for code in (None, 503):
+    for code in (None, 408, 429, 503):
         kind = next(
             k
             for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api_away(code))
