@@ -1040,11 +1040,13 @@ if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClien
 // claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with bridge.tab: a
 // claim before (or with a worker that never started) would send other replicas' calls to wait out
 // the ack timeout (#4806 review). `hostTabs` sets the client first; a replica without the KEK has
-// none, so `startHosting` refuses and logs it once (#4949, #5421).
+// none, so `startHosting` refuses and logs it once (#4949, #5421). Its poll stops on shutdown, so
+// a worker that never polled does not start hosting while the process closes (#5432).
+let stopTabHosting: (() => void) | undefined
 if (tabRelay) {
   const sql = database?.sql
   const keys = payloadKeys
-  hostTabs(tabRelay, {
+  stopTabHosting = hostTabs(tabRelay, {
     sealing: temporalClient && dataConverter && keys && sql ? { client: temporalClient, dropKey: (subject) => dropPayloadKey(sql, keys, subject) } : undefined,
     worker: hostWorkers?.pinned,
   })
@@ -1275,6 +1277,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 }
 
 async function stop(): Promise<void> {
+  stopTabHosting?.()
   stopSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()

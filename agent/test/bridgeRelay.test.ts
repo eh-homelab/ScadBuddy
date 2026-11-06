@@ -145,6 +145,21 @@ describe('TemporalTabRelay', () => {
     relay.close()
   })
 
+  it('hostTabs with a client and a worker still connecting claims nothing until the worker is ok (#4806, #5432)', async () => {
+    const owners = memoryOwners()
+    let state = 'connecting'
+    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
+    relay.serve(owner(['tab-0']))
+    const stop = hostTabs(relay, { sealing: refusingClient().sealing, worker: { state: () => state }, pollMs: 5 })
+    // Several polls while the worker connects: none claims.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(owners.rows.size).toBe(0)
+    state = 'ok'
+    await vi.waitFor(() => expect(owners.rows).toEqual(new Map([['tab-0', 'agent-tools.a']])))
+    stop()
+    relay.close()
+  })
+
   it('answers no_answer, and logs, when Temporal refuses the start: the tool never throws', async () => {
     const owners = memoryOwners()
     owners.rows.set('tab-1', 'agent-tools.b')
