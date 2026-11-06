@@ -72,10 +72,10 @@ def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
     assert old is not None
     assert store.resolve(old) == Service("projects", frozenset({"api"}))
 
-    later = now + timedelta(minutes=1)
-    (minted,) = store.rotate_due(KEK, now=later)
+    # Minted at the same instant, so it expires with the old one: the later-created wins.
+    (minted,) = store.rotate_due(KEK, now=now)
     assert [c.caller for c in store.list() if c.id == minted] == ["projects"]
-    assert store.rotate_due(KEK, now=later) == []
+    assert store.rotate_due(KEK, now=now) == []
     assert store.resolve(old) == Service("projects", frozenset({"api"}))
 
     reader.invalidate(old)

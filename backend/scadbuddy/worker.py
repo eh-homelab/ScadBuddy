@@ -1422,6 +1422,7 @@ async def run_projects_worker(
     # #5210: on a role of its own, wait for the API's migrations and grants.
     await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
     crud: CrudClient | None = None
+    routes: FlowRoutes | None = None
     try:
         await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
@@ -1489,8 +1490,9 @@ async def run_projects_worker(
             if server is not None and serving is not None:
                 server.should_exit = True
                 await serving
-            await routes.aclose()
     finally:
+        if routes is not None:
+            await routes.aclose()
         if crud is not None:
             await crud.aclose()
         await events.aclose()

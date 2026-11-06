@@ -90,6 +90,9 @@ VIEWS: Mapping[ServiceCaller, tuple[str, ...]] = {
 PREFIX = "sbsvc_"
 LIFETIME = timedelta(days=30)
 ROTATE_BEFORE = timedelta(days=7)
+#: A caller's newest live sealed credential, the one it is handed: latest to expire, then
+#: latest created (`_insert`), then by id, so a tie always picks the same row.
+NEWEST = " ORDER BY expires_at DESC, created_at DESC, id DESC LIMIT 1"
 #: An exchanged credential's lifetime (spec 2026-11-05 §11 D4); the caller renews it at
 #: half-life.
 EXCHANGE_LIFETIME = timedelta(minutes=15)
@@ -209,10 +212,13 @@ def _insert(conn: Connection[Any], kek: Kek, caller: ServiceCaller, at: datetime
     token = f"{PREFIX}{credential_id}.{secrets.token_urlsafe(32)}"
     scopes = sorted(SCOPES[caller])
     envelope = seal_secret(kek, token, aad(credential_id, caller, scopes))
+    # `created_at` strictly after the caller's last one (callers hold its lock), so the
+    # newest of two minted at one instant is the later (`NEWEST`).
     conn.execute(
         "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
         " secret_sealed, dek_sealed, kek_id, created_at, expires_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, GREATEST(%s, (SELECT max(created_at)"
+        " + interval '1 microsecond' FROM service_credentials WHERE caller = %s)), %s)",
         (
             credential_id,
             caller,
@@ -222,6 +228,7 @@ def _insert(conn: Connection[Any], kek: Kek, caller: ServiceCaller, at: datetime
             envelope.dek_sealed,
             envelope.kek_id,
             at,
+            caller,
             at + LIFETIME,
         ),
     )
@@ -267,7 +274,7 @@ class ServiceCredentialStore:
                 row = conn.execute(
                     "SELECT expires_at, kek_id, scopes FROM service_credentials"
                     " WHERE caller = %s AND proof = 'legacy' AND revoked_at IS NULL"
-                    " AND expires_at > %s ORDER BY expires_at DESC LIMIT 1",
+                    " AND expires_at > %s" + NEWEST,
                     (caller, at),
                 ).fetchone()
                 if (
@@ -571,8 +578,7 @@ class TokenReader:
         with psycopg.connect(self._database_url, autocommit=True, row_factory=dict_row) as conn:
             row = conn.execute(
                 sql.SQL(
-                    "SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id FROM {}"
-                    " ORDER BY expires_at DESC LIMIT 1"
+                    "SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id FROM {}" + NEWEST
                 ).format(sql.Identifier(f"service_credentials_{self.caller}"))
             ).fetchone()
         if row is None:
