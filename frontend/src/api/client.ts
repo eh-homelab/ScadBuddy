@@ -2023,10 +2023,11 @@ export const api = {
 
   /**
    * #2169 — slice the dialog's choices in the background, through the run's own path,
-   * without queueing; follow it with `getPreviewSlice`.
+   * without queueing; follow it with `getPreviewSlice`. `fresh` (#4433, the dialog's
+   * Reslice) slices again even when a finished slice of the same choices exists.
    */
-  previewSlice: (outputId: string, body: PrintRunRequest) =>
-    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+  previewSlice: (outputId: string, body: PrintRunRequest, fresh = false) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice${fresh ? '?fresh=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2656,9 +2657,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #2169 — slice the dialog's choices for a library file in the background. */
-  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
-    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
+  /** #2169 — slice the dialog's choices for a library file in the background; `fresh` as `previewSlice`'s. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest, fresh = false) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice${fresh ? '?fresh=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

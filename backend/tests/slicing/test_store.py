@@ -141,6 +141,42 @@ async def test_start_on_a_completed_row_returns_it(store: NativeSliceStore) -> N
     assert again.warnings == ["w"] and again.finished_at is not None
 
 
+async def test_a_fresh_start_on_a_completed_row_reads_running_at_once(
+    store: NativeSliceStore,
+) -> None:
+    """#4433: the dialog's Reslice slices a completed row again. The row reads running
+    at once, so the dialog follows the new execution, not the old result."""
+    slice_id = await _start(store)
+    await store.finish(
+        slice_id, status="completed", sliced_blob_key="slice-abc", failure=None, warnings=["w"]
+    )
+    again = await store.start(
+        workflow_id="slice-1-a",
+        subject="out-1",
+        library_file_id=1,
+        plate_id=1,
+        preset_key="k",
+        fresh=True,
+    )
+    assert (again.id, again.status, again.failure, again.finished_at) == (
+        slice_id,
+        "running",
+        None,
+        None,
+    )
+
+
+async def test_a_fresh_start_leaves_another_subjects_row_alone(store: NativeSliceStore) -> None:
+    slice_id = await _start(store)
+    await store.finish(
+        slice_id, status="completed", sliced_blob_key="slice-abc", failure=None, warnings=[]
+    )
+    with pytest.raises(SliceSubjectError):
+        await _start(store, subject="out-2", fresh=True)
+    found = await store.get(slice_id, "out-1")
+    assert found is not None and found.status == "completed"
+
+
 async def test_a_completed_row_answered_again_is_kept_from_the_ttl_sweep(
     store: NativeSliceStore,
 ) -> None:

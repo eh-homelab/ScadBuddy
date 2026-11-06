@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { PreviewStarted, PrintRunRequest, SlicePreview } from '../api/types'
 import type { PrintSource } from './printSource'
 import { RESLICE_DEBOUNCE_MS, RESLICE_POLL_MS, usePreviewSlice } from './usePreviewSlice'
@@ -110,5 +110,76 @@ describe('the preview reads', () => {
     expect(api.previewToolpathUrl('o', 3, 'bambuddy')).toMatch(/\/print\/outputs\/o\/preview-slices\/3\/toolpath$/)
     expect(api.libraryPreviewToolpathUrl(7, 3, 'native')).toMatch(/\/print\/library\/7\/preview-slices\/3\/toolpath\?slicer=native$/)
     expect(api.libraryPreviewToolpathUrl(7, 3, 'bambuddy')).toMatch(/\/print\/library\/7\/preview-slices\/3\/toolpath$/)
+  })
+})
+
+describe('usePreviewSlice: Reslice (#4433)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('slices the same choices again with fresh, the old result kept and marked stale', async () => {
+    const start = vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
+    vi.spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce(completed('bambuddy'))
+      .mockResolvedValueOnce(running(null, 'bambuddy'))
+      .mockResolvedValueOnce({ ...completed('bambuddy'), print_time_seconds: 90 })
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+
+    await advance(RESLICE_DEBOUNCE_MS)
+    expect(start).toHaveBeenLastCalledWith('out-1', request, false)
+    expect(result.current.canReslice).toBe(true)
+    expect(result.current.stale).toBe(false)
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(start).toHaveBeenCalledTimes(2)
+    expect(start).toHaveBeenLastCalledWith('out-1', request, true)
+    expect(result.current.reslicing).toBe(true)
+    expect(result.current.canReslice).toBe(false)
+    expect(result.current.stale).toBe(true)
+    expect(result.current.result?.print_time_seconds).toBe(60)
+
+    await advance(RESLICE_POLL_MS)
+
+    expect(result.current.reslicing).toBe(false)
+    expect(result.current.stale).toBe(false)
+    expect(result.current.canReslice).toBe(true)
+    expect(result.current.result?.print_time_seconds).toBe(90)
+  })
+
+  it('says why a Reslice failed and can be tried again', async () => {
+    const start = vi
+      .spyOn(api, 'previewSlice')
+      .mockResolvedValueOnce(started('bambuddy'))
+      .mockRejectedValueOnce(new ApiError(502, 'slice job not found or expired'))
+      .mockResolvedValueOnce(started('bambuddy'))
+    vi.spyOn(api, 'getPreviewSlice').mockResolvedValue(completed('bambuddy'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(result.current.error).toBe('slice job not found or expired')
+    expect(result.current.reslicing).toBe(false)
+    expect(result.current.canReslice).toBe(true)
+    expect(result.current.result).not.toBeNull()
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(start).toHaveBeenCalledTimes(3)
+    expect(start).toHaveBeenLastCalledWith('out-1', request, true)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('cannot reslice before the choices have settled', () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    expect(result.current.canReslice).toBe(false)
   })
 })

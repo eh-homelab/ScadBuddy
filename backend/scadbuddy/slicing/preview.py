@@ -35,6 +35,11 @@ SlicerQuery = Annotated[
     Literal["bambuddy", "native"],
     Query(description="Who sliced it: the `slicer` the start answered with."),
 ]
+#: The dialog's Reslice (#4433): a new slice on either slicer, never a finished one.
+FreshQuery = Annotated[
+    bool,
+    Query(description="Slice again, even when a finished slice of the same choices exists."),
+]
 
 #: Completed reads at once, each a sliced 3MF spooled to a file (Task 12 review M4); a
 #: read that cannot get a turn within `SLICE_READ_WAIT_SECONDS` is told to come back.

@@ -189,17 +189,20 @@ def _slicing(client: TestClient) -> Slicing:
     return slicing
 
 
-def _post(client: TestClient, output_id: str) -> dict[str, Any]:
+def _post(client: TestClient, output_id: str, *, fresh: bool = False) -> dict[str, Any]:
     started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
+        f"/api/v1/print/outputs/{output_id}/preview-slice",
+        json=body(),
+        headers=press(),
+        params={"fresh": "true"} if fresh else None,
     )
     assert started.status_code == 202, started.text
     op: dict[str, Any] = follow_operation(client, started.json(), timeout=60, poll=0.1)
     return op
 
 
-def start(client: TestClient, output_id: str) -> dict[str, Any]:
-    op = _post(client, output_id)
+def start(client: TestClient, output_id: str, *, fresh: bool = False) -> dict[str, Any]:
+    op = _post(client, output_id, fresh=fresh)
     assert op["status"] == "succeeded", op
     result: dict[str, Any] = op["result"]
     return result
@@ -315,6 +318,27 @@ def test_the_same_choices_answer_the_same_job(
 
     assert again["job_id"] == first["job_id"]
     assert slicer.calls == 1
+
+
+def test_reslice_slices_the_same_choices_again(
+    native_client: TestClient, model: str, slicer: FakeSlicer
+) -> None:
+    """#4433: the dialog's Reslice slices a completed slice's choices again, in the same
+    row, so a run of these choices still names it; a plain start after it reuses it."""
+    output_id = prepared(native_client, model)
+    first = start(native_client, output_id)
+    assert settled(native_client, output_id, first["job_id"])["status"] == "completed"
+
+    again = start(native_client, output_id, fresh=True)
+    read_at_once = read(native_client, output_id, again["job_id"], slicer="native").json()
+
+    assert again["job_id"] == first["job_id"]
+    assert read_at_once["status"] == "running"
+    assert settled(native_client, output_id, again["job_id"])["status"] == "completed"
+    assert slicer.calls == 2
+
+    start(native_client, output_id)
+    assert slicer.calls == 2
 
 
 def test_progress_while_running(native_client: TestClient, model: str, slicer: FakeSlicer) -> None:

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, type Slicer } from '../api/client'
 import type { NozzlePlan, PrintRunRequest, SlicePreview } from '../api/types'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
@@ -32,6 +32,15 @@ export interface PreviewSliceState {
   /** `result`'s toolpath, read from the slicer that made it; `null` with no result. */
   toolpathUrl: string | null
   error: string | null
+  /**
+   * #4433 — slice the choices on screen again, with no finished slice reused. `result`
+   * stays, marked stale, until the new one lands.
+   */
+  reslice: () => void
+  /** Whether `reslice` can start: there are choices, they have settled and nothing slices. */
+  canReslice: boolean
+  /** A slice that `reslice` started is under way. */
+  reslicing: boolean
 }
 
 interface Shown {
@@ -60,15 +69,22 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
   const [slicing, setSlicing] = useState(false)
   const [progress, setProgress] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [reslicing, setReslicing] = useState(false)
+  // #4433 — each Reslice bumps `forced`; the run that sees a new value asks for a fresh slice.
+  const [forced, setForced] = useState(0)
+  const used = useRef(0)
   const attempt = useRef(0)
 
   useEffect(() => {
     const current = latest.current
     if (key === null || !current) return
+    const fresh = forced !== used.current
+    used.current = forced
     const token = ++attempt.current
     let timer: ReturnType<typeof setTimeout> | undefined
     const live = () => token === attempt.current
     setSlicing(true)
+    setReslicing(fresh)
     setProgress(null)
     setError(null)
     const follow = async (jobId: number, plan: NozzlePlan | null, slicer: Slicer) => {
@@ -80,6 +96,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
         return
       }
       setSlicing(false)
+      setReslicing(false)
       setProgress(null)
       if (read.status === 'completed') setShown({ source: own, request: key, result: read, plan, slicer })
       else setError(read.failure ?? 'The slice failed.')
@@ -87,11 +104,12 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     const fail = (cause: unknown) => {
       if (!live()) return
       setSlicing(false)
+      setReslicing(false)
       setProgress(null)
       setError(cause instanceof ApiError ? cause.detail : 'The background slice could not run.')
     }
     sourceApi(current)
-      .preview(JSON.parse(key) as PrintRunRequest)
+      .preview(JSON.parse(key) as PrintRunRequest, fresh)
       .then((started) =>
         live() ? follow(started.job_id, started.nozzle_plan ?? null, started.slicer ?? 'bambuddy') : undefined,
       )
@@ -100,7 +118,8 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
       attempt.current += 1
       if (timer) clearTimeout(timer)
     }
-  }, [own, key, latest])
+  }, [own, key, latest, forced])
+  const reslice = useCallback(() => setForced((count) => count + 1), [])
 
   const mine = shown?.source === own ? shown : null
   const toolpathUrl = mine && source ? sourceApi(source).toolpathUrl(mine.result.job_id, mine.slicer) : null
@@ -108,12 +127,16 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     result: mine?.result ?? null,
     plateId: mine ? ((JSON.parse(mine.request) as PrintRunRequest).plate_id ?? 1) : null,
     plan: mine?.plan ?? null,
-    stale: mine !== null && mine.request !== wanted,
+    // A Reslice marks the shown slice stale until the new one lands (#4433).
+    stale: mine !== null && (mine.request !== wanted || (reslicing && slicing)),
     slicing: slicing && wanted !== null,
     // Only the slice of the choices on screen: while new ones wait out the debounce, the
     // old slice's percentage would say how far the wrong slice got (review M5).
     progress: slicing && wanted !== null && wanted === key ? progress : null,
     toolpathUrl,
     error,
+    reslice,
+    canReslice: wanted !== null && wanted === key && !slicing && source !== undefined,
+    reslicing: reslicing && slicing && wanted !== null,
   }
 }

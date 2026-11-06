@@ -77,41 +77,52 @@ class NativeSliceStore:
         library_file_id: int,
         plate_id: int,
         preset_key: str,
+        fresh: bool = False,
     ) -> NativeSlice:
         """The row of ``workflow_id``, inserted if there is none. A failed or cancelled
         row reads running at once, its failure cleared and ``started_at`` now (Task 12
         review I1): the dialog reads it the moment this answers, before the new
-        execution's `running`. A start that no execution follows (one that joined an
-        execution as it closed) is the lost-row stop's, which compares that
-        ``started_at``. A completed row's ``finished_at`` is refreshed, so the TTL runs
-        from its last use (review M5); a running row is left as it is. A copy belongs to
-        one subject: the row of another's is refused (`SliceSubjectError`)."""
+        execution's `running`. With ``fresh`` (the dialog's Reslice, #4433) a completed
+        row reads running again in the same way, so a new execution slices it again. A
+        start that no execution follows (one that joined an execution as it closed) is
+        the lost-row stop's, which compares that ``started_at``. Else a completed row's
+        ``finished_at`` is refreshed, so the TTL runs from its last use (review M5); a
+        running row is left as it is. A copy belongs to one subject: the row of
+        another's is refused (`SliceSubjectError`)."""
+        other = "native_slices.subject <> EXCLUDED.subject"
+        again = (
+            "(native_slices.status IN ('failed', 'cancelled')"
+            " OR (%(fresh)s AND native_slices.status = 'completed'))"
+        )
 
         def run() -> NativeSlice:
             with self._pool.connection() as conn:
                 row = conn.execute(
                     "INSERT INTO native_slices"
                     " (workflow_id, subject, library_file_id, plate_id, preset_key)"
-                    " VALUES (%s, %s, %s, %s, %s)"
+                    " VALUES (%(workflow_id)s, %(subject)s, %(library_file_id)s,"
+                    " %(plate_id)s, %(preset_key)s)"
                     # Only the same subject's row is touched: another's is refused below.
                     " ON CONFLICT (workflow_id) DO UPDATE SET"
-                    " status = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " THEN native_slices.status"
-                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN 'running'"
-                    " ELSE native_slices.status END,"
-                    " failure = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " OR native_slices.status NOT IN ('failed', 'cancelled')"
+                    f" status = CASE WHEN {other} THEN native_slices.status"
+                    f" WHEN {again} THEN 'running' ELSE native_slices.status END,"
+                    f" failure = CASE WHEN {other} OR NOT {again}"
                     " THEN native_slices.failure END,"
-                    " started_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " OR native_slices.status NOT IN ('failed', 'cancelled')"
+                    f" started_at = CASE WHEN {other} OR NOT {again}"
                     " THEN native_slices.started_at ELSE clock_timestamp() END,"
-                    " finished_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " THEN native_slices.finished_at"
+                    f" finished_at = CASE WHEN {other} THEN native_slices.finished_at"
+                    f" WHEN {again} THEN NULL"
                     " WHEN native_slices.status = 'completed' THEN now()"
-                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN NULL"
                     " ELSE native_slices.finished_at END"
                     f" RETURNING {_COLUMNS}",
-                    (workflow_id, subject, library_file_id, plate_id, preset_key),
+                    {
+                        "workflow_id": workflow_id,
+                        "subject": subject,
+                        "library_file_id": library_file_id,
+                        "plate_id": plate_id,
+                        "preset_key": preset_key,
+                        "fresh": fresh,
+                    },
                 ).fetchone()
             assert row is not None
             return NativeSlice.model_validate(row)

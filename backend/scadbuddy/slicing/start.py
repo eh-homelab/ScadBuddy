@@ -73,6 +73,7 @@ async def start_native_slice(
     subject: str,
     client: BambuddyClient | None,
     copy_sha256: str | None,
+    fresh: bool = False,
 ) -> NativeSlice:
     """The row of copy ``library_file_id`` sliced with ``plan``, its execution started
     unless it completed. The presets are built here only for their key: a file built
@@ -85,7 +86,10 @@ async def start_native_slice(
     the execution with the id, and `slice_prepare` refuses other bytes.
 
     A failed or cancelled row is returned running (`NativeSliceStore.start`), so a read
-    straight after this never sees the last outcome (Task 12 review I1)."""
+    straight after this never sees the last outcome (Task 12 review I1). ``fresh`` (the
+    dialog's Reslice, #4433) slices a completed row again too, and its execution reuses
+    no other row's slice (`slice_prepare`). A running row is fresh already: the start
+    joins its execution."""
     preset_key = await native_slice_key(starter, plan, plate_id, client)
     row = await store.start(
         workflow_id=native_workflow_id(
@@ -95,6 +99,7 @@ async def start_native_slice(
         library_file_id=library_file_id,
         plate_id=plate_id,
         preset_key=preset_key,
+        fresh=fresh,
     )
     if row.status != "completed":
         await temporal.start_workflow(
@@ -107,6 +112,7 @@ async def start_native_slice(
                 preset_key=preset_key,
                 slicer_queue=starter.slicer_queue,
                 copy_sha256=copy_sha256,
+                fresh=fresh,
             ),
             id=row.workflow_id,
             task_queue=starter.library_queue,
