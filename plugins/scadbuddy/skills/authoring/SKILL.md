@@ -216,7 +216,9 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
 - A source, README or picture you got from elsewhere goes through your workspace
   (#2329; `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`), not
   through the conversation. Save it there (`http_request` with `save_to_workspace`, or
-  `workspace_save` for a ScadBuddy file), view it with `workspace_read` or fix it with `workspace_edit`, then send it
+  `workspace_save` for a ScadBuddy file; over an external `/mcp` install, a local file
+  goes in by `PUT <scadbuddy_url>/mcp/workspace/<name>` with your token and the raw
+  bytes as the body, #4550, `agent/src/mcp/uploads.ts`), view it with `workspace_read` or fix it with `workspace_edit`, then send it
   with `workspace_path` and the `workspace_sha256` you read it at, in place of the
   inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
   `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image
@@ -670,8 +672,11 @@ Workflow:
    workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
    panel, or one saved by `http_request` `save_to_workspace` or `workspace_save`; bytes
    are never a tool argument, #2510, `agent/src/tools/workspaceUploads.ts`). Over an
-   external `/mcp` install there is no panel: `http_request` `save_to_workspace` and
-   `workspace_save` are the only ways in until #4550. Each object
+   external `/mcp` install there is no panel: put a local file in with
+   `PUT <scadbuddy_url>/mcp/workspace/<name>` and your token, the raw bytes as the body
+   (`curl -X PUT --data-binary @part.stl -H "Authorization: Bearer $TOKEN" …`); it
+   answers `{name, mediaType, size, sha256}`, which are the `workspace_path` and
+   `workspace_sha256` to pass (#4550, `agent/src/mcp/uploads.ts`). Each object
    in the file becomes a scene object.
 2. Read it with `get_scene`: object ids (`o1`, `o2`, ...), each object's colour parts
    (`p1`, ...), its ops in order, and its transform (translate, rotate in degrees X then

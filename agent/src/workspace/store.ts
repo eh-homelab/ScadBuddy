@@ -236,12 +236,17 @@ const BY_EXTENSION: Record<string, string> = {
   woff2: 'font/woff2',
 }
 
+/** The type `path`'s extension names, or undefined when the extension is not a known one. */
+export function mediaTypeOfName(path: string): string | undefined {
+  const ext = /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toLowerCase()
+  return ext === undefined ? undefined : BY_EXTENSION[ext]
+}
+
 /** What `bytes` at `path` most likely are: the image signature, then the extension, then text or not. */
 export function guessMediaType(path: string, bytes: Uint8Array): string {
   const image = sniffImage(bytes)
   if (image) return image
-  const ext = /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toLowerCase()
-  const known = ext === undefined ? undefined : BY_EXTENSION[ext]
+  const known = mediaTypeOfName(path)
   if (known) return known
   return decodeText(bytes) === undefined ? 'application/octet-stream' : 'text/plain'
 }

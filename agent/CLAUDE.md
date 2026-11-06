@@ -256,7 +256,10 @@ opens every one and seals it again byte for byte).
     guards, writes owner-only, each write a `workspace.file` event) and the caps' route
     `routes/workspaceSettings.ts`; the frontend is `components/assistant/SessionFiles.tsx`
     with msw `src/mocks/features/sessionFiles.ts` (component tests stub the upload:
-    jsdom's `File` cannot pass undici's multipart parser).
+    jsdom's `File` cannot pass undici's multipart parser). An `/mcp` client puts a file
+    into its principal workspace with `PUT /mcp/workspace/<path>` (#4550,
+    `src/mcp/uploads.ts`, mounted by `mountMcp` behind `/mcp`'s gates and auth; `write`
+    tier, `disabled` mode refused), raw bytes answered with `{name, mediaType, size, sha256}`.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
