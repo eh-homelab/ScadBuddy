@@ -501,7 +501,9 @@ Every step merges with the mode where it is today, and old and new builds run si
    token resolve through the same `resolve`, so any API pod accepts either.
 2. **Clusters PR.** A ServiceAccount per Deployment (§6.1); `automountServiceAccountToken:
    false` on every ScadBuddy pod; the projected volume and `SCADBUDDY_SERVICE_TOKEN_FILE`
-   on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator`
+   on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator` (TokenReview) and to
+   `system:service-account-issuer-discovery` (the issuer and JWKS reads of §6.2 step 0; Kubernetes
+   binds that role to no one by default)
    and its own apiserver token mounted in the API container only. Merge after step 1's
    image is deployed.
 3. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
@@ -555,7 +557,8 @@ Each one takes the more secure option. The cost is stated with it.
    bootstrap secret file (§7). The database view goes once every caller exchanges (§8).
    Cost: the API depends on the Kubernetes API for each exchange.
 2. **TokenReview after an offline JWKS check.** The offline check refuses forgeries for free;
-   TokenReview then refuses a valid-looking token of a deleted pod. The API's ServiceAccount gets `system:auth-delegator`.
+   TokenReview then refuses a valid-looking token of a deleted pod. The API's ServiceAccount gets `system:auth-delegator`, and
+   `system:service-account-issuer-discovery` for the offline check's JWKS.
    A deleted pod's token is refused at once, and the pod name and uid are bound to each
    credential. Cost: one cluster-wide grant, held by the CRUD service only. That the ClusterRole grants
    `create` on TokenReview and SubjectAccessReview and nothing more is **not verified** here
