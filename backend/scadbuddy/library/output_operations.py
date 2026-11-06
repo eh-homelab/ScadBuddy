@@ -188,11 +188,11 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # removes that output or releases its Parts.
         output_id = uuid.uuid4().hex
         requested: str | None = request.get("output_id")
-        claimed = requested is not None and await asyncio.to_thread(
+        claimed = False
+        if requested is not None and await asyncio.to_thread(
             state.outputs.claim, job.slug, requested
-        )
-        if claimed:
-            assert requested is not None
+        ):
+            claimed = True
             output_id = requested
         manifest = chosen.manifest if chosen is not None else []
         # An arranged output has no template inputs to reopen; it records its sources (§7).

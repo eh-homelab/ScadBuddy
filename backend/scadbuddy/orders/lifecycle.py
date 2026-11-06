@@ -1597,9 +1597,11 @@ class Lifecycle:
         A ``quote_id`` already recorded (by an earlier attempt of the same operation,
         #5353) is answered with, under the order's lock, and nothing is written but the
         drop of this holder's holds on keys the recorded quote does not name (#5415: a
-        re-slice that gave other bytes). The quote's holds are taken again in its own
-        transaction, so a row never commits without them, whatever another attempt
-        dropped before it."""
+        re-slice that gave other bytes). The holder is shared by every attempt, so those
+        holds may be a sibling attempt's that still runs; that attempt's own record is
+        answered with this quote too, so it never needs them (#5448). The quote's holds
+        are taken again in its own transaction, so a row never commits without them,
+        whatever another attempt dropped before it."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)

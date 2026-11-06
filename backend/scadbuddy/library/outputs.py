@@ -971,12 +971,14 @@ def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
         )
 
 
-def _live_outputs(root: Path) -> dict[str, set[str]]:
+def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     """Every slug directory under ``root``, with the ids of its outputs that have a
-    meta.json. Unlike ``glob``, a slug or output directory that cannot be listed raises
-    instead of being skipped. Symlinks are followed, as ``OutputStore``'s own globs
-    follow them: an output it serves must not look deleted."""
+    meta.json, and every output directory without one. Unlike ``glob``, a slug or output
+    directory that cannot be listed raises instead of being skipped. Symlinks are
+    followed, as ``OutputStore``'s own globs follow them: an output it serves must not
+    look deleted."""
     live: dict[str, set[str]] = {}
+    bare: list[Path] = []
     with os.scandir(root) as slugs:
         for slug in slugs:
             if not slug.is_dir(follow_symlinks=True):
@@ -984,11 +986,13 @@ def _live_outputs(root: Path) -> dict[str, set[str]]:
             ids = live.setdefault(slug.name, set())
             with os.scandir(slug.path) as entries:
                 for entry in entries:
-                    if entry.is_dir(follow_symlinks=True) and os.path.isfile(
-                        os.path.join(entry.path, META_NAME)
-                    ):
+                    if not entry.is_dir(follow_symlinks=True):
+                        continue
+                    if os.path.isfile(os.path.join(entry.path, META_NAME)):
                         ids.add(entry.name)
-    return live
+                    else:
+                        bare.append(Path(entry.path))
+    return live, bare
 
 
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
@@ -1025,7 +1029,9 @@ def reap_orphan_holds(
     (#1007): a save that failed between holding its Parts and writing meta.json, or a
     hold taken after a delete's release, leaves holds that nothing else ever drops.
     Returns how many outputs' holds it released. Each released output's directory, if
-    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815).
+    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815), as
+    does an output directory with no meta.json and no hold at all, past the same grace
+    (#5448: a save that claimed its id and stopped before it held its Parts).
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
@@ -1039,14 +1045,21 @@ def reap_orphan_holds(
     root = store.paths.outputs
     with refs.pool.connection() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT holder_id FROM blob_refs"
-            " WHERE holder_kind = %s AND created_at < now() - %s",
-            (OUTPUT_HOLDER, grace),
+            "SELECT holder_id, min(created_at) < now() - %s AS aged FROM blob_refs"
+            " WHERE holder_kind = %s GROUP BY holder_id",
+            (grace, OUTPUT_HOLDER),
         ).fetchall()
-    held = {row["holder_id"] for row in rows}
+    held = {row["holder_id"] for row in rows if row["aged"]}
+    holding = {row["holder_id"] for row in rows}
+    live, bare = _live_outputs(root) if root.is_dir() else ({}, [])
+    for directory in bare:
+        # A directory that holds nothing and has no meta.json (#5448): a save that
+        # claimed its id (`OutputStore.claim`) and stopped before it held its Parts.
+        # A held one waits for its holds' release below.
+        if directory.name not in holding:
+            _remove_orphan_directory(directory, grace)
     if not held:
         return 0
-    live = _live_outputs(root) if root.is_dir() else {}
     live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
     # Holds taken before slugs were recorded: a live output tells its own slug.
     _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
