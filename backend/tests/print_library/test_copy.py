@@ -5,6 +5,7 @@ fake Bambuddy library and a native library over S3."""
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -19,6 +20,7 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, Scope, map_response
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.print_library import copy_store
 from scadbuddy.print_library.copy import (
     FILE_ATTEMPTS,
     GAVE_UP,
@@ -709,6 +711,42 @@ async def test_a_wait_that_does_not_cancel_closes_the_locks_connection(
     finally:
         await asyncio.to_thread(waiter.close)
         await asyncio.to_thread(holder.close)
+
+
+async def test_a_wait_that_wins_after_its_connection_closed_raises(
+    pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock query returns only after `release_all` closed its connection (#5500).
+    That connection holds no lock, so `acquire` records nothing and raises: a caller
+    never goes on to the put without the lock."""
+    monkeypatch.setattr(copy_store, "TARGET_LOCK_CONNECT_TIMEOUT", 0.5)
+    waiter = LibraryCopyStore(pool).locks()
+    await asyncio.to_thread(waiter.acquire, "sb_to_bb", "cd" * 32)
+    await asyncio.to_thread(waiter.release_all)
+    conn = waiter._conn
+    assert conn is not None
+    entered = threading.Event()
+    closed = threading.Event()
+
+    def execute(*_: Any, **__: Any) -> None:
+        entered.set()
+        assert closed.wait(10)
+
+    monkeypatch.setattr(conn, "cancel_safe", lambda **_: None)
+    monkeypatch.setattr(conn, "execute", execute)
+    waiting = asyncio.ensure_future(asyncio.to_thread(waiter.acquire, "sb_to_bb", "ab" * 32))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        await asyncio.to_thread(waiter.release_all)
+        assert waiter._conn is None
+        assert conn.closed
+        closed.set()
+        with pytest.raises(psycopg.OperationalError, match="no lock is held"):
+            await asyncio.wait_for(waiting, 10)
+        assert waiter._held == []
+    finally:
+        closed.set()
+        await asyncio.to_thread(waiter.close)
 
 
 async def test_closing_the_locks_cancels_a_wait_it_gave_up_on(pool: Pool) -> None:

@@ -296,7 +296,8 @@ class TargetLocks:
     stops mid-put frees them. The calls block: run them on a thread. A wait that its
     caller gave up on (the activity was cancelled) is cancelled by the next
     `release_all` or `close`, so neither queues behind it on the connection. A wait that
-    the cancel does not end closes the connection (`_stop_wait`)."""
+    the cancel does not end closes the connection (`_stop_wait`). A wait that wins on
+    that closed connection raises `psycopg.OperationalError`: it holds no lock."""
 
     def __init__(self, conninfo: Any) -> None:
         self._conninfo = conninfo
@@ -331,8 +332,14 @@ class TargetLocks:
             conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
             with self._lock:
                 # A wait that won after `_stop_wait` closed its connection holds nothing.
-                if self._conn is conn:
-                    self._held.append(key)
+                # Its caller must not go on to the put without the lock. Today that
+                # caller is a cancelled `to_thread`, which drops the error unread.
+                if self._conn is not conn:
+                    raise psycopg.OperationalError(
+                        "the target lock's connection was closed while the lock was"
+                        " taken: no lock is held"
+                    )
+                self._held.append(key)
         finally:
             self._idle.set()
 
