@@ -713,7 +713,8 @@ export class TurnRunner {
                       ...(live ? { ledger } : {}),
                       ...(activities ? { activities } : {}),
                       loadings,
-                      // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
+                      // The turn's credentials and loaded plugins' current tokens, unioned with the
+                      // saved list (tools/harness.ts): workspace_read redacts them (#2329), uploads refuse them.
                       secrets: () => secrets,
                     })
                   : {}),

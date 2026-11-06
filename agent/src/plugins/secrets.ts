@@ -13,9 +13,10 @@ import { headerSecretVariants, type PluginStore } from './registry.js'
  * - every OAuth sign-in's access and refresh tokens and client secret (`ai_plugin_oauth`,
  *   opened under the KEK).
  *
- * A turn's ToolCall tools redact and refuse uploads of these (main.ts `turnHeaderSecrets`,
- * tools/harness.ts), and a file picked from a workspace in the UI is refused when it holds
- * one (routes/sessionFiles.ts, #4703). One reader for both, so the two cannot drift.
+ * Every tool redacts and refuses uploads of these in every mode, an in-process turn, a
+ * ToolCall, /mcp and a background task alike (main.ts `toolServices.secrets`, #5480), and a
+ * file picked from a workspace in the UI is refused when it holds one (routes/sessionFiles.ts,
+ * #4703). One reader for all, so they cannot drift.
  *
  * It includes every sign-in's tokens, a plugin that is not enabled too: a token stays a
  * secret while it is stored. A value shorter than SECRET_MIN_CHARS is left out, so it

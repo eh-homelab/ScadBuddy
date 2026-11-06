@@ -91,7 +91,8 @@ function asToolError(err: unknown): never {
 }
 
 // CREDENTIALS. workspace_read redacts the agent's secrets (ToolServices.secrets:
-// every saved Claude credential, and a classic turn's plugin tokens) from what
+// every saved Claude credential and every plugin secret in every mode, plus an
+// in-process turn's loaded plugin headers, #5480) from what
 // the model sees, but an upload sends the bytes themselves. A secret that reached
 // the workspace (an http_request body, a browser download, a saved file) could
 // otherwise be moved into a README, a source file or an asset and read back

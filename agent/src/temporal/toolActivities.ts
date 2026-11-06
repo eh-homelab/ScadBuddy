@@ -191,12 +191,6 @@ export type ToolActivityDeps = {
   resolveBackoffMs?: readonly number[]
   /** Tool access (#4757): a package built-in's, which `builtin_tier` answers; every built-in `outward` without it. */
   access?: Pick<AccessResolver, 'builtin'> | undefined
-  /**
-   * A session turn's own secrets beside `services.secrets` (its remote plugins' and package
-   * servers' header values and forwarder URLs, as sessions/turnRunner.ts gathers them), which a
-   * ToolCall's tool redacts as the in-process call does (tools/harness.ts `withSecrets`, #2329).
-   */
-  turnSecrets?: ((session: string, owner: Owner) => Promise<readonly string[]>) | undefined
 }
 
 export type ToolActivity = (input: unknown) => Promise<unknown>
@@ -795,10 +789,9 @@ export function toolCallActivities(tools: readonly Tool[], deps: ToolActivityDep
         }
         const { turnTiers: sent, turnId, ...who } = owner
         const callKey = requestId ?? `call:${session}:${toolUseId}`
-        // Redacted of what the turn redacts in-process: its plugin and package tokens too.
-        const base = deps.services.secrets
-        const turnSecrets = deps.turnSecrets
-        const services = turnSecrets ? { ...deps.services, secrets: async () => [...((await base?.()) ?? []), ...(await turnSecrets(session, who))] } : deps.services
+        // `services.secrets` is the one list every mode checks (main.ts, #5480): the saved
+        // credentials and every plugin and package secret.
+        const services = deps.services
         const caller: Caller = {
           owner: who,
           session,
