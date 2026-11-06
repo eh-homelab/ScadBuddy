@@ -1066,7 +1066,7 @@ export const api = {
       body: JSON.stringify({ call_id: callId, answer }),
     }),
 
-  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string) =>
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string, boundHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1075,6 +1075,8 @@ export const api = {
         ...(reason ? { reason } : {}),
         // #2482: approve a parent's proposal, exactly the one shown (its hash).
         ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
+        // #4445: the printer the card named (its entry's `bound_hash`): another is refused.
+        ...(boundHash ? { bound_hash: boundHash } : {}),
       }),
     }),
 

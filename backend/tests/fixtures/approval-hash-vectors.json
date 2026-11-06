@@ -37,6 +37,12 @@
       "input_json": "{}",
       "canonical": "{\"input\":{},\"tool\":\"empty\"}",
       "hash": "2d70b96428cc575752fbedd79bcc3d0772cc1e34d260fec0babcf2621d5600d9"
+    },
+    {
+      "tool": "print_output",
+      "input_json": "{\"output_id\":\"o1\",\"printer\":\"00000000-0000-4000-8000-0000000000AA\",\"printer_id\":null}",
+      "canonical": "{\"input\":{\"output_id\":\"o1\",\"printer\":\"00000000-0000-4000-8000-0000000000AA\",\"printer_id\":null},\"tool\":\"print_output\"}",
+      "hash": "182a4effadf558f2d61449f70ea86a6bfa8254bd714b22fea6a118de668facb4"
     }
   ]
 }

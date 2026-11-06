@@ -69,6 +69,7 @@ from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Proposal, Run
 from scadbuddy.flows.narrowing import narrowing_problem
+from scadbuddy.flows.print_binding import api_lookup, bind_call, named_printer
 from scadbuddy.flows.store import (
     FlowStore,
     HopMovedError,
@@ -98,6 +99,10 @@ PROPOSAL_CHANGED = "https://scadbuddy.dev/problems/flow-escalation-proposal-chan
 NOT_NARROWER = "https://scadbuddy.dev/problems/flow-escalation-not-a-narrowing"
 PARENT_TIER = "https://scadbuddy.dev/problems/flow-escalation-parent-tier"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
+#: A print's registry printer links another printer than the run page showed (#4445).
+PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
+#: An approval of a print on a registry printer the run page could not name (#4445).
+PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
@@ -163,6 +168,30 @@ def _proposal_changed() -> ApiError:
     )
 
 
+def _printer_changed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The printer this call prints on is not the one you were shown. Reload it.",
+        type_=PRINTER_CHANGED,
+    )
+
+
+def _printer_unbound() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run page could not say which printer this call prints on, so it cannot be"
+        " approved yet. Reload it, and approve once it names the printer.",
+        type_=PRINTER_UNBOUND,
+    )
+
+
+def _printer_unreadable() -> ApiError:
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "Could not read the printer this call prints on, so nothing was approved. Try again.",
+    )
+
+
 def _unavailable_key() -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -218,7 +247,9 @@ def flow_kinds(
     them. `hash_key` makes an approval's input hash (`approval_hash.py`); None records
     none, and the agent then runs no approved tool call. `api` makes a client on
     ScadBuddy's own API, which a parent's narrowing is matched through (the grant's
-    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person."""
+    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person.
+    A person's approval of a `print_output` call that names a registry printer reads
+    that printer through it too (#4445); None, and that approval is refused."""
 
     async def answer_of(request: dict[str, Any]) -> str:
         if "answer" in request:
@@ -344,20 +375,50 @@ def flow_kinds(
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
-    async def parked_hash(checked: dict[str, Any], call_id: str) -> str | None:
+    async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:
         """The input hash of the call as it is parked (#2318): an outward agent tool's
         name and arguments, which the agent hashes again from the call it is asked to
-        run. None for a ScadBuddy host function (the workflow runs it itself)."""
+        run. None for a ScadBuddy host function (the workflow runs it itself). A print
+        on a registry printer is bound to the pair its row links now (#4445), which must
+        be the `bound_hash` the run page showed (`shown`): else a 409, which says
+        whether the page showed another pair or none."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
                 continue
             if parked.tool_name != APPROVED_TOOL or hash_key is None:
                 return None
+            name = str(parked.tool_input.get("name"))
             args = parked.tool_input.get("args")
-            return input_hash(
-                hash_key, str(parked.tool_input.get("name")), args if isinstance(args, dict) else {}
-            )
+            args = args if isinstance(args, dict) else {}
+            if named_printer(name, args) is not None:
+                # Bound to the registry printer's link as it is now (#4445), which the
+                # agent's gate checks again when the call runs.
+                registry = None if api is None else api()
+                if registry is None:
+                    raise ApiError(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "Approving a print on a registry printer needs SCADBUDDY_API_INTERNAL_URL.",
+                    )
+                try:
+                    args = (await bind_call(name, args, api_lookup(registry))).args
+                except httpx.HTTPError:
+                    # Nothing is recorded: the person approves again once the row reads.
+                    activity.logger.warning(
+                        "could not read the printer a flow's print names", exc_info=True
+                    )
+                    raise _printer_unreadable() from None
+                finally:
+                    await registry.aclose()
+                bound = input_hash(hash_key, name, args)
+                if not isinstance(shown, str):
+                    # The page showed no binding (its read of the run or of the printer
+                    # failed): never approved without one.
+                    raise _printer_unbound()
+                if not hmac.compare_digest(shown, bound):
+                    raise _printer_changed()
+                return bound
+            return input_hash(hash_key, name, args)
         raise _stale()
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
@@ -383,7 +444,9 @@ def flow_kinds(
         elif approved and await store.get_decision(decision.request_id) is None:
             # Bound to the call as it waits now, which is what the person was shown; a
             # resend keeps the hash its first attempt recorded.
-            decision.input_hash = await parked_hash(checked, decision.call_id)
+            decision.input_hash = await parked_hash(
+                checked, decision.call_id, request.get("bound_hash")
+            )
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:

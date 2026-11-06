@@ -1331,6 +1331,11 @@ export const printTools: Tool[] = [
       const input = args.printer === undefined || lan ? args : { ...args, printer_id: printerId }
       return { input, summary: printSummary(input, name, native) }
     },
+    // #4445: a flow's call that names only `printer` binds the printer_id the row links, or
+    // null for a row only the LAN reaches, so a re-link since the approval never matches.
+    // As backend flows/print_binding.py binds a person's approval.
+    flowBinding: (args, resolved) =>
+      args.printer === undefined || args.printer_id !== undefined ? {} : { printer_id: resolved.printer_id ?? null },
     // Its own wait for the print run, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async (args, ctx) => {

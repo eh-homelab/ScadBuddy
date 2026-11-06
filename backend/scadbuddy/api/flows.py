@@ -49,6 +49,7 @@ from scadbuddy.flow_triggers.component import Triggers, TriggersDep
 from scadbuddy.flow_triggers.fire import pause_for_flow
 from scadbuddy.flow_triggers.models import RunTrigger
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
+from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
     FlowDeletedError,
@@ -91,9 +92,12 @@ from scadbuddy.flows.operations import (
     NOT_PARENT,
     seal_answer,
 )
+from scadbuddy.flows.print_binding import PrinterLookup, bind_call
 from scadbuddy.flows.store import GrantStateError
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
@@ -237,6 +241,12 @@ class PendingEntry(BaseModel):
     #: Whether the starting session narrowed it into a proposal the person may approve.
     proposed: bool = False
     hops: list[HopRecord] = []
+    #: What the call does, in ScadBuddy's own words, when it reads it from ScadBuddy's
+    #: own records: a `print_output` call's registry printer (#4445). Never the input.
+    summary: str | None = None
+    #: With `summary`: the input hash the approval binds (the printer the summary names),
+    #: which an approval sends back as `bound_hash` (#4445).
+    bound_hash: str | None = None
 
 
 class GrantUseView(BaseModel):
@@ -736,9 +746,12 @@ async def _starting(client: Client, run_id: str) -> RunView | None:
     return None
 
 
-async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
+async def _pending(
+    client: Client, run: Run, lookup: PrinterLookup, hash_key: bytes | None
+) -> tuple[list[PendingEntry], bool]:
     """The run's parked calls: from the workflow's `agent_status`, joined with the row's
-    `waiting_on` for the prompt and the time; from the row alone if it does not answer."""
+    `waiting_on` for the prompt and the time; from the row alone if it does not answer.
+    A `print_output` call names the registry printer it prints on (#4445)."""
     waiting = {w.call_id: w for w in run.waiting_on}
     try:
         async with asyncio.timeout(_STATUS_SECONDS):
@@ -757,6 +770,18 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
                 fn=HOST_FN.get(approval.tool_name, approval.tool_name),
             )
         )
+        if (call := parked_call(approval.tool_name, approval.tool_input)) is not None:
+            _, tool, args = call
+            try:
+                bound = await bind_call(tool, args, lookup)
+            except psycopg.Error:
+                # The page still shows the call; with no binding, an approval is refused
+                # until a read names the printer (`flow-printer-unbound`).
+                logger.warning("could not read the printer a parked print names", exc_info=True)
+                continue
+            entries[-1].summary = bound.summary
+            if bound.summary is not None and hash_key is not None and tool is not None:
+                entries[-1].bound_hash = input_hash(hash_key, tool, bound.args)
     for callback in status_.pending_callbacks:
         seen = waiting.get(callback.tool_id)
         entries.append(
@@ -772,8 +797,10 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
 
 
 @router.get("/workflow-runs/{run_id}", response_model=RunView, summary="Get a flow run")
-async def get_flow_run(run_id: str, flows: FlowsDep, triggers: TriggersDep) -> RunView:
-    view = await _run_view(run_id, flows)
+async def get_flow_run(
+    run_id: str, flows: FlowsDep, triggers: TriggersDep, printers: PrintersDep
+) -> RunView:
+    view = await _run_view(run_id, flows, printers)
     if (fired := await triggers.store.fire_of_run(run_id)) is not None:
         fire, trigger = fired
         view.trigger = RunTrigger(
@@ -786,7 +813,7 @@ async def get_flow_run(run_id: str, flows: FlowsDep, triggers: TriggersDep) -> R
     return view
 
 
-async def _run_view(run_id: str, flows: Flows) -> RunView:
+async def _run_view(run_id: str, flows: Flows, printers: Printers) -> RunView:
     run = await flows.store.get_run(run_id)
     if run is None:
         if flows.client is None or (view := await _starting(flows.client, run_id)) is None:
@@ -814,8 +841,19 @@ async def _run_view(run_id: str, flows: Flows) -> RunView:
     if flows.client is None:
         view.pending = [PendingEntry.model_validate(w.model_dump()) for w in run.waiting_on]
         return view
-    view.pending, view.live = await _pending(flows.client, run)
+    view.pending, view.live = await _pending(
+        flows.client, run, _registry(printers), approval_key(flows.settings)
+    )
     return view
+
+
+def _registry(printers: Printers) -> PrinterLookup:
+    """A lookup of the printer registry, which this process holds."""
+
+    async def lookup(printer: str) -> PrinterRow | None:
+        return await asyncio.to_thread(printers.store.get, printer)
+
+    return lookup
 
 
 #: An image's bytes never change under its name (the name is their sha256).
@@ -911,6 +949,9 @@ class DecideBody(BaseModel):
     #: (`GET .../proposals/{call_id}`). Any other, or none, is refused: the person
     #: approves what they saw, never a proposal replaced since.
     proposal_hash: str | None = Field(default=None, max_length=128)
+    #: The pending entry's `bound_hash` the person was shown (#4445): an approval of a
+    #: print on a registry printer is refused (409) unless the row still links that pair.
+    bound_hash: str | None = Field(default=None, max_length=128)
 
 
 class ProposalView(BaseModel):
