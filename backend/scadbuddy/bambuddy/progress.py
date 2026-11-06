@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal, Protocol
 
 import psycopg
@@ -586,14 +586,13 @@ def _print_of(progress: PrintProgress) -> _PrintIds:
     return progress.run_id, frozenset(item for item in items if item is not None)
 
 
-def _is_of(ids: _PrintIds, run_id: str | None, queue_item_ids: Collection[int]) -> bool:
+def _is_of(ids: _PrintIds, run_id: str | None, queue_item_ids: frozenset[int]) -> bool:
     """Whether a read of ``ids`` was of the print run ``run_id`` started or queued as
     ``queue_item_ids``."""
     read_run, read_items = ids
     if run_id is not None and read_run == run_id:
         return True
-    queued = queue_item_ids if isinstance(queue_item_ids, frozenset) else frozenset(queue_item_ids)
-    return bool(read_items) and read_items <= queued
+    return bool(read_items) and read_items <= queue_item_ids
 
 
 #: Outputs whose last observed progress :class:`ProgressObserver` remembers.
@@ -626,7 +625,11 @@ class ProgressObserver:
         self._lock = threading.Lock()
 
     def started(
-        self, meta: OutputMeta, *, run_id: str | None = None, queue_item_ids: Collection[int] = ()
+        self,
+        meta: OutputMeta,
+        *,
+        run_id: str | None = None,
+        queue_item_ids: frozenset[int] = frozenset(),
     ) -> None:
         """A print of ``meta`` was just started: whatever was seen before is stale, unless
         it is of this print, which run ``run_id`` started over the LAN or queued as
@@ -639,7 +642,7 @@ class ProgressObserver:
         slug: str,
         *,
         run_id: str | None = None,
-        queue_item_ids: Collection[int] = (),
+        queue_item_ids: frozenset[int] = frozenset(),
     ) -> None:
         """A print of the run subject ``key`` (an output's id, or ``library:<file id>``,
         #1751) was just started: whatever was seen before is stale, unless it is of
