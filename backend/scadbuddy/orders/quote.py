@@ -41,6 +41,7 @@ from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
+from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
     OPEN_FOR_EDITS,
     QUOTE_HOLDER,
@@ -586,6 +587,16 @@ class QuoteRun:
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None
 
 
+def operation_quote_id(operation: str | None) -> str:
+    """The id a quote's run records its quote under (#5353): the operation's (its
+    workflow id, the same on every attempt), so an attempt that runs again after its
+    worker stopped (a rollout) finds the quote an earlier attempt recorded. A run
+    outside an operation gets one of its own."""
+    if operation is None:
+        return uuid.uuid4().hex
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote:{operation}").hex
+
+
 def subject_of(item_id: str) -> str:
     """The quote's subject (§5.4's, Ruling 1): an item's quote and its print are the
     same subject's work."""
@@ -593,11 +604,26 @@ def subject_of(item_id: str) -> str:
 
 
 async def quote_run(
-    run: QuoteRun, order_id: str, item_id: str, request: SliceQuoteRequest, by: Actor
+    run: QuoteRun,
+    order_id: str,
+    item_id: str,
+    request: SliceQuoteRequest,
+    by: Actor,
+    *,
+    quote_id: str | None = None,
 ) -> Quote:
-    """The whole run, in the order the module docstring gives."""
+    """The whole run, in the order the module docstring gives. ``quote_id`` is the id
+    every attempt of one operation records under (:func:`operation_quote_id`): an
+    attempt that finds it recorded answers with it and does nothing (#5353)."""
     lifecycle = run.lifecycle
     store = lifecycle.store
+    quote_id = quote_id or uuid.uuid4().hex
+    recorded = await asyncio.to_thread(store.quote, quote_id)
+    if recorded is not None and recorded.order_item_id == item_id:
+        return recorded
+    # An earlier attempt's holds, from a worker that stopped before it recorded: this
+    # attempt takes them again, so the reaper never ages them out from under it.
+    await _drop(run.refs, quote_id, True)
     try:
         await asyncio.to_thread(set_filaments, lifecycle, order_id, item_id, request.filaments, by)
     except LifecycleError as error:
@@ -635,8 +661,13 @@ async def quote_run(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
-    quote_id = uuid.uuid4().hex
     held = False
+    landed = False
+
+    def mark(_: Quote) -> None:
+        nonlocal landed
+        landed = True
+
     try:
         plates: list[Plate] = []
         for plate in sliced:
@@ -656,7 +687,9 @@ async def quote_run(
         first = plates[0]
         assert first.sha256 is not None and first.blob_key is not None
         try:
-            return await asyncio.to_thread(
+            # To its end: a cancel (the worker stopping) after the commit must not drop
+            # the holds of a quote that stands (#5353).
+            return await to_thread_to_end(
                 lambda: lifecycle.record_slice_quote(
                     order_id,
                     item_id,
@@ -667,7 +700,8 @@ async def quote_run(
                     by=by,
                     revision_id=revision_id,
                     quote_id=quote_id,
-                )
+                ),
+                mark,
             )
         except LifecycleError as error:
             raise refused(error) from None
@@ -685,7 +719,8 @@ async def quote_run(
             **extensions,
         ) from None
     except BaseException:
-        await _drop(run.refs, quote_id, held)
+        if not landed:
+            await _drop(run.refs, quote_id, held)
         raise
 
 

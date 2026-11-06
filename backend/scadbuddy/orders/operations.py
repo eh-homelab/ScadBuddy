@@ -43,7 +43,7 @@ from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
-from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
+from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
 from scadbuddy.orders.archives import copy_check, copy_in
 from scadbuddy.orders.bambuddy import download_sliced, quote_preview_job, start_quote_preview
@@ -58,6 +58,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    operation_quote_id,
     quote_check,
     quote_run,
 )
@@ -386,6 +387,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             request["item_id"],
             SliceQuoteRequest.model_validate(request["request"]),
             Actor.model_validate(request["by"]),
+            quote_id=operation_quote_id(OPERATION_RUN.get()),
         )
         dumped: dict[str, Any] = quote.model_dump(mode="json")
         return dumped
@@ -716,7 +718,12 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             ORDER_ITEM_QUOTE,
             quote_check_kind,
             quote_run_kind,
-            run_attempts=1,
+            # A worker that stops mid-run (a rollout: the API pod holds the `library`
+            # worker) fails its attempt as a retryable `WorkerShutdown`, or misses its
+            # heartbeat; the next attempt runs on the new pod (#5353). Every attempt
+            # records under the operation's quote id, so one that finds it recorded
+            # answers with it, and a transient Bambuddy failure is tried again too.
+            run_attempts=3,
             queue="library",
             run_timeout=QUOTE_TIMEOUT,
             where="the item's quotes",
