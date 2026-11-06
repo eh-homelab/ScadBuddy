@@ -2,21 +2,23 @@
 2026-11-05 §6.1, §6.2, §7.2, §11 D1, D2).
 
 In Kubernetes a caller presents its projected ServiceAccount token (audience
-:data:`AUDIENCE`), which :class:`TokenReviewVerifier` asks the apiserver about with the
-API pod's own token: a deleted pod's token is refused at once, and the credential is bound
-to the pod's name and uid. Outside it, :class:`BootstrapVerifier` compares a per-caller
-secret with the hashes read at start from ``SCADBUDDY_SERVICE_BOOTSTRAP_DIR``. Each
-verifier answers the caller it proved, or ``None``; a verifier that cannot answer at all
-raises :class:`VerifierUnavailableError`. Nothing here logs a presented token.
+:data:`AUDIENCE`). :class:`TokenReviewVerifier` first checks it offline against the
+cluster issuer's JWKS (signature RS256 or ES256, ``iss``, ``aud``, ``exp``/``nbf``, and a
+``sub`` that names a ScadBuddy caller); only such a token is then sent to TokenReview,
+with the API pod's own token, so a deleted pod's token is refused at once and the
+credential is bound to the pod's name and uid. A forged or junk token is refused without
+a TokenReview and spends nothing (review of #5498). Outside Kubernetes,
+:class:`BootstrapVerifier` compares a per-caller secret with the hashes read at start
+from ``SCADBUDDY_SERVICE_BOOTSTRAP_DIR``. Each verifier answers the caller it proved, or
+``None``; one that cannot answer at all raises :class:`VerifierUnavailableError`.
+Nothing here logs a presented token.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
+import asyncio
 import hashlib
 import hmac
-import json
 import logging
 import math
 import os
@@ -29,105 +31,65 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import httpx
+from joserfc import errors as jose_errors
+from joserfc import jwt
+from joserfc.jwk import KeySet
 
 from scadbuddy.auth.service_credentials import CALLERS, ServiceCaller
 
 logger = logging.getLogger(__name__)
 
-#: Review of #5498: refused proofs are limited before any TokenReview. Per API process,
-#: at most this many proofs a minute reach a verifier ...
-VERIFIER_BUDGET = 60
-#: ... and a claimed caller with this many refusals in a minute is limited for the rest
-#: of it (all its proofs, its real one too, answer 429 without a TokenReview).
-REFUSALS_PER_CALLER = 10
-LIMIT_WINDOW = 60.0
-#: The bucket of every claim that names no caller, so a forger cannot grow the table.
-UNKNOWN = "unknown"
+#: Per API process, at most this many TokenReviews a minute. Only a token the cluster
+#: signed for a known caller spends it, so junk and forgeries cannot exhaust it.
+REVIEW_BUDGET = 60
+BUDGET_WINDOW = 60.0
+#: The algorithms a cluster signs ServiceAccount tokens with; never ``none`` or HS*.
+JWT_ALGORITHMS = ("RS256", "ES256")
+#: Clock skew allowed on ``exp`` and ``nbf``.
+LEEWAY_SECONDS = 30
+#: The JWKS and the issuer are kept this long ...
+JWKS_CACHE_SECONDS = 3600.0
+#: ... and fetched again for an unknown ``kid`` at most this often.
+JWKS_REFETCH_SECONDS = 30.0
 
 
-class ProofLimiter:
-    """The two limits on proofs, in this process's memory (one event loop, no lock):
-    :meth:`spend` before each verifier call, :meth:`check` and :meth:`refused` per
-    claimed caller. Each answers the seconds to wait, or ``None``."""
+class ReviewLimitedError(Exception):
+    """The TokenReview budget is spent: ``retry_after`` seconds until one more."""
+
+    def __init__(self, caller: ServiceCaller, retry_after: int) -> None:
+        super().__init__(f"retry after {retry_after} s")
+        self.caller = caller
+        self.retry_after = retry_after
+
+
+class ReviewBudget:
+    """:data:`REVIEW_BUDGET` TokenReviews a minute, in this process's memory (one event
+    loop, no lock)."""
 
     def __init__(
-        self,
-        *,
-        budget: int = VERIFIER_BUDGET,
-        refusals: int = REFUSALS_PER_CALLER,
-        clock: Callable[[], float] = time.monotonic,
+        self, *, budget: int = REVIEW_BUDGET, clock: Callable[[], float] = time.monotonic
     ) -> None:
         self._budget = budget
-        self._refusals = refusals
         self._clock = clock
         self._spent: deque[float] = deque()
-        self._refused: dict[str, deque[float]] = {}
 
-    def _trim(self, times: deque[float], now: float) -> None:
-        while times and now - times[0] >= LIMIT_WINDOW:
-            times.popleft()
+    def _trim(self, now: float) -> None:
+        while self._spent and now - self._spent[0] >= BUDGET_WINDOW:
+            self._spent.popleft()
 
-    def _wait(self, times: deque[float], now: float) -> int:
-        return max(1, math.ceil(times[0] + LIMIT_WINDOW - now))
+    @property
+    def spent(self) -> int:
+        self._trim(self._clock())
+        return len(self._spent)
 
     def spend(self) -> int | None:
-        """One proof reaches a verifier, or the seconds until one may."""
+        """One TokenReview may go, or the seconds until one may."""
         now = self._clock()
-        self._trim(self._spent, now)
+        self._trim(now)
         if len(self._spent) >= self._budget:
-            return self._wait(self._spent, now)
+            return max(1, math.ceil(self._spent[0] + BUDGET_WINDOW - now))
         self._spent.append(now)
         return None
-
-    def check(self, claimed: str) -> int | None:
-        now = self._clock()
-        times = self._refused.get(claimed)
-        if times is None:
-            return None
-        self._trim(times, now)
-        if len(times) >= self._refusals:
-            return self._wait(times, now)
-        return None
-
-    def refused(self, claimed: str) -> None:
-        now = self._clock()
-        times = self._refused.setdefault(claimed, deque())
-        self._trim(times, now)
-        times.append(now)
-
-
-def _claims(token: str) -> dict[str, Any] | None:
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1]
-    try:
-        data = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-        claims = json.loads(data)
-    except (binascii.Error, ValueError):
-        return None
-    return claims if isinstance(claims, dict) else None
-
-
-def claimed_caller(token: str, namespace: str) -> str | None:
-    """The caller a JWT's payload claims (``kubernetes.io.serviceaccount.name``, else
-    ``sub``), read WITHOUT checking its signature: only a refusal bucket's key, never who
-    the caller is. :data:`UNKNOWN` for a claim of no ScadBuddy ServiceAccount here, and
-    ``None`` for a token that is not a JWT."""
-    claims = _claims(token)
-    if claims is None:
-        return None
-    k8s = claims.get("kubernetes.io")
-    account = k8s.get("serviceaccount") if isinstance(k8s, dict) else None
-    name = account.get("name") if isinstance(account, dict) else None
-    claimed_namespace = k8s.get("namespace") if isinstance(k8s, dict) else None
-    if isinstance(name, str) and claimed_namespace == namespace:
-        username = f"system:serviceaccount:{namespace}:{name}"
-    elif isinstance(claims.get("sub"), str):
-        username = claims["sub"]
-    else:
-        return UNKNOWN
-    return caller_for_service_account(username, namespace) or UNKNOWN
 
 
 #: The audience every caller's projected token is issued for, and the only one accepted.
@@ -177,17 +139,13 @@ class VerifierUnavailableError(Exception):
 
 
 class ProofVerifier(Protocol):
-    def claim(self, token: str, client_id: str) -> str | None:
-        """The caller the proof claims to be, unverified: a refusal bucket's key, or
-        ``None`` for a token that cannot be a proof of this kind."""
-        ...
-
     async def verify(self, token: str) -> VerifiedProof | None: ...
 
 
 def caller_for_service_account(username: str, namespace: str) -> ServiceCaller | None:
-    """The caller a TokenReview's ``status.user.username`` names, or ``None``: an unknown
-    ServiceAccount, ``default``, another namespace, or no namespace configured."""
+    """The caller a token's ``sub`` or a TokenReview's ``status.user.username`` names, or
+    ``None``: an unknown ServiceAccount, ``default``, another namespace, or no namespace
+    configured."""
     if not namespace:
         return None
     prefix = f"system:serviceaccount:{namespace}:"
@@ -203,9 +161,16 @@ def _one(extra: Mapping[str, Any], key: str) -> str | None:
     return None
 
 
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
 class TokenReviewVerifier:
-    """§6.2 steps 1 to 3: a TokenReview with ``spec.audiences: ["scadbuddy"]``, sent with
-    the API pod's own token (re-read each time: the kubelet rotates it)."""
+    """§6.2 steps 1 to 3, behind an offline check (review of #5498): the token's signature
+    against the issuer's JWKS and its claims first, then a TokenReview with
+    ``spec.audiences: ["scadbuddy"]`` within :class:`ReviewBudget`. Every call to the
+    apiserver is made with the API pod's own token, re-read each time (the kubelet
+    rotates it)."""
 
     def __init__(
         self,
@@ -215,14 +180,22 @@ class TokenReviewVerifier:
         token_file: Path,
         ca_file: Path | None,
         transport: httpx.AsyncBaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], float] = time.time,
     ) -> None:
         self.namespace = namespace
-        self._url = url.rstrip("/") + "/apis/authentication.k8s.io/v1/tokenreviews"
+        self._base = url.rstrip("/")
         self._token_file = token_file
         self._verify: ssl.SSLContext | bool = (
             ssl.create_default_context(cafile=str(ca_file)) if ca_file is not None else True
         )
         self._transport = transport
+        self._clock = clock
+        self._now = now
+        self.budget = ReviewBudget(clock=clock)
+        self._keys_lock = asyncio.Lock()
+        self._keys: tuple[float, str, KeySet] | None = None
+        self._refetched_at: float | None = None
 
     @classmethod
     def in_cluster(cls, namespace: str) -> TokenReviewVerifier | None:
@@ -241,25 +214,117 @@ class TokenReviewVerifier:
             ca_file=IN_CLUSTER_CA,
         )
 
-    def claim(self, token: str, client_id: str) -> str | None:
-        return claimed_caller(token, self.namespace)
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            verify=self._verify, transport=self._transport, timeout=REVIEW_TIMEOUT
+        )
 
-    async def verify(self, token: str) -> VerifiedProof | None:
+    def _own_token(self) -> str:
         try:
-            own = self._token_file.read_text().strip()
+            return self._token_file.read_text().strip()
         except OSError as error:
             raise VerifierUnavailableError("the API pod has no apiserver token") from error
+
+    async def _get(self, client: httpx.AsyncClient, path: str) -> dict[str, Any]:
+        try:
+            response = await client.get(
+                self._base + path, headers={"Authorization": f"Bearer {self._own_token()}"}
+            )
+        except httpx.HTTPError as error:
+            raise VerifierUnavailableError(type(error).__name__) from error
+        if response.status_code != 200:
+            raise VerifierUnavailableError(f"{path} answered {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise VerifierUnavailableError(f"{path} answered no JSON") from error
+        if not isinstance(data, dict):
+            raise VerifierUnavailableError(f"{path} answered no object")
+        return data
+
+    async def _issuer_keys(self, *, refetch: bool = False) -> tuple[str, KeySet]:
+        """The issuer (from its discovery document) and its JWKS, both read from the
+        apiserver itself (`kubernetes.default.svc`), never from the discovery's
+        ``jwks_uri``. Kept :data:`JWKS_CACHE_SECONDS`; ``refetch`` (an unknown ``kid``)
+        reads them again at most every :data:`JWKS_REFETCH_SECONDS`."""
+        async with self._keys_lock:
+            now = self._clock()
+            cached = self._keys
+            if cached is not None:
+                fresh = now - cached[0] < JWKS_CACHE_SECONDS
+                if not refetch and fresh:
+                    return cached[1], cached[2]
+                if (
+                    refetch
+                    and self._refetched_at is not None
+                    and now - self._refetched_at < JWKS_REFETCH_SECONDS
+                ):
+                    return cached[1], cached[2]
+            async with self._client() as client:
+                discovery = await self._get(client, "/.well-known/openid-configuration")
+                jwks = await self._get(client, "/openid/v1/jwks")
+            issuer = discovery.get("issuer")
+            if not isinstance(issuer, str) or not issuer:
+                raise VerifierUnavailableError("the cluster's discovery names no issuer")
+            try:
+                keys = KeySet.import_key_set(jwks)  # type: ignore[arg-type]
+            except (jose_errors.JoseError, ValueError, TypeError, KeyError):
+                raise VerifierUnavailableError("the cluster's JWKS holds no usable key") from None
+            if refetch:
+                self._refetched_at = now
+            self._keys = (now, issuer, keys)
+            return issuer, keys
+
+    async def _signed_caller(self, token: str) -> ServiceCaller | None:
+        """The caller a token the cluster signed names, checked offline; ``None`` for
+        anything else (no TokenReview, no budget)."""
+        issuer, keys = await self._issuer_keys()
+        try:
+            decoded = jwt.decode(token, keys, algorithms=list(JWT_ALGORITHMS))
+        except jose_errors.InvalidKeyIdError:
+            issuer, keys = await self._issuer_keys(refetch=True)
+            try:
+                decoded = jwt.decode(token, keys, algorithms=list(JWT_ALGORITHMS))
+            except (jose_errors.JoseError, ValueError, TypeError):
+                return None
+        except (jose_errors.JoseError, ValueError, TypeError):
+            return None
+        if not isinstance(decoded.header.get("kid"), str):
+            return None
+        claims = decoded.claims
+        aud = claims.get("aud")
+        audiences = [aud] if isinstance(aud, str) else aud if isinstance(aud, list) else []
+        at = self._now()
+        exp, nbf = _number(claims.get("exp")), _number(claims.get("nbf"))
+        if (
+            claims.get("iss") != issuer
+            or AUDIENCE not in audiences
+            or exp is None
+            or exp + LEEWAY_SECONDS <= at
+            or (claims.get("nbf") is not None and (nbf is None or nbf - LEEWAY_SECONDS > at))
+        ):
+            return None
+        sub = claims.get("sub")
+        return caller_for_service_account(sub, self.namespace) if isinstance(sub, str) else None
+
+    async def verify(self, token: str) -> VerifiedProof | None:
+        caller = await self._signed_caller(token)
+        if caller is None:
+            return None
+        wait = self.budget.spend()
+        if wait is not None:
+            raise ReviewLimitedError(caller, wait)
         review = {
             "apiVersion": "authentication.k8s.io/v1",
             "kind": "TokenReview",
             "spec": {"token": token, "audiences": [AUDIENCE]},
         }
         try:
-            async with httpx.AsyncClient(
-                verify=self._verify, transport=self._transport, timeout=REVIEW_TIMEOUT
-            ) as client:
+            async with self._client() as client:
                 response = await client.post(
-                    self._url, json=review, headers={"Authorization": f"Bearer {own}"}
+                    self._base + "/apis/authentication.k8s.io/v1/tokenreviews",
+                    json=review,
+                    headers={"Authorization": f"Bearer {self._own_token()}"},
                 )
         except httpx.HTTPError as error:
             raise VerifierUnavailableError(type(error).__name__) from error
@@ -269,7 +334,11 @@ class TokenReviewVerifier:
             status = response.json().get("status") or {}
         except ValueError as error:
             raise VerifierUnavailableError("TokenReview answered no JSON") from error
-        return self._proof(status)
+        proof = self._proof(status)
+        if proof is not None and proof.caller != caller:
+            logger.warning("refused a service-token exchange: TokenReview named another caller")
+            return None
+        return proof
 
     def _proof(self, status: Mapping[str, Any]) -> VerifiedProof | None:
         if status.get("authenticated") is not True:
@@ -334,10 +403,6 @@ class BootstrapVerifier:
         if not hashes:
             logger.warning("SCADBUDDY_SERVICE_BOOTSTRAP_DIR holds no caller's secret")
         return cls(hashes)
-
-    def claim(self, token: str, client_id: str) -> str | None:
-        """The caller named in the request's ``client_id``; a bootstrap secret says nothing."""
-        return client_id if client_id in CALLERS else UNKNOWN
 
     async def verify(self, token: str) -> VerifiedProof | None:
         presented = hashlib.sha256(token.strip().encode()).digest()

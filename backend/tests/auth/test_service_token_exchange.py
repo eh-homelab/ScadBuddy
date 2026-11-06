@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 import secrets
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,18 +19,20 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
+from joserfc import jwt
+from joserfc.jwk import ECKey, KeySet, OctKey, RSAKey
 from pydantic import ValidationError
 
 from scadbuddy.auth.exchange import (
     AUDIENCE,
     BootstrapConfigError,
     BootstrapVerifier,
-    ProofLimiter,
+    ReviewBudget,
+    ReviewLimitedError,
     TokenReviewVerifier,
     VerifiedProof,
     VerifierUnavailableError,
     caller_for_service_account,
-    claimed_caller,
 )
 from scadbuddy.auth.models import Service
 from scadbuddy.auth.service_credentials import (
@@ -51,76 +55,65 @@ from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, PgPool
 
 KEK = Kek("k1", os.urandom(32))
 NAMESPACE = "bambuddy"
+ISSUER = "https://kubernetes.default.svc.cluster.local"
+
+# The cluster's signing keys: one RSA (as the cluster's, RS256) and one EC (ES256).
+SIGNING_KEY = RSAKey.generate_key(2048, parameters={"kid": "rsa-1"})
+EC_KEY = ECKey.generate_key("P-256", parameters={"kid": "ec-1"})
+# A key the cluster never published: what a forger signs with.
+FORGER_KEY = RSAKey.generate_key(2048, parameters={"kid": "rsa-1"})
 
 
 def _b64(data: dict[str, Any]) -> str:
     return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
 
 
-def fake_jwt(service_account: str, *, nonce: str = "", namespace: str = NAMESPACE) -> str:
-    """A token shaped like a projected one; its signature is junk, as nothing here checks it."""
-    claims = {
+def claims_for(
+    service_account: str, *, namespace: str = NAMESPACE, nonce: str = "", **override: Any
+) -> dict[str, Any]:
+    now = int(time.time())
+    claims: dict[str, Any] = {
+        "iss": ISSUER,
         "aud": [AUDIENCE],
         "sub": f"system:serviceaccount:{namespace}:{service_account}",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 3600,
         "kubernetes.io": {"namespace": namespace, "serviceaccount": {"name": service_account}},
         "nonce": nonce,
     }
-    return f"{_b64({'alg': 'RS256'})}.{_b64(claims)}.c2lnbmF0dXJl"
+    claims.update(override)
+    return claims
 
 
-# The claimed caller (an unverified bucket key) and the refusal limits.
+def signed(
+    service_account: str,
+    *,
+    key: Any = SIGNING_KEY,
+    alg: str = "RS256",
+    kid: str | None = None,
+    **claims: Any,
+) -> str:
+    """A projected token as the cluster (or, with another key, a forger) signs it."""
+    header = {"alg": alg, "kid": kid or key.kid}
+    return jwt.encode(header, claims_for(service_account, **claims), key)
 
 
-@pytest.mark.parametrize(
-    ("token", "claimed"),
-    [
-        (fake_jwt("scadbuddy-print"), "print"),
-        (fake_jwt("scadbuddy"), "agent"),
-        # Only `sub` names it.
-        (
-            f"{_b64({})}.{_b64({'sub': 'system:serviceaccount:bambuddy:scadbuddy-render'})}.x",
-            "render",
-        ),
-        # Anything else shares one bucket, so a forger cannot grow the table.
-        (fake_jwt("pgadmin"), "unknown"),
-        (fake_jwt("scadbuddy-print", namespace="other"), "unknown"),
-    ],
-)
-def test_the_claimed_caller_of_a_jwt(token: str, claimed: str) -> None:
-    assert claimed_caller(token, NAMESPACE) == claimed
+def unsigned(service_account: str) -> str:
+    """``alg: none``: no signature at all."""
+    header = _b64({"alg": "none", "kid": "rsa-1"})
+    return f"{header}.{_b64(claims_for(service_account))}."
 
 
-@pytest.mark.parametrize(
-    "token", ["jwt", "a.b", "a.!!!.c", f"a.{_b64({'x': 1})[:-1]}%.c", "a.WzFd.c"]
-)
-def test_a_token_that_is_not_a_jwt_claims_nothing(token: str) -> None:
-    assert claimed_caller(token, NAMESPACE) is None
-
-
-def test_the_verifier_budget_is_60_a_minute() -> None:
-    clock = Clock()
-    limiter = ProofLimiter(clock=clock)
-    for _ in range(60):
-        assert limiter.spend() is None
-    wait = limiter.spend()
-    assert wait == 60
-    clock.now += 30
-    assert limiter.spend() == 30
-    clock.now += 30
-    assert limiter.spend() is None
-
-
-def test_more_than_ten_refusals_a_minute_limit_the_claimed_caller() -> None:
-    clock = Clock()
-    limiter = ProofLimiter(clock=clock)
-    for _ in range(10):
-        assert limiter.check("print") is None
-        limiter.refused("print")
-    assert limiter.check("print") == 60
-    # Another caller's bucket is its own.
-    assert limiter.check("agent") is None
-    clock.now += 60
-    assert limiter.check("print") is None
+def hs256(service_account: str) -> str:
+    """HS256 under a key a forger chose (the classic confusion of a public key for a
+    shared secret)."""
+    return jwt.encode(
+        {"alg": "HS256", "kid": "rsa-1"},
+        claims_for(service_account),
+        OctKey.import_key(b"x" * 32),
+        algorithms=["HS256"],
+    )
 
 
 # The ServiceAccount map (§6.1).
@@ -152,7 +145,19 @@ def test_no_namespace_maps_nothing() -> None:
     assert caller_for_service_account("system:serviceaccount:bambuddy:scadbuddy-print", "") is None
 
 
-# TokenReview (§6.2), against a fake apiserver.
+def test_the_tokenreview_budget_is_60_a_minute() -> None:
+    clock = Clock()
+    budget = ReviewBudget(clock=clock)
+    for _ in range(60):
+        assert budget.spend() is None
+    assert budget.spend() == 60
+    clock.now += 30
+    assert budget.spend() == 30
+    clock.now += 30
+    assert budget.spend() is None
+
+
+# The offline check and TokenReview (§6.2, review of #5498), against a fake apiserver.
 
 
 POD_EXTRA = {
@@ -163,44 +168,70 @@ POD_EXTRA = {
 
 
 class FakeApiserver:
-    """Answers TokenReviews: each known JWT names a username, its extra and audiences."""
+    """The cluster's issuer discovery, its JWKS and TokenReview. A review authenticates
+    every token signed by a published key, as the token's `sub`, bound to a pod, unless
+    the token was revoked or given a status of its own."""
 
     def __init__(self, own_token: str = "api-pod-token") -> None:
         self.own_token = own_token
-        self.reviews: dict[str, dict[str, Any]] = {}
+        self.keys: list[Any] = [SIGNING_KEY, EC_KEY]
+        self.statuses: dict[str, dict[str, Any]] = {}
+        self.revoked: set[str] = set()
+        #: TokenReviews only.
         self.requests: list[httpx.Request] = []
+        self.jwks_fetches = 0
         self.status = 201
+        self.jwks_status = 200
 
-    def add(
+    def revoke(self, token: str) -> None:
+        self.revoked.add(token)
+
+    def review_as(
         self,
-        jwt: str,
-        username: str,
+        token: str,
         *,
+        username: str | None = None,
         extra: dict[str, list[str]] | None = None,
         audiences: list[str] | None = None,
     ) -> None:
-        self.reviews[jwt] = {
+        sub = jwt.decode(token, KeySet(self.keys), algorithms=["RS256", "ES256"]).claims["sub"]
+        self.statuses[token] = {
             "authenticated": True,
-            "user": {"username": username, "extra": POD_EXTRA if extra is None else extra},
+            "user": {"username": username or sub, "extra": POD_EXTRA if extra is None else extra},
             "audiences": [AUDIENCE] if audiences is None else audiences,
         }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization") != f"Bearer {self.own_token}":
+            return httpx.Response(401)
+        if request.url.path == "/.well-known/openid-configuration":
+            return httpx.Response(
+                200,
+                json={"issuer": ISSUER, "jwks_uri": "https://192.168.11.51:6443/openid/v1/jwks"},
+            )
+        if request.url.path == "/openid/v1/jwks":
+            self.jwks_fetches += 1
+            if self.jwks_status != 200:
+                return httpx.Response(self.jwks_status)
+            return httpx.Response(200, json={"keys": [k.as_dict(private=False) for k in self.keys]})
+        assert request.url.path == "/apis/authentication.k8s.io/v1/tokenreviews"
         self.requests.append(request)
         if self.status != 201:
             return httpx.Response(self.status)
-        assert request.url.path == "/apis/authentication.k8s.io/v1/tokenreviews"
-        if request.headers.get("authorization") != f"Bearer {self.own_token}":
-            return httpx.Response(401)
         body = json.loads(request.content)
         assert body["kind"] == "TokenReview"
-        status = self.reviews.get(body["spec"]["token"])
-        if status is None or AUDIENCE not in body["spec"].get("audiences", []):
-            status = {"authenticated": False, "error": "invalid bearer token"}
+        token = body["spec"]["token"]
+        status: dict[str, Any] = {"authenticated": False, "error": "invalid bearer token"}
+        if AUDIENCE in body["spec"].get("audiences", []) and token not in self.revoked:
+            if token not in self.statuses:
+                self.review_as(token)
+            status = self.statuses[token]
         return httpx.Response(201, json={**body, "status": status})
 
 
-def _verifier(apiserver: FakeApiserver, tmp_path: Path) -> TokenReviewVerifier:
+def _verifier(
+    apiserver: FakeApiserver, tmp_path: Path, clock: Callable[[], float] = time.monotonic
+) -> TokenReviewVerifier:
     token_file = tmp_path / "apiserver-token"
     token_file.write_text(apiserver.own_token + "\n")
     return TokenReviewVerifier(
@@ -209,54 +240,123 @@ def _verifier(apiserver: FakeApiserver, tmp_path: Path) -> TokenReviewVerifier:
         token_file=token_file,
         ca_file=None,
         transport=httpx.MockTransport(apiserver.handler),
+        clock=clock,
     )
 
 
-async def test_token_review_maps_a_pod_bound_token(tmp_path: Path) -> None:
+async def test_a_signed_pod_bound_token_is_reviewed_and_mapped(tmp_path: Path) -> None:
     apiserver = FakeApiserver()
-    apiserver.add("jwt-print", "system:serviceaccount:bambuddy:scadbuddy-print")
-    proof = await _verifier(apiserver, tmp_path).verify("jwt-print")
+    verifier = _verifier(apiserver, tmp_path)
+    proof = await verifier.verify(signed("scadbuddy-print"))
     assert proof == VerifiedProof(
         caller="print",
         proof="k8s",
         pod_name="scadbuddy-print-6c9f-abcde",
         pod_uid="0f6f2b7e-1111-2222-3333-444455556666",
     )
-    # The audience is asked for, and the API pod's own token is re-read each call.
     (request,) = apiserver.requests
     assert json.loads(request.content)["spec"]["audiences"] == [AUDIENCE]
+    # ES256 is the other algorithm a cluster may sign with.
+    assert await verifier.verify(signed("scadbuddy-render", key=EC_KEY, alg="ES256")) is not None
 
 
 @pytest.mark.parametrize(
-    ("username", "extra", "audiences"),
+    "token",
     [
-        ("system:serviceaccount:bambuddy:default", None, None),
-        ("system:serviceaccount:bambuddy:unknown", None, None),
-        ("system:serviceaccount:elsewhere:scadbuddy-print", None, None),
-        # Not bound to a pod: no pod to revoke it by deleting.
-        ("system:serviceaccount:bambuddy:scadbuddy-print", {}, None),
-        # The apiserver said authenticated, but for another audience.
-        ("system:serviceaccount:bambuddy:scadbuddy-print", None, ["https://kubernetes"]),
+        pytest.param(signed("scadbuddy-print", key=FORGER_KEY), id="another-key"),
+        pytest.param(unsigned("scadbuddy-print"), id="alg-none"),
+        pytest.param(hs256("scadbuddy-print"), id="hs256"),
+        pytest.param(signed("scadbuddy-print", iss="https://elsewhere"), id="issuer"),
+        pytest.param(signed("scadbuddy-print", aud=["https://kubernetes"]), id="audience"),
+        pytest.param(signed("scadbuddy-print", exp=int(time.time()) - 120), id="expired"),
+        pytest.param(signed("scadbuddy-print", nbf=int(time.time()) + 120), id="not-yet"),
+        pytest.param(signed("default"), id="default-sa"),
+        pytest.param(signed("pgadmin"), id="unknown-sa"),
+        pytest.param(signed("scadbuddy-print", namespace="other"), id="other-namespace"),
+        pytest.param("not-a-jwt", id="junk"),
+        pytest.param("a.b.c", id="junk-parts"),
     ],
 )
-async def test_token_review_refuses(
-    tmp_path: Path,
-    username: str,
-    extra: dict[str, list[str]] | None,
-    audiences: list[str] | None,
+async def test_a_token_that_fails_offline_never_reaches_tokenreview(
+    tmp_path: Path, token: str
 ) -> None:
     apiserver = FakeApiserver()
-    apiserver.add("jwt", username, extra=extra, audiences=audiences)
     verifier = _verifier(apiserver, tmp_path)
-    assert await verifier.verify("jwt") is None
-    assert await verifier.verify("not-a-known-jwt") is None
+    assert await verifier.verify(token) is None
+    assert apiserver.requests == []
+    # Nor does it spend the TokenReview budget.
+    assert verifier.budget.spent == 0
 
 
-async def test_token_review_down_is_unavailable_not_refused(tmp_path: Path) -> None:
+async def test_a_little_clock_skew_is_allowed(tmp_path: Path) -> None:
+    verifier = _verifier(FakeApiserver(), tmp_path)
+    now = int(time.time())
+    assert await verifier.verify(signed("scadbuddy-print", exp=now - 10)) is not None
+    assert await verifier.verify(signed("scadbuddy-print", nbf=now + 10)) is not None
+
+
+async def test_tokenreview_still_decides(tmp_path: Path) -> None:
+    """Revocation (a deleted pod) and the pod binding are TokenReview's."""
     apiserver = FakeApiserver()
-    apiserver.status = 503
+    verifier = _verifier(apiserver, tmp_path)
+    revoked = signed("scadbuddy-print", nonce="revoked")
+    apiserver.revoke(revoked)
+    unbound = signed("scadbuddy-print", nonce="unbound")
+    apiserver.review_as(unbound, extra={})
+    other_audience = signed("scadbuddy-print", nonce="aud")
+    apiserver.review_as(other_audience, audiences=["https://kubernetes"])
+    # The apiserver must agree on who it is.
+    disagrees = signed("scadbuddy-print", nonce="who")
+    apiserver.review_as(disagrees, username="system:serviceaccount:bambuddy:scadbuddy-render")
+    for token in (revoked, unbound, other_audience, disagrees):
+        assert await verifier.verify(token) is None
+    assert len(apiserver.requests) == 4
+
+
+async def test_an_unknown_kid_refetches_the_jwks_at_most_every_30_s(tmp_path: Path) -> None:
+    apiserver = FakeApiserver()
+    clock = Clock()
+    verifier = _verifier(apiserver, tmp_path, clock)
+    assert await verifier.verify(signed("scadbuddy-print")) is not None
+    assert apiserver.jwks_fetches == 1
+    rotated = RSAKey.generate_key(2048, parameters={"kid": "rsa-2"})
+    for i in range(5):
+        assert await verifier.verify(signed("scadbuddy-print", key=rotated, nonce=str(i))) is None
+    assert apiserver.jwks_fetches == 2
+    # The cluster rotates its key; within 30 s it is still not asked again.
+    apiserver.keys.append(rotated)
+    clock.now += 29
+    assert await verifier.verify(signed("scadbuddy-print", key=rotated)) is None
+    assert apiserver.jwks_fetches == 2
+    clock.now += 1
+    assert await verifier.verify(signed("scadbuddy-print", key=rotated)) is not None
+    assert apiserver.jwks_fetches == 3
+
+
+async def test_the_budget_holds_back_only_signed_tokens(tmp_path: Path) -> None:
+    apiserver = FakeApiserver()
+    clock = Clock()
+    verifier = _verifier(apiserver, tmp_path, clock)
+    for i in range(60):
+        token = signed("scadbuddy-print", nonce=f"r{i}")
+        apiserver.revoke(token)
+        assert await verifier.verify(token) is None
+    with pytest.raises(ReviewLimitedError) as limited:
+        await verifier.verify(signed("scadbuddy-print"))
+    assert limited.value.retry_after == 60
+    assert limited.value.caller == "print"
+    assert len(apiserver.requests) == 60
+
+
+@pytest.mark.parametrize("where", ["review", "jwks"])
+async def test_an_apiserver_down_is_unavailable_not_refused(tmp_path: Path, where: str) -> None:
+    apiserver = FakeApiserver()
+    if where == "review":
+        apiserver.status = 503
+    else:
+        apiserver.jwks_status = 503
     with pytest.raises(VerifierUnavailableError):
-        await _verifier(apiserver, tmp_path).verify("jwt")
+        await _verifier(apiserver, tmp_path).verify(signed("scadbuddy-print"))
 
 
 # The bootstrap directory (§7.2).
@@ -558,7 +658,7 @@ def test_the_reader_exchanges_and_renews_at_half_life(tmp_path: Path) -> None:
         "grant_type": ["urn:ietf:params:oauth:grant-type:token-exchange"],
         "subject_token": ["jwt-1"],
         "subject_token_type": ["urn:ietf:params:oauth:token-type:jwt"],
-        # Names the refusal bucket a bootstrap proof is limited in; never believed.
+        # Must match the caller the proof proves; never believed.
         "client_id": ["print"],
     }
     clock.now += 449

@@ -20,7 +20,7 @@ from scadbuddy.auth.check import SIGNED_OUT
 from scadbuddy.auth.component import AuthComponent, AuthDep
 from scadbuddy.auth.exchange import (
     TOKEN_TYPES,
-    UNKNOWN,
+    ReviewLimitedError,
     VerifiedProof,
     VerifierUnavailableError,
 )
@@ -63,16 +63,16 @@ def _count(auth: AuthComponent, caller: str, proof: str, result: Result) -> None
     auth.core.metrics.service_token_exchanges.labels(caller, proof, result).inc()
 
 
-def _limited(auth: AuthComponent, claimed: str, proof: str, wait: int) -> ApiError:
-    """Review of #5498: too many proofs reached a verifier this minute, or this claimed
-    caller's were refused too often; no verifier is asked."""
+def _limited(auth: AuthComponent, caller: str, proof: str, wait: int) -> ApiError:
+    """Review of #5498: this API process's TokenReview budget is spent for the minute. The
+    token was already checked offline (the cluster signed it for ``caller``)."""
     logger.warning(
-        "limited a service-token exchange claiming %s (%s proof) for %d s", claimed, proof, wait
+        "limited a service-token exchange of %s (%s proof) for %d s", caller, proof, wait
     )
-    _count(auth, claimed, proof, "limited")
+    _count(auth, caller, proof, "limited")
     return ApiError(
         429,
-        "Too many proofs this minute.",
+        "Too many TokenReviews this minute.",
         type_=f"{PROBLEMS}exchange-limited",
         headers={"Retry-After": str(wait)},
     )
@@ -94,7 +94,7 @@ def _refused() -> ApiError:
     responses={
         400: {"description": "Not a token exchange this route takes"},
         401: {"description": "The proof names no ScadBuddy service, or it is suspended"},
-        429: {"description": "Too many exchanges this minute; see Retry-After"},
+        429: {"description": "Too many exchanges or TokenReviews this minute; see Retry-After"},
         503: {"description": "The proof could not be checked now; see Retry-After"},
     },
 )
@@ -103,8 +103,8 @@ async def exchange_service_token(
     grant_type: Annotated[str, Form()] = "",
     subject_token: Annotated[str, Form()] = "",
     subject_token_type: Annotated[str, Form()] = "",
-    #: The caller the proof claims to be (RFC 6749 §2.3.1's field). Never believed: it
-    #: picks a bootstrap proof's refusal bucket, and must match the caller proved.
+    #: The caller the proof claims to be (RFC 6749 §2.3.1's field). Never believed: when
+    #: sent, it must match the caller the proof proves.
     client_id: Annotated[str, Form()] = "",
 ) -> JSONResponse:
     proof = TOKEN_TYPES.get(subject_token_type)
@@ -126,18 +126,10 @@ async def exchange_service_token(
         # This deployment does not take that proof (no namespace, or no bootstrap dir).
         _count(auth, "unknown", proof, "refused")
         raise _refused()
-    limiter = auth.proof_limiter
-    claimed = verifier.claim(subject_token, client_id)
-    if claimed is None:
-        # Not a JWT: refused without a TokenReview, but it spends the budget.
-        if (wait := limiter.spend()) is not None:
-            raise _limited(auth, UNKNOWN, proof, wait)
-        _count(auth, UNKNOWN, proof, "refused")
-        raise _refused()
-    if (wait := limiter.check(claimed)) is not None or (wait := limiter.spend()) is not None:
-        raise _limited(auth, claimed, proof, wait)
     try:
         verified: VerifiedProof | None = await verifier.verify(subject_token)
+    except ReviewLimitedError as limited:
+        raise _limited(auth, limited.caller, proof, limited.retry_after) from None
     except VerifierUnavailableError as error:
         logger.warning("could not check a %s proof (%s)", proof, error)
         _count(auth, "unknown", proof, "unavailable")
@@ -148,7 +140,6 @@ async def exchange_service_token(
             headers={"Retry-After": str(UNAVAILABLE_RETRY)},
         ) from None
     if verified is None or (client_id and client_id != verified.caller):
-        limiter.refused(claimed)
         _count(auth, "unknown", proof, "refused")
         raise _refused()
     try:

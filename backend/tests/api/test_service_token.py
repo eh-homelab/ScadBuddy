@@ -18,15 +18,23 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.auth.component import AUTH
 from scadbuddy.core.settings import Settings
-from tests.auth.test_service_token_exchange import POD_EXTRA, FakeApiserver, _verifier, fake_jwt
+from tests.auth.test_service_token_exchange import (
+    FORGER_KEY,
+    POD_EXTRA,
+    FakeApiserver,
+    _verifier,
+    hs256,
+    signed,
+    unsigned,
+)
 
 PUBLIC = "https://scadbuddy.test"
-# Shaped like projected tokens: the route reads the claimed ServiceAccount, unverified, to
-# pick a refusal bucket; only the fake apiserver decides who a token is.
-JWT_PRINT = fake_jwt("scadbuddy-print")
-JWT_RENDER = fake_jwt("scadbuddy-render")
-JWT_DEFAULT = fake_jwt("default")
-JWT_UNKNOWN = fake_jwt("scadbuddy-print", nonce="forged")
+# Projected tokens as the fake cluster signs them; JWT_UNKNOWN is signed by a key it
+# never published.
+JWT_PRINT = signed("scadbuddy-print")
+JWT_RENDER = signed("scadbuddy-render")
+JWT_DEFAULT = signed("default")
+JWT_UNKNOWN = signed("scadbuddy-print", key=FORGER_KEY)
 GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 JWT = "urn:ietf:params:oauth:token-type:jwt"
 BOOTSTRAP = "urn:scadbuddy:params:token-type:bootstrap"
@@ -53,11 +61,7 @@ def settings(settings: Settings, tmp_path: Path) -> Settings:
 
 @pytest.fixture
 def apiserver() -> FakeApiserver:
-    server = FakeApiserver()
-    server.add(JWT_PRINT, "system:serviceaccount:bambuddy:scadbuddy-print")
-    server.add(JWT_RENDER, "system:serviceaccount:bambuddy:scadbuddy-render")
-    server.add(JWT_DEFAULT, "system:serviceaccount:bambuddy:default")
-    return server
+    return FakeApiserver()
 
 
 @pytest.fixture
@@ -240,7 +244,8 @@ def test_rotate_takes_the_legacy_callers_only(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-# Refused proofs are limited before any TokenReview (review of #5498).
+# Forged and junk proofs never lock a real caller out (review of #5498): they are refused
+# offline, before any TokenReview, and spend nothing.
 
 
 def _limited(app: FastAPI, caller: str, proof: str = "k8s") -> float:
@@ -248,47 +253,51 @@ def _limited(app: FastAPI, caller: str, proof: str = "k8s") -> float:
     return _count(app, "scadbuddy_service_token_exchanges_total", labels)
 
 
-def test_the_verifier_budget_stops_the_apiserver_calls(
+def test_forged_print_tokens_never_block_the_real_one(
     client: TestClient, app: FastAPI, apiserver: FakeApiserver
 ) -> None:
-    """60 proofs a minute reach a verifier per API process; a token that is not a JWT is
-    refused without a TokenReview but spends the budget too."""
-    for _ in range(60):
-        assert _exchange(client, "not-a-jwt").status_code == 401
+    forged = [
+        *(signed("scadbuddy-print", key=FORGER_KEY, nonce=str(i)) for i in range(40)),
+        *(unsigned("scadbuddy-print") for _ in range(40)),
+        *(hs256("scadbuddy-print") for _ in range(40)),
+    ]
+    for token in forged:
+        assert _exchange(client, token).status_code == 401
     assert apiserver.requests == []
+    assert _exchange(client, JWT_PRINT).status_code == 200
+
+
+def test_junk_tokens_never_cause_a_429_for_a_real_one(
+    client: TestClient, apiserver: FakeApiserver
+) -> None:
+    for i in range(200):
+        assert _exchange(client, f"not-a-jwt-{i}").status_code == 401
+    assert apiserver.requests == []
+    assert _exchange(client, JWT_PRINT).status_code == 200
+
+
+def test_the_tokenreview_budget_counts_signed_tokens_only(
+    client: TestClient, app: FastAPI, apiserver: FakeApiserver
+) -> None:
+    """60 TokenReviews a minute per API process, spent only by tokens the cluster
+    signed for a known caller (here, pods deleted since)."""
+    for i in range(60):
+        token = signed("scadbuddy-print", nonce=f"deleted-{i}")
+        apiserver.revoke(token)
+        assert _exchange(client, token).status_code == 401
+    assert len(apiserver.requests) == 60
     response = _exchange(client, JWT_PRINT)
     assert response.status_code == 429, response.text
     assert 1 <= int(response.headers["retry-after"]) <= 60
-    assert apiserver.requests == []
+    assert len(apiserver.requests) == 60
     assert _limited(app, "print") == 1
 
 
-def test_a_claimed_caller_with_ten_refusals_is_limited(
-    client: TestClient, app: FastAPI, apiserver: FakeApiserver
-) -> None:
-    for i in range(10):
-        forged = fake_jwt("scadbuddy-print", nonce=str(i))
-        assert _exchange(client, forged).status_code == 401
-    assert len(apiserver.requests) == 10
-    # Even its real token waits out the minute, and the apiserver is not asked.
-    response = _exchange(client, JWT_PRINT)
-    assert response.status_code == 429, response.text
-    assert 1 <= int(response.headers["retry-after"]) <= 60
-    assert len(apiserver.requests) == 10
-    assert _limited(app, "print") == 1
-    # Another caller's bucket is untouched.
-    assert _exchange(client, JWT_RENDER).status_code == 200
-
-
-def test_a_bootstrap_caller_is_limited_by_the_name_it_sends(
-    client: TestClient, app: FastAPI
-) -> None:
-    for _ in range(10):
+def test_bootstrap_proofs_have_no_bucket(client: TestClient) -> None:
+    for _ in range(50):
         wrong = secrets.token_urlsafe(32)
         assert _exchange(client, wrong, BOOTSTRAP, client_id="render").status_code == 401
-    response = _exchange(client, RENDER_SECRET, BOOTSTRAP, client_id="render")
-    assert response.status_code == 429, response.text
-    assert _limited(app, "render", "bootstrap") == 1
+    assert _exchange(client, RENDER_SECRET, BOOTSTRAP, client_id="render").status_code == 200
 
 
 def test_a_bootstrap_secret_sent_under_another_name_is_refused(client: TestClient) -> None:

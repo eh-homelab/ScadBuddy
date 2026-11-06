@@ -639,7 +639,7 @@ class ExchangeReader:
             "grant_type": GRANT_TYPE,
             "subject_token": proof,
             "subject_token_type": self._token_type,
-            # The refusal bucket a bootstrap proof is limited in; the API never believes it.
+            # Never believed: when sent, the API refuses a proof of another caller.
             "client_id": self.caller,
         }
         try:
