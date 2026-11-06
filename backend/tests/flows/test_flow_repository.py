@@ -557,7 +557,8 @@ def test_the_umask_is_read_without_setting_it(
 ) -> None:
     """On Linux the umask comes from /proc/self/status, so no thread ever sees a umask
     of 0 while it is read (#5397). The expected value comes from a plainly written
-    file's mode, so the test does not set the umask either (#5417)."""
+    file's mode and a new directory's mode (which also shows the execute bits), so the
+    test does not set the umask either (#5417, #5429)."""
     from scadbuddy.flows import repository
 
     def refuse(_mask: int) -> int:
