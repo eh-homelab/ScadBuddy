@@ -132,6 +132,7 @@ MAX_LIMIT = 100
 #: A ``margin_state`` request reads at most this many store pages of this size (#5515).
 #: When it reaches the cap, it returns the rows found so far (maybe none) and the cursor
 #: it reached, and the client carries on from there.
+#: frontend/src/mocks/features/orders/orders.ts mirrors both values: change them together.
 SCAN_PAGE_SIZE = MAX_LIMIT
 MAX_SCAN_PAGES = 10
 LIST_PARAMS = frozenset(
