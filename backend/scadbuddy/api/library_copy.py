@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -85,10 +86,19 @@ async def post_library_copy(
     handle = ops.client.get_workflow_handle(job_id)
     running = False
     try:
-        running = (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+        described = await handle.describe()
+        running = described.status == WorkflowExecutionStatus.RUNNING
     except RPCError as error:
         if not execution_gone(error):
             raise
+    if running:
+        # A row with no run id (written before #5424, or a start whose `started` write
+        # never happened) is given the running chain's: `_settled` then matches it. The
+        # copy runs either way: a failed write is logged, not answered.
+        try:
+            await asyncio.to_thread(rows.started, job_id, _first_run(described), only_unset=True)
+        except Exception:
+            logger.warning("could not record the run of a joined copy: %s", job_id, exc_info=True)
     if not running:
         await asyncio.to_thread(rows.start, job_id, request)
     # No update to answer, so not `start_command`: a plain start that joins a running one.
@@ -110,6 +120,15 @@ async def post_library_copy(
             except Exception:
                 logger.warning("could not end the row of a copy that failed to start: %s", job_id)
         raise
+    if not running and started.result_run_id is not None:
+        # The run this start began, or, for a start that raced another, the run it
+        # joined: `_settled` reads the job as ended only when that run's chain closed.
+        # The copy started either way: a failed write is logged, not answered. A later
+        # start that joins writes the run id, and `NO_RUN_ID_MARGIN` covers the rest.
+        try:
+            await asyncio.to_thread(rows.started, job_id, started.result_run_id)
+        except Exception:
+            logger.warning("could not record the run of a started copy: %s", job_id, exc_info=True)
     return LibraryCopyStarted(copy_id=started.id)
 
 
@@ -152,26 +171,53 @@ async def get_library_copy(copy_id: str, state: StateDep, ops: OperationsDep) ->
 #: What a job whose execution ended without its finish activity (terminated, timed out)
 #: shows: its row still says `running`, which the execution's state contradicts.
 ENDED_UNFINISHED = "the copy's workflow ended before it finished; start it again"
+#: For a row with no run id only (one written before #5424 shipped, a start whose
+#: `started` write failed, or a rerun before its `started` write): its execution reads
+#: as ended once it closed this long after the row's `started_at`. The two times come
+#: from two clocks (Temporal's and Postgres'). Hosts kept by NTP differ by well under a
+#: second, and 5 minutes also covers a host whose clock jumps. So the run before a
+#: rerun, which closed before the rerun's row was written, reads as this row's end only
+#: if the clocks differ by more than 5 minutes. The cost: such a row whose execution
+#: ended in its first 5 minutes keeps showing `running` until a rerun.
+NO_RUN_ID_MARGIN = timedelta(minutes=5)
 
 
 def _settled(
     summary: LibraryCopySummary, described: WorkflowExecutionDescription | None
 ) -> LibraryCopySummary:
     """``summary`` with the execution's word on whether it runs. A row left `running`
-    by an execution that closed after the row was started is shown `failed`, saying
-    so. The row is written before the execution starts (and reset before a rerun), so
-    no execution yet, or one that closed before `started_at`, is a copy about to run,
-    not one that ended."""
+    by the execution that its start began (`LibraryCopySummary.run_id`), now closed,
+    is shown `failed`, saying so. For a row with a run id, the match is by run id, on
+    Temporal's side only, because Temporal's ``close_time`` and Postgres' ``started_at``
+    come from two clocks that can differ (#5424). The row is written before the
+    execution starts (and reset before a rerun), so a closed execution of another run
+    (the one before a rerun) is a copy about to run, not one that ended. A row with no
+    run id falls back to ``close_time >= started_at + NO_RUN_ID_MARGIN``."""
     running = described is not None and described.status == WorkflowExecutionStatus.RUNNING
     update: dict[str, object] = {"running": running}
     if (
         summary.status == "running"
         and described is not None
         and described.close_time is not None
-        and described.close_time >= summary.started_at
+        and (
+            summary.run_id in _chain(described)
+            if summary.run_id is not None
+            else described.close_time >= summary.started_at + NO_RUN_ID_MARGIN
+        )
     ):
         update.update(status="failed", error=ENDED_UNFINISHED)
     return summary.model_copy(update=update)
+
+
+def _chain(described: WorkflowExecutionDescription) -> set[str]:
+    """The run ids that name the described execution's chain: its own and the first
+    run's (a copy continues as new every `BATCHES_PER_RUN` batches)."""
+    return {described.run_id, _first_run(described)}
+
+
+def _first_run(described: WorkflowExecutionDescription) -> str:
+    """The first run of the described execution's chain."""
+    return described.raw_info.first_run_id or described.run_id
 
 
 async def _execution(ops: OperationsDep, copy_id: str) -> WorkflowExecutionDescription | None:

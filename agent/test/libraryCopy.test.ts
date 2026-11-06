@@ -90,7 +90,7 @@ it('get_library_copy GETs the job by id and returns its status', async () => {
     copied: 1,
     skipped_same_hash: 0,
     failed: 0,
-    files: [{ source_id: 7, path: '', name: 'rex.3mf', size: 3, status: 'copied', reason: null, target_id: 1000000001, target_folder_id: null }],
+    files: [{ source_id: 7, path: '', name: 'rex.3mf', size: 3, status: 'copied', reason: null, attempts: 1, reason_try: null, target_id: 1000000001, target_folder_id: null }],
   }
   let asked: string | undefined
   server.use(

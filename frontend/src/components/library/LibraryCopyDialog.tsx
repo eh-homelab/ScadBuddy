@@ -369,7 +369,11 @@ function CopyProgress({ status }: { status: LibraryCopyStatus }) {
                   <Badge variant={file.status === 'failed' ? 'destructive' : file.status === 'copied' ? 'default' : 'secondary'}>
                     {LABELS[file.status]}
                   </Badge>
-                  {file.reason && <span className="ml-2 text-muted-foreground">{file.reason}</span>}
+                  {file.reason && (
+                    <span className="ml-2 text-muted-foreground">
+                      {file.status === 'pending' && file.reason_try != null ? `Try ${file.reason_try} failed: ${file.reason}; retrying` : file.reason}
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}

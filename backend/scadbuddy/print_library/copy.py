@@ -31,7 +31,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE, BambuddyClient, client_for
-from scadbuddy.bambuddy.errors import is_transient
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, is_transient
 from scadbuddy.bambuddy.models import Folder, FolderCreate, LibraryFile, LibraryListRow
 from scadbuddy.bambuddy.send import Sink, upload_raw
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -47,7 +47,7 @@ from scadbuddy.print_library.copy_models import (
     LibraryCopyPlan,
     LibraryCopyRequest,
 )
-from scadbuddy.print_library.copy_store import LibraryCopyStore, PlannedFile
+from scadbuddy.print_library.copy_store import LibraryCopyStore, PlannedFile, TargetLocks
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource
@@ -66,8 +66,20 @@ NOT_NATIVE = (
     " native first"
 )
 GONE_FROM_SOURCE = "it is no longer in the source library"
-#: The batch attempt on which a file's 5xx is its own failure rather than a retry.
+#: The 5xx answer (507 aside) on a file at which it is the file's own failure, not a
+#: retry (a 3MF its upload refuses, bytes gone from its disk). Counted apart from its
+#: tries (`LibraryCopyStore.server_error`): a library that did not answer never spends it.
 FILE_ATTEMPTS = 3
+#: The most tries begun on one file. A library that does not answer, a 429, a 5xx, a
+#: batch that timed out or a worker that stopped: each spends one try of the file in
+#: hand. With `workflows.library_copy.BATCH_RETRIES` this is about 25 minutes of
+#: retries, longer than a Bambuddy restart. After it the file fails with the last try's
+#: reason (`NO_REASON` when that try said nothing), so a file that always times out (a
+#: very large upload) cannot hold the job forever.
+MAX_FILE_TRIES = 10
+GAVE_UP = "gave up after {tries} tries: {reason}"
+#: The reason when no try said why it did not end.
+NO_REASON = "a try did not end (the batch timed out or its worker stopped)"
 #: `StoreFullError`'s reason, the 507 a native upload answers (plan Ruling 11).
 STORE_FULL = "the blob store has no room for it (507)"
 
@@ -218,9 +230,10 @@ class _Target:
         return parent
 
     async def has(self, digest: str, size: int | None) -> int | None:
-        """The id of a live file whose bytes hash to ``digest``, or ``None``. Read, not
-        locked: two copies into one target at once can both miss here and both put the
-        same bytes, so the skip holds between copies, not within a race of them."""
+        """The id of a live file whose bytes hash to ``digest``, or ``None``. The batch
+        calls it before a put, under the lock on ``digest`` in this library
+        (`TargetLocks`), so two copies into one target never both miss and both put
+        the same bytes."""
         raise NotImplementedError
 
 
@@ -248,10 +261,17 @@ class _BambuddyTarget(_Target):
     only a row of the source file's size has its ``file_hash`` read (`same_bytes`'s
     narrowing, `send.py`), each at most once."""
 
-    def __init__(self, client: BambuddyClient, uploads: BambuddyUploadStore, root_id: int | None):
+    def __init__(
+        self,
+        client: BambuddyClient,
+        uploads: BambuddyUploadStore,
+        root_id: int | None,
+        store: LibraryCopyStore | None = None,
+    ):
         super().__init__(root_id)
         self.client = client
         self.uploads = uploads
+        self.store = store
         self._rows: dict[int, LibraryListRow] | None = None
         self._hashes: dict[int, str | None] = {}
 
@@ -270,20 +290,30 @@ class _BambuddyTarget(_Target):
             self._rows = {row.id: row for row in [*root, *every]}
         return self._rows
 
+    async def _hash(self, file_id: int) -> str | None:
+        if file_id not in self._hashes:
+            try:
+                self._hashes[file_id] = (await self.client.library_file(file_id)).file_hash
+            except ApiError as error:
+                if error.status != status.HTTP_404_NOT_FOUND:
+                    raise  # unread, not absent: the batch is retried
+                self._hashes[file_id] = None
+        return self._hashes[file_id]
+
     async def has(self, digest: str, size: int | None) -> int | None:
+        """The listing read at the batch's start, then the files that other copies
+        recorded they put or found (`LibraryCopyStore.held`), each read at Bambuddy:
+        the listing does not show a file that another copy put after the read."""
         rows = await self._listed()
         for row in sorted(rows.values(), key=lambda r: r.id):
             if size is not None and row.file_size is not None and row.file_size != size:
                 continue
-            if row.id not in self._hashes:
-                try:
-                    self._hashes[row.id] = (await self.client.library_file(row.id)).file_hash
-                except ApiError as error:
-                    if error.status != status.HTTP_404_NOT_FOUND:
-                        raise  # unread, not absent: the batch is retried
-                    self._hashes[row.id] = None
-            if self._hashes[row.id] == digest:
+            if await self._hash(row.id) == digest:
                 return row.id
+        if self.store is not None:
+            for file_id in await asyncio.to_thread(self.store.held, "sb_to_bb", digest):
+                if await self._hash(file_id) == digest:
+                    return file_id
         return None
 
     async def put(
@@ -307,6 +337,10 @@ class _BambuddyTarget(_Target):
         return uploaded.id
 
 
+#: How a file ended: (status, target id, target folder, reason, the target's SHA-256).
+Outcome = tuple[str, int | None, int | None, str | None, str | None]
+
+
 def _reason(error: BaseException) -> str:
     if isinstance(error, ApiError):
         return f"HTTP {error.status}: {error.detail}"
@@ -325,40 +359,44 @@ async def _spool(chunks: Any, spool: BinaryIO) -> str:
 
 
 async def _copy_bb_to_sb(
-    client: BambuddyClient, target: _NativeTarget, row: PlannedFile
-) -> tuple[str, int | None, int | None, str | None]:
-    """One Bambuddy file into the native library: (status, target id, target folder,
-    reason). Only the source's own 404s (the read, the download) mean the file is gone;
-    a 404 from the target (a folder deleted since the plan) keeps its own reason."""
+    client: BambuddyClient, target: _NativeTarget, row: PlannedFile, locks: TargetLocks
+) -> Outcome:
+    """One Bambuddy file into the native library. Only the source's own 404s (the read,
+    the download) mean the file is gone; a 404 from the target (a folder deleted since
+    the plan) keeps its own reason."""
     try:
         source = await client.library_file(row.source_id)
     except ApiError as error:
         if error.status == status.HTTP_404_NOT_FOUND:
-            return "failed", None, None, GONE_FROM_SOURCE
+            return "failed", None, None, GONE_FROM_SOURCE, None
         raise
     folder_id = await target.folder_for(row.path)
     if source.file_hash is not None:
+        # The lock before the download, so no spool is held open while it waits.
+        await asyncio.to_thread(locks.acquire, "bb_to_sb", source.file_hash)
         held = await target.has(source.file_hash, source.file_size)
         if held is not None:
-            return "skipped_same_hash", held, folder_id, None
+            return "skipped_same_hash", held, folder_id, None, source.file_hash
     with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
         try:
             digest = await _spool(client.download_library_file(source.id), spool)
         except ApiError as error:
             if error.status == status.HTTP_404_NOT_FOUND:
-                return "failed", None, folder_id, GONE_FROM_SOURCE
+                return "failed", None, folder_id, GONE_FROM_SOURCE, None
             raise
         if source.file_hash is not None and digest != source.file_hash:
-            return "failed", None, folder_id, f"sha256 mismatch: Bambuddy served {digest}"
+            return "failed", None, folder_id, f"sha256 mismatch: Bambuddy served {digest}", None
         if source.file_hash is None:
+            # No hash to lock on before the download: lock on the bytes' own.
+            await asyncio.to_thread(locks.acquire, "bb_to_sb", digest)
             held = await target.has(digest, source.file_size)
             if held is not None:
-                return "skipped_same_hash", held, folder_id, None
+                return "skipped_same_hash", held, folder_id, None, digest
         try:
             copied = await target.put(source.filename, spool, folder_id)
         except StoreFullError as error:
-            return "failed", None, folder_id, f"{STORE_FULL}: {error}"
-    return "copied", copied, folder_id, None
+            return "failed", None, folder_id, f"{STORE_FULL}: {error}", None
+    return "copied", copied, folder_id, None, digest
 
 
 def _media_type(name: str, native_type: str) -> str:
@@ -371,16 +409,17 @@ def _media_type(name: str, native_type: str) -> str:
 
 
 async def _copy_sb_to_bb(
-    native: NativeLibrary, target: _BambuddyTarget, row: PlannedFile
-) -> tuple[str, int | None, int | None, str | None]:
+    native: NativeLibrary, target: _BambuddyTarget, row: PlannedFile, locks: TargetLocks
+) -> Outcome:
     """One native file into Bambuddy's library."""
     found = await asyncio.to_thread(native.rows.file, row.source_id)
     if found is None:
-        return "failed", None, None, GONE_FROM_SOURCE
+        return "failed", None, None, GONE_FROM_SOURCE, None
     folder_id = await target.folder_for(row.path)
+    await asyncio.to_thread(locks.acquire, "sb_to_bb", found.sha256)
     held = await target.has(found.sha256, found.size)
     if held is not None:
-        return "skipped_same_hash", held, folder_id, None
+        return "skipped_same_hash", held, folder_id, None, found.sha256
 
     async def write(out: Sink) -> None:
         async with aclosing(native.download_library_file(found.id)) as chunks:
@@ -395,7 +434,21 @@ async def _copy_sb_to_bb(
         digest=found.sha256,
         size=found.size,
     )
-    return "copied", copied, folder_id, None
+    return "copied", copied, folder_id, None, found.sha256
+
+
+class CopyRefusedError(Exception):
+    """Bambuddy refused the API key (a 401 or 403, `SCOPE_PROBLEM`). Every file would
+    fail the same way, so the whole copy fails with this reason, and no file is
+    written off for it."""
+
+
+def _retry_later(error: ApiError) -> bool:
+    """A library that does not answer (`is_transient`), or one that limits requests
+    (Bambuddy's 429): never the file's own failure while it has tries left."""
+    return is_transient(error) or error.extensions.get("bambuddy_status") == (
+        status.HTTP_429_TOO_MANY_REQUESTS
+    )
 
 
 async def copy_batch(
@@ -406,70 +459,121 @@ async def copy_batch(
     native: NativeLibrary,
     uploads: BambuddyUploadStore,
     heartbeat: Callable[[str], None],
-    attempt: int = 1,
 ) -> LibraryCopyBatch:
-    """Up to ``input.limit`` of the job's pending files, each recorded as it ends. One
-    file's failure (gone from the source, refused by the target, the store full) is its
-    row's ``reason`` and never stops the others. A library that does not answer
-    (`is_transient`) always raises, and the activity is retried until it does. A 5xx
-    the library answered for the file raises too, since it may still be the library;
-    on the `FILE_ATTEMPTS`th ``attempt`` it is the file's own failure, recorded as its
-    reason, and the batch ends there, so one file a library always 500s on (a 3MF its
-    upload refuses, bytes gone from its disk) cannot hold the job on that file forever,
-    while the rows after it wait for the next batch, which starts at attempt 1 again.
-    ``attempt`` is the activity's, so only that first row can spend it."""
+    """Up to ``input.limit`` of the job's pending files, each recorded as it ends.
+
+    One file's failure (gone from the source, refused by the target, the store full) is
+    its row's ``reason`` and never stops the others. A try that cannot end raises, and
+    the activity is retried (`workflows.library_copy.BATCH_RETRIES`). The files that
+    this attempt recorded before the raise stay recorded, so the retry starts at the
+    file that raised. Each file counts its own tries (`LibraryCopyStore.begin`, before
+    the try, so a batch that timed out counts too):
+
+    - A library that does not answer, or a 429, raises until the file has begun
+      `MAX_FILE_TRIES` tries. Each raise writes its reason on the pending row.
+    - A 5xx that the library answered (507 aside) raises too, because it may still be
+      the library. Its `FILE_ATTEMPTS`th such answer (counted apart from the tries, so a
+      library that did not answer never spends it) is the file's own failure. So a file
+      that a library always 500s on cannot hold the job. It still counts as a try.
+    - A 401 or 403 raises `CopyRefusedError`: it fails every file, so it fails the copy.
+    - Any other answer (a 404, a 422, a 507) fails the file at once.
+
+    A file that another attempt ended first (a timed-out attempt that still runs, and
+    its retry) is not counted again: the counts never exceed the files.
+    """
     request = input.request
     rows = await asyncio.to_thread(store.pending, input.copy_id, limit=input.limit)
     target: _NativeTarget | _BambuddyTarget = (
         _NativeTarget(native, request.target_folder_id)
         if request.direction == "bb_to_sb"
-        else _BambuddyTarget(client, uploads, request.target_folder_id)
+        else _BambuddyTarget(client, uploads, request.target_folder_id, store)
     )
+    locks = store.locks()
     copied = skipped = failed = 0
-    ended_early = False
-    for row in rows:
-        beating = asyncio.create_task(beat_while(f"{row.path}/{row.name}", heartbeat))
-        try:
-            if isinstance(target, _NativeTarget):
-                outcome = await _copy_bb_to_sb(client, target, row)
+    try:
+        for row in rows:
+            try:
+                outcome = await _copy_one(
+                    store, input.copy_id, row, target, client, native, locks, heartbeat
+                )
+                result, target_id, folder_id, reason, digest = outcome
+                recorded = await asyncio.to_thread(
+                    store.record,
+                    input.copy_id,
+                    row.source_id,
+                    result,  # type: ignore[arg-type]
+                    reason=reason,
+                    target_id=target_id,
+                    target_folder_id=folder_id,
+                    sha256=digest,
+                )
+            finally:
+                # Only once the row says where the bytes went (`LibraryCopyStore.held`
+                # reads it), so the next copy to take the lock finds them.
+                await asyncio.to_thread(locks.release_all)
+            if not recorded:
+                continue  # another attempt ended this file first, and counted it
+            if result == "copied":
+                copied += 1
+            elif result == "skipped_same_hash":
+                skipped += 1
             else:
-                outcome = await _copy_sb_to_bb(native, target, row)
-        except ApiError as error:
-            # A 404 here is the target's (the source's own are answered above): a
-            # folder deleted since the plan, say. The row says which.
-            if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
-                # A library not answering at all (a restart, a gateway's 502/503/504) is
-                # never this file's failure: the batch is retried until it answers.
-                if is_transient(error) or attempt < FILE_ATTEMPTS:
-                    raise
-                ended_early = True  # this file spent the batch's tries; the rest wait
-            outcome = ("failed", None, None, _reason(error))
-        except (StoreFullError, ValueError, OSError) as error:
-            logger.warning("a library copy failed on one file", exc_info=True)
-            outcome = ("failed", None, None, _reason(error))
-        finally:
-            beating.cancel()
-            await asyncio.gather(beating, return_exceptions=True)
-        result, target_id, folder_id, reason = outcome
-        await asyncio.to_thread(
-            store.record,
-            input.copy_id,
-            row.source_id,
-            result,  # type: ignore[arg-type]
-            reason=reason,
-            target_id=target_id,
-            target_folder_id=folder_id,
-        )
-        if result == "copied":
-            copied += 1
-        elif result == "skipped_same_hash":
-            skipped += 1
-        else:
-            failed += 1
-        if ended_early:
-            break
+                failed += 1
+    finally:
+        await asyncio.to_thread(locks.close)
     counts = await asyncio.to_thread(store.counts, input.copy_id)
     return LibraryCopyBatch(copied=copied, skipped=skipped, failed=failed, remaining=counts.pending)
+
+
+async def _copy_one(
+    store: LibraryCopyStore,
+    copy_id: str,
+    row: PlannedFile,
+    target: _NativeTarget | _BambuddyTarget,
+    client: BambuddyClient,
+    native: NativeLibrary,
+    locks: TargetLocks,
+    heartbeat: Callable[[str], None],
+) -> Outcome:
+    """One file's try: its outcome, or a raise that retries the batch."""
+    tries, last, spent = await asyncio.to_thread(
+        store.begin, copy_id, row.source_id, limit=MAX_FILE_TRIES
+    )
+    if spent:
+        return "failed", None, None, GAVE_UP.format(tries=tries, reason=last or NO_REASON), None
+    beating = asyncio.create_task(beat_while(f"{row.path}/{row.name}", heartbeat))
+    try:
+        if isinstance(target, _NativeTarget):
+            return await _copy_bb_to_sb(client, target, row, locks)
+        return await _copy_sb_to_bb(native, target, row, locks)
+    except ApiError as error:
+        if error.type == SCOPE_PROBLEM:
+            raise CopyRefusedError(error.detail) from error
+        # A 404 here is the target's (the source's own are answered above): a folder
+        # deleted since the plan, say. The row says which.
+        if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
+            if _retry_later(error):
+                # Spends only the file's tries, never its 5xx answers.
+                if tries < MAX_FILE_TRIES:
+                    await asyncio.to_thread(
+                        store.note, copy_id, row.source_id, _reason(error), try_=tries
+                    )
+                    raise
+                reason = GAVE_UP.format(tries=tries, reason=_reason(error))
+                return "failed", None, None, reason, None
+            answered = await asyncio.to_thread(store.server_error, copy_id, row.source_id)
+            if answered < FILE_ATTEMPTS:
+                await asyncio.to_thread(
+                    store.note, copy_id, row.source_id, _reason(error), try_=tries
+                )
+                raise
+        return "failed", None, None, _reason(error), None
+    except (StoreFullError, ValueError, OSError) as error:
+        logger.warning("a library copy failed on one file", exc_info=True)
+        return "failed", None, None, _reason(error), None
+    finally:
+        beating.cancel()
+        await asyncio.gather(beating, return_exceptions=True)
 
 
 def library_copy_activities(
@@ -481,7 +585,8 @@ def library_copy_activities(
     """The three activities, in the API process (its ``library`` worker, which holds the
     native library). Each reads the settings when it runs. A plan that cannot run (no
     native library, a folder the source lacks, too many files) records the failure on
-    the job's row and ends the workflow with a non-retryable error."""
+    the job's row and ends the workflow with a non-retryable error, as does a batch
+    whose Bambuddy refuses the API key (`CopyRefusedError`)."""
 
     async def _native() -> NativeLibrary:
         native = await library.serving_native()
@@ -519,16 +624,19 @@ def library_copy_activities(
         except ApiError as error:
             await asyncio.to_thread(store.finish, input.copy_id, "failed", error.detail)
             raise ApplicationError(error.detail, non_retryable=True) from error
-        async with client_for(settings) as client:
-            return await copy_batch(
-                store,
-                input,
-                client=client,
-                native=native,
-                uploads=uploads_of(),
-                heartbeat=activity.heartbeat,
-                attempt=activity.info().attempt,
-            )
+        try:
+            async with client_for(settings) as client:
+                return await copy_batch(
+                    store,
+                    input,
+                    client=client,
+                    native=native,
+                    uploads=uploads_of(),
+                    heartbeat=activity.heartbeat,
+                )
+        except CopyRefusedError as error:
+            await asyncio.to_thread(store.finish, input.copy_id, "failed", str(error))
+            raise ApplicationError(str(error), non_retryable=True) from error
 
     @activity.defn(name=LIBRARY_COPY_FINISH)
     async def library_copy_finish(input: LibraryCopyFinishInput) -> None:

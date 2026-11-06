@@ -341,14 +341,23 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Copies between the two libraries (#5355): `print_library/copy.py` (the plan's walk,
   the batch, the ``library`` queue activities), `copy_models.py`, `copy_store.py`
   (`library_copies`, `library_copy_files`), `workflows/library_copy.py` (`LibraryCopy`,
-  AUTO_UPGRADE, one execution per distinct request: `copy_id`), routes
+  AUTO_UPGRADE, one execution per distinct request: `copy_id`; its histories replay from
+  `tests/fixtures/library_copy_histories/`, so a change goes behind `workflow.patched`), routes
   `api/library_copy.py` (`POST`/`GET /print/library-copies`, and `/print/bambuddy-library`,
   Bambuddy's library browsed as a source on `native`). A file whose SHA-256 the target
   holds is skipped (Bambuddy's `file_hash` and the native rows' `sha256` compare
   directly), each selected folder's path is kept, nothing at the target is deleted or
   overwritten. The bytes go into Bambuddy through `send.upload_raw`, the one raw upload
   path (`ensure_raw_copy` uses it too), and into the native library through
-  `NativeLibrary.upload` (`StoreFullError` is a failed row naming the 507). Agent
+  `NativeLibrary.upload` (`StoreFullError` is a failed row naming the 507). Each file
+  counts its own tries (`attempts`, limit `MAX_FILE_TRIES`: every try, whether the
+  library answered, did not answer, answered 429 or the try never ended) and, apart, its
+  5xx answers (`server_errors`, 507 aside, limit `FILE_ATTEMPTS`); any other answer fails
+  the file at once, except a 401 or 403, which fails the whole copy (`CopyRefusedError`).
+  A session advisory lock per target library and SHA-256 (`TargetLocks`) keeps two
+  copies from putting the same bytes twice, and the status route matches the execution by the
+  row's `run_id`; a row with no run id falls back to `close_time >= started_at +
+  NO_RUN_ID_MARGIN` (5 min) (#5424). Agent
   `copy_library_files` and `get_library_copy` (`agent/src/tools/libraryCopy.ts`);
   `list_library`'s `source: bambuddy`; frontend `components/library/LibraryCopyDialog.tsx`.
   A native run of several prints starts the later ones in `PrintLanSequence`

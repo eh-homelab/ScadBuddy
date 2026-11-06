@@ -8,15 +8,18 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
 from httpx import Response
+from temporalio.client import WorkflowExecutionStatus
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.api.library_copy import ENDED_UNFINISHED
+from scadbuddy.api.library_copy import ENDED_UNFINISHED, NO_RUN_ID_MARGIN, _settled
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -26,6 +29,7 @@ from scadbuddy.print_library.copy_models import (
     LibraryCopyBatch,
     LibraryCopyBatchInput,
     LibraryCopyRequest,
+    LibraryCopySummary,
 )
 from scadbuddy.print_library.copy_store import LibraryCopyStore, PlannedFile
 from tests.api.test_library_native import _native_settings
@@ -91,6 +95,13 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
     _until(lambda: status()["status"] != "running" and not status()["running"])
     done = status()
     assert (done["status"], done["total"], done["copied"], done["failed"]) == ("done", 2, 1, 1)
+    # The start recorded the run it began: the status matches the execution by it.
+    state: AppState = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    ops: OperationCommands = state.components.get(OPERATIONS)
+    portal = native_client.portal
+    assert portal is not None
+    described = portal.call(ops.client.get_workflow_handle(copy_id).describe)
+    assert done["run_id"] == described.raw_info.first_run_id
     assert done["request"] == {
         "direction": "bb_to_sb",
         "file_ids": [7, 8],
@@ -106,6 +117,8 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
         "size": None,
         "status": "failed",
         "reason": "it is no longer there",
+        "attempts": 0,
+        "reason_try": None,
         "target_id": None,
         "target_folder_id": None,
     }
@@ -163,6 +176,27 @@ def test_a_copy_whose_execution_ended_unfinished_reads_failed_but_one_starting_d
     copy_id = started.json()["copy_id"]
     _until(lambda: len(gates) == 1)  # the batch is in flight: the execution runs
     assert status(copy_id)["running"] is True
+    # A row with no run id (written before #5424 shipped, or a start whose `started`
+    # write never happened): a start that joins the running execution writes it.
+    run_id = status(copy_id)["run_id"]
+    assert run_id is not None
+    with state.settings_store.pool.connection() as conn:
+        conn.execute("UPDATE library_copies SET run_id = NULL WHERE id = %s", (copy_id,))
+    assert status(copy_id)["run_id"] is None
+    # A join whose write fails is logged, not a 500: the copy runs either way.
+    with monkeypatch.context() as patched:
+
+        def fail(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("the database went away")
+
+        patched.setattr(LibraryCopyStore, "started", fail)
+        failed_join = native_client.post("/api/v1/print/library-copies", json=body)
+        assert failed_join.status_code == 202, failed_join.text
+        assert failed_join.json() == {"copy_id": copy_id}
+    assert status(copy_id)["run_id"] is None
+    joined = native_client.post("/api/v1/print/library-copies", json=body)
+    assert joined.status_code == 202 and joined.json() == {"copy_id": copy_id}
+    assert status(copy_id)["run_id"] == run_id
     portal = native_client.portal
     assert portal is not None  # a client in its `with` block has one
     portal.call(ops.client.get_workflow_handle(copy_id).terminate)
@@ -184,6 +218,39 @@ def test_a_copy_whose_execution_ended_unfinished_reads_failed_but_one_starting_d
     gates[1].set()
     _until(lambda: status(copy_id)["status"] == "done")
     assert status(copy_id)["error"] is None
+
+
+def test_a_started_copy_whose_run_id_write_fails_still_answers_started(
+    native_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run id is written after the start. A failed write is logged, not a 500 for a
+    copy that did start: the copy runs to its end."""
+
+    async def plan(request: Any, source: Any, target: Any) -> list[PlannedFile]:
+        return [PlannedFile(source_id=7, path="", name="rex.3mf", size=3)]
+
+    async def batch(store: LibraryCopyStore, input: LibraryCopyBatchInput, **_: Any) -> Any:
+        store.record(input.copy_id, 7, "copied", target_id=NATIVE_FILE, target_folder_id=None)
+        return LibraryCopyBatch(copied=1, skipped=0, failed=0, remaining=0)
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(copy_module, "plan_copy", plan)
+    monkeypatch.setattr(copy_module, "copy_batch", batch)
+    monkeypatch.setattr(LibraryCopyStore, "started", fail)
+    started = native_client.post(
+        "/api/v1/print/library-copies", json={"direction": "bb_to_sb", "file_ids": [7]}
+    )
+    assert started.status_code == 202, started.text
+    copy_id = started.json()["copy_id"]
+
+    def status() -> dict[str, Any]:
+        got: dict[str, Any] = native_client.get(f"/api/v1/print/library-copies/{copy_id}").json()
+        return got
+
+    _until(lambda: status()["status"] == "done")
+    assert status()["run_id"] is None
 
 
 def test_a_copy_needs_the_native_library_and_a_bambuddy(
@@ -255,3 +322,44 @@ def test_bambuddy_is_browsed_as_a_source_while_native_serves(native_client: Test
     ]
     # The native library still serves the page itself: Bambuddy's folder is not its.
     assert native_client.get("/api/v1/print/library", params={"folder_id": 3}).status_code == 404
+
+
+def _summary(run_id: str | None, started_at: datetime) -> LibraryCopySummary:
+    return LibraryCopySummary(
+        copy_id="library-copy-skew",
+        direction="bb_to_sb",
+        request=LibraryCopyRequest(direction="bb_to_sb", file_ids=[7]),
+        status="running",
+        started_at=started_at,
+        run_id=run_id,
+    )
+
+
+def _closed(run_id: str, first_run_id: str, close_time: datetime) -> Any:
+    return SimpleNamespace(
+        status=WorkflowExecutionStatus.TERMINATED,
+        close_time=close_time,
+        run_id=run_id,
+        raw_info=SimpleNamespace(first_run_id=first_run_id),
+    )
+
+
+def test_settled_matches_the_run_by_its_id_not_by_two_clocks() -> None:
+    """#5424: Temporal's ``close_time`` and Postgres' ``started_at`` come from two
+    clocks. The row's own run, closed, reads as ended whatever the clocks say. The run
+    before a rerun never does."""
+    now = datetime.now(UTC)
+    early = now - timedelta(seconds=5)  # Temporal's clock behind Postgres'
+    late = now + timedelta(seconds=5)  # Temporal's clock ahead of Postgres'
+    ended = _settled(_summary("run-b", now), _closed("run-b", "run-b", early))
+    assert (ended.status, ended.error) == ("failed", ENDED_UNFINISHED)
+    # A chain that continued as new: matched by its first run.
+    chained = _settled(_summary("run-b", now), _closed("run-c", "run-b", early))
+    assert chained.status == "failed"
+    rerun = _settled(_summary("run-b", now), _closed("run-a", "run-a", late))
+    assert (rerun.status, rerun.error) == ("running", None)
+    # No run id (a row from before #5424): the two clocks, with a margin well above skew.
+    unstarted = _settled(_summary(None, now), _closed("run-a", "run-a", late))
+    assert unstarted.status == "running"
+    old = _settled(_summary(None, now), _closed("run-a", "run-a", now + NO_RUN_ID_MARGIN))
+    assert (old.status, old.error) == ("failed", ENDED_UNFINISHED)

@@ -40,8 +40,29 @@ HEARTBEAT_TIMEOUT = timedelta(seconds=60)
 BATCH_TIMEOUT = timedelta(minutes=30)
 PLAN_TIMEOUT = timedelta(minutes=10)
 #: A library down at plan time is retried this often, then the job fails with the
-#: cause as its reason rather than running on with no files and nothing to show.
-PLAN_RETRIES = RetryPolicy(maximum_attempts=5)
+#: cause as its reason rather than running on with no files and nothing to show. The
+#: first form (5 tries on the default backoff, about 15 s) is shorter than a Bambuddy
+#: restart, so a copy started during a rollout failed at plan time (#5424).
+PLAN_RETRIES_V1 = RetryPolicy(maximum_attempts=5)
+#: 10 s, 20 s, 40 s, then each minute: 8 tries over about 5 minutes.
+PLAN_RETRIES = RetryPolicy(
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=8,
+)
+#: A batch that raised (a library that does not answer, a 429, a 5xx, a timeout) is
+#: retried with this backoff. No attempt limit: each file counts its own tries
+#: (`print_library.copy.MAX_FILE_TRIES`, `FILE_ATTEMPTS`), so the retries end when the
+#: files do. 10 s doubling to 5 minutes: about 25 minutes before a file's tenth try.
+BATCH_RETRIES = RetryPolicy(
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=5),
+)
+#: The explicit plan and batch retry policies (#5424). Histories from before it keep
+#: the policies they scheduled with.
+RETRIES_PATCH = "library-copy-retries-5424"
 
 
 @workflow.defn(name=LIBRARY_COPY_WORKFLOW)
@@ -49,6 +70,7 @@ class LibraryCopy:
     @workflow.run
     async def run(self, input: LibraryCopyInput) -> LibraryCopyResult:
         batches_done = input.batches_done
+        retries = workflow.patched(RETRIES_PATCH)
         if not input.planned:
             # A plan that refuses recorded why on the job's row first; the failure
             # then ends this execution, and the status route reads the row. A plan
@@ -59,7 +81,7 @@ class LibraryCopy:
                     input,
                     result_type=LibraryCopyPlan,
                     start_to_close_timeout=PLAN_TIMEOUT,
-                    retry_policy=PLAN_RETRIES,
+                    retry_policy=PLAN_RETRIES if retries else PLAN_RETRIES_V1,
                 )
             except ActivityError as error:
                 cause = error.cause
@@ -80,6 +102,7 @@ class LibraryCopy:
                 result_type=LibraryCopyBatch,
                 start_to_close_timeout=BATCH_TIMEOUT,
                 heartbeat_timeout=HEARTBEAT_TIMEOUT,
+                retry_policy=BATCH_RETRIES if retries else None,
             )
             batches_done += 1
             counts.copied += batch.copied
