@@ -8,7 +8,10 @@ import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handl
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
-import { QuoteEditor } from './QuoteEditor'
+import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
+
+/** Long enough for a debounced price check to be sent and its answer to land. */
+const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEBOUNCE_MS))
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
@@ -246,7 +249,7 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     await user.type(field, 'abc')
     await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
     // The pending quote's answer does not come back while the field holds 'abc'.
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    await settled()
     expect(screen.queryByTestId('quote-warning')).toBeNull()
     await user.clear(field)
     expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
@@ -271,7 +274,7 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     await user.type(field, '10.59')
     await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
     // Nothing shows for 10.59 once its own answer has landed either.
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    await settled()
     expect(screen.queryByTestId('quote-warning')).toBeNull()
   })
 
@@ -297,7 +300,7 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     reset()
     const { user } = editor()
     await user.type(screen.getByLabelText('Price per unit (USD)'), '1')
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await settled()
     expect(screen.queryByTestId('quote-warning')).toBeNull()
   })
 })

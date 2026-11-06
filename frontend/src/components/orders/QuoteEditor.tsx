@@ -15,7 +15,7 @@ import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
 
 /** How long the typed price must stay still before the warning asks the route about it. */
-const CHECK_DEBOUNCE_MS = 300
+export const CHECK_DEBOUNCE_MS = 300
 
 function startTime(at: number): string {
   return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
