@@ -186,6 +186,12 @@ async def test_fresh_starts_at_once_on_a_completed_row_make_one_row(
     ids = await asyncio.gather(*(_start(store, fresh=True) for _ in range(8)))
     assert len(set(ids)) == 1
     assert ids[0] != old
+    # And no stray insert that no start answered (#5464).
+    with store._pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM native_slices WHERE reslice_of = %s", ("slice-1-a",)
+        ).fetchall()
+    assert [row["id"] for row in rows] == [ids[0]]
 
 
 async def test_a_failed_fresh_slice_leaves_the_completed_row(store: NativeSliceStore) -> None:
