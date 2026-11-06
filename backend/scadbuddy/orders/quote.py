@@ -542,7 +542,7 @@ async def keep_sliced(
     key = sliced_key(sha256)
     await asyncio.to_thread(_write_sliced, blobs, key, payload)
     await blobs.publish(key, scope=scope)
-    await asyncio.to_thread(refs.add, key, QUOTE_HOLDER, quote_id)
+    await asyncio.to_thread(refs.hold, key, QUOTE_HOLDER, quote_id)
     return key, sha256
 
 
@@ -621,9 +621,6 @@ async def quote_run(
     recorded = await asyncio.to_thread(store.quote, quote_id)
     if recorded is not None and recorded.order_item_id == item_id:
         return recorded
-    # An earlier attempt's holds, from a worker that stopped before it recorded: this
-    # attempt takes them again, so the reaper never ages them out from under it.
-    await _drop(run.refs, quote_id, True)
     try:
         await asyncio.to_thread(set_filaments, lifecycle, order_id, item_id, request.filaments, by)
     except LifecycleError as error:
@@ -662,12 +659,6 @@ async def quote_run(
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
     held = False
-    landed = False
-
-    def mark(_: Quote) -> None:
-        nonlocal landed
-        landed = True
-
     try:
         plates: list[Plate] = []
         for plate in sliced:
@@ -687,8 +678,8 @@ async def quote_run(
         first = plates[0]
         assert first.sha256 is not None and first.blob_key is not None
         try:
-            # To its end: a cancel (the worker stopping) after the commit must not drop
-            # the holds of a quote that stands (#5353).
+            # To its end: a cancel (the worker stopping) waits for the commit, so the
+            # drop below sees the quote it recorded (#5353).
             return await to_thread_to_end(
                 lambda: lifecycle.record_slice_quote(
                     order_id,
@@ -701,12 +692,11 @@ async def quote_run(
                     revision_id=revision_id,
                     quote_id=quote_id,
                 ),
-                mark,
             )
         except LifecycleError as error:
             raise refused(error) from None
     except QuoteError as error:
-        await _drop(run.refs, quote_id, held)
+        await _drop(lifecycle, order_id, quote_id, held)
         extensions: dict[str, Any] = {}
         if error.plate is not None:
             extensions["plate"] = error.plate
@@ -719,18 +709,19 @@ async def quote_run(
             **extensions,
         ) from None
     except BaseException:
-        if not landed:
-            await _drop(run.refs, quote_id, held)
+        await _drop(lifecycle, order_id, quote_id, held)
         raise
 
 
-async def _drop(refs: BlobRefs, quote_id: str, held: bool) -> None:
+async def _drop(lifecycle: Lifecycle, order_id: str, quote_id: str, held: bool) -> None:
     """A run that fails after its first add drops its own holder before it raises
-    (Ruling 3); one the drop misses is the reaper's. Off the loop, as every other store
-    call of the run: a slow database must not stall the worker."""
+    (Ruling 3), unless its quote was recorded: every attempt of one operation holds
+    under one id, and another may have recorded it (#5353). One the drop misses is the
+    reaper's. Off the loop, as every other store call of the run: a slow database must
+    not stall the worker."""
     if not held:
         return
     try:
-        await asyncio.to_thread(refs.drop_holder, QUOTE_HOLDER, quote_id)
+        await asyncio.to_thread(lifecycle.drop_unrecorded_quote_holds, order_id, quote_id)
     except Exception:
         logger.exception("could not drop a failed quote's hold", extra={"id": quote_id})

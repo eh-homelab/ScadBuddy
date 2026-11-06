@@ -21,8 +21,10 @@ from contextlib import aclosing
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+import psycopg
 from fastapi import Response, status
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
@@ -83,6 +85,23 @@ ORDER_ITEM_QUOTE = "order_item_quote"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
 ORDER_ATTEMPT_COPY = "order_attempt_copy"
+#: Failures of a quote's run that another attempt would only repeat (#5353): a bug in
+#: ScadBuddy's code (an assertion, a wrong type or key, a value it cannot read) or SQL the
+#: database refuses as written. Not ``OSError``, ``httpx`` or ``psycopg.OperationalError``
+#: (a volume, Bambuddy or the database briefly away), nor the worker's own stop: those are
+#: what the next attempt is for. Each attempt renders and slices again, for up to
+#: ``QUOTE_TIMEOUT``, so a bug fails the operation at once instead.
+QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
+    AssertionError,
+    AttributeError,
+    LookupError,
+    NotImplementedError,
+    TypeError,
+    ValueError,
+    psycopg.DataError,
+    psycopg.IntegrityError,
+    psycopg.ProgrammingError,
+)
 #: One ``order_item_print`` run: the print run's accept, which answers within the command
 #: deadline, and the attempt's row. Its slices and queueing are the print run's own.
 PRINT_TIMEOUT = timedelta(minutes=5)
@@ -381,14 +400,20 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             refs=orders.refs,
             schema_of=lambda reference: reference_schema(core, reference),
         )
-        quote = await quote_run(
-            run,
-            request["order_id"],
-            request["item_id"],
-            SliceQuoteRequest.model_validate(request["request"]),
-            Actor.model_validate(request["by"]),
-            quote_id=operation_quote_id(OPERATION_RUN.get()),
-        )
+        try:
+            quote = await quote_run(
+                run,
+                request["order_id"],
+                request["item_id"],
+                SliceQuoteRequest.model_validate(request["request"]),
+                Actor.model_validate(request["by"]),
+                quote_id=operation_quote_id(OPERATION_RUN.get()),
+            )
+        except QUOTE_DETERMINISTIC as error:
+            # Recorded as the unexpected failure, as before; only not tried again.
+            raise ApplicationError(
+                type(error).__name__, type=type(error).__name__, non_retryable=True
+            ) from error
         dumped: dict[str, Any] = quote.model_dump(mode="json")
         return dumped
 
@@ -722,7 +747,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             # worker) fails its attempt as a retryable `WorkerShutdown`, or misses its
             # heartbeat; the next attempt runs on the new pod (#5353). Every attempt
             # records under the operation's quote id, so one that finds it recorded
-            # answers with it, and a transient Bambuddy failure is tried again too.
+            # answers with it, and a transient Bambuddy failure is tried again too; a
+            # bug (`QUOTE_DETERMINISTIC`) is not.
             run_attempts=3,
             queue="library",
             run_timeout=QUOTE_TIMEOUT,

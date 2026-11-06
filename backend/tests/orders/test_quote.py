@@ -5,6 +5,7 @@ fakes; the rows are Postgres."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from scadbuddy.orders.models import (
     Order,
     OrderItem,
     PricingPolicy,
+    Quote,
     Reference,
 )
 from scadbuddy.orders.problems import PROBLEMS
@@ -696,3 +698,104 @@ async def test_a_failed_run_drops_its_own_holder(shop: Shop, tmp_path: Path) -> 
     assert "plate 2" in failed.value.detail
     assert shop.holders() == set()
     assert shop.rows.quotes(shop.item.id) == []
+
+
+# -- attempts of one operation that overlap (#5353) -------------------------------------------
+
+#: The quote id every attempt of one operation records under (`operation_quote_id`).
+ONE_OPERATION = "5353" * 8
+
+
+class PausedSlicer(FakeSlicer):
+    """Holds the second plate's fetch until ``go``: by then the first plate's file is
+    kept and held, so the attempt is between its holds and its record. With ``fail``
+    the attempt fails there, as one whose worker stopped does."""
+
+    def __init__(self, files: Mapping[int, bytes]) -> None:
+        super().__init__(files)
+        self.paused = asyncio.Event()
+        self.go = asyncio.Event()
+        self.fail = False
+
+    async def fetch(self, sliced: SlicedPlate) -> bytes:
+        if sliced.plate_id == 2:
+            self.paused.set()
+            await self.go.wait()
+            if self.fail:
+                raise RuntimeError("this attempt's worker stopped")
+        return await super().fetch(sliced)
+
+
+async def paused_attempt(shop: Shop, tmp_path: Path) -> tuple[PausedSlicer, asyncio.Task[Quote]]:
+    """An attempt of the operation, started and run to its pause."""
+    files = {1: sliced_plate(1, 600, [1.0, 1.0]), 2: sliced_plate(2, 600, [1.0, 1.0])}
+    run = run_of(shop, tmp_path, files)
+    slicer = PausedSlicer(files)
+    run.slicer = slicer
+    task = asyncio.create_task(
+        quote_run(
+            run,
+            shop.order.id,
+            shop.item.id,
+            shop.request(s0=shop.pla, s1=shop.petg),
+            BY,
+            quote_id=ONE_OPERATION,
+        )
+    )
+    await asyncio.wait_for(slicer.paused.wait(), 30)
+    return slicer, task
+
+
+def held_keys(shop: Shop, quote_id: str) -> set[str]:
+    with shop.refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (QUOTE_HOLDER, quote_id),
+        ).fetchall()
+    return {row["key"] for row in rows}
+
+
+def plate_keys(quote: Quote) -> set[str]:
+    return {plate["blob_key"] for plate in quote.plates} | {quote.sliced_blob_key or ""}
+
+
+async def test_an_attempt_that_fails_before_another_records_leaves_its_quote_held(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#5353: a heartbeat timeout starts the next attempt while the first still runs.
+    One fails after both took their holds and drops them, since nothing is recorded
+    yet; the other then records, and its quote's holds commit with its row."""
+    first, recording = await paused_attempt(shop, tmp_path)
+    second, failing = await paused_attempt(shop, tmp_path)
+    assert held_keys(shop, ONE_OPERATION)
+    second.fail = True
+    second.go.set()
+    with pytest.raises(RuntimeError):
+        await failing
+    assert held_keys(shop, ONE_OPERATION) == set()
+    first.go.set()
+    quote = await recording
+    assert quote.id == ONE_OPERATION
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]
+
+
+async def test_attempts_that_end_after_another_recorded_keep_its_holds(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#5353: three overlapping attempts. One records; one that reaches its record
+    afterwards answers with that quote (no second row, no primary-key failure); one that
+    fails afterwards leaves the recorded quote's holds where they are."""
+    first, recording = await paused_attempt(shop, tmp_path)
+    second, late = await paused_attempt(shop, tmp_path)
+    third, failing = await paused_attempt(shop, tmp_path)
+    first.go.set()
+    quote = await recording
+    second.go.set()
+    assert (await late).id == quote.id == ONE_OPERATION
+    third.fail = True
+    third.go.set()
+    with pytest.raises(RuntimeError):
+        await failing
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]

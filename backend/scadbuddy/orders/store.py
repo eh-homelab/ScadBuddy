@@ -1930,6 +1930,13 @@ class OrderStore:
         assert row is not None
         return _attachment_of(row)[0]
 
+    def drop_holds(self, conn: Conn, holder_kind: str, holder_id: str) -> None:
+        """Every hold of ``(holder_kind, holder_id)``, in the caller's transaction."""
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (holder_kind, holder_id),
+        )
+
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
         """The row and its hold on the file, together; the blob sweep takes the bytes
         once nothing else holds them. The one way an attachment goes: nothing cascades

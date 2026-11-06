@@ -459,6 +459,28 @@ def test_a_quote_whose_pod_stopped_after_recording_answers_with_that_quote(
     assert again.json() == quote
 
 
+def test_a_bug_in_the_quotes_run_is_not_tried_again(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5353 review: a failure that another attempt would only repeat (here a
+    ``TypeError``) fails the operation on its first attempt, as the unexpected failure,
+    instead of rendering and slicing three times."""
+    shop = Shop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    calls: list[str] = []
+
+    async def buggy(*args: Any, **kwargs: Any) -> Quote:
+        calls.append(kwargs["quote_id"])
+        raise TypeError("a bug")
+
+    monkeypatch.setattr(order_operations, "quote_run", buggy)
+    op = shop.quote()
+    assert op["status"] == "failed", op
+    assert op["error"]["status"] == 500
+    assert len(calls) == 1
+    assert shop.get_item()["quotes"] == []
+
+
 def test_a_quote_renders_when_the_item_has_no_output(bambuddy: TestClient) -> None:
     """Review Focus 7: an item made by hand renders at its commit, saves an output,
     takes its colour slots and the body's filaments, and the next quote reuses it."""
