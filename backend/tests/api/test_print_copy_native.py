@@ -303,11 +303,15 @@ def test_a_model_delete_names_only_the_open_run_of_an_output_with_copies(
 ) -> None:
     """#5420 (#5408 review): of a model's two outputs only one has a native per-print
     copy. Both have an open run, but only that one's would lose its slice, so only its
-    run is named, and the delete is refused before anything is deleted. Each output in
-    turn holds the copy, so the run is found wherever its output falls in the list."""
-    outputs = [_save(native_client, widget, name).json()["id"] for name in ("One", "Two")]
-    copy, sliced = _per_print_copy(native_client, outputs[with_copy])
+    run is named, and the delete is refused before anything is deleted. The holder is
+    picked by its place in ``ids_for``'s list, the one `model_open_runs` flattens (in
+    directory order, not creation order), so each place is tested."""
+    for name in ("One", "Two"):
+        _save(native_client, widget, name)
     state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    outputs = state.outputs.ids_for(widget)
+    assert len(outputs) == 2
+    copy, sliced = _per_print_copy(native_client, outputs[with_copy])
     portal = native_client.portal
     assert portal is not None
     runs = [

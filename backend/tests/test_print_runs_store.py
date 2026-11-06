@@ -211,12 +211,13 @@ async def test_a_run_with_prints_still_to_start_is_still_using_its_files(
 
 
 async def test_running_for_outputs_groups_each_outputs_runs_newest_first(
-    store: PrintRunStore,
+    store: PrintRunStore, jobs: JobProjection
 ) -> None:
     """#5420 (#5408 review): one query for several outputs. Each output's in-use runs
-    are under its own id, newest first; an output with none, and an id asked twice,
-    are still keys, each once."""
-    for run_id, output_id in [("a-old", "o-a"), ("b-done", "o-b"), ("a-new", "o-a")]:
+    are under its own id, newest first by ``created_at`` (pinned here, against the
+    insert order); an output with none, and an id asked twice, are still keys, each
+    once."""
+    for run_id, output_id in [("a-new", "o-a"), ("b-done", "o-b"), ("a-old", "o-a")]:
         await store.insert_accepted(
             run_id,
             subject=PrintSubject.output(output_id),
@@ -227,6 +228,12 @@ async def test_running_for_outputs_groups_each_outputs_runs_newest_first(
             retention=None,
         )
     await store.succeed("b-done", "demo", RESULT)
+    with jobs.pool.connection() as conn:
+        for run_id, created in [("a-old", "2026-01-01"), ("a-new", "2026-01-02")]:
+            conn.execute(
+                "UPDATE print_runs SET created_at = %s::timestamptz WHERE id = %s",
+                (created, run_id),
+            )
 
     found = await store.running_for_outputs(["o-a", "o-b", "o-a"])
 
