@@ -370,6 +370,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   set_model_thumbnail: revision,
   delete_model_thumbnail: revision,
   add_model_media: revision,
+  // Its answer wraps the ModelRecord with the stored `path` (#5475).
+  add_readme_image: (input, result) => revision(input, field(result, 'model')),
   // Presets.
   save_preset: (input, result) => {
     const id = str(field(result, 'id'))

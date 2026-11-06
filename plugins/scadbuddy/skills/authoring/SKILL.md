@@ -222,7 +222,8 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
   with `workspace_path` and the `workspace_sha256` you read it at, in place of the
   inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
   `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image
-  or video for the gallery) or `set_output_thumbnail`. Text must be UTF-8. A file that
+  or video for the gallery), `add_readme_image` (an image the README links as
+  `![alt](images/<name>)`, #5475) or `set_output_thumbnail`. Text must be UTF-8. A file that
   changed since you read it is refused; read it again and resend.
 - If `apply_patch` answers `conflict`, someone saved since you read it. Read the
   source again and rebuild the patch against `current`; don't force your old text

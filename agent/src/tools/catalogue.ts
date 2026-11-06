@@ -427,6 +427,40 @@ export const catalogueTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'add_readme_image',
+    label: "Add an image for a model's README",
+    description:
+      "Store an image (PNG, JPEG, WebP or GIF, at most 10 MB) in a model's `images/` folder, as one revision, for its " +
+      'README (#5475). The type comes from the bytes; SVG is refused. The name is the file name made plain, numbered ' +
+      'when taken; nothing is written over. Answers `path` (`images/<name>`) and the model: link it in the README as ' +
+      '`![alt](images/<name>)` with set_readme.' +
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        slug,
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+        filename: z.string().min(1).max(255).optional().describe('e.g. "side-view.png"; the workspace file\'s own name by default'),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['POST /api/v1/models/{slug}/images'],
+    title: ({ slug, filename, workspace_path }) => `Add README image ${filename ?? workspace_path} → ${slug}`,
+    handler: async ({ slug, workspace_path, workspace_sha256, filename }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'add_readme_image')
+      const name = filename ?? uploadName(info.path)
+      const answer = await command(ctx, `add a README image to ${slug}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/images', {
+          params: { path: { slug } },
+          body: { file: name },
+          ...uploadInit(ctx, info, { name: 'file', filename: name, type: info.mediaType }, headers),
+        }),
+      )
+      return json(withSent(answer, info))
+    },
+  }),
+
+  defineTool({
     name: 'delete_model_thumbnail',
     label: "Remove a model's thumbnail",
     description: "Remove a model's own thumbnail, as a revision in its history.",
