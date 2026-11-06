@@ -99,13 +99,13 @@ async def move_hop(run_id: str, body: HopMove, flows: FlowsDep) -> FlowWaiting |
     moved = await flows.store.move_hop(run_id, body.call_id, body.record, proposal=body.proposal)
     if moved is not None:
         return moved
-    # Sent again after it moved the call (D5): the entry carries this very record last.
-    run = await flows.store.get_run(run_id)
-    waiting = [] if run is None else run.waiting_on
-    entry = next((w for w in waiting if w.call_id == body.call_id), None)
-    if entry is not None and entry.hop == "person" and entry.hops[-1:] == [body.record]:
-        return entry
-    return None
+    # Sent again after it moved the call (D5): the call's entry, waiting or resolved
+    # since, carries this very record, and only one move ever leaves hop `parent`.
+    entry = await flows.store.hop_entry(run_id, body.call_id)
+    if entry is None or entry.hop != "person" or body.record not in entry.hops:
+        return None
+    mine = entry.hops.index(body.record)
+    return entry.model_copy(update={"hops": entry.hops[: mine + 1], "resolved_at": None})
 
 
 @router.get("/decisions/{request_id}", name="crud_projects_get_decision")
@@ -134,9 +134,10 @@ async def record_decision(body: DecisionWrite, flows: FlowsDep) -> Recorded:
 
 
 def _same(held: Decision, decision: Decision) -> bool:
-    """As `FlowStore.record_decision` tells this very decision from another."""
-    pair: tuple[Any, Any] = (held.outcome, held.response)
-    return pair == (decision.outcome, decision.response)
+    """This very decision: as `FlowStore.record_decision` tells it from another, and by
+    who made it (as `flows/operations.py` `run_escalate` checks its own denial)."""
+    held_by: tuple[Any, ...] = (held.outcome, held.response, held.responder)
+    return held_by == (decision.outcome, decision.response, decision.responder)
 
 
 @router.delete(

@@ -17,8 +17,8 @@ from fastapi import Depends, FastAPI
 from scadbuddy.api import crud_projects
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
-from scadbuddy.auth.gate import AuthGate
-from scadbuddy.auth.models import Service
+from scadbuddy.auth.gate import SESSION_COOKIE, AuthGate
+from scadbuddy.auth.models import AuthSession, Service
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.crud.client import CrudClient
@@ -35,11 +35,36 @@ pytestmark = pytest.mark.requires_postgres
 
 TOKEN = "sbsvc_projects"
 BASE = "/api/v1/internal/crud/projects"
+SESSION = "a-live-session"
 
 
 class _Credentials:
     def resolve(self, token: str) -> Service | None:
         return Service("projects", frozenset({"crud.projects"})) if token == TOKEN else None
+
+
+#: The session tokens resolved, to show a person's request reached the guard as one.
+RESOLVED: list[str] = []
+
+
+class _Sessions:
+    def resolve(self, token: str) -> AuthSession | None:
+        RESOLVED.append(token)
+        if token != SESSION:
+            return None
+        return AuthSession(
+            id_hash=b"h",
+            principal="user:https://idp.test#alice",
+            issuer="https://idp.test",
+            subject="alice",
+            name=None,
+            email=None,
+            kind="login",
+            created_at=NOW,
+            last_seen_at=NOW,
+            idle_expires_at=NOW + timedelta(days=3650),
+            absolute_expires_at=NOW + timedelta(days=3650),
+        )
 
 
 class _Source:
@@ -74,17 +99,22 @@ def store(jobs: JobProjection, events: Events) -> FlowStore:
 
 
 @pytest.fixture
-def app(store: FlowStore) -> FastAPI:
+def mode() -> str:
+    return "enforce"
+
+
+@pytest.fixture
+def app(store: FlowStore, mode: str) -> FastAPI:
     """The routes behind the real `auth_check` and gate, with the flows component's store."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts = {AUTH: SimpleNamespace(would_refuse=_Noted()), FLOWS: SimpleNamespace(store=store)}
     app.state.scadbuddy = SimpleNamespace(
-        settings=SimpleNamespace(auth_mode="enforce"),
+        settings=SimpleNamespace(auth_mode=mode),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_projects.router, prefix="/api/v1")
     install_problem_handlers(app)
-    app.add_middleware(AuthGate, sessions=lambda: None, credentials=lambda: _Credentials())  # type: ignore[arg-type,return-value]
+    app.add_middleware(AuthGate, sessions=lambda: _Sessions(), credentials=lambda: _Credentials())
     return app
 
 
@@ -305,3 +335,54 @@ async def test_a_hop_moved_since_this_very_decision_still_answers_recorded(
     assert await remote.record_decision(decision, at_hop="parent") is True
     with pytest.raises(HopMovedError):
         await remote.record_decision(_decision(outcome="approved", response={}), at_hop="parent")
+
+
+async def test_a_retry_finds_its_move_after_the_entry_was_resolved(
+    remote: RemoteFlowStore, store: FlowStore
+) -> None:
+    """The answer to the first move was lost, and a person decided and the run moved on
+    before the retry: the retry still answers the entry it moved, never another's."""
+    await started(store)
+    await store.project(
+        ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_add=_at_parent("c"))
+    )
+    record = HopRecord(hop="parent", action="pass_up", actor="session:s", at=NOW)
+    first = await store.move_hop("r1", "c", record)
+    await store.project(
+        ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="c", history_length=20)
+    )
+    run = await store.get_run("r1")
+    assert run is not None and run.waiting_on == []
+    assert await remote.move_hop("r1", "c", record) == first
+    other = record.model_copy(update={"actor": "session:other"})
+    assert await remote.move_hop("r1", "c", other) is None
+
+
+async def test_a_person_s_decision_with_the_same_answer_is_not_this_one(
+    remote: RemoteFlowStore, store: FlowStore
+) -> None:
+    """After the hop moved, a person's denial with the parent's response is another's."""
+    await started(store)
+    await store.project(
+        ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_add=_at_parent("c"))
+    )
+    await store.record_decision(_decision(response={}, responder="browser"))
+    await store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="c"))
+    with pytest.raises(HopMovedError):
+        await remote.record_decision(_decision(response={}), at_hop="parent")
+
+
+@pytest.mark.parametrize("mode", ["off", "observe", "enforce"])
+async def test_a_person_or_nobody_is_refused_in_every_mode(app: FastAPI) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://api"
+    ) as client:
+        nobody = await client.get(f"{BASE}/approval-expiry")
+        person = await client.get(
+            f"{BASE}/approval-expiry", headers={"Cookie": f"{SESSION_COOKIE}={SESSION}"}
+        )
+    assert nobody.status_code == 401
+    assert person.status_code == 401
+    assert SESSION in RESOLVED
+    for refused in (nobody, person):
+        assert refused.headers["X-ScadBuddy-Crud"] == "1"

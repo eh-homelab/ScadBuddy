@@ -346,6 +346,11 @@ class FlowStore:
         `parent`."""
         return await asyncio.to_thread(self._move_hop, run_id, call_id, record, proposal)
 
+    async def hop_entry(self, run_id: str, call_id: str) -> FlowWaiting | None:
+        """The call's parked entry, still waiting or resolved since (the latest one): how a
+        resent `move_hop` finds the move it made (`api/crud_projects.py`)."""
+        return await asyncio.to_thread(self._hop_entry, run_id, call_id)
+
     async def get_proposal(self, request_id: str) -> Proposal | None:
         """A parent's narrowed input for the call, its hash, and who proposed it."""
         return await asyncio.to_thread(self._get_proposal, request_id)
@@ -804,6 +809,17 @@ class FlowStore:
             assert updated is not None
             self._announce(conn, Run.model_validate(updated))
         return moved
+
+    def _hop_entry(self, run_id: str, call_id: str) -> FlowWaiting | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT waiting_on, waiting_done FROM workflow_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        entries = [FlowWaiting.model_validate(w) for w in row["waiting_on"]]
+        entries += reversed(_done(row))
+        return next((w for w in entries if w.call_id == call_id), None)
 
     def _get_proposal(self, request_id: str) -> Proposal | None:
         with self._pool.connection() as conn:
