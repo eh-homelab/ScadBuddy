@@ -468,7 +468,8 @@ directory is set, so a cluster that does not set it has no static secret to stea
 - Agent: `agent/test/serviceCredential.test.ts` tests the exchanging reader against a
   fake backend route.
 - Real TokenReview is never called in CI. The clusters PR is checked on the cluster by a
-  one-off `kubectl create token scadbuddy-print --audience scadbuddy` and a call to the
+  one-off `kubectl create token scadbuddy-print --audience scadbuddy --bound-object-kind Pod
+  --bound-object-name <pod> --bound-object-uid <uid>` (an unbound token is refused, #5498) and a call to the
   route (§8 step 3).
 
 ## 8. Migration, with no downtime
