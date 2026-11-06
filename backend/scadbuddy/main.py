@@ -115,9 +115,10 @@ from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_hol
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
 from scadbuddy.printers.bambuddy_sync import (
+    apply_virtual_printers,
     boot_adoption_due,
+    read_virtual_printers,
     sync_printers,
-    sync_virtual_printers,
 )
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
@@ -800,8 +801,7 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
     await _with_bambuddy(state, sweep)
 
 
-#: How long the boot's virtual-printer pass may take: two Bambuddy lists and an upsert
-#: per virtual printer.
+#: How long the boot's virtual-printer pass may wait for Bambuddy's two lists.
 VP_BOOT_TIMEOUT = 60.0
 
 
@@ -812,27 +812,34 @@ async def _adopt_virtual_rows_logged(state: AppState) -> None:
     `boot_adoption_due`, the sync's virtual-printer part runs: two Bambuddy lists, no
     access code, no probe. Nothing without a Bambuddy. Bambuddy refusing, unreachable or
     past `VP_BOOT_TIMEOUT` is one WARNING from this pass (the client logs its own failed
-    request besides); anything else one logged traceback; never raised."""
+    request besides); anything else, the registry's own ApiErrors too (#5259), one logged
+    traceback; never raised."""
     try:
         registry = state.components.get(PRINTERS)
         rows = await asyncio.to_thread(registry.store.list)
         if not boot_adoption_due(rows):
             return
         settings = await asyncio.to_thread(state.settings_store.load)
-        async with asyncio.timeout(VP_BOOT_TIMEOUT), client_for(settings) as client:
-            await sync_virtual_printers(registry, client)
-    except ApiError as error:
-        if error.type == NOT_CONFIGURED_PROBLEM:
+        # Only Bambuddy's calls are in here: an ApiError from the registry's writes below
+        # is a local fault, never "Bambuddy unreachable" (#5259).
+        try:
+            async with asyncio.timeout(VP_BOOT_TIMEOUT), client_for(settings) as client:
+                listing = await read_virtual_printers(client)
+        except ApiError as error:
+            if error.type == NOT_CONFIGURED_PROBLEM:
+                return
+            logger.warning(
+                "could not sync the virtual printers from Bambuddy at start",
+                extra={"status": error.status},
+            )
             return
-        logger.warning(
-            "could not sync the virtual printers from Bambuddy at start",
-            extra={"status": error.status},
-        )
-    except TimeoutError:
-        logger.warning(
-            "could not sync the virtual printers from Bambuddy at start",
-            extra={"timeout": VP_BOOT_TIMEOUT},
-        )
+        except TimeoutError:
+            logger.warning(
+                "could not sync the virtual printers from Bambuddy at start",
+                extra={"timeout": VP_BOOT_TIMEOUT},
+            )
+            return
+        await apply_virtual_printers(registry, listing)
     except Exception:
         logger.exception("could not sync the virtual printers from Bambuddy at start")
 
