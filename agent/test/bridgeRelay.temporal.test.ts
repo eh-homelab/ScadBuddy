@@ -192,10 +192,37 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await owned(TAB, b.queue)
       await kill(b)
       a.hub.pairSession('s1', TAB)
-      const started = performance.now()
+      const before = performance.now()
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
+      const elapsed = performance.now() - before
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
-      expect(performance.now() - started).toBeLessThan(ACK_TIMEOUT_MS + 1_000)
+      // #5428: what ended the wait is the call's history, not the test's clock. The wall clock also
+      // counts the workflow tasks, the start and the unsealing, which are CPU work: under a loaded
+      // suite they took 1.5-3 s beside the 3 s ack window (measured on one shared CPU), so an
+      // `ACK_TIMEOUT_MS + 1 s` bound failed while the ack window itself was 3.0 s.
+      expect(started).toHaveLength(1)
+      const { events } = JSON.parse(historyToJSON(await client.workflow.getHandle(started[0]!).fetchHistory())) as {
+        events: {
+          eventType: string
+          workflowExecutionStartedEventAttributes?: { workflowExecutionTimeout?: string }
+          activityTaskScheduledEventAttributes?: { scheduleToStartTimeout?: string }
+          activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } }
+        }[]
+      }
+      const seconds = (d: string | undefined) => Number(d?.replace(/s$/, '')) * 1000
+      // The owner's queue was given the ack timeout to take the call, once, and the call ended on it.
+      const scheduled = events.filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED')
+      expect(scheduled.map((e) => seconds(e.activityTaskScheduledEventAttributes?.scheduleToStartTimeout))).toEqual([ACK_TIMEOUT_MS])
+      const timedOut = events.filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
+      expect(timedOut.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual([
+        'TIMEOUT_TYPE_SCHEDULE_TO_START',
+      ])
+      expect(events.at(-1)?.eventType).toBe('EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED')
+      // Not a long wait: the answer came well before the workflow's own deadline (the ack timeout,
+      // the owner's run and WORKFLOW_SLACK_MS), the wait a missing ack timeout would end on.
+      const deadline = seconds(events[0]?.workflowExecutionStartedEventAttributes?.workflowExecutionTimeout)
+      expect(deadline).toBeGreaterThan(ACK_TIMEOUT_MS + 10_000)
+      expect(elapsed).toBeLessThan(deadline - 10_000)
       // The dead replica's row is dropped, so the next call does not wait for it again.
       await vi.waitFor(async () => expect(await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).toHaveLength(0))
     })
