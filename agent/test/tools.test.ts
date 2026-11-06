@@ -3384,7 +3384,9 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
 
   it('gives up following after its budget, saying it may still start (review #2849)', async () => {
     // The budget's clock moves only when a follow is answered, so a slow machine cannot
-    // spend it before the first follow (#5379): the third answer ends it.
+    // spend it before the first follow (#5379): the third answer ends it. The poll interval
+    // is the test's own: a pause of 10 ms or more between follows would end the budget
+    // after fewer than three (#5391).
     let clock = 0
     let follows = 0
     server.use(
@@ -3399,7 +3401,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     const result = await runTool(
       { ...tool('delete_output'), gated: false },
       { output_id: OUT },
-      ctx({ acceptingMs: 30, now: () => clock }),
+      ctx({ acceptingMs: 30, now: () => clock, pollIntervalMs: 1 }),
     )
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('ScadBuddy is still starting it')
