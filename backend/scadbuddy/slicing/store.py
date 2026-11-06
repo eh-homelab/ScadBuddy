@@ -100,7 +100,9 @@ class NativeSliceStore:
         A fresh start answers the key's running row too, and joins its execution. Else,
         when the key has a completed row, it inserts a new row; with none, it acts as a
         start that is not fresh. The key's starts take one lock, so two fresh starts
-        make one row.
+        make one row. During a rollout an older pod's start takes no lock and runs the
+        old upsert on the first row; a race with a fresh insert is harmless, since
+        each row has its own workflow id and so its own execution (#5456).
 
         A start that no execution follows is the lost-row stop's, which compares that
         ``started_at``: a start that joins an execution as it closes (`start_workflow`'s
