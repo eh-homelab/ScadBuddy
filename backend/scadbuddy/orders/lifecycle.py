@@ -27,6 +27,7 @@ import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -64,7 +65,7 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.pricing import Plate, Priced
+from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
@@ -250,6 +251,14 @@ class OrderEdit(BaseModel):
     shipping_address_id: str | UnsetType | None = UNSET
     billing_address_id: str | UnsetType | None = UNSET
     charges: list[ChargeInput] | None = None
+
+
+@dataclass(frozen=True)
+class LabourRate:
+    """``pricing_labour_rate_per_hour`` and the shop's ``orders_currency`` it is in."""
+
+    per_hour: Decimal
+    currency: str
 
 
 @dataclass
@@ -547,16 +556,22 @@ class Lifecycle:
         return [] if item_id is None else [self._item_of(conn, order, item_id)]
 
     def add_time_entry(
-        self, order_id: str, body: TimeEntryInput, by: Actor, *, rate_minor_per_hour: int | None
+        self, order_id: str, body: TimeEntryInput, by: Actor, *, labour_rate: LabourRate
     ) -> tuple[TimeEntry, bool]:
-        """Time spent, at ``rate_minor_per_hour`` (the labour rate now, copied), and
-        whether this call wrote it: a second write of one ``source`` returns the first
-        entry and writes nothing, not even an audit row."""
+        """Time spent, at the labour rate now (copied, in the order's minor units, under
+        the order's lock, so a currency change cannot slip in between), and whether this
+        call wrote it: a second write of one ``source`` returns the first entry and writes
+        nothing, not even an audit row."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             items = self._entry_item(conn, order, body.order_item_id)
+            rate = (
+                to_minor(labour_rate.per_hour, order.currency)
+                if order.currency == labour_rate.currency
+                else None
+            )
             entry, written = self.store.insert_time_entry(
-                conn, order.id, body, rate_minor_per_hour=rate_minor_per_hour, created_by=by
+                conn, order.id, body, rate_minor_per_hour=rate, created_by=by
             )
             if not written:
                 return entry, False
@@ -1440,7 +1455,7 @@ class Lifecycle:
                 # Logged time and costs are the job's record (#5326): never dropped with
                 # the item, and its delete has no audit row for them.
                 raise LifecycleError(
-                    "item_not_draft",
+                    "item_has_entries",
                     f"item {item_id} has time or cost entries: remove them or cancel it"
                     f" (POST /orders/{order_id}/items/{item_id}/cancel)",
                     items=[item.id],

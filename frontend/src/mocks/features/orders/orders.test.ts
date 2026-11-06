@@ -78,6 +78,11 @@ describe('orders mock (#4249)', () => {
     expect(added.reference?.slug).toBe('name-keychain')
     expect(added.colours.length).toBeGreaterThan(0)
     await api.deleteOrderItem(ORDER_DRAFT, added.id)
+    // A draft item with logged time stays on the record (#5326).
+    const logged = await api.addOrderItem(ORDER_DRAFT, { output_id: OUTPUT_REAGAN, quantity: 1 })
+    await api.addTimeEntry(ORDER_DRAFT, { order_item_id: logged.id, kind: 'design', minutes: 5 })
+    const kept = await failure(api.deleteOrderItem(ORDER_DRAFT, logged.id))
+    expect(kept?.problem.type).toBe(`${PROBLEMS}item_has_entries`)
     await api.quoteOrderItem(ORDER_DRAFT, ITEM_DRAFT, { unit_price_minor: 5 })
     const refused = await failure(api.deleteOrderItem(ORDER_DRAFT, ITEM_DRAFT))
     expect(refused?.problem.type).toBe(`${PROBLEMS}item_not_draft`)

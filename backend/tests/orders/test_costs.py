@@ -28,6 +28,7 @@ from scadbuddy.orders.pricing import Plate, PlateFilament, price
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
+from tests.orders.test_cost_entries import usd_rate
 from tests.orders.test_lifecycle import BY, Shop, _slice_quote
 
 pytestmark = pytest.mark.requires_postgres
@@ -399,10 +400,10 @@ async def test_labour_is_the_entries_else_a_default(shop: Shop) -> None:
         order.id,
         TimeEntryInput(order_item_id=item.id, kind="setup", minutes=20),
         BY,
-        rate_minor_per_hour=3000,
+        labour_rate=usd_rate("30"),
     )
     shop.lifecycle.add_time_entry(
-        order.id, TimeEntryInput(kind="packing", minutes=10), BY, rate_minor_per_hour=3000
+        order.id, TimeEntryInput(kind="packing", minutes=10), BY, labour_rate=usd_rate("30")
     )
     costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
     assert costs is not None
@@ -501,6 +502,29 @@ async def test_a_cancelled_item_is_charged_nothing_and_its_cost_counts(shop: Sho
     assert (costs.revenue_minor, costs.margin_state) == (0, "loss")
 
 
+async def test_a_cancelled_order_is_charged_nothing_its_charges_included(shop: Shop) -> None:
+    """§5: a cancelled order follows the cancelled item's rule, so its shipping charge
+    never shows a job that fell through as profit (#5338's review)."""
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    shop.lifecycle.edit_order(
+        order.id,
+        BY,
+        OrderEdit(charges=[ChargeInput(kind="shipping", label="Post", amount_minor=500)]),
+    )
+    shop.lifecycle.accept_order(order.id, BY)
+    shop.lifecycle.add_cost_entry(order.id, CostEntryInput(kind="payment_fee", amount_minor=30), BY)
+    shop.lifecycle.cancel_order(order.id, BY, None)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    assert costs.items[0].revenue_minor == 0
+    assert (costs.charges_minor, costs.revenue_minor, costs.cost_minor) == (500, 0, 30)
+    assert (costs.margin_minor, costs.margin_state) == (-30, "loss")
+
+
 async def test_a_custom_item_costs_only_its_entries(shop: Shop) -> None:
     order = shop.order()
     item = shop.lifecycle.add_custom_item(
@@ -559,7 +583,7 @@ async def test_an_item_with_no_accepted_quote_has_no_margin(shop: Shop) -> None:
         order.id,
         TimeEntryInput(order_item_id=item.id, kind="design", minutes=90),
         BY,
-        rate_minor_per_hour=2000,
+        labour_rate=usd_rate("20"),
     )
 
     costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)

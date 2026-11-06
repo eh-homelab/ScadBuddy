@@ -202,7 +202,7 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
       labour_minor: labour,
       other_minor: others,
       cost_minor: prints + labour + others,
-      revenue_minor: item.status === 'cancelled' ? 0 : accepted ? accepted.total_minor : null,
+      revenue_minor: item.status === 'cancelled' || order.status === 'cancelled' ? 0 : accepted ? accepted.total_minor : null,
       estimated,
       unknown,
     },
@@ -235,7 +235,12 @@ export function costsOf(orderId: string): OrderCosts | null {
   const shipping = state.shipments.filter((s) => s.order_id === order.id).reduce((s, x) => s + (x.cost_minor ?? 0), 0)
   const charges = state.charges.filter((c) => c.order_id === order.id && c.kind !== 'tax').reduce((s, c) => s + c.amount_minor, 0)
   const open = items.filter((i) => i.status !== 'cancelled')
-  const revenue = items.length && open.every((i) => i.revenue_minor != null) ? items.reduce((s, i) => s + (i.revenue_minor ?? 0), 0) + charges : null
+  const revenue =
+    order.status === 'cancelled'
+      ? 0
+      : items.length && open.every((i) => i.revenue_minor != null)
+        ? items.reduce((s, i) => s + (i.revenue_minor ?? 0), 0) + charges
+        : null
   const labour = items.reduce((s, i) => s + (i.labour_minor ?? 0), 0) + ownLabour
   const others = items.reduce((s, i) => s + (i.other_minor ?? 0), 0) + ownOther.reduce((s, e) => s + e.amount_minor, 0)
   const prints = items.reduce((s, i) => s + (i.prints_minor ?? 0), 0)

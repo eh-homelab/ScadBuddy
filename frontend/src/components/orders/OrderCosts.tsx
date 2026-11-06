@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '../../lib/format'
 import { formatMoney } from '../../lib/money'
-import { AddCost, COST_KINDS, LogTime, TIME_KINDS } from './CostEntryForms'
+import { AddCost, COST_KINDS, LogTime, readTimer, TIME_KINDS } from './CostEntryForms'
 import { refusalText } from './refusal'
 
 type MarginView = Pick<Costs, 'margin_minor' | 'margin_percent' | 'margin_state' | 'estimated' | 'unknown'>
@@ -191,6 +191,11 @@ export function OrderCosts({ costs, onChanged }: { costs: Costs; onChanged: () =
                     <Button size="sm" variant="ghost" className="h-auto px-1 py-0 font-normal" aria-expanded={expanded} onClick={() => toggle(item.item_id)}>
                       {expanded ? '▾' : '▸'} {item.title}
                     </Button>
+                    {!expanded && readTimer(item.item_id) && (
+                      <Badge variant="outline" className="ml-1 font-normal">
+                        Timer running
+                      </Badge>
+                    )}
                   </td>
                   <td className="sb-num" data-testid="cost-charged">
                     {charged(item.revenue_minor)}

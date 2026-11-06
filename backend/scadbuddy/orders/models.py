@@ -466,8 +466,9 @@ class TimeEntryInput(BaseModel):
     note: str = Field(default="", max_length=1000)
     #: When the timer started, when a timer wrote it.
     started_at: datetime | None = None
-    #: What wrote it (``timer:<started_at>``): one entry per order, kind and source, so
-    #: a retry whose first reply was lost writes once. None for one typed by hand.
+    #: What wrote it (``timer:<item or order>:<started_at>``): one entry per order, kind
+    #: and source, so a retry whose first reply was lost writes once. None for one typed
+    #: by hand.
     source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
 
 

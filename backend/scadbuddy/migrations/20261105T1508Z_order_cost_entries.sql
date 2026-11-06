@@ -15,7 +15,7 @@ CREATE TABLE order_time_entries (
   rate_minor_per_hour bigint CHECK (rate_minor_per_hour >= 0),
   note text NOT NULL DEFAULT '',
   started_at timestamptz,
-  -- What wrote it (`timer:<started_at>`); null for an entry typed by hand.
+  -- What wrote it (`timer:<item or order>:<started_at>`); null for an entry typed by hand.
   source text,
   created_by jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()

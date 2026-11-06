@@ -25,8 +25,9 @@ cost is only its entries), nor does a cancelled one, which was never made.
 **Other** (§4.4). The cost entries; and on the order, its shipments' ``cost_minor``.
 
 **Charged and margin** (§5). An item is charged its accepted quote's total, nothing once
-cancelled, and has no charged figure without an accepted quote. The order is charged its
-items' plus every charge but ``tax``, once every item not cancelled has a charged figure.
+it or its order is cancelled, and has no charged figure without an accepted quote. The
+order is charged its items' plus every charge but ``tax``, once every item not cancelled
+has a charged figure; a cancelled order is charged nothing, its charges included.
 Margin is charged less cost; a ``loss`` below zero, else ``unknown`` when a part is unknown,
 else ``thin`` below ``orders_thin_margin_percent``, else ``ok``.
 
@@ -256,6 +257,7 @@ class _Item:
 
     def __init__(self, store: OrderStore, order: Order, item: OrderItem, rates: CostRates) -> None:
         self.item = item
+        self.order = order
         self.rates = rates
         self.exponent = minor_exponent(order.currency)
         #: Today's settings apply only in the shop's own currency (§5).
@@ -416,6 +418,8 @@ def _margin(view: Margin, thin: Decimal) -> None:
 def _item_cost(
     reader: _Item, time: Sequence[TimeEntry], other: Sequence[CostEntry], thin: Decimal
 ) -> ItemCost:
+    """One item's cost and margin. An item of a cancelled order is charged nothing, as a
+    cancelled item is, even one fulfilled before the cancel (§5)."""
     item, quote = reader.item, reader.accepted
     unit = _unit(quote)
     attempts: list[AttemptCost] = []
@@ -448,7 +452,7 @@ def _item_cost(
 
     prints = sum(a.cost_minor for a in attempts)
     others = sum(entry.amount_minor for entry in other)
-    if item.status == "cancelled":
+    if item.status == "cancelled" or reader.order.status == "cancelled":
         revenue: Money | None = 0
     else:
         revenue = None if quote is None else quote.total_minor
@@ -510,7 +514,10 @@ def _read(store: OrderStore, order_id: str, rates: CostRates) -> OrderCosts | No
     charges = sum(c.amount_minor for c in store.charges(order.id) if c.kind != "tax")
     open_items = [i for i in items if i.status != "cancelled"]
     revenue: Money | None = None
-    if items and all(i.revenue_minor is not None for i in open_items):
+    if order.status == "cancelled":
+        # The job fell through: what it cost shows as a loss, whatever was charged (§5).
+        revenue = 0
+    elif items and all(i.revenue_minor is not None for i in open_items):
         revenue = sum(i.revenue_minor or 0 for i in items) + charges
 
     labour = sum(i.labour_minor for i in items) + own_labour

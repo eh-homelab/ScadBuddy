@@ -61,6 +61,7 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
+    LabourRate,
     LifecycleError,
     ManualQuoteInput,
     OrderEdit,
@@ -799,7 +800,8 @@ async def get_order_costs(
         "In any order status, ended and on hold included. The entry copies the labour rate "
         "in force (`pricing_labour_rate_per_hour`) as `rate_minor_per_hour`, so a later "
         "change never rewrites it; for an order in a currency other than the shop's, no "
-        "rate can be copied and it is null. With a `source` (a timer's `timer:<started_at>`), "
+        "rate can be copied and it is null. With a `source` (a timer's "
+        "`timer:<item or order>:<started_at>`), "
         "a second write of the same order, kind and source returns the first entry as it "
         "was recorded and writes nothing (200). On the audit line as `time.added`."
     ),
@@ -815,19 +817,11 @@ async def add_time_entry(
     _path(order_id)
     by = current_actor()
 
-    def add() -> tuple[TimeEntry, bool]:
-        order = orders.store.order(order_id)
-        if order is None:
-            raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
-        runtime = settings.snapshot().runtime
-        rate = (
-            to_minor(Decimal(runtime.pricing_labour_rate_per_hour), order.currency)
-            if order.currency == runtime.orders_currency
-            else None
-        )
-        return orders.lifecycle.add_time_entry(order_id, body, by, rate_minor_per_hour=rate)
-
-    entry, written = await _run(add)
+    runtime = settings.snapshot().runtime
+    rate = LabourRate(Decimal(runtime.pricing_labour_rate_per_hour), runtime.orders_currency)
+    entry, written = await _run(
+        lambda: orders.lifecycle.add_time_entry(order_id, body, by, labour_rate=rate)
+    )
     if not written:
         response.status_code = status.HTTP_200_OK
     return entry
@@ -1171,7 +1165,8 @@ async def patch_item(
 )
 async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Response:
     """Only while the item is `draft` (Ruling 10): else 409 ``item_not_draft`` names the
-    cancel route, and the caller decides."""
+    cancel route, and the caller decides. A draft item with time or cost entries is 409
+    ``item_has_entries`` (#5326): remove them, or cancel it."""
     _path(order_id, item_id)
     by = current_actor()
     await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))

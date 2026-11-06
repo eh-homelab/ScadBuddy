@@ -3,10 +3,12 @@ lifecycle in any order status, each on the audit line and told after commit."""
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from scadbuddy.core.events import OrderChanged, OrderItemChanged
-from scadbuddy.orders.lifecycle import LifecycleError
+from scadbuddy.orders.lifecycle import LabourRate, LifecycleError
 from scadbuddy.orders.models import CostEntryInput, TimeEntryInput
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
@@ -14,6 +16,13 @@ from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
 
 pytestmark = pytest.mark.requires_postgres
+
+#: A labour rate in a currency other than the orders': nothing can be copied.
+EUR_RATE = LabourRate(Decimal("30"), "EUR")
+
+
+def usd_rate(per_hour: str) -> LabourRate:
+    return LabourRate(Decimal(per_hour), "USD")
 
 
 @pytest.fixture(name="shop")
@@ -29,7 +38,7 @@ def test_a_time_entry_is_recorded_with_its_rate_and_audit_row(shop: Shop) -> Non
         order.id,
         TimeEntryInput(order_item_id=item.id, kind="post_processing", minutes=25, note="sand"),
         BY,
-        rate_minor_per_hour=3000,
+        labour_rate=usd_rate("30"),
     )
 
     assert (entry.order_item_id, entry.minutes, entry.rate_minor_per_hour) == (item.id, 25, 3000)
@@ -58,7 +67,7 @@ def test_entries_are_allowed_in_every_status(shop: Shop, state: str) -> None:
         shop.lifecycle.hold(order.id, BY)
 
     shop.lifecycle.add_time_entry(
-        order.id, TimeEntryInput(kind="packing", minutes=5), BY, rate_minor_per_hour=None
+        order.id, TimeEntryInput(kind="packing", minutes=5), BY, labour_rate=EUR_RATE
     )
     cost, _ = shop.lifecycle.add_cost_entry(
         order.id, CostEntryInput(kind="payment_fee", amount_minor=59), BY
@@ -101,8 +110,10 @@ def test_a_timer_entry_retried_is_written_once(shop: Shop) -> None:
     order, _ = shop.accepted()
     body = TimeEntryInput(kind="setup", minutes=12, source="timer:2026-11-05T10:00:00Z")
 
-    first, written = shop.lifecycle.add_time_entry(order.id, body, BY, rate_minor_per_hour=0)
-    again, again_written = shop.lifecycle.add_time_entry(order.id, body, BY, rate_minor_per_hour=0)
+    first, written = shop.lifecycle.add_time_entry(order.id, body, BY, labour_rate=usd_rate("0"))
+    again, again_written = shop.lifecycle.add_time_entry(
+        order.id, body, BY, labour_rate=usd_rate("0")
+    )
 
     assert again == first
     assert (written, again_written) == (True, False)
@@ -121,7 +132,7 @@ def test_an_item_with_entries_is_never_deleted(shop: Shop) -> None:
     with pytest.raises(LifecycleError) as refused:
         shop.lifecycle.delete_item(order.id, item.id, BY)
 
-    assert refused.value.slug == "item_not_draft"
+    assert refused.value.slug == "item_has_entries"
     assert [e.order_item_id for e in shop.rows.cost_entries(order.id)] == [item.id]
 
 
@@ -132,7 +143,7 @@ def test_a_removal_is_audited_and_an_unknown_entry_is_not_found(shop: Shop) -> N
         order.id,
         TimeEntryInput(order_item_id=item.id, kind="design", minutes=60),
         BY,
-        rate_minor_per_hour=0,
+        labour_rate=usd_rate("0"),
     )
 
     with pytest.raises(LifecycleError) as refused:

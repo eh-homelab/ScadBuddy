@@ -26,7 +26,10 @@ export const COST_KINDS: Record<CostEntry['kind'], string> = {
 /** #5326 §4.3 — the running timer lives in this browser only, so an abandoned one costs nothing. */
 export const timerKey = (scope: string) => `scadbuddy.order-timer.${scope}`
 
-function readTimer(scope: string): string | null {
+/** §4.3 — past this, the page offers to log or discard a timer someone may have left running. */
+export const STALE_TIMER_MS = 12 * 60 * 60_000
+
+export function readTimer(scope: string): string | null {
   try {
     return window.localStorage.getItem(timerKey(scope))
   } catch {
@@ -46,6 +49,11 @@ function writeTimer(scope: string, startedAt: string | null): void {
 /** Whole minutes since `startedAt`, rounded up, at least one. */
 export function elapsedMinutes(startedAt: string, at: number = Date.now()): number {
   return Math.max(1, Math.ceil((at - new Date(startedAt).getTime()) / 60_000))
+}
+
+/** Whether a timer started at `startedAt` has run past `STALE_TIMER_MS`. */
+export function isStale(startedAt: string, at: number = Date.now()): boolean {
+  return at - new Date(startedAt).getTime() > STALE_TIMER_MS
 }
 
 type Scope = { orderId: string; itemId: string | null; onDone: () => void }
@@ -75,14 +83,15 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
     setBusy(true)
     setError(null)
     try {
-      // A timer's entry names its start, so a retry after a lost reply writes once.
+      // A timer's entry names its scope and start, so a retry after a lost reply writes
+      // once, whatever kind is picked by then.
       await api.addTimeEntry(orderId, {
         order_item_id: itemId,
         kind,
         minutes: count,
         note: note.trim(),
         started_at: startedAt,
-        source: startedAt ? `timer:${startedAt}` : null,
+        source: startedAt ? `timer:${scope}:${startedAt}` : null,
       })
       setMinutes('')
       setNote('')
@@ -95,6 +104,18 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
       setBusy(false)
     }
   }
+
+  function stop() {
+    if (!started) return
+    const startedAt = started
+    void save(elapsedMinutes(startedAt), startedAt).then((saved) => {
+      if (!saved) return
+      writeTimer(scope, null)
+      setStarted(null)
+    })
+  }
+
+  const stale = started !== null && isStale(started)
 
   return (
     <form
@@ -137,21 +158,12 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
         Log time
       </Button>
       {started ? (
-        <Button
-          type="button"
-          size="sm"
-          disabled={busy}
-          onClick={() => {
-            const startedAt = started
-            void save(elapsedMinutes(startedAt), startedAt).then((saved) => {
-              if (!saved) return
-              writeTimer(scope, null)
-              setStarted(null)
-            })
-          }}
-        >
-          Stop timer ({elapsedMinutes(started)} min)
-        </Button>
+        <>
+          <Button type="button" size="sm" disabled={busy} onClick={stop}>
+            Stop timer ({elapsedMinutes(started)} min)
+          </Button>
+          <span className="self-center text-xs text-muted-foreground">on this browser only</span>
+        </>
       ) : (
         <Button
           type="button"
@@ -166,6 +178,28 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
         >
           Start timer
         </Button>
+      )}
+      {stale && started && (
+        <div role="status" className="flex basis-full flex-wrap items-center gap-2 text-xs">
+          <span>
+            This timer has run since {new Date(started).toLocaleString()}. Log the {elapsedMinutes(started)} minutes, or discard it?
+          </span>
+          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={stop}>
+            Log {elapsedMinutes(started)} min
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              writeTimer(scope, null)
+              setStarted(null)
+            }}
+          >
+            Discard timer
+          </Button>
+        </div>
       )}
       {error && (
         <p role="alert" className="basis-full text-xs text-destructive">

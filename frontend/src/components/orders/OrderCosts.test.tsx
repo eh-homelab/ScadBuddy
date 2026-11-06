@@ -109,10 +109,37 @@ describe('OrderCosts', () => {
 
     await waitFor(() => expect(state.timeEntries.map((e) => e.minutes)).toEqual([10]))
     expect(state.timeEntries[0]!.started_at).not.toBeNull()
-    // Its start names it, so a retry after a lost reply writes once.
-    expect(state.timeEntries[0]!.source).toBe(`timer:${started}`)
+    // Its scope and start name it, so a retry after a lost reply writes once.
+    expect(state.timeEntries[0]!.source).toBe(`timer:${ITEM_APPROVED}:${started}`)
     expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).toBeNull()
     expect(await screen.findAllByRole('button', { name: 'Start timer' })).not.toHaveLength(0)
+  })
+
+  it('marks a collapsed row whose timer runs, and says the timer is on this browser only', async () => {
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 60_000).toISOString())
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    expect(within(row).getByText('Timer running')).toBeInTheDocument()
+
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    expect(await screen.findByText('on this browser only')).toBeInTheDocument()
+    expect(within(row).queryByText('Timer running')).toBeNull()
+  })
+
+  it('offers to log or discard a timer older than 12 hours', async () => {
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 13 * 60 * 60_000).toISOString())
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    const offer = await screen.findByRole('status')
+    expect(offer).toHaveTextContent(/This timer has run since/)
+    await user.click(within(offer).getByRole('button', { name: 'Discard timer' }))
+
+    expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).toBeNull()
+    expect(state.timeEntries).toEqual([])
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })
 

@@ -571,7 +571,8 @@ export const orderTools: Tool[] = [
       '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
       'order_item_accept_quote). A `reference` or ' +
       '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
-      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead). ' +
+      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead), and one ' +
+      'with time or cost entries with `item_has_entries` (remove them, or cancel it). ' +
       '`approval` sets how the customer approves the item: the design first, or design and price together.',
     input: z.object({
       order_id: orderId,
