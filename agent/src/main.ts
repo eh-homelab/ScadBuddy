@@ -59,7 +59,7 @@ import { fetchGrantKey, fetchGrantMinter } from './tools/fetchGrant.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
-import { TemporalTabRelay } from './bridge/relay.js'
+import { hostTabs, TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
 import { PostgresTabImageStore } from './bridge/tabImages.js'
@@ -1036,25 +1036,18 @@ const hostWorkers =
 // a recorded entry's decision in its row (R5, plan Step 9.7).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
-// that is deleted once the caller has the answer (#4780): so only with the codec.
-if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
+// that is deleted once the caller has the answer (#4780): so only with the codec. This replica
+// claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with bridge.tab: a
+// claim before (or with a worker that never started) would send other replicas' calls to wait out
+// the ack timeout (#4806 review). `hostTabs` sets the client first; a replica without the KEK has
+// none, so `startHosting` refuses and logs it once (#4949, #5421).
+if (tabRelay) {
+  const sql = database?.sql
   const keys = payloadKeys
-  tabRelay.useClient({ client: temporalClient, dropKey: (subject) => dropPayloadKey(database.sql, keys, subject) })
-}
-// This replica claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with
-// bridge.tab: a claim before (or with a worker that never started) would send other replicas'
-// calls to wait out the ack timeout (#4806 review). And only with the codec, as useClient above:
-// a replica without the KEK cannot decode the sealed calls sent to it (#4949).
-if (tabRelay && hostWorkers && workerDataConverter) {
-  const relay = tabRelay
-  const pinned = hostWorkers.pinned
-  // Unref'd, so a worker that never connects does not hold the process open at shutdown.
-  const polling = setInterval(() => {
-    if (pinned.state() !== 'ok') return
-    clearInterval(polling)
-    relay.startHosting()
-  }, 200)
-  polling.unref()
+  hostTabs(tabRelay, {
+    sealing: temporalClient && dataConverter && keys && sql ? { client: temporalClient, dropKey: (subject) => dropPayloadKey(sql, keys, subject) } : undefined,
+    worker: hostWorkers?.pinned,
+  })
 }
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.

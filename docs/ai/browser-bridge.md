@@ -423,6 +423,9 @@ sequenceDiagram
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
   tab's route and live tools, but waits at most 6 s for the answer (`STATUS_PROBE_MS`,
   #4950), as does the check behind a chat attach: past it the tab reads "not connected".
+  Those 6 s are the ack (3 s) plus the status activity's start-to-close (3 s), with none of
+  the workflow's slack: a probe made while a rollout fails the first workflow task reads
+  "not connected" at once, and does not wait for the task to run again (#5421).
   A workflow that ends on its own execution timeout is logged as one ("timed out as a
   workflow (rollout?)"), apart from an owner's failure: its 15 s of slack covers about one
   failed workflow task during a rolling deploy.

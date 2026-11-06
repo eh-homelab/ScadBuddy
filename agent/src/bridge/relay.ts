@@ -162,6 +162,8 @@ export class TemporalTabRelay implements TabRelay {
   #owner: RelayOwner | undefined
   /** Whether this replica's host worker polls its queue with `bridge.tab` (`startHosting`): only then is a tab claimed here. */
   #hosting = false
+  /** `startHosting` refused for want of a sealing client, and said so once. */
+  #refused = false
   /** One owner-row write at a time, in order: a tab's release never lands before its claim. */
   #writes: Promise<void> = Promise.resolve()
   readonly #refreshMs: number
@@ -197,7 +199,10 @@ export class TemporalTabRelay implements TabRelay {
   startHosting(): void {
     if (this.#hosting) return
     if (!this.#client) {
-      this.#log('bridge relay: no sealing client (no secret key), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
+      if (!this.#refused) {
+        this.#refused = true
+        this.#log('bridge relay: no sealing client (no secret key), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
+      }
       return
     }
     this.#hosting = true
@@ -344,6 +349,36 @@ export class TemporalTabRelay implements TabRelay {
   #failed(err: unknown): void {
     this.#log(`bridge relay: ${errorMessage(err)}`)
   }
+}
+
+/** How often `hostTabs` asks whether the host worker polls yet. */
+export const HOSTING_POLL_MS = 200
+
+/**
+ * How main.ts starts this replica's tab hosting (#5421): the sealing client first, when there is
+ * one, then `startHosting` once `worker` (the host worker on `relay.hostQueue`) polls, asked now
+ * and every `pollMs`. In that order, or `startHosting` would refuse as for a replica with no KEK.
+ * Without `worker` the client is set and no tab is claimed. Returns a stop for the wait.
+ */
+export function hostTabs(
+  relay: TemporalTabRelay,
+  options: { sealing: SealingClient | undefined; worker: { state(): string } | undefined; pollMs?: number },
+): () => void {
+  const { sealing, worker } = options
+  if (sealing) relay.useClient(sealing)
+  if (!worker) return () => {}
+  const polled = () => {
+    if (worker.state() !== 'ok') return false
+    relay.startHosting()
+    return true
+  }
+  if (polled()) return () => {}
+  // Unref'd, so a worker that never connects does not hold the process open at shutdown.
+  const polling = setInterval(() => {
+    if (polled()) clearInterval(polling)
+  }, options.pollMs ?? HOSTING_POLL_MS)
+  polling.unref()
+  return () => clearInterval(polling)
 }
 
 function errorMessage(err: unknown): string {

@@ -13,7 +13,7 @@ import { tiersUpTo, type Principal } from '../src/auth/principal.js'
 import { TabHub, type TabConnection } from '../src/bridge/hub.js'
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
-import { TemporalTabRelay } from '../src/bridge/relay.js'
+import { hostTabs, TemporalTabRelay } from '../src/bridge/relay.js'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
 import { connectDatabase, type Database } from '../src/db.js'
@@ -175,13 +175,8 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
     const p = { role, identity, hostQueue, pool, spawned: 0, shared: [] as AgentWorker[] } as AgentProcess
     const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     p.listener = listener
-    // The browser relay, sealed (main.ts `tabRelay.useClient`): a call for a tab on another process is a BridgeCall.
-    const relay = new TemporalTabRelay({
-      owners: new PostgresTabOwnerStore(pool.sql),
-      hostQueue,
-      client: { client, dropKey: (subject: string) => dropPayloadKey(pool.sql, keys, subject) },
-      log: () => {},
-    })
+    // The browser relay; sealed by `hostTabs` below, as main.ts seals it: a call for a tab on another process is a BridgeCall.
+    const relay = new TemporalTabRelay({ owners: new PostgresTabOwnerStore(pool.sql), hostQueue, log: () => {} })
     p.tabs = new TabHub({ pairings: new PostgresPairingStore(pool.sql), relay, sessionTabs: new PostgresSessionTabStore(pool.sql), log: () => {} })
     p.m = manager({
       sql: pool.sql,
@@ -287,7 +282,9 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
       shutdownGraceMs: 1_000,
     })
     await Promise.all([...p.shared.map((w) => w.running()), p.hosts.pinned.running(), p.hosts.sessions?.running()])
-    relay.startHosting()
+    // As main.ts: the sealing client, then hosting once the host worker polls. Reversed, the relay
+    // would refuse to host, and `tabOn` would wait for a claim row that never comes (#5421).
+    hostTabs(relay, { sealing: { client, dropKey: (subject: string) => dropPayloadKey(pool.sql, keys, subject) }, worker: p.hosts.pinned })
     processes.push(p)
     if (role === 'worker') {
       // Its /readyz (runtime/health.ts): Temporal lists it on every queue it serves.
