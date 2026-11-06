@@ -484,7 +484,9 @@ Every step merges with the mode where it is today, and old and new builds run si
    `kek_id` (`20261102T0645Z_service_credentials.sql:10-12`), so an exchanged row with no
    sealed copy can be written, and adds a CHECK that a `proof = 'legacy'` row carries all
    three and any other row carries none. Every `service_credentials_<caller>` view filters
-   on `proof = 'legacy'`, so `TokenReader` never reads an unsealed row. The readers (`TokenReader`, `ServiceCredential`) get an exchange source,
+   on `proof = 'legacy'`, so `TokenReader` never reads an unsealed row. `rotate_due`,
+   `replace_if_none` and `has_live` (`service_credentials.py`) consider only `proof = 'legacy'`
+   rows, so an exchanged row never triggers or blocks a sealed mint. The readers (`TokenReader`, `ServiceCredential`) get an exchange source,
    used when `SCADBUDDY_SERVICE_TOKEN_FILE` or `_BOOTSTRAP_FILE` is set; **otherwise they
    read the view as today**. An exchange that answers `404` (an old API pod during the
    roll) falls back to the view while the caller still has a database URL. Both kinds of
