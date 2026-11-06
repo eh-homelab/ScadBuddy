@@ -373,7 +373,8 @@ class Metrics:
             "Each attempt of a worker's call to the API's CRUD routes (#5298), by caller, "
             "area (the first path segment after the caller) and outcome: ok, refused, "
             "route_missing (an old API pod), unavailable (5xx), transport or reexchange "
-            "(a 401 or out-of-scope 403 that earned one new credential).",
+            "(a 401 or out-of-scope 403: the credential is stale, so the call retries with "
+            "a backoff until a new one is exchanged or its 30 s budget ends).",
             ["caller", "area", "outcome"],
             buckets=HTTP_BUCKETS,
             registry=r,

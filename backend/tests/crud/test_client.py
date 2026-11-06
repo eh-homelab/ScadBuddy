@@ -4,6 +4,8 @@ raises, a stale credential is replaced once, and a retry keeps its idempotency k
 from __future__ import annotations
 
 import hashlib
+import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,7 +14,7 @@ import pytest
 from prometheus_client import CollectorRegistry
 from temporalio import activity
 
-from scadbuddy.auth.service_credentials import ServiceAuth
+from scadbuddy.auth.service_credentials import ExchangeReader, ServiceAuth
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.crud.client import (
     CrudClient,
@@ -135,13 +137,12 @@ async def test_a_403_out_of_scope_refreshes_once_and_retries() -> None:
     assert count(metrics, "reexchange") == 1
 
 
-async def test_a_second_403_out_of_scope_is_refused() -> None:
+async def test_a_403_out_of_scope_that_never_clears_is_unavailable() -> None:
     script = Script(problem(403, reason="out_of_scope"))
-    client, source = make(script)
-    with pytest.raises(CrudRefusedError):
+    client, _ = make(script)
+    with pytest.raises(CrudUnavailableError):
         await client.request("GET", PATH)
-    assert len(script.requests) == 2
-    assert source.invalidated == ["t1"]
+    assert len(script.requests) > 2
 
 
 async def test_another_403_is_refused_without_a_refresh() -> None:
@@ -153,7 +154,7 @@ async def test_another_403_is_refused_without_a_refresh() -> None:
     assert source.invalidated == []
 
 
-async def test_a_401_is_retried_once_with_the_new_credential() -> None:
+async def test_a_401_is_retried_with_the_new_credential() -> None:
     script = Script(problem(401), ok())
     client, source = make(script)
     assert (await client.request("GET", PATH)).status_code == 200
@@ -173,8 +174,117 @@ async def test_5xx_and_connect_errors_retry_with_the_same_key() -> None:
     assert count(metrics, "ok") == 1
 
 
-async def test_a_persistent_5xx_is_unavailable() -> None:
-    client, _ = make(Script(problem(500)))
+async def test_a_persistent_5xx_stops_at_the_deadline() -> None:
+    script = Script(problem(500))
+    client, _ = make(script, budget=0.2)
+    started = time.monotonic()
+    with pytest.raises(CrudUnavailableError):
+        await client.request("GET", PATH)
+    assert 0.2 <= time.monotonic() - started < 1.0
+    assert 2 <= len(script.requests) <= 25
+
+
+async def test_a_retry_after_a_missing_route_asks_for_a_new_connection() -> None:
+    script = Script(httpx.Response(404, text="no"), ok())
+    client, _ = make(script)
+    await client.request("GET", PATH)
+    assert "connection" not in script.requests[0].headers or (
+        script.requests[0].headers["connection"] != "close"
+    )
+    assert script.requests[1].headers["Connection"] == "close"
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def exchange_and_api(clock: FakeClock, scopes_ok_after: int) -> tuple[Any, list[str]]:
+    """The exchange route and a CRUD route. Tokens before the ``scopes_ok_after``-th
+    (an old API pod's) lack the scope: 403. A request with no token: 401. Each request
+    takes 1 s."""
+    issued = 0
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal issued
+        clock.now += 1.0
+        if request.url.path == "/api/v1/auth/service-token":
+            issued += 1
+            token = f"sbsvc_{issued:016x}." + "a" * 43
+            return httpx.Response(200, json={"access_token": token, "expires_in": 900})
+        header = request.headers.get("Authorization")
+        seen.append(header or "none")
+        if header is None:
+            return problem(401)
+        if int(header.removeprefix("Bearer sbsvc_")[:16], 16) < scopes_ok_after:
+            return problem(403, reason="out_of_scope")
+        return ok()
+
+    return handler, seen
+
+
+def real_reader(tmp_path: Path, clock: FakeClock, handler: Any) -> ExchangeReader:
+    proof = tmp_path / "proof"
+    proof.write_text("jwt\n")
+    return ExchangeReader(
+        "render",
+        "http://api",
+        proof,
+        "k8s",
+        clock=clock,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+@pytest.mark.parametrize("scopes_ok_after", [2, 3])
+async def test_a_stale_scope_waits_out_the_exchange_hold_off(
+    tmp_path: Path, scopes_ok_after: int
+) -> None:
+    """A new worker exchanged with an old API pod: the 403 drops the credential, the
+    reader holds the next exchange off for 10 s, the retries wait, and the call lands."""
+    clock = FakeClock()
+    handler, seen = exchange_and_api(clock, scopes_ok_after)
+    reader = real_reader(tmp_path, clock, handler)
+    client = CrudClient(
+        "http://api",
+        "render",
+        ServiceAuth(reader),
+        transport=httpx.MockTransport(handler),
+        clock=clock,
+        sleep=clock.sleep,
+        backoff=0.01,
+    )
+    try:
+        response = await client.request("GET", PATH)
+    except CrudUnavailableError:
+        assert scopes_ok_after > 2
+        return
+    assert response.status_code == 200
+    assert seen[0] != seen[-1]
+    await client.aclose()
+
+
+async def test_an_old_pod_that_keeps_answering_ends_unavailable_not_refused(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    handler, _ = exchange_and_api(clock, 10**6)
+    client = CrudClient(
+        "http://api",
+        "render",
+        ServiceAuth(real_reader(tmp_path, clock, handler)),
+        transport=httpx.MockTransport(handler),
+        clock=clock,
+        sleep=clock.sleep,
+        backoff=0.01,
+    )
     with pytest.raises(CrudUnavailableError):
         await client.request("GET", PATH)
 
@@ -201,6 +311,21 @@ def test_the_sync_client_retries_alike() -> None:
     assert source.invalidated == ["t1"]
     assert {r.headers["Idempotency-Key"] for r in script.requests} == {"k"}
     assert script.requests[0].headers["Authorization"] == "Bearer t1"
+
+
+def test_the_sync_client_counts_each_outcome() -> None:
+    metrics = Metrics(CollectorRegistry())
+    client = CrudSyncClient(
+        "http://api",
+        "render",
+        ServiceAuth(Source()),
+        transport=httpx.MockTransport(Script(httpx.ConnectError("x"), problem(503), ok())),
+        metrics=metrics,
+        unavailable_budget=1.0,
+        backoff=0.01,
+    )
+    client.request("GET", PATH)
+    assert [count(metrics, o) for o in ("transport", "unavailable", "ok")] == [1, 1, 1]
 
 
 def test_a_sync_refusal_raises() -> None:

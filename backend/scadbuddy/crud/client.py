@@ -7,9 +7,15 @@ A render, print or projects worker holds no database secret: it calls
   missing (an old API pod during a roll). It is tried again on a new connection, and a
   route still missing after ``unavailable_budget`` seconds is `CrudUnavailableError`. A
   5xx and a transport failure retry within the same budget.
-- A 4xx with the header is `CrudRefusedError`, carrying the problem. Two refusals earn
-  one retry first, once per call: a 401 (the credential died; `ServiceAuth` has dropped
-  it) and a 403 ``out_of_scope`` (the credential's scopes are stale; `refresh` drops it).
+- A 4xx with the header is `CrudRefusedError`, carrying the problem, except a stale
+  credential: a 401 (the credential died or none could be had) and a 403 ``out_of_scope``
+  (its scopes are stale; `refresh` drops it, and only when the request carried one). A new
+  worker can hold a credential from an old API pod for a moment, and `ExchangeReader`
+  holds a new exchange off for ``REEXCHANGE_MIN``, so these retry with a backoff in the
+  same budget, and the budget's end is `CrudUnavailableError`, not a refusal.
+- A retry after a missing route sends ``Connection: close``, so it does not reuse the
+  connection of the pod that lacked the route; the shared client is never closed under
+  other callers.
 - Every retry sends the same ``Idempotency-Key``; `activity_key` builds a key that is
   the same on every attempt of one Temporal activity.
 """
@@ -19,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 import httpx
@@ -82,8 +88,8 @@ class _Call:
         self._area = _area(path)
         self._deadline = owner._clock() + owner._budget
         self._attempt = 0
-        self._reexchanged = False
         self.refresh = False
+        self.fresh_connection = False
         self.last = "no attempt"
 
     def observe(self, outcome: Outcome, started: float) -> None:
@@ -93,12 +99,12 @@ class _Call:
                 time.perf_counter() - started
             )
 
-    def judge(self, response: httpx.Response, started: float) -> Literal["done", "retry", "again"]:
-        """``done``: return it; ``again``: send at once; ``retry``: after a backoff on a
-        new connection. A refusal raises."""
+    def judge(self, response: httpx.Response, started: float) -> Literal["done", "retry"]:
+        """``done``: return it; ``retry``: send again after a backoff. A refusal raises."""
         status = response.status_code
         if CRUD_HEADER not in response.headers:
             self.last = f"{status} without {CRUD_HEADER}: the route is missing"
+            self.fresh_connection = True
             self.observe("route_missing", started)
             return "retry"
         if status < 400:
@@ -110,11 +116,11 @@ class _Call:
             return "retry"
         problem = _problem(response)
         stale = status == 401 or (status == 403 and problem.get("reason") == OUT_OF_SCOPE)
-        if stale and not self._reexchanged:
-            self._reexchanged = True
-            self.refresh = status == 403
+        if stale:
+            self.last = f"{status} for a stale credential"
+            self.refresh = status == 403 and "Authorization" in response.request.headers
             self.observe("reexchange", started)
-            return "again"
+            return "retry"
         self.observe("refused", started)
         raise CrudRefusedError(status, problem)
 
@@ -155,12 +161,17 @@ class _Base:
         self._clock = clock
 
     @staticmethod
-    def _kwargs(json: Any, key: str | None) -> dict[str, Any]:
+    def _kwargs(json: Any, key: str | None, call: _Call) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         if json is not None:
             kwargs["json"] = json
+        headers = {}
         if key is not None:
-            kwargs["headers"] = {IDEMPOTENCY_HEADER: key}
+            headers[IDEMPOTENCY_HEADER] = key
+        if call.fresh_connection:
+            headers["Connection"] = "close"
+        if headers:
+            kwargs["headers"] = headers
         return kwargs
 
 
@@ -172,54 +183,43 @@ class CrudClient(_Base):
         auth: ServiceAuth,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         **options: Any,
     ) -> None:
         super().__init__(base_url, caller, auth, **options)
-        self._transport = transport
-        self._http: httpx.AsyncClient | None = None
-
-    def _client(self) -> httpx.AsyncClient:
-        if self._http is None:
-            self._http = httpx.AsyncClient(
-                base_url=self._base_url,
-                auth=self._auth,
-                timeout=self._timeout,
-                transport=self._transport,
-            )
-        return self._http
+        self._sleep = sleep
+        self._http = httpx.AsyncClient(
+            base_url=self._base_url, auth=auth, timeout=self._timeout, transport=transport
+        )
 
     async def aclose(self) -> None:
-        http, self._http = self._http, None
-        if http is not None:
-            await http.aclose()
+        await self._http.aclose()
 
     async def request(
         self, method: str, path: str, *, json: Any = None, idempotency_key: str | None = None
     ) -> httpx.Response:
         call = _Call(self, path)
-        kwargs = self._kwargs(json, idempotency_key)
         while True:
             started = time.perf_counter()
             try:
-                response = await self._client().request(method, path, **kwargs)
+                response = await self._http.request(
+                    method, path, **self._kwargs(json, idempotency_key, call)
+                )
             except httpx.TransportError as error:
                 call.failed(error, started)
-                await self.aclose()
-                await asyncio.sleep(call.delay())
+                await self._sleep(call.delay())
                 continue
-            action = call.judge(response, started)
-            if action == "done":
+            if call.judge(response, started) == "done":
                 return response
             if call.refresh:
                 call.refresh = False
                 self._auth.refresh(response.request)
-            if action == "retry":
-                await self.aclose()
-                await asyncio.sleep(call.delay())
+            await self._sleep(call.delay())
 
 
 class CrudSyncClient(_Base):
-    """The same, blocking: for a store called through ``asyncio.to_thread``."""
+    """The same, blocking: for a store called through ``asyncio.to_thread``. One
+    ``httpx.Client`` serves every thread, and is never closed under them."""
 
     def __init__(
         self,
@@ -228,47 +228,35 @@ class CrudSyncClient(_Base):
         auth: ServiceAuth,
         *,
         transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] = time.sleep,
         **options: Any,
     ) -> None:
         super().__init__(base_url, caller, auth, **options)
-        self._transport = transport
-        self._http: httpx.Client | None = None
-
-    def _client(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(
-                base_url=self._base_url,
-                auth=self._auth,
-                timeout=self._timeout,
-                transport=self._transport,
-            )
-        return self._http
+        self._sleep = sleep
+        self._http = httpx.Client(
+            base_url=self._base_url, auth=auth, timeout=self._timeout, transport=transport
+        )
 
     def close(self) -> None:
-        http, self._http = self._http, None
-        if http is not None:
-            http.close()
+        self._http.close()
 
     def request(
         self, method: str, path: str, *, json: Any = None, idempotency_key: str | None = None
     ) -> httpx.Response:
         call = _Call(self, path)
-        kwargs = self._kwargs(json, idempotency_key)
         while True:
             started = time.perf_counter()
             try:
-                response = self._client().request(method, path, **kwargs)
+                response = self._http.request(
+                    method, path, **self._kwargs(json, idempotency_key, call)
+                )
             except httpx.TransportError as error:
                 call.failed(error, started)
-                self.close()
-                time.sleep(call.delay())
+                self._sleep(call.delay())
                 continue
-            action = call.judge(response, started)
-            if action == "done":
+            if call.judge(response, started) == "done":
                 return response
             if call.refresh:
                 call.refresh = False
                 self._auth.refresh(response.request)
-            if action == "retry":
-                self.close()
-                time.sleep(call.delay())
+            self._sleep(call.delay())
