@@ -113,6 +113,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
 from scadbuddy.printers.bambuddy_sync import (
     apply_virtual_printers,
@@ -193,6 +194,7 @@ from scadbuddy.workflows.housekeeping import (
     ensure_schedules,
     library_worker,
 )
+from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.previews import (
@@ -1451,6 +1453,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedOperationWorkflow,
     VersionedFlowTriggerFire,
     VersionedStoreMigration,
+    VersionedLibraryCopy,
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
 )
@@ -1565,6 +1568,12 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
+        *library_copy_activities(
+            lambda: state.settings_store.pool,
+            lambda: state.settings_store.load(),
+            state.components.get(PRINT_LIBRARY),
+            lambda: state.uploads,
+        ),
         *slice_activities(
             state.components.get(SLICING),
             state.components.get(PRINT_LIBRARY),

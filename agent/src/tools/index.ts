@@ -28,6 +28,7 @@ import { settingsTools } from './settings.js'
 import { delegationTools } from './delegation.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
+import { libraryCopyTools } from './libraryCopy.js'
 import { templateTools } from './templates.js'
 import { toolCallTools } from './toolCalls.js'
 import { traySpoolTools } from './traySpools.js'
@@ -57,6 +58,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...libraryTools,
   ...settingsTools,
   ...storeTools,
+  ...libraryCopyTools,
   ...printTools,
   ...printHistoryTools,
   ...printMediaTools,

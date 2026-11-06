@@ -1084,6 +1084,30 @@ async def _raw_left_unrecorded(
 RAW_TARGET = "raw"
 
 
+async def upload_raw(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    folder: int | None,
+    *,
+    filename: str,
+    media_type: str,
+    write: Callable[[Sink], Awaitable[None]],
+) -> LibraryFile:
+    """The one way bytes ScadBuddy holds go into Bambuddy's library as they are: a
+    native file printed through Bambuddy (:func:`ensure_raw_copy`) and a library copy
+    (#5355, `print_library/copy.py`). ``write`` spools the bytes, hashed as they go, and
+    they are uploaded into ``folder`` (the top level for ``None``) as ``filename``; an
+    upload an earlier attempt left unrecorded is taken rather than uploaded again
+    (:func:`_raw_left_unrecorded`, #1145). Nothing here records the upload: the caller
+    does, or deliberately does not."""
+    with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+        hashed = _Hashing(spool)
+        await write(hashed)
+        return await _raw_left_unrecorded(
+            client, uploads, folder, filename, hashed.size, hashed.digest.hexdigest()
+        ) or await upload_into(client, filename, spool, folder_id=folder, media_type=media_type)
+
+
 async def ensure_raw_copy(
     client: BambuddyClient,
     uploads: BambuddyUploadStore,
@@ -1111,12 +1135,9 @@ async def ensure_raw_copy(
                 continue
             if await _still_there(client, uploads, key, copy, tolerate_errors=True) is not None:
                 return copy.id
-        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
-            hashed = _Hashing(spool)
-            await write(hashed)
-            uploaded = await _raw_left_unrecorded(
-                client, uploads, folder, filename, hashed.size, hashed.digest.hexdigest()
-            ) or await upload_into(client, filename, spool, folder_id=folder, media_type=media_type)
+        uploaded = await upload_raw(
+            client, uploads, folder, filename=filename, media_type=media_type, write=write
+        )
         await uploads.record(
             key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET)
         )

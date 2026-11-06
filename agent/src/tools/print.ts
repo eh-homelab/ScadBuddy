@@ -766,18 +766,36 @@ export const printTools: Tool[] = [
     name: 'list_library',
     label: 'Browse the Bambuddy library',
     description:
-      "Bambuddy's library, one folder at a time: the folder tree, and the files of `folder_id` (the top level " +
+      "The print library, one folder at a time: the folder tree, and the files of `folder_id` (the top level " +
       'without it). Without `all` only unsliced 3MFs, the files print_output takes as `library_file_id`; with ' +
-      'it every file, each flagged `printable`. A file ScadBuddy uploaded names its `output_id`.' +
+      'it every file, each flagged `printable`. A file ScadBuddy uploaded names its `output_id`. On ' +
+      "library_backend native this is ScadBuddy's own library; `source: 'bambuddy'` then browses Bambuddy's instead " +
+      '(the source of a bb_to_sb copy_library_files), every file type, unpaged.' +
       PAGED,
-    input: z.object({ folder_id: z.number().int().optional(), all: z.boolean().optional(), ...pageInput }),
+    input: z.object({
+      folder_id: z.number().int().optional(),
+      all: z.boolean().optional(),
+      source: z
+        .enum(['bambuddy'])
+        .optional()
+        .describe("Browse Bambuddy's library itself while ScadBuddy's own serves the page (library_backend native): the source side of a bb_to_sb copy_library_files. Every file type, unpaged."),
+      ...pageInput,
+    }),
     risk: 'read',
     source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Library'],
-    routes: ['GET /api/v1/print/library'],
+    routes: ['GET /api/v1/print/library', 'GET /api/v1/print/bambuddy-library'],
     // The backend pages the folder's files (#2290), so only this page's files are read
     // for the outputs they came from (#5291 review); the tree comes with every page.
     handler: async (args, { backend }) => {
+      if (args.source === 'bambuddy') {
+        return json(
+          await ok(
+            backend.GET('/api/v1/print/bambuddy-library', { params: { query: { folder_id: args.folder_id } } }),
+            "list Bambuddy's library",
+          ),
+        )
+      }
       let listing = {}
       const { items, ...rest } = await backendPage(
         args,
