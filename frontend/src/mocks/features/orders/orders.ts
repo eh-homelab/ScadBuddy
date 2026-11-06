@@ -181,7 +181,7 @@ function reopenedStatus(item: OrderItem): [OrderItem['status'], boolean] {
   return [quotes.length > 0 ? 'quoted' : 'draft', false]
 }
 
-/** The backend's answer for a `Refused`: 404 for a missing row, 409 typed by the slug otherwise. */
+/** The backend's answer for a `Refused`: 404 for a missing row, else 409, each typed by the slug. */
 export function refused(request: Request, error: unknown) {
   if (error instanceof FilamentsRefused) return fieldProblem(request, 'filaments', error.message)
   if (error instanceof FieldRefused) return fieldProblem(request, error.field, error.message)
@@ -190,7 +190,8 @@ export function refused(request: Request, error: unknown) {
     ...(error.items.length > 0 ? { items: error.items } : {}),
     ...(error.shipments.length > 0 ? { shipments: error.shipments } : {}),
   }
-  return error.notFound ? problem(request, 404, error.message) : problem(request, 409, error.message, PROBLEMS + error.slug, extensions)
+  // A 404 is typed by its slug too, as `orders/problems.py` `refused` types it.
+  return problem(request, error.notFound ? 404 : 409, error.message, PROBLEMS + error.slug, extensions)
 }
 
 /** A body naming a slot or a filament that cannot be (#4250): a 422 on `filaments`. */
