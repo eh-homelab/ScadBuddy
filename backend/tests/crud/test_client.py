@@ -4,6 +4,8 @@ raises, a stale credential is replaced once, and a retry keeps its idempotency k
 from __future__ import annotations
 
 import hashlib
+import http.server
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -184,14 +186,66 @@ async def test_a_persistent_5xx_stops_at_the_deadline() -> None:
     assert 2 <= len(script.requests) <= 25
 
 
-async def test_a_retry_after_a_missing_route_asks_for_a_new_connection() -> None:
-    script = Script(httpx.Response(404, text="no"), ok())
-    client, _ = make(script)
-    await client.request("GET", PATH)
-    assert "connection" not in script.requests[0].headers or (
-        script.requests[0].headers["connection"] != "close"
+class PortServer:
+    """A keep-alive HTTP/1.1 server: the first request is a bare 404 (no CRUD header),
+    later ones are 200 with it; it records each request's client port."""
+
+    def __init__(self) -> None:
+        self.ports: list[int] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                outer.ports.append(self.client_address[1])
+                first = len(outer.ports) == 1
+                body = b"{}"
+                self.send_response(404 if first else 200)
+                if not first:
+                    self.send_header("X-ScadBuddy-Crud", "1")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+async def test_a_retry_after_a_missing_route_uses_a_new_connection() -> None:
+    server = PortServer()
+    client = CrudClient(
+        server.url, "render", ServiceAuth(Source()), unavailable_budget=5.0, backoff=0.01
     )
-    assert script.requests[1].headers["Connection"] == "close"
+    try:
+        assert (await client.request("GET", PATH)).status_code == 200
+    finally:
+        await client.aclose()
+        server.stop()
+    assert len(server.ports) == 2
+    assert server.ports[0] != server.ports[1]
+
+
+def test_the_sync_retry_after_a_missing_route_uses_a_new_connection() -> None:
+    server = PortServer()
+    client = CrudSyncClient(
+        server.url, "render", ServiceAuth(Source()), unavailable_budget=5.0, backoff=0.01
+    )
+    try:
+        assert client.request("GET", PATH).status_code == 200
+    finally:
+        client.close()
+        server.stop()
+    assert server.ports[0] != server.ports[1]
 
 
 class FakeClock:
