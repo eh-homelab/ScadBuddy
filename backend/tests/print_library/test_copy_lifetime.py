@@ -286,6 +286,7 @@ async def test_a_recorded_copy_made_the_persons_is_released_with_its_slices(
     assert done.released == 1
     in_place = how == "restored"
     assert done.released_in_place == int(in_place)
+    assert done.released_in_place <= done.released
     warned = [
         r for r in caplog.records if r.getMessage().startswith("released a recorded native copy")
     ]
@@ -617,3 +618,24 @@ async def test_a_pass_reads_its_subjects_a_page_at_a_time(
     assert all(live(native, i) for i in news)
     assert native.rows.print_subjects(None, 2) == subjects[:2]
     assert native.rows.print_subjects(subjects[1], 2) == subjects[2:]
+
+
+async def test_a_copy_marked_by_a_subject_on_another_page_is_never_released(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5156 review: a copy recorded under two subjects and marked by the first is that
+    subject's to judge. On the other subject's page it is not among the marked files read,
+    and is still never released: it stays marked and recorded under both."""
+    shared = await copy_of(native, uploads, payload)
+    [copy] = await uploads.for_output(KEY, native=True)
+    await uploads.record(OTHER, copy)
+    others = await copy_of(native, uploads, payload, target=X1C, key=OTHER)
+
+    done = await sweep(native, uploads, after=LATER, page=1)
+
+    assert done == CopySweep(superseded=0, orphans=0, released=0)
+    row = native.rows.file(shared)
+    assert row is not None and row.print_subject == KEY
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [shared]
+    assert shared in {c.id for c in await uploads.for_output(OTHER, native=True)}
+    assert live(native, others)

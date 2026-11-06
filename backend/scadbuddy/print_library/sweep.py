@@ -195,7 +195,8 @@ async def _sweep_subjects(
     subjects = sorted({f.print_subject for f in files.values() if f.print_subject} - busy)
     copies = await uploads.for_outputs(subjects, native=True)
     by_use = await uploads.copies_by_use(subjects)
-    # The recorded copies that carry no mark: theirs if live (moved, restored), else gone.
+    # The recorded copies not among this page's marked files: unmarked, theirs if live
+    # (moved, restored), else gone; or marked by a subject on another page.
     unmarked = [c.id for found in copies.values() for c in found if c.id not in files]
     live = {f.id: f for f in await asyncio.to_thread(native.rows.files_by_ids, unmarked)}
     there = await asyncio.to_thread(native.rows.existing, unmarked)
@@ -212,6 +213,11 @@ async def _sweep_subjects(
             if copy is None:
                 continue
             row = files.get(copy.id)
+            found = live.get(copy.id)
+            if row is None and found is not None and found.print_subject is not None:
+                # Marked by another subject, one on another page (#5156): that subject
+                # judges it, as the guard below does within a page. Never released.
+                continue
             if row is None and copy.id not in live:
                 # Trashed, which a restore may undo; or purged, and then its slices have
                 # nothing left to keep them: its record goes, and they are orphans.
@@ -222,7 +228,6 @@ async def _sweep_subjects(
                 # A person's: moved (outside the routes, or a move whose release never
                 # ran) or restored. Theirs, with its slices.
                 released.append(copy.id)
-                found = live.get(copy.id)
                 if row is None and found is not None and found.folder_id == copy.folder_id:
                     # Unmarked where it was recorded: restored, or uploaded unmarked by
                     # an earlier build's print worker. Released, the latter stays in the
