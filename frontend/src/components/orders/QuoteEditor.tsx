@@ -1,13 +1,15 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
-import { formatMoney } from '../../lib/money'
+import { formatMoney, toMajor } from '../../lib/money'
+import { useAsync } from '../../lib/useAsync'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
+import { byCreated, parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
+import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
 
@@ -62,6 +64,14 @@ export function QuoteEditor({
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // #5328, job cost spec §6.3: the model's real cost in its past jobs, read once while
+  // the item takes a price. The warning judges the typed price, else the newest quote
+  // not yet accepted: what is about to be sent.
+  const slug = editable ? item?.reference?.slug : undefined
+  const history = useAsync(() => (slug ? api.unitCostHistory(slug, currency) : Promise.resolve(null)), [slug, currency])
+  const typed = price.trim() ? parseUnitPrice(price, exponent) : null
+  const pending = quotes.some((q) => q.accepted) ? undefined : [...quotes].sort(byCreated).at(-1)
+  const checked = typed ?? pending?.unit_price_minor
 
   async function record(accept: boolean) {
     const minor = parseUnitPrice(price, exponent)
@@ -211,6 +221,9 @@ export function QuoteEditor({
             Record only
           </Button>
         </form>
+      )}
+      {editable && checked != null && (
+        <QuoteWarning history={history.data} unitPrice={checked} currency={currency} exponent={exponent} onUse={(minor) => setPrice(toMajor(minor, exponent))} />
       )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">

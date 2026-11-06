@@ -1713,6 +1713,33 @@ class OrderStore:
 
     # -- the costs read's rows (job cost spec §5, §8; #5326, #5327) ----------------------
 
+    def fulfilled_items(
+        self, slug: str, currency: str, since: datetime, limit: int
+    ) -> list[tuple[Order, str]]:
+        """The newest ``limit`` items of ``slug`` that are ``fulfilled`` on an order in
+        ``currency`` that is not cancelled, each with its order, newest first. An item's
+        time is its last accepted attempt's ``accepted_at``, which must be at or after
+        ``since`` (job cost spec §6.3, #5328)."""
+        with self._pool.connection() as c:
+            rows = c.execute(
+                "SELECT i.id AS item_id, i.order_id FROM order_items i"
+                " JOIN orders o ON o.id = i.order_id"
+                " JOIN LATERAL (SELECT max(f.accepted_at) AS done FROM order_item_fulfilments f"
+                "  WHERE f.order_item_id = i.id AND f.accepted_at IS NOT NULL) a ON true"
+                " WHERE i.slug = %s AND i.status = 'fulfilled' AND o.status <> 'cancelled'"
+                " AND o.currency = %s AND a.done >= %s"
+                " ORDER BY a.done DESC, i.id DESC LIMIT %s",
+                (slug, currency, since, limit),
+            ).fetchall()
+            ids = sorted({row["order_id"] for row in rows})
+            orders = {
+                row["id"]: Order.model_validate(row)
+                for row in c.execute(
+                    f"SELECT {_ORDER} FROM orders WHERE id = ANY(%s)", (ids,)
+                ).fetchall()
+            }
+        return [(orders[row["order_id"]], row["item_id"]) for row in rows]
+
     def cost_rows(self, orders: Sequence[Order]) -> CostRows:
         """Every row the costs read needs of ``orders``, in one query per table on one
         connection, whatever their number: the order page reads one order, the list a page."""

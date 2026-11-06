@@ -22,7 +22,7 @@ import asyncio
 import logging
 import zipfile
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
@@ -65,6 +65,7 @@ from scadbuddy.orders.costs import (
     order_margins,
 )
 from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
@@ -741,6 +742,45 @@ async def estimate(
         factor=factor,
         parts=parts,
         unknown_parts=sum(1 for part in parts if part.volume_mm3 is None),
+    )
+
+
+@router.get(
+    "/history/unit-cost",
+    response_model=UnitCostHistory,
+    summary="A model's real cost per unit from its past jobs",
+    description=(
+        "The quote warning's history (job cost spec §6.3): the items of `slug` that are "
+        "fulfilled on an order that is not cancelled, in `currency` (the shop's by "
+        "default), the newest 10 whose last accepted attempt is within 365 days. "
+        "`unit_cost_minor` is their real cost (as `GET /orders/{id}/costs` gives each "
+        "item) over their units. `main_reason` is the cost part that most exceeded what "
+        "their accepted quotes priced for it; failed prints, test prints and cost entries "
+        "count in full. `suggested_unit_price_minor` is the unit cost marked up by "
+        "`pricing_markup_percent`, or with no markup the lowest price that is not thin. "
+        "With `unit_price_minor`, `warning` says that price leaves a margin below "
+        "`orders_thin_margin_percent`. Advice only. With no history, `jobs` is 0 and "
+        "nothing warns."
+    ),
+)
+async def unit_cost(
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    slug: Annotated[str, Query(min_length=1, max_length=200)],
+    currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
+    unit_price_minor: Annotated[int | None, Query(ge=0)] = None,
+) -> UnitCostHistory:
+    _path(slug)
+    runtime = settings.snapshot().runtime
+    return await asyncio.to_thread(
+        unit_cost_history,
+        orders.store,
+        slug,
+        _cost_rates(settings),
+        markup_percent=runtime.pricing_markup_percent,
+        now=datetime.now(UTC),
+        currency=currency,
+        unit_price_minor=unit_price_minor,
     )
 
 

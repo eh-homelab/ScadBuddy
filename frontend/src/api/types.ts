@@ -450,6 +450,8 @@ export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
  * item's copies, plates and request id are the server's. */
 export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printer_id' | 'filament_plan' | 'choices'>
 export type OrderEstimate = Schemas['OrderEstimate']
+/** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
+export type UnitCostHistory = Schemas['UnitCostHistory']
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
 export type Activity = Schemas['ActivityItem']
