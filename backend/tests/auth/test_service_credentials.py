@@ -79,12 +79,19 @@ def test_revoked_or_expired_is_refused(store: ServiceCredentialStore, pg_conninf
     assert store.revoke(agent.id) == "agent"
     assert store.resolve(token) is None
     assert store.revoke(agent.id) is None
-    assert not store.has_live("agent")
+    assert not [c for c in store.list() if c.caller == "agent" and c.revoked_at is None]
 
 
-def _after(start: threading.Barrier, run: Callable[[], object]) -> None:
-    start.wait()
-    run()
+def _after(
+    start: threading.Barrier, run: Callable[[], object], errors: list[BaseException]
+) -> None:
+    """Runs ``run`` once both threads are ready; records what it raised, which a thread
+    would otherwise only print."""
+    try:
+        start.wait()
+        run()
+    except BaseException as error:
+        errors.append(error)
 
 
 def test_a_revoke_and_the_rotation_replace_once(store: ServiceCredentialStore) -> None:
@@ -96,16 +103,19 @@ def test_a_revoke_and_the_rotation_replace_once(store: ServiceCredentialStore) -
             if credential.caller == "agent":
                 store.revoke(credential.id)
         start = threading.Barrier(2)
+        errors: list[BaseException] = []
         threads = [
-            threading.Thread(target=_after, args=(start, lambda: store.rotate_due(KEK))),
+            threading.Thread(target=_after, args=(start, lambda: store.rotate_due(KEK), errors)),
             threading.Thread(
-                target=_after, args=(start, lambda: store.replace_if_none(KEK, "agent"))
+                target=_after,
+                args=(start, lambda: store.replace_if_none(KEK, "agent"), errors),
             ),
         ]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
+        assert errors == []
         live = [c for c in store.list() if c.caller == "agent" and c.revoked_at is None]
         assert len(live) == 1
 
