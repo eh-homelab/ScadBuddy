@@ -839,6 +839,22 @@ class OrderStore:
             add("o.created_at >= %s", filters.since)
         if filters.until is not None:
             add("o.created_at <= %s", filters.until)
+        if filters.accepted_since is not None:
+            add("o.accepted_at >= %s", filters.accepted_since)
+        if filters.accepted_until is not None:
+            add("o.accepted_at < %s", filters.accepted_until)
+        if filters.currency is not None:
+            add("o.currency = %s", filters.currency)
+        if filters.product is not None:
+            # The profit report's grouping (job cost spec §6.4): a slug first, then a SKU.
+            product = filters.product
+            item = "EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND {})"
+            if product.kind == "model":
+                add(item.format("i.slug = %s"), product.key)
+            elif product.kind == "sku":
+                add(item.format("i.slug IS NULL AND i.sku = %s"), product.key)
+            else:
+                add(item.format("i.slug IS NULL AND i.sku IS NULL"))
         if cursor is not None:
             add("(o.created_at, o.id) < (%s, %s)", *decode_cursor(cursor))
         query = sql.SQL(
@@ -852,6 +868,32 @@ class OrderStore:
         rows = [Order.model_validate(r) for r in found[:limit]]
         more = len(found) > limit
         return rows, encode_cursor(rows[-1].created_at, rows[-1].id) if more else None
+
+    def accepted_orders(
+        self,
+        since: datetime,
+        until: datetime,
+        after: tuple[datetime, str] | None,
+        limit: int,
+    ) -> list[Order]:
+        """Orders accepted at or after ``since`` and before ``until``, cancelled ones too,
+        newest accepted first, the ``limit`` after the position ``after`` (an order's
+        ``accepted_at`` and id): the profit report's batches (job cost spec §6.4, #5329)."""
+        with self._pool.connection() as c:
+            found = c.execute(
+                f"SELECT {_ORDER} FROM orders WHERE accepted_at >= %s AND accepted_at < %s"
+                " AND (%s::timestamptz IS NULL OR (accepted_at, id) < (%s::timestamptz, %s))"
+                " ORDER BY accepted_at DESC, id DESC LIMIT %s",
+                (
+                    since,
+                    until,
+                    None if after is None else after[0],
+                    None if after is None else after[0],
+                    None if after is None else after[1],
+                    limit,
+                ),
+            ).fetchall()
+        return [Order.model_validate(row) for row in found]
 
     def update_order_fields(
         self,

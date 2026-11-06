@@ -46,6 +46,7 @@ describe('order tools (#4249)', () => {
       'customer_get',
       'customer_upsert',
       'order_list',
+      'orders_profit_report',
       'order_get',
       'order_create',
       'order_update',
@@ -67,6 +68,7 @@ describe('order tools (#4249)', () => {
       customer_get: 'read',
       customer_upsert: 'write',
       order_list: 'read',
+      orders_profit_report: 'read',
       order_get: 'read',
       order_create: 'write',
       order_update: 'write',
@@ -177,6 +179,28 @@ describe('order tools (#4249)', () => {
     // #5327: "Loss or thin" is `margin_state` repeated.
     await tool('order_list').execute({ margin_state: ['loss', 'thin'] }, ctx())
     expect(new URL(url).searchParams.getAll('margin_state')).toEqual(['loss', 'thin'])
+
+    // #5329: a profit report row's orders.
+    const row = { product: 'sku:DES-1', accepted_from: '2026-08-08T00:00:00Z', accepted_to: '2026-11-06T00:00:00Z', currency: 'USD' }
+    await tool('order_list').execute(row, ctx())
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual(row)
+    expect(() => tool('order_list').execute({ product: 'nope' }, ctx())).toThrow()
+  })
+
+  it('reads the profit report for a period (#5329)', async () => {
+    let url = ''
+    const report = { group: 'model', rows: [{ group: 'model', key: 'demo', product: 'model:demo', currency: 'USD' }], complete: true }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/reports/profit`, ({ request }) => {
+        url = request.url
+        return HttpResponse.json(report)
+      }),
+    )
+    const period = { from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z' }
+    expect(firstText(await tool('orders_profit_report').execute(period, ctx()))).toEqual(report)
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual(period)
+    await tool('orders_profit_report').execute({}, ctx())
+    expect(new URL(url).search).toBe('')
   })
 
   it('edits, holds and records a payment through their own routes', async () => {

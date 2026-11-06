@@ -300,8 +300,23 @@ A new page, Orders → Profit, `GET /orders/reports/profit?from=&to=&group=model
   Python, with the same computation as the per-order read (`costs.py` `order_margins`).
   The `margin_state` filter reads store pages of 100 and computes their margins. It
   stops at 10 pages (`api/orders.py` `MAX_SCAN_PAGES`) and returns the rows found and
-  the cursor reached, so a page can be short or empty while a cursor remains. The
-  report is still open.
+  the cursor reached, so a page can be short or empty while a cursor remains.
+  As built for the report (#5329): `GET /orders/reports/profit` also computes in Python.
+  It reads the period's orders in batches of 100, newest accepted first
+  (`OrderStore.accepted_orders`), and costs each batch with `_order_costs` over one
+  `cost_rows` read. It stops after 2000 orders (`report.py` `MAX_REPORT_ORDERS`). Then
+  `complete` is false, and `read_from` is the oldest accepted time it read. The page
+  says so. Nothing is stored or cached. The period includes `from` and excludes `to`.
+  Cancelled orders count: they are charged nothing, and their cost is a loss. Each row
+  sums its items' figures from the per-order read. An item with a model `slug` is in that
+  model's row, else an item with a `sku` in that SKU's row, else in the "Custom, no SKU"
+  row (a request item with no design yet goes there too). The order's own figures (its
+  entries, its shipments' cost, its charges but tax) are on no item. They are an extra
+  `order` row: the order's read less its items'. Each currency also has a `total` row,
+  the sum of its orders' reads. A row's `product` (`model:<slug>`, `sku:<sku>` or
+  `custom`) is a new `GET /orders` filter. With `accepted_from`, `accepted_to` and
+  `currency`, also new, it lists the row's orders. The agent's `order_list` takes them
+  too.
 - The weighting of a multi-filament estimate when the sliced split is unknown.
 - The report's chart, if any.
 

@@ -452,6 +452,9 @@ export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printe
 export type OrderEstimate = Schemas['OrderEstimate']
 /** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
 export type UnitCostHistory = Schemas['UnitCostHistory']
+/** #5329, job cost spec §6.4 — `GET /orders/reports/profit`: the profit report by model. */
+export type ProfitReport = Schemas['ProfitReport']
+export type ProfitRow = Schemas['ProfitRow']
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
 export type Activity = Schemas['ActivityItem']

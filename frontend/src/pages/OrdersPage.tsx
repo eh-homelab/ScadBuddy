@@ -8,6 +8,7 @@ import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustome
 import { NEXT_SORT, sortByMargin, type MarginSort } from '../components/orders/marginSort'
 import { marginTint } from '../components/orders/OrderCosts'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
+import { OrdersTabs } from '../components/orders/OrdersTabs'
 import { refusalText } from '../components/orders/refusal'
 import { DataTable, type Column } from '../components/records/DataTable'
 import { FilterBar } from '../components/records/FilterBar'
@@ -20,7 +21,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { dueAt, formatDueDate, timeAgo } from '../lib/format'
 import { formatMoney } from '../lib/money'
-import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, LOSS_OR_THIN, parseOrdersQuery, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
+import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, isReportFiltered, LOSS_OR_THIN, parseOrdersQuery, REPORT_KEYS, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { useAsync } from '../lib/useAsync'
 
 const PAGE = 50
@@ -43,6 +44,22 @@ function MarginCell({ order }: { order: OrderRow }) {
       {order.margin_state === 'unknown' && <span className="ml-1 text-warn">(incomplete)</span>}
     </span>
   )
+}
+
+/** #5329 — the profit report row's filters, in words. */
+function reportFilterText(query: OrdersQuery): string {
+  const parts: string[] = []
+  if (query.product === 'custom') parts.push('custom items with no SKU')
+  else if (query.product.startsWith('sku:')) parts.push(`SKU ${query.product.slice(4)}`)
+  else if (query.product.startsWith('model:')) parts.push(`model ${query.product.slice(6)}`)
+  else if (query.product) parts.push(query.product)
+  if (query.accepted_from || query.accepted_to) {
+    const from = query.accepted_from ? formatDueDate(query.accepted_from) : 'any time'
+    const to = query.accepted_to ? formatDueDate(new Date(Date.parse(query.accepted_to) - 1).toISOString()) : 'now'
+    parts.push(`accepted ${from} to ${to}`)
+  }
+  if (query.currency) parts.push(`in ${query.currency}`)
+  return parts.join(', ')
 }
 
 /** `/orders` (spec 2026-10-18 §9): the list with its filters, newest first, paged by cursor. */
@@ -156,7 +173,10 @@ export function OrdersPage() {
     <div className="h-full overflow-y-auto" data-testid="orders-page">
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-xl font-semibold tracking-tight">Orders</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl font-semibold tracking-tight">Orders</h1>
+            <OrdersTabs />
+          </div>
           <Button
             onClick={() => {
               // Each New order starts empty: a cancelled attempt's choices do not carry over.
@@ -216,6 +236,14 @@ export function OrdersPage() {
             </div>
           </div>
         </FilterBar>
+        {isReportFiltered(query) && (
+          <div role="status" data-testid="orders-report-filter" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
+            <span>The orders behind a profit report row: {reportFilterText(query)}.</span>
+            <Button variant="link" size="sm" className="h-auto p-0" onClick={() => onChange({ ...query, ...Object.fromEntries(REPORT_KEYS.map((k) => [k, ''])) })}>
+              Show every order
+            </Button>
+          </div>
+        )}
         {list.error ? (
           <p role="alert" className="text-[13px] text-warn">
             Could not load orders: {list.error.message}

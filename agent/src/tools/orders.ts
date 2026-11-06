@@ -300,13 +300,25 @@ export const orderTools: Tool[] = [
       '(`loss`, `thin`, `unknown`, `ok`; null with no charged figure) and `margin_estimated`. `margin_state` filters by ' +
       'any of the states given (`["loss", "thin"]` is the orders list\'s "Loss or thin"). With `margin_state`, each ' +
       'call reads a limited number of orders, so a page can be short or empty while `next_cursor` remains: follow ' +
-      'the cursor until it is null before you say no order matches.',
+      'the cursor until it is null before you say no order matches. `product`, `accepted_from` (inclusive), ' +
+      '`accepted_to` (exclusive) and `currency` list the orders behind an orders_profit_report row: pass its ' +
+      '`product`, its `period_from` and `period_to`, and its `currency`.',
     input: z.object({
       status: z.enum(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']).optional(),
       customer_id: customerId.optional(),
       q: z.string().max(200).optional(),
       from: datetime.optional(),
       to: datetime.optional(),
+      accepted_from: datetime.optional(),
+      accepted_to: datetime.optional(),
+      currency: z.string().regex(/^[A-Z]{3}$/).optional().describe('An ISO 4217 code, such as USD'),
+      product: z
+        .string()
+        .min(1)
+        .max(210)
+        .regex(/^(custom|(model|sku):.+)$/)
+        .optional()
+        .describe('`model:<slug>`, `sku:<sku>` or `custom`, as a profit report row names it'),
       margin_state: z.array(z.enum(['loss', 'thin', 'unknown', 'ok'])).min(1).max(4).optional(),
       cursor: z.string().max(400).optional(),
       limit: z.number().int().min(1).max(100).optional(),
@@ -316,6 +328,25 @@ export const orderTools: Tool[] = [
     // The route takes `status` repeated (#5276); the tool names one.
     handler: async ({ status, ...query }, { backend }) =>
       json(await ok(backend.GET('/api/v1/orders', { params: { query: { ...query, ...(status ? { status: [status] } : {}) } } }), 'list orders')),
+  }),
+  defineTool({
+    name: 'orders_profit_report',
+    label: 'Read the profit report',
+    description:
+      'The profit report by model (job cost spec §6.4): the orders accepted at or after `from` and before `to` ' +
+      '(by default the last 90 days), cancelled ones too. Rows are per currency, never summed across currencies. ' +
+      'Each product row is one model `slug` (`group` `model`), one custom item `sku` (`sku`), or the custom items ' +
+      'with no SKU (`custom`), with its `orders`, `units`, what was charged (`revenue_minor`), the real cost ' +
+      '(`cost_minor`), `margin_minor`, `margin_percent`, `margin_state` and the waste (`waste_minor`, ' +
+      '`waste_percent`: the cost of test and failed prints). Each item counts as order_costs gives it. The `order` ' +
+      "row is the orders' own entries, shipments' cost and charges, and the `total` row each currency's sum. Pass a " +
+      "row's `product`, `period_from`, `period_to` and `currency` to order_list for its orders. With `complete` " +
+      'false the report stopped at `max_orders` and covers the orders accepted from `read_from` only.',
+    input: z.object({ from: datetime.optional(), to: datetime.optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/reports/profit'],
+    handler: async (query, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders/reports/profit', { params: { query } }), 'read the profit report')),
   }),
   defineTool({
     name: 'order_get',

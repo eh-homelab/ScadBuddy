@@ -221,6 +221,7 @@ import type {
   OrderDetail,
   OrderEstimate,
   UnitCostHistory,
+  ProfitReport,
   OrderCosts,
   TimeEntry,
   TimeEntryCreate,
@@ -2328,6 +2329,15 @@ export const api = {
     if (page.cursor) search.set('cursor', page.cursor)
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<OrderPage>(`/orders${suffix}`)
+  },
+  /** #5329 §6.4 — the profit report by model: the orders accepted in `[from, to)`, by
+   * default the last 90 days. */
+  profitReport: (period: { from?: string; to?: string } = {}) => {
+    const search = new URLSearchParams()
+    if (period.from) search.set('from', period.from)
+    if (period.to) search.set('to', period.to)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ProfitReport>(`/orders/reports/profit${suffix}`)
   },
   order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),

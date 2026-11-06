@@ -606,6 +606,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   main reason, the suggested price and, with `unit_price_minor`, `warning`. Advice only.
   Frontend `components/orders/QuoteWarning.tsx` in `QuoteEditor` (mock
   `mocks/features/orders/history.ts`); agent `order_item_quote` adds `price_warning`.
+  Job cost phase 4 (#5329, §6.4): `GET /orders/reports/profit?from=&to=&group=model`
+  (`orders/report.py` `profit_report`): the orders accepted in `[from, to)` (default the
+  last 90 days), cancelled ones too, per currency (never summed across currencies) and per
+  product (`product_of`: a model `slug`, else a `sku`, else `custom`). Each row sums its
+  items' figures from `_order_costs`, never a second formula. Waste is the cost of test and
+  failed attempts. The `order` row is each order's read less its items' (entries, shipping
+  cost, charges); `total` is the orders' reads summed. It reads batches of `REPORT_BATCH`
+  (`OrderStore.accepted_orders`) and stops at `MAX_REPORT_ORDERS` (`complete`,
+  `read_from`). `GET /orders` takes `product`, `accepted_from`, `accepted_to` and
+  `currency` (`OrderFilter`, `models.py` `Product`), which list a row's orders. Frontend
+  `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
+  `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
+  `orders_profit_report` (read) and `order_list`'s new filters.
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
