@@ -51,7 +51,7 @@ _DETAILS: dict[Reason, str] = {
 def refusal(route_cls: RouteClass, reason: Reason, *, bearer: bool) -> ApiError:
     """``enforce``'s answer to a request :func:`would_refuse` refuses (§8.2)."""
     if reason in UNAUTHENTICATED:
-        wants_bearer = bearer or route_cls.startswith("internal.")
+        wants_bearer = bearer or route_cls.startswith(("internal.", "crud."))
         return ApiError(
             401,
             _DETAILS[reason],

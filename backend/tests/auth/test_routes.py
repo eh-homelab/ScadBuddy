@@ -201,10 +201,10 @@ def _person(kind: SessionKind = "login") -> Person:
         ("crud.render", ANONYMOUS, False, "no_credential"),
         ("crud.render", _person(), True, "no_credential"),
         ("crud.render", Service("render", frozenset({"crud.render"})), False, None),
-        ("crud.render", Service("print", frozenset({"crud.print"})), False, "no_credential"),
-        ("crud.projects", Service("projects", frozenset({"api"})), False, "no_credential"),
+        ("crud.render", Service("print", frozenset({"crud.print"})), False, "out_of_scope"),
+        ("crud.projects", Service("projects", frozenset({"api"})), False, "out_of_scope"),
         ("flow.host", Service("projects", frozenset({"flow.host"})), False, None),
-        ("flow.host", Service("projects", frozenset({"api"})), False, "no_credential"),
+        ("flow.host", Service("projects", frozenset({"api"})), False, "out_of_scope"),
         ("internal.outputs", _person(), True, "no_credential"),
         ("internal.outputs", Service("print", frozenset({"internal.outputs"})), False, None),
         (

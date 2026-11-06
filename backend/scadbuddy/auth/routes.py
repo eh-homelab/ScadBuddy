@@ -210,10 +210,16 @@ def would_refuse(
     ``header_needed`` is false for a socket and for a scriptless GET."""
     if route_cls in ("public", "transfer", "exchange"):
         return None
-    if route_cls.startswith(("internal.", "crud.")) or route_cls == "flow.host":
+    if route_cls.startswith("internal."):
         if isinstance(caller, Service) and route_cls in caller.scopes:
             return None
         return "no_credential"
+    if route_cls.startswith("crud.") or route_cls == "flow.host":
+        # A live service credential of another caller, or without the class, is a 403
+        # as `crud/guard.py` answers it in `off`; only no live credential is a 401.
+        if not isinstance(caller, Service):
+            return "no_credential"
+        return None if route_cls in caller.scopes else "out_of_scope"
     if isinstance(caller, Anonymous):
         return "signed_out"
     # A credential whose scopes leave out the public routes (the print worker's).

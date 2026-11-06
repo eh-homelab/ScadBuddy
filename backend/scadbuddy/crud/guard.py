@@ -13,7 +13,7 @@ Every response of a CRUD router, a refusal included, carries ``X-ScadBuddy-Crud:
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -23,15 +23,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from scadbuddy.auth.check import FORBIDDEN, SIGNED_OUT
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
-from scadbuddy.auth.service_credentials import ServiceCaller
 from scadbuddy.core.problems import ApiError
 
+#: The callers with CRUD routes; `auth/routes.py` `CRUD_CLASSES` has the same keys.
+CrudCaller = Literal["projects", "render", "print"]
 CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}
 PREFIX = "/internal/crud"
 
 
-def require_crud(caller: ServiceCaller) -> Any:
+def require_crud(caller: CrudCaller) -> Any:
     """A dependency: the request must be ``caller``'s service credential with ``crud.<caller>``."""
     route_class = f"crud.{caller}"
 
@@ -88,7 +89,7 @@ class _CrudRoute(APIRoute):
         return crud_handler
 
 
-def crud_router(caller: ServiceCaller) -> APIRouter:
+def crud_router(caller: CrudCaller) -> APIRouter:
     """A router for ``/api/v1/internal/crud/<caller>``: hidden from the schema, guarded
     by :func:`require_crud`, answering with the CRUD headers."""
     return APIRouter(
