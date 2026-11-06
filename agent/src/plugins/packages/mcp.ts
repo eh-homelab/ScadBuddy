@@ -177,14 +177,6 @@ export async function serverAccess(
 export type PackageServerConfig = { pkg: string; server: string; name: string; plugin: RemotePlugin; address: string }
 
 /**
- * The header values every loaded package's http MCP servers declare, and their bare tokens
- * (`declaredHeaderSecrets` of each package's directory).
- */
-export function packageHeaderSecrets(loaded: readonly LoadedPackage[]): string[] {
-  return loaded.flatMap((pkg) => declaredHeaderSecrets(pkg.dir))
-}
-
-/**
  * The header values the http MCP servers in a package's files declare, and their bare tokens,
  * read from the files alone: not vetted, no address check, no forwarder route. The values are
  * literals in the pinned files (vetting refuses a `$` in them, vet.ts), so the files say all of

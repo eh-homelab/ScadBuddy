@@ -135,6 +135,14 @@ export function marketplaceTarget(marketplace: unknown, entryName: string, marke
   }
 }
 
+/**
+ * How long a pin whose files could not be had for its header secrets (`headerSecrets`) is
+ * refused again without a new fetch (#5488): while its git host is down, `workspace_read` and
+ * the uploads fail at once instead of each waiting for the fetch to time out. The same window
+ * as plugins/secrets.ts `PLUGIN_SECRETS_CACHE_MS`.
+ */
+export const PACKAGE_SECRETS_FAILURE_MS = 30_000
+
 export class PackageInstaller {
   readonly cacheRoot: string
   private readonly fetcher: RepoFetcher
@@ -147,6 +155,8 @@ export class PackageInstaller {
   private readonly current = new Map<string, string>()
   /** Per cached directory, the built-ins its last vetting found (vet.ts `builtin_tools`). */
   private readonly builtins = new Map<string, string[]>()
+  /** Per pin (its cache directory), the last `headerSecrets` failure and when it happened. */
+  private readonly headerFailures = new Map<string, { at: number; error: unknown }>()
 
   constructor(options: InstallerOptions) {
     this.fetcher = options.fetcher
@@ -401,10 +411,24 @@ export class PackageInstaller {
    * read from the copy that hashes to the pin, fetched again when there is none. Never vetted and
    * never checked for address or listing size, so a package that fails to load still gives them:
    * they stay secrets that every tool redacts and every upload refuses. Throws when no copy can
-   * be had (the fetch fails), so the secrets read fails closed. Runs in the package's queue.
+   * be had (the fetch fails, or the files do not hash to the pin), so the secrets read fails
+   * closed; for `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without a
+   * fetch (a refusal, never an empty list). Runs in the package's queue.
    */
   headerSecrets(pin: PackagePin): Promise<string[]> {
-    return this.serial(pin.name, async () => declaredHeaderSecrets(await this.verifiedCopy(pin, { vet: false })))
+    const key = this.cacheDir(pin)
+    return this.serial(pin.name, async () => {
+      const failed = this.headerFailures.get(key)
+      if (failed && Date.now() - failed.at <= PACKAGE_SECRETS_FAILURE_MS) throw failed.error
+      try {
+        const values = declaredHeaderSecrets(await this.verifiedCopy(pin, { vet: false }))
+        this.headerFailures.delete(key)
+        return values
+      } catch (error) {
+        this.headerFailures.set(key, { at: Date.now(), error })
+        throw error
+      }
+    })
   }
 
   /**

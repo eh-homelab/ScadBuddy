@@ -12,7 +12,9 @@ import {
   BuiltInPluginError,
   PackageInstaller,
   PackageRefusedError,
+  PACKAGE_SECRETS_FAILURE_MS,
 } from '../src/plugins/packages/install.js'
+import { readPluginSecrets } from '../src/plugins/secrets.js'
 import { FetchError, GitFetcher } from '../src/plugins/packages/git.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
@@ -739,6 +741,52 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     temps.push(goneCache)
     const gone = new PackageInstaller({ fetcher: localFetcher({}), cacheRoot: goneCache, resolve: resolver() })
     await expect(gone.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+  })
+
+  it('refuses a pin whose files could not be had again for a short window, without a new fetch (#5488)', async () => {
+    const HEADER = 'Bearer pkg-header-token-78'
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', headers: { Authorization: HEADER } } } }),
+    })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    // The git host is down: no repository to fetch, and nothing cached.
+    const served: Record<string, TestRepo> = {}
+    const down = localFetcher(served)
+    const emptyCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
+    temps.push(emptyCache)
+    const cut = new PackageInstaller({ fetcher: down, cacheRoot: emptyCache, resolve: resolver() })
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-06T00:00:00Z'))
+      await expect(cut.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+      expect(down.checkouts).toHaveLength(1)
+      // Within the window: refused again, with no fetch, even once the host is back.
+      served.greeter = repos.greeter
+      vi.setSystemTime(Date.now() + PACKAGE_SECRETS_FAILURE_MS)
+      await expect(cut.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+      expect(down.checkouts).toHaveLength(1)
+      // After it: fetched again, and the values come back.
+      vi.setSystemTime(Date.now() + 1)
+      expect(await cut.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-78'])
+      expect(down.checkouts).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a fetch on the unvetted path whose files do not hash to the pin, and the secrets read fails closed (#5488)', async () => {
+    repos.greeter = gitRepo(GREETER)
+    const good = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    const pin = { ...good, contentHash: `sha256:${'0'.repeat(64)}` }
+    const emptyCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
+    temps.push(emptyCache)
+    const cut = new PackageInstaller({ fetcher, cacheRoot: emptyCache, resolve: resolver() })
+    await expect(cut.headerSecrets(pin)).rejects.toThrow(/hash to sha256:[0-9a-f]{64}, not the pinned sha256:0{64}/)
+    expect(existsSync(cut.cacheDir(pin))).toBe(false)
+    await expect(
+      readPluginSecrets({ kek: undefined, packages: { store: { enabledPins: () => Promise.resolve([pin]) }, installer: cut } }),
+    ).rejects.toThrow(/not the pinned/)
   })
 
   it('puts the source and every declared endpoint through the egress check', async () => {
