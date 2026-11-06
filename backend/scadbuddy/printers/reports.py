@@ -52,8 +52,9 @@ def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None,
     is a start, and nothing was running before it.
 
     Any other name ends ``running``. That relies on ScadBuddy's subtask names being
-    unique per run (they carry the run id), so a different name is always a different
-    job, never the same print renamed."""
+    unique per run (they carry a run-id prefix, the plate and, past the first, the
+    copy), so a different name is always a different job, never the same print
+    renamed."""
     named, state = new.get("subtask_name"), new.get("gcode_state")
     if not named or state is None:
         return running, None
