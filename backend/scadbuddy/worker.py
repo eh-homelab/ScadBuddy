@@ -55,7 +55,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.loop_watch import LoopWatch
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
@@ -190,6 +190,13 @@ def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Await
     return current
 
 
+def worker_metrics(settings: Settings, role: MetricsRole) -> Metrics:
+    """A worker's metrics: only the series ``role`` sets (#664), its build among them."""
+    metrics = Metrics(role=role)
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    return metrics
+
+
 def build_worker_deps(
     settings: Settings, *, stopping: Callable[[], bool] = lambda: False
 ) -> tuple[WorkerDeps, StoreBundle]:
@@ -208,8 +215,7 @@ def build_worker_deps(
         except OSError:
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "render")
     # The projection's job events go out on the API's bus: `publish_in` writes and
     # NOTIFYs in the row's transaction, so the listener is never started here.
     events = PgNotifyEventBus(
@@ -1137,8 +1143,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             " reads outputs through the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "print")
     events = PgNotifyEventBus(
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
@@ -1172,7 +1177,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
 
     activity = ActivityIndex(pool, events=events, metrics=metrics)
     print_runs = PrintRunStore(pool, events=events, activity=activity)
-    operations = OperationStore(pool, events=events, activity=activity)
+    # This worker ends its kinds' records, so it counts them (#2295).
+    operations = OperationStore(pool, events=events, activity=activity, metrics=metrics)
     kek = settings_kek(settings.secret_key_file)
     printers = PrinterStore(pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file))
     reports = PrinterReportStore(pool)
@@ -1243,6 +1249,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         printers=printers,
         reports=reports,
     )
+    metrics.operation_kinds(kind.name for kind in kinds)
     printing = PrintActivities(
         PrintDeps(
             settings_store=settings_store,
@@ -1401,8 +1408,7 @@ async def run_projects_worker(
             " print and arrange call the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "projects")
     events = PgNotifyEventBus(
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
@@ -1421,18 +1427,21 @@ async def run_projects_worker(
         )
         store = FlowStore(settings_store.pool, events=events)
         queue = settings.temporal_task_queue_projects
+        kinds = {
+            kind.name: kind
+            for kind in flow_kinds(
+                store,
+                keys[0],
+                approval_key(settings),
+                api=lambda: api_client(settings.api_internal_url, credential),
+            )
+        }
+        # This worker ends its kinds' records, so it counts them (#2295).
+        metrics.operation_kinds(kinds)
         decisions = operation_activities(
-            OperationStore(settings_store.pool, events=events),
+            OperationStore(settings_store.pool, events=events, metrics=metrics),
             settings_store,
-            {
-                kind.name: kind
-                for kind in flow_kinds(
-                    store,
-                    keys[0],
-                    approval_key(settings),
-                    api=lambda: api_client(settings.api_internal_url, credential),
-                )
-            },
+            kinds,
         )
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)

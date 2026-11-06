@@ -117,8 +117,16 @@ class QuoteError(ValueError):
 
 def reference_of(item: OrderItem) -> Reference:
     """What the item names to make. A custom item (#4954) names nothing, so there is
-    nothing to render or slice: 409 ``item_custom``, and its price is typed instead."""
+    nothing to render or slice: 409 ``item_custom``, and its price is typed instead. A
+    request has none until its first revision: 409 ``item_has_no_design``."""
     if item.reference is None:
+        if item.kind == "request":
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"item {item.id} is a request with no design yet: add a revision first",
+                type_=PROBLEMS + "item_has_no_design",
+                items=[item.id],
+            )
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"item {item.id} is a custom item: it has no model to render or slice, so its"
@@ -340,12 +348,15 @@ async def ensure_output(
     by: Actor,
     follow_every: float = FOLLOW_EVERY,
     schema: CustomizerSchema | None = None,
+    revision_id: str | None = None,
 ) -> str:
     """The output the item slices (Ruling 7): its own while it matches the reference,
     else the reference rendered at its commit, waited on through the projection, saved
     as ``POST /outputs`` saves one (``create_output``, ``output_create``'s run) and set
     as the item's ``output_id``. An item with no colour slots takes the render's, with
-    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`."""
+    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`.
+    With ``revision_id`` (the quote's run) the render is of that revision: once the
+    item has another, nothing is written and the run is refused `revision_not_newest`."""
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
@@ -391,6 +402,7 @@ async def ensure_output(
                 output_id=output_id,
                 colours=colours_of(colours) if not item.colours else None,
                 filaments=None if item.colours else dict(filaments) or None,
+                expected_revision_id=revision_id,
             )
         )
     except LifecycleError as error:
@@ -595,6 +607,15 @@ async def quote_run(
     if order is None or item is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order_id!r}")
     reference = reference_of(item)
+    try:
+        # The revision the run quotes, read before the render: a revision made while
+        # it renders or slices refuses the quote (`ensure_output`, `record_slice_quote`).
+        item = await asyncio.to_thread(lifecycle.ensure_revision, order_id, item_id, by)
+    except LifecycleError as error:
+        raise refused(error) from None
+    revision_id = item.current_revision_id
+    if revision_id is None:
+        raise refused(LifecycleError("item_has_no_design", f"item {item_id} has no design yet"))
     schema = await run.schema_of(reference) if run.schema_of is not None else None
     output_id = await ensure_output(
         lifecycle=lifecycle,
@@ -607,6 +628,7 @@ async def quote_run(
         by=by,
         follow_every=run.follow_every,
         schema=schema,
+        revision_id=revision_id,
     )
     subject = subject_of(item_id)
     sliced = await slice_item(
@@ -643,6 +665,7 @@ async def quote_run(
                     sliced_sha256=first.sha256 or "",
                     sliced_blob_key=first.blob_key or "",
                     by=by,
+                    revision_id=revision_id,
                     quote_id=quote_id,
                 )
             )

@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import type userEvent from '@testing-library/user-event'
 import { delay, HttpResponse, http } from 'msw'
-import { Route, Routes, useLocation, useParams } from 'react-router'
+import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output } from '../api/types'
 import { bbox, keychainSchema, models, outputs, prints } from '../mocks/fixtures'
@@ -26,7 +26,7 @@ vi.mock('../lib/traceAction', async (importOriginal) => {
   }
   return { ...actual, traceAction }
 })
-import { HISTORY_PAGE_SIZE, HISTORY_READ, HistoryPage } from './HistoryPage'
+import { HISTORY_MAX_SHOWN, HISTORY_PAGE_SIZE, HISTORY_READ, HistoryPage } from './HistoryPage'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
 
 // Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
@@ -63,6 +63,16 @@ function render(route = '/m/name-keychain/history') {
 /** The page's query string, for a test of what it keeps in the URL (#2290). */
 function Search() {
   return <div data-testid="search">{useLocation().search}</div>
+}
+
+/** A button that opens `to` in the same router, so the page moves without a remount. */
+function GoTo({ to, label = 'Go' }: { to: string; label?: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => void navigate(to)}>
+      {label}
+    </button>
+  )
 }
 
 /** Stands in for the deep-link page so the test can read what it was given. */
@@ -1160,6 +1170,155 @@ describe('HistoryPage paging (#2290)', () => {
     addPaged(30)
     render(`/m/name-keychain/history?shown=${HISTORY_PAGE_SIZE + 5}`)
     await screen.findByText(`Showing ${HISTORY_PAGE_SIZE + 5} of ${seeded() + 30}`)
+  })
+
+  it('opens with at most HISTORY_MAX_SHOWN outputs, whatever the URL asks for (#5289 review)', async () => {
+    noPrints()
+    addPaged(30)
+    const was = HISTORY_MAX_SHOWN.outputs
+    HISTORY_MAX_SHOWN.outputs = 30
+    onTestFinished(() => {
+      HISTORY_MAX_SHOWN.outputs = was
+    })
+    render('/m/name-keychain/history?shown=100000')
+    await screen.findByText(`Showing 30 of ${seeded() + 30}`)
+  })
+
+  it("leaves Load more usable on another model's history when the page it was loading lands after the move (#5289 review)", async () => {
+    noPrints()
+    addPaged(30)
+    const first = outputs.find((o) => o.slug === 'name-keychain')!
+    for (let n = 1; n <= 30; n++) {
+      addMockOutput({ ...first, slug: 'gridfinity-bin', params: {}, id: `${'ef'.repeat(15)}${String(n).padStart(2, '0')}`, name: `Bin ${n}` })
+    }
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let answered = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        if (!new URL(request.url).searchParams.has('after')) return undefined
+        await held
+        answered = true
+        return undefined
+      }),
+    )
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/m/:slug/history" element={<><HistoryPage /><GoTo to="/m/gridfinity-bin/history" /></>} />
+      </Routes>,
+      { route: '/m/name-keychain/history' },
+    )
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${seeded() + 30}`)
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByRole('button', { name: 'Loading…' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of 30`)
+    release()
+    await waitFor(() => expect(answered).toBe(true))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled()
+  })
+
+  it.each([
+    ['an answer', () => undefined],
+    ['a failure', () => problem(500, 'Internal Server Error', 'the old model failed late')],
+  ])("leaves another model's Load more alone when the old model's page lands late with %s (#5303 review)", async (_, answer) => {
+    noPrints()
+    addPaged(30)
+    const first = outputs.find((o) => o.slug === 'name-keychain')!
+    for (let n = 1; n <= 30; n++) {
+      addMockOutput({ ...first, slug: 'gridfinity-bin', params: {}, id: `${'ef'.repeat(15)}${String(n).padStart(2, '0')}`, name: `Bin ${n}` })
+    }
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let answered = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        if (!new URL(request.url).searchParams.has('after')) return undefined
+        await held
+        answered = true
+        return answer()
+      }),
+      // The new model's own Load more stays in flight for the whole test.
+      http.get('/api/v1/models/gridfinity-bin/outputs', async ({ request }) => {
+        if (!new URL(request.url).searchParams.has('after')) return undefined
+        await delay('infinite')
+        return undefined
+      }),
+    )
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/m/:slug/history" element={<><HistoryPage /><GoTo to="/m/gridfinity-bin/history" /></>} />
+      </Routes>,
+      { route: '/m/name-keychain/history' },
+    )
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${seeded() + 30}`)
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('button', { name: 'Loading…' })
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of 30`)
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByRole('button', { name: 'Loading…' })).toBeDisabled()
+    release()
+    await waitFor(() => expect(answered).toBe(true))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(screen.getByRole('button', { name: 'Loading…' })).toBeDisabled()
+    expect(screen.queryByText(/Could not load more outputs/)).not.toBeInTheDocument()
+  })
+
+  it("drops a Load more answered after a move away and back, built on the page it left (#5306 review)", async () => {
+    noPrints()
+    addPaged(30)
+    const first = outputs.find((o) => o.slug === 'name-keychain')!
+    addMockOutput({ ...first, slug: 'gridfinity-bin', params: {}, id: `${'ef'.repeat(15)}01`, name: 'Bin 1' })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let answered = false
+    let heldOnce = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        if (!new URL(request.url).searchParams.has('after') || heldOnce) return undefined
+        heldOnce = true
+        await held
+        answered = true
+        return undefined
+      }),
+    )
+    const { user } = renderPage(
+      <Routes>
+        <Route
+          path="/m/:slug/history"
+          element={
+            <>
+              <HistoryPage />
+              <GoTo to="/m/gridfinity-bin/history" />
+              <GoTo to="/m/name-keychain/history" label="Back to A" />
+            </>
+          }
+        />
+      </Routes>,
+      { route: '/m/name-keychain/history' },
+    )
+    const total = seeded() + 30
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('button', { name: 'Loading…' })
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await screen.findByText('Bin 1')
+    await user.click(screen.getByRole('button', { name: 'Back to A' }))
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)
+    release()
+    await waitFor(() => expect(answered).toBe(true))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    // The late answer from before the move is dropped: still one page, and Load more works.
+    expect(screen.getByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled()
   })
 
   it('starts again from the first page when the last output shown went away', async () => {

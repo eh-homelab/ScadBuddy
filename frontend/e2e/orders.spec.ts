@@ -210,6 +210,55 @@ test.describe('orders', () => {
     await expect(page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Ball Maze' })).toBeVisible()
   })
 
+  // #5280 — a design request goes through a revision the customer accepts, then a quote,
+  // to approved (design first).
+  test('a design request through a revision to approved (#5280)', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-3', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Add item' }).click()
+    const add = page.getByRole('dialog', { name: 'Add item' })
+    await add.getByRole('button', { name: 'Design request' }).click()
+    await add.getByLabel('Title').fill('A dragon')
+    await add.getByLabel('What the customer asked for').fill('Green, about 10 cm')
+    await add.getByRole('button', { name: 'Add item' }).click()
+    await expect(add).toBeHidden()
+
+    await page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'A dragon' }).click()
+    const item = page.getByRole('dialog', { name: 'A dragon' })
+    const status = (text: RegExp) => item.getByText(text).first()
+    await expect(item.getByRole('combobox', { name: 'Approval' })).toHaveText('Design first')
+
+    // Revision 1 is a model's design, with a render.
+    await item.getByRole('button', { name: 'New revision' }).click()
+    await item.getByRole('button', { name: 'Change the design…' }).click()
+    const picker = page.getByRole('dialog', { name: 'New revision' })
+    await picker.getByLabel('Template').fill('keychain')
+    await picker.getByRole('button', { name: /Name Keychain/ }).click()
+    await picker.getByLabel('Note').fill('Closest thing in the catalogue')
+    await picker.getByRole('button', { name: 'Add revision' }).click()
+    await expect(picker).toBeHidden()
+    const revision = item.getByTestId('revision')
+    await expect(revision).toHaveAttribute('data-number', '1')
+    await revision.getByLabel('Add render or photo').setInputFiles({
+      name: 'render.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]),
+    })
+    await expect(revision.getByRole('listitem', { name: 'render.png' })).toBeVisible()
+    await revision.getByRole('button', { name: 'Send to customer' }).click()
+    await expect(revision.getByText(/^Sent /)).toBeVisible()
+
+    await revision.getByRole('button', { name: 'Record answer' }).click()
+    await revision.getByRole('button', { name: "Record the customer's answer" }).click()
+    await expect(revision.getByTestId('revision-answer')).toHaveText('Accepted')
+
+    // Quote by hand and accept it: the item is approved.
+    await item.getByLabel(/Price per unit/).fill('30.00')
+    await item.getByRole('button', { name: 'Record and accept' }).click()
+    await expect(status(/^Approved$/)).toBeVisible()
+  })
+
   test('on a phone the orders page fits', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/orders')

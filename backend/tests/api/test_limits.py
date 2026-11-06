@@ -9,6 +9,7 @@ from starlette.requests import Request
 from scadbuddy.api.limits import (
     MAX_MULTIPART_BODY_BYTES,
     MAX_TEXT_BODY_BYTES,
+    ORDER_ATTACHMENT_UPLOAD_PATH,
     ClientGoneError,
     unless_the_client_leaves,
 )
@@ -130,3 +131,30 @@ def test_a_small_chunked_body_passes_the_gate(client: TestClient) -> None:
 def test_an_ordinary_body_passes_the_gate(client: TestClient) -> None:
     response = client.post("/api/v1/models/check", json={"source": "cube(1);\n"})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/orders/o1/attachments",
+        "/api/v1/orders/o1/items/i1/attachments",
+        "/api/v1/orders/o1/items/i1/fulfilments/f1/attachments",
+        "/api/v1/orders/o1/items/i1/revisions/r1/attachments",
+    ],
+)
+def test_every_order_upload_route_takes_the_media_limit(path: str) -> None:
+    """Each of `api/order_attachments.py`'s upload routes, the attempts' among them, is
+    as large as a template's media, never the multipart cap."""
+    assert ORDER_ATTACHMENT_UPLOAD_PATH.match(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/orders/o1/attachments/a1/to-model",
+        "/api/v1/orders/o1/items/i1/fulfilments/attachments",
+        "/api/v1/orders/o1/items/i1/revisions/r1/fulfilments/f1/attachments",
+    ],
+)
+def test_no_other_order_route_takes_the_media_limit(path: str) -> None:
+    assert not ORDER_ATTACHMENT_UPLOAD_PATH.match(path)

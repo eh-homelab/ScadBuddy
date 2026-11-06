@@ -308,7 +308,7 @@ design rests on are measured by a manual script, **which has not yet been run ag
 live Bambuddy**: it needs a key, and none was available where phase 3 was written. The
 operator runs it once at deploy time and pastes its output here, replacing this
 paragraph, under a heading "Blob store (#426), measured <date> against <version>". In
-the same change, remove CLAUDE.md's "it has not yet been run against a live Bambuddy"
+the same change, remove backend/CLAUDE.md's "it has not yet been run against a live Bambuddy"
 clause (the `backend/scadbuddy/store/` bullet under "Layout"). Until then nothing below
 is a measurement, and the Bambuddy backend's tests are shaped from the recorded
 `openapi/` schemas, not from these responses.

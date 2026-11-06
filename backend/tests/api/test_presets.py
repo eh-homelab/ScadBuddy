@@ -1310,3 +1310,24 @@ def test_an_unrelated_metadata_patch_leaves_model_json_presets_as_written(
     [rewritten] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
     assert "inputs" not in rewritten
     assert rewritten["params"] == {"width": 5}
+
+
+def test_each_preset_carries_its_link(client: TestClient, model: str) -> None:
+    """#1022: the customizer opened on the preset; absolute only under a public URL."""
+    saved = _save(client, model, "Big", {"width": 25})
+    assert saved["path"] == f"/m/{model}?preset={saved['id']}"
+    assert saved["url"] is None
+    # A built-in's slug carries a colon, encoded as the app's `modelPath` encodes it.
+    shipped = client.get(_url(BUILTIN)).json()[0]
+    assert shipped["path"] == "/m/builtin%3Akeychain?preset=template-wide"
+
+    settings = client.put("/api/v1/settings", json={"public_url": "https://scad.test/"})
+    assert settings.status_code == 200, settings.text
+    listed = client.get(_url(model)).json()
+    assert listed[0]["url"] == f"https://scad.test/m/{model}?preset={saved['id']}"
+    renamed = client.patch(_url(model, saved["id"]), json={"name": "Bigger"}, headers=press())
+    assert renamed.json()["url"] == f"https://scad.test/m/{model}?preset={saved['id']}"
+    copy = client.post(
+        f"{_url(model, saved['id'])}/duplicate", json={"name": "Copy"}, headers=press()
+    ).json()
+    assert copy["url"] == f"https://scad.test/m/{model}?preset={copy['id']}"

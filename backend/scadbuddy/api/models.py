@@ -314,9 +314,15 @@ SearchWords = Annotated[
         description="Search words; each must appear in the name, the description or a tag",
     ),
 ]
+#: How many `tag`s, and how long each, the route takes: bounds on the request only.
+#: Past a model's own caps (`MAX_TAGS` distinct tags as folded, `MAX_TAG_CHARS` each) no
+#: model can match, and the answer is empty rather than 422 (#5305 review): a browser
+#: cannot fold as `fold` does, so it sends the tags as typed and leaves that to here.
+MAX_TAG_FILTERS = 4 * MAX_TAGS
+MAX_TAG_FILTER_CHARS = 4 * MAX_TAG_CHARS
 TagFilter = Annotated[
-    list[Annotated[str, Field(min_length=1, max_length=MAX_TAG_CHARS)]] | None,
-    Query(max_length=MAX_TAGS, description="Only models carrying every one of these tags"),
+    list[Annotated[str, Field(min_length=1, max_length=MAX_TAG_FILTER_CHARS)]] | None,
+    Query(max_length=MAX_TAG_FILTERS, description="Only models carrying every one of these tags"),
 ]
 OriginFilter = Annotated[CatalogueOrigin | None, Query(description="Only built-ins, or mine")]
 SortOrder = Annotated[

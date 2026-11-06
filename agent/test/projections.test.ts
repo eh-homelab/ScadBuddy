@@ -149,8 +149,9 @@ describe('registry projections', () => {
     // The backend routes that call Bambuddy (backend/scadbuddy/api/printing.py,
     // outputs.py `send`, settings.py `test`/`targets`); `remember_*` only write
     // ScadBuddy's own settings.json, `/print/runs/` only reads its database, and
+    // a revision's `/send` goes to the customer, not Bambuddy (#5280),
     // `/print/filament-profiles` lists ScadBuddy's built-in profiles (#717).
-    const bambuddyRoutes = /\/print\/(?!runs\/|filament-profiles$)|\/send$|\/settings\/(test|targets)$/
+    const bambuddyRoutes = /\/print\/(?!runs\/|filament-profiles$)|(?<!\{revision_id\})\/send$|\/settings\/(test|targets)$/
     for (const tool of ALL_TOOLS) {
       if (tool.routes.some((r) => bambuddyRoutes.test(r.split(' ')[1]!)) && !tool.name.startsWith('remember_')) {
         expect(tool.bambuddyScope.length, tool.name).toBeGreaterThan(0)

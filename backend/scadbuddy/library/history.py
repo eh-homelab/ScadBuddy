@@ -22,7 +22,7 @@ import re
 import tarfile
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from scadbuddy.core.gitrepo import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, FULL_ID, GitRepo
@@ -460,7 +460,12 @@ class ModelHistory(GitRepo):
         return completed.stdout
 
     def diff(
-        self, revisions: RevisionRange, slug: str | None = None, *, relative: str | None = None
+        self,
+        revisions: RevisionRange,
+        slug: str | None = None,
+        *,
+        relative: str | None = None,
+        exclude: Sequence[str] = (),
     ) -> str:
         """A unified patch across ``revisions``, optionally scoped to one model.
 
@@ -469,7 +474,7 @@ class ModelHistory(GitRepo):
         """
         if relative is None and slug is not None and slug.startswith(f"{BUILTIN_DIR}/"):
             relative = f"{BUILTIN_DIR}/"
-        return super().diff(revisions, slug, relative=relative)
+        return super().diff(revisions, slug, relative=relative, exclude=exclude)
 
     def diff_dirs(
         self,

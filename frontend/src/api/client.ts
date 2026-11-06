@@ -52,6 +52,7 @@ import type {
   Job,
   CatalogueLibrary,
   DependencyReport,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
@@ -127,7 +128,10 @@ import type {
   FlowDecided,
   FlowProposal,
   FlowRunQueue,
+  FlowCommitMessage,
   FlowDefinition,
+  FlowDetails,
+  FlowDetailsUpdate,
   FlowGrantSpec,
   FlowGrantView,
   FlowHostInterface,
@@ -222,6 +226,9 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  Revision,
+  RevisionAnswerInput,
+  RevisionCreate,
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
@@ -249,6 +256,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { unmatchable } from '../lib/catalogueQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
 import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
@@ -320,6 +328,9 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+export const MODELS_PAGE_LIMIT = 500
+
 /** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
 export interface ModelFilters {
   q: string
@@ -331,7 +342,8 @@ export interface ModelFilters {
 function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
   const query = new URLSearchParams()
   if (q.trim()) query.set('q', q.trim())
-  for (const tag of tags) query.append('tag', tag)
+  // As typed: the route folds them, and the browser cannot fold as it does (#5305 review).
+  for (const tag of new Set(tags)) query.append('tag', tag)
   if (origin !== 'all') query.set('origin', origin)
   return query
 }
@@ -1076,7 +1088,14 @@ export const api = {
   archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
   unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
   /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
-  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
+  deleteFlow: (name: string, message?: FlowCommitMessage) =>
+    request<FlowState>(`/workflows/names/${seg(name)}`, {
+      method: 'DELETE',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
+  /** #3186 — a flow's display name and description: one commit of `flow.json`, not a version. */
+  updateFlowDetails: (name: string, body: FlowDetailsUpdate) =>
+    request<FlowDetails>(`/workflows/names/${seg(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   /**
    * One flow's versions, newest first: the one place the page reads them from, its git
@@ -1112,8 +1131,11 @@ export const api = {
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
 
   /** A new version with the script at `commit`: a new commit, type-checked first. */
-  restoreFlowVersion: (name: string, commit: string) =>
-    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
+  restoreFlowVersion: (name: string, commit: string, message?: FlowCommitMessage) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, {
+      method: 'POST',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
 
   /**
    * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
@@ -1201,6 +1223,8 @@ export const api = {
     page: { limit?: number; after?: string } = {},
     signal?: AbortSignal,
   ): Promise<{ items: ModelSummary[]; total: number }> => {
+    // Tags no model can carry all of select none, and GET /models would refuse them.
+    if (unmatchable(filters.tags)) return { items: [], total: 0 }
     const query = modelFilterParams(filters)
     query.set('sort', filters.sort)
     if (page.limit !== undefined) query.set('limit', String(page.limit))
@@ -1211,9 +1235,50 @@ export const api = {
     return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
   },
 
+  /**
+   * The first `size` models `filters` select, read in pages of at most
+   * `MODELS_PAGE_LIMIT` (the backend's `MAX_PAGE_LIMIT`), each after the last: a window
+   * past the cap asked for in one read answers 422 (#5289 review). A chunk whose `after`
+   * went away (409) reads the window again from the top, once; `signal` stops it
+   * between chunks (#5292 review).
+   */
+  listModelsWindow: async (
+    filters: ModelFilters,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const read = async (): Promise<{ items: ModelSummary[]; total: number }> => {
+      const items: ModelSummary[] = []
+      let total = 0
+      while (items.length < size) {
+        signal?.throwIfAborted()
+        const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
+        const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug }, signal)
+        items.push(...page.items)
+        total = page.total
+        if (page.items.length < limit) break
+      }
+      return { items, total }
+    }
+    try {
+      return await read()
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) return await read()
+      throw cause
+    }
+  },
+
   /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
-  modelFacets: (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal) =>
-    request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal }),
+  modelFacets: async (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal): Promise<ModelFacets> => {
+    if (!unmatchable(filters.tags)) {
+      return await request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal })
+    }
+    // None selected: only the whole catalogue's count is asked for, and each tag is at 0.
+    const every = await request<ModelFacets>(`/model-facets?${modelFilterParams({ ...filters, tags: [] })}`, {
+      signal,
+    })
+    return { total: every.total, matched: 0, tags: [...new Set(filters.tags)].map((tag) => ({ tag, count: 0 })) }
+  },
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
@@ -2274,6 +2339,46 @@ export const api = {
       },
       onProgress,
     ),
+  // -- design revisions (#5280, storefront spec 2026-11-02 §4) -----------------------------
+  addOrderItemRevision: (orderId: string, itemId: string, body: RevisionCreate) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions`, { method: 'POST', body: JSON.stringify(body) }),
+  sendOrderItemRevision: (orderId: string, itemId: string, revisionId: string) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/send`, { method: 'POST' }),
+  answerOrderItemRevision: (orderId: string, itemId: string, revisionId: string, body: RevisionAnswerInput) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A file on one revision: its `render`, a `reference`, or (with `fulfilmentId`) the photo of its test print. */
+  addRevisionAttachment: (
+    orderId: string,
+    itemId: string,
+    revisionId: string,
+    file: File,
+    opts: { role: OrderAttachmentRole; caption?: string; fulfilmentId?: string | null },
+    onProgress?: (fraction: number) => void,
+  ): Promise<OrderAttachment> =>
+    uploadForm<OrderAttachment>(
+      `/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        body.append('role', opts.role)
+        if (opts.caption) body.append('caption', opts.caption)
+        if (opts.fulfilmentId) body.append('fulfilment_id', opts.fulfilmentId)
+        return body
+      },
+      onProgress,
+    ),
+  /** A test print of the item's newest revision: one copy, an attempt of purpose `test`. */
+  testPrintRevision: (orderId: string, itemId: string, revisionId: string, body: PrintRunRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/test-print`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A test-print photo of an accepted revision, copied into its template's photos. */
+  revisionPhotoToModel: (orderId: string, attachmentId: string) =>
+    command<ModelSummary>(`/orders/${seg(orderId)}/attachments/${seg(attachmentId)}/to-model`, { method: 'POST' }),
   updateOrderAttachment: (orderId: string, id: string, body: OrderAttachmentPatch) =>
     request<OrderAttachment>(`/orders/${seg(orderId)}/attachments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderAttachment: (orderId: string, id: string) =>
@@ -2455,6 +2560,10 @@ export const api = {
     command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  /** #5321 — one library file by id, whatever its type, with its folder's path. */
+  getLibraryFile: (fileId: number) => request<LibraryFileEntry>(`/print/library/${fileId}`),
+  /** #1031 — the library file itself, always served as a download. */
+  libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,

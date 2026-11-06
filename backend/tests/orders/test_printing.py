@@ -32,6 +32,7 @@ from scadbuddy.orders.printing import (
     print_item,
     print_request_id,
 )
+from scadbuddy.orders.printing import test_print_check as check_test_print
 from scadbuddy.orders.quote import OutputsRead
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.local import LocalBlobStore
@@ -663,3 +664,290 @@ def test_a_retry_after_a_start_that_made_its_run_attaches_it(shop: Shop, pool: P
     assert held(pool, FULFILMENT_HOLDER) == {attempt.id: "quote-a"}
     assert shop.get_item(item).status == "queued"
     assert "print.refused" not in shop.kinds(order)
+
+
+# -- test prints (storefront spec §4.4) -------------------------------------------------------
+
+
+def trial_claimed(shop: Shop, item: OrderItem, key: str, revision: str | None = None) -> Fulfilment:
+    return shop.lifecycle.claim_print(
+        item.order_id,
+        item.id,
+        BY,
+        request_id=key,
+        sliced_sha256="a" * 64,
+        sliced_blob_key="quote-a",
+        revision_id=revision or shop.get_item(item).current_revision_id,
+    )
+
+
+def trial_started(shop: Shop, item: OrderItem, run_id: str) -> Fulfilment:
+    claim = trial_claimed(shop, item, f"test-{run_id}")
+    return shop.lifecycle.attach_print(claim, run_id, None)
+
+
+def _quoted(shop: Shop) -> tuple[Order, OrderItem]:
+    """An order quoted, not accepted: its item `approved`."""
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    return shop.get(order), shop.get_item(item)
+
+
+def test_a_test_print_needs_no_accepted_order(shop: Shop, pool: PgPool) -> None:
+    order, before = _quoted(shop)
+    claim = trial_claimed(shop, before, "r1")
+    assert claim.purpose == "test" and claim.revision_id == before.current_revision_id
+    assert claim.copies == 1
+    assert shop.get_item(before).status == before.status and shop.get(order).status == "quoted"
+    claimed_rows = [e for e in shop.rows.events(order.id) if e.kind == "print.claimed"]
+    assert [e.detail["purpose"] for e in claimed_rows] == ["test"]
+    assert held(pool, FULFILMENT_HOLDER) == {claim.id: "quote-a"}
+    # A draft item prints a test too: the test is how the design is checked.
+    draft = shop.item(order)
+    assert trial_claimed(shop, draft, "r2").purpose == "test"
+    assert shop.get_item(draft).status == "draft"
+
+
+def test_a_test_print_settles_without_moving_the_item(shop: Shop, pool: PgPool) -> None:
+    order, item = _quoted(shop)
+    run_id = run_row(pool)
+    trial_started(shop, item, run_id)
+    set_run(pool, run_id, "succeeded")
+    # Its progress moves nothing: the item is in no print state.
+    assert shop.lifecycle.follow_print(run_id, progressed=True) is None
+    settle(pool, run_id, "finished")
+    followed = shop.lifecycle.follow_print(run_id)
+    assert followed is not None
+    assert (followed.outcome, followed.quantity) == ("succeeded", 1)
+    assert shop.get_item(item).status == "approved"
+    assert shop.get(order).status == "quoted"
+
+
+def test_a_failed_test_print_does_not_fail_the_item(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    run_id = run_row(pool, status="failed", detail="jammed")
+    trial_started(shop, item, run_id)
+    followed = shop.lifecycle.follow_print(run_id)
+    assert followed is not None and followed.outcome == "failed"
+    assert shop.get_item(item).status == "approved"
+    assert shop.get(order).status == "accepted"
+
+
+def _in_flight(call: Any) -> None:
+    with pytest.raises(LifecycleError) as refused:
+        call()
+    assert refused.value.slug == "print_in_flight"
+
+
+def test_one_print_of_an_item_is_in_flight_at_a_time(shop: Shop, pool: PgPool) -> None:
+    """Every print of an item prints its output, whose outcome is recorded against the
+    newest run only: a second print in flight would take the first one's outcome."""
+    order, item = shop.accepted(quantity=2)
+    # A test print while a production print of the item is open.
+    production = run_row(pool)
+    started(shop, order, item, production)
+    _in_flight(lambda: trial_claimed(shop, item, "test-beside"))
+    settle(pool, production, "finished")
+    shop.lifecycle.follow_print(production)
+    shop.lifecycle.accept_fulfilment(order.id, item.id, shop.rows.fulfilments(item.id)[0].id, BY)
+    assert shop.get_item(item).status == "fulfilled"
+
+    order, item = shop.accepted()
+    # A production claim while a test print is open, its run attached or not yet.
+    pending = trial_claimed(shop, item, "test-pending")
+    _in_flight(lambda: claimed(shop, order, item, "production"))
+    # Two test prints: the second is refused.
+    _in_flight(lambda: trial_claimed(shop, item, "test-second"))
+    # A retry of the same request is its own claim, never refused.
+    assert trial_claimed(shop, item, "test-pending") == pending
+    test_run = run_row(pool)
+    shop.lifecycle.attach_print(pending, test_run, None)
+    _in_flight(lambda: claimed(shop, order, item, "production"))
+    settle(pool, test_run, "finished")
+    shop.lifecycle.follow_print(test_run)
+    assert claimed(shop, order, item, "production").purpose == "production"
+    # And a production claim's retry is its own claim, too.
+    assert claimed(shop, order, item, "production").purpose == "production"
+    assert len(shop.rows.fulfilments(item.id)) == 1
+
+
+def test_a_key_is_one_kind_of_print(shop: Shop, pool: PgPool) -> None:
+    """One request id on a production print and on a test print, or on two revisions'
+    test prints, is two requests: neither answers with the other's attempt."""
+    order, item = shop.accepted()
+    production = claimed(shop, order, item, "k")
+    with pytest.raises(LifecycleError) as refused:
+        trial_claimed(shop, item, "k")
+    assert refused.value.slug == "print_request_conflict"
+    shop.lifecycle.release_print(production, "test")
+    trial = trial_claimed(shop, item, "t")
+    with pytest.raises(LifecycleError) as other:
+        claimed(shop, order, item, "t")
+    assert other.value.slug == "print_request_conflict"
+    with pytest.raises(LifecycleError) as revision:
+        trial_claimed(shop, item, "t", revision="another-revision")
+    assert revision.value.slug == "print_request_conflict"
+    assert shop.rows.fulfilments(item.id, purpose=None) == [trial]
+
+
+def test_test_attempts_count_for_nothing(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    run_id = run_row(pool)
+    test = trial_started(shop, item, run_id)
+    settle(pool, run_id, "finished")
+    shop.lifecycle.follow_print(run_id)
+    # derive's `attempted` leaves it out.
+    assert shop.get(order).status == "accepted"
+    assert claimed(shop, order, item, "production").copies == 1
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.accept_fulfilment(order.id, item.id, test.id, BY)
+    assert refused.value.slug == "fulfilment_not_found"
+
+
+def test_a_test_print_is_of_the_current_revision(shop: Shop, pool: PgPool) -> None:
+    order, item = _quoted(shop)
+    first = item.current_revision_id
+    shop.lifecycle.add_revision(order.id, item.id, BY, note="thinner walls")
+    with pytest.raises(LifecycleError) as refused:
+        trial_claimed(shop, item, "old", revision=first)
+    assert refused.value.slug == "revision_not_newest"
+    with pytest.raises(LifecycleError) as unknown:
+        trial_claimed(shop, item, "none", revision="no-such-revision")
+    assert unknown.value.slug == "revision_not_found" and unknown.value.not_found
+    assert shop.rows.fulfilments(item.id, purpose=None) == []
+
+
+def test_a_test_print_is_refused_on_hold_and_for_a_settled_item(shop: Shop, pool: PgPool) -> None:
+    order, item = _quoted(shop)
+    shop.lifecycle.hold(order.id, BY)
+    with pytest.raises(LifecycleError) as held_back:
+        trial_claimed(shop, item, "held")
+    assert held_back.value.slug == "order_on_hold"
+    shop.lifecycle.release(order.id, BY)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    with pytest.raises(LifecycleError) as cancelled:
+        trial_claimed(shop, item, "cancelled")
+    assert cancelled.value.slug == "item_not_open"
+
+
+def test_a_released_test_claim_leaves_the_item(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    refusal = ApiError(422, "no spool for slot 2")
+    with pytest.raises(ApiError):
+        asyncio.run(
+            print_item(
+                shop.lifecycle,
+                Starts(pool, refuse=refusal),
+                Starts(pool).existing,
+                order.id,
+                item.id,
+                BY,
+                request_id="t",
+                sliced_sha256=None,
+                sliced_blob_key=None,
+                revision_id=item.current_revision_id,
+            )
+        )
+    assert shop.rows.fulfilments(item.id, purpose=None) == []
+    assert shop.get_item(item).status == "approved"
+    assert "print.refused" in shop.kinds(order)
+
+
+def test_a_test_attempt_is_settled_by_hand_before_the_order_is_accepted(
+    shop: Shop, pool: PgPool
+) -> None:
+    order, item = _quoted(shop)
+    claim = trial_claimed(shop, item, "k")
+    settled = shop.lifecycle.update_fulfilment(
+        order.id, item.id, claim.id, FulfilmentInput(quantity=0, outcome="failed"), BY
+    )
+    assert settled.outcome == "failed" and settled.purpose == "test"
+    assert shop.get_item(item).status == "approved"
+    assert shop.get(order).status == "quoted"
+    shop.lifecycle.hold(order.id, BY)
+    with pytest.raises(LifecycleError) as held_back:
+        shop.lifecycle.update_fulfilment(
+            order.id, item.id, claim.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+        )
+    assert held_back.value.slug == "order_on_hold"
+
+
+def test_a_draft_item_with_a_test_print_is_cancelled_not_deleted(shop: Shop, pool: PgPool) -> None:
+    order, item = _quoted(shop)
+    trial_claimed(shop, item, "k")
+    shop.lifecycle.add_revision(order.id, item.id, BY, note="thinner walls")
+    assert shop.get_item(item).status == "draft"
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.delete_item(order.id, item.id, BY)
+    assert refused.value.slug == "item_not_draft" and shop.rows.fulfilments(item.id, purpose=None)
+    assert "cancel it instead" in str(refused.value)
+
+
+def test_the_test_print_check(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 3))
+    outputs = Outputs(item)
+    revision = item.current_revision_id
+    assert revision is not None
+
+    def check(of: str = revision) -> dict[str, Any]:
+        return asyncio.run(
+            check_test_print(shop.lifecycle, outputs, blobs, order.id, item.id, of, by=BY)
+        )
+
+    # No slice quote of the revision: a manual one prices it, but slices nothing.
+    shop.quoted(order, item)
+    assert _refusal(check) == "requote_needed"
+    _slice_quote(shop, order, item, key="quote-a")
+    (blobs.dir_for("quote-a") / "sliced.3mf").write_bytes(b"sliced")
+    assert _refusal(check) == "requote_needed"
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_item_quotes SET sliced_sha256 = %s WHERE order_item_id = %s",
+            (hashlib.sha256(b"sliced").hexdigest(), item.id),
+        )
+    checked = check()
+    assert (checked["copies"], checked["output_id"]) == (1, item.output_id)
+    assert checked["sliced_blob_key"] == "quote-a"
+    # A quote the previous build recorded names no revision: it is the current one's.
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_item_quotes SET revision_id = NULL WHERE order_item_id = %s", (item.id,)
+        )
+    assert check()["copies"] == 1
+    pending = trial_claimed(shop, item, "pending")
+    assert _refusal(check) == "print_in_flight"
+    shop.lifecycle.release_print(pending, "test")
+    assert _refusal(lambda: check("no-such-revision")) == "revision_not_found"
+    shop.lifecycle.add_revision(order.id, item.id, BY, note="thinner walls")
+    assert _refusal(check) == "revision_not_newest"
+    shop.lifecycle.hold(order.id, BY)
+    assert _refusal(check) == "order_on_hold"
+
+
+def test_the_test_print_check_repairs_a_copy_changed_behind_its_revision(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """A build before revisions edited the item's colours: the check makes the copy the
+    next revision (it stands though the check refuses), and the revision the browser
+    named is no longer the current one."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order))
+    first = item.current_revision_id
+    assert first is not None
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            ('[{"slot": 0, "colour": "#0000ff"}]', item.id),
+        )
+    refusal = _refusal(
+        lambda: asyncio.run(
+            check_test_print(shop.lifecycle, Outputs(item), blobs, order.id, item.id, first, by=BY)
+        )
+    )
+    assert refusal == "revision_not_newest"
+    assert [r.number for r in shop.rows.revisions(item.id)] == [1, 2]
+    assert "revision.repaired" in shop.kinds(order)

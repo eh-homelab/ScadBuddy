@@ -58,11 +58,20 @@ export const HISTORY_PAGE_SIZE = 20
  * object so a test can lower it.
  */
 export const HISTORY_READ = { limit: 500 }
+/**
+ * The most outputs `?shown=` opens with: four reads of `HISTORY_READ.limit`, more than
+ * anyone pages through by hand, so a hand-edited URL cannot read a model's whole
+ * history (#5289 review). Load more still grows the window past it. An object so a test
+ * can lower it.
+ */
+export const HISTORY_MAX_SHOWN = { outputs: 2000 }
 
-/** How many outputs `?shown=` asks for: at least a page. */
+/** How many outputs `?shown=` asks for: at least a page, at most `HISTORY_MAX_SHOWN`. */
 function shownFrom(params: URLSearchParams): number {
   const asked = Math.floor(Number(params.get('shown')))
-  return Number.isFinite(asked) ? Math.max(HISTORY_PAGE_SIZE, asked) : HISTORY_PAGE_SIZE
+  return Number.isFinite(asked)
+    ? Math.min(HISTORY_MAX_SHOWN.outputs, Math.max(HISTORY_PAGE_SIZE, asked))
+    : HISTORY_PAGE_SIZE
 }
 
 /**
@@ -116,7 +125,21 @@ export function HistoryPage() {
   useEffect(() => {
     rows.current = outputsState.data
   })
+  // Bumped by each Load more and each move to another model's history: an answer whose
+  // token is not the latest drops itself, success or failure, without touching the page.
+  // A token rather than the slug, so a move away and back drops it too, since it was
+  // built on the page it left (#5303, #5306 reviews).
+  const moreRequest = useRef(0)
+  useEffect(() => {
+    moreRequest.current += 1
+  }, [slug])
   const [more, setMore] = useState<{ loading: boolean; error?: Error }>({ loading: false })
+  // Another model's history in the same page: its Load more starts afresh (#5289 review).
+  const [moreFor, setMoreFor] = useState(slug)
+  if (moreFor !== slug) {
+    setMoreFor(slug)
+    setMore({ loading: false })
+  }
 
   /** `?shown=` as `count`, replacing the entry, so Back opens with what is on screen. */
   function keepShown(count: number) {
@@ -135,6 +158,8 @@ export function HistoryPage() {
     const current = rows.current ?? { items: [], total: 0 }
     const items = change(current.items)
     outputsState.setData({ items, total: Math.max(0, current.total - removed) })
+    // Only a window Load more grew is written back. Without `?shown=`, no Load more ran:
+    // the window is still one page, and there is no count to keep for Back.
     if (removed > 0 && params.has('shown')) {
       loaded.current = { slug, size: Math.max(HISTORY_PAGE_SIZE, items.length) }
       keepShown(loaded.current.size)
@@ -145,10 +170,11 @@ export function HistoryPage() {
     const page = rows.current
     const last = page?.items.at(-1)
     if (!page || !last) return
+    const mine = ++moreRequest.current
     setMore({ loading: true })
     try {
       const next = await api.listOutputsPage(slug, { limit: HISTORY_PAGE_SIZE, after: last.id })
-      if (loaded.current.slug !== slug) return
+      if (moreRequest.current !== mine) return
       const items = [...page.items, ...next.items.filter((o) => !page.items.some((p) => p.id === o.id))]
       loaded.current = { slug, size: items.length }
       outputsState.setData({ items, total: next.total }, { supersede: true })
@@ -158,6 +184,7 @@ export function HistoryPage() {
       // window again in the background, so it is not lost until the next change.
       outputsState.refresh()
     } catch (cause) {
+      if (moreRequest.current !== mine) return
       // The last output shown went away since: read the window again from the first.
       if (cause instanceof ApiError && cause.status === 409) {
         setMore({ loading: false })

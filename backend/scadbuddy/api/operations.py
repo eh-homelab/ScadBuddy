@@ -480,6 +480,9 @@ async def _run_operation(
     except CommandStillAcceptingError:
         # A `done` kind past the deadline: the record may exist by now (§4.2 step 4).
         recorded = await ops.store.find(key)
+        if ops.store.metrics is not None and (recorded is None or recorded.status == "running"):
+            # Deferred (#2295): a 202 to follow, or the 503 re-send, not the answer.
+            ops.store.metrics.operations_deferred.labels(kind.name).inc()
         if recorded is not None:
             return _answer(recorded, response, repeated=False)
         if http is not None:

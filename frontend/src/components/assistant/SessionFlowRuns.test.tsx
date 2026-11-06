@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ATTENTION_POLL_MS } from '../../agent/attention'
-import { setFlowRunChildren } from '../../mocks/features/flows'
+import { setFlowDetails, setFlowRunChildren } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
 import { SessionFlowRuns } from './SessionFlowRuns'
 
@@ -36,6 +36,13 @@ describe('SessionFlowRuns', () => {
     expect(lines[0]).toMatch(/^queue_print: with this session until .+; outside the grant: print limit reached$/)
     expect(lines[1]).toBe('arrange: with you; outside the grant: no rule admits it')
     expect(lines[2]).toBe('print_output (in a session it talks to): with you; outside the grant: printer 5 is not in the grant')
+  })
+
+  it("names a waiting run by its flow's display name (#3186)", async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap' })
+    renderPage(<SessionFlowRuns sessionId="sess-escalated" />)
+    const waiting = await screen.findByRole('list', { name: 'Waiting in runs started here' })
+    expect(within(waiting).getByRole('link', { name: 'Nightly swap' })).toHaveAttribute('href', '/workflows/runs/run-escalated')
   })
 
   it("re-reads the queues while a child's call is listed, which no run topic announces", async () => {

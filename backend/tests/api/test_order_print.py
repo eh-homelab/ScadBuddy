@@ -479,3 +479,58 @@ def test_an_attempts_archive_offers_its_finish_photo_as_a_copy(bambuddy: TestCli
     problem(elsewhere, "archive_not_attempts")
     detail = bambuddy.get(f"/api/v1/orders/{item.order['id']}").json()
     assert [a["id"] for a in detail["attachments"]] == [copied["id"]]
+
+
+# -- test prints (storefront spec §4.4) -------------------------------------------------------
+
+
+def _books_spools(shop: QuoteShop) -> None:
+    """The book's records made the dialog's spools' filaments, so the slots match."""
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = shop.client.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+
+
+def test_a_test_print_runs_from_a_slice_quote_of_its_revision(bambuddy: TestClient) -> None:
+    shop = QuoteShop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    item = shop.get_item()
+    revision = item["current_revision_id"]
+    assert quote["revision_id"] == revision
+    _books_spools(shop)
+    queued = queue_route()
+    answer = bambuddy.post(
+        f"{shop.path}/revisions/{revision}/test-print",
+        json=body(),
+        headers={"Idempotency-Key": "test-print-1"},
+    )
+    attempt = answered(bambuddy, answer)
+    assert attempt["purpose"] == "test" and attempt["revision_id"] == revision
+    assert attempt["copies"] == 1 and attempt["sliced_blob_key"] == quote["sliced_blob_key"]
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["status"] == "succeeded", run
+    assert json.loads(queued.calls.last.request.content)["quantity"] == 1
+    # The item and the order stay where they were.
+    assert shop.get_item()["status"] == item["status"]
+    detail = bambuddy.get(f"/api/v1/orders/{shop.order['id']}").json()
+    assert detail["order"]["status"] == "draft"
+
+
+def test_a_test_print_without_a_slice_quote_is_requote_needed(bambuddy: TestClient) -> None:
+    item = Item(bambuddy, accept=False)
+    revision = item.item["current_revision_id"]
+    answer = bambuddy.post(
+        f"{item.path}/revisions/{revision}/test-print", json=body(), headers=press()
+    )
+    assert answer.status_code == 409 and answer.json()["type"].endswith("/requote_needed")
+    store = _state(bambuddy).components.get(ORDERS).store
+    assert store.fulfilments(item.item["id"], purpose=None) == []

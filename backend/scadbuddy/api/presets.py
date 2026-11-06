@@ -32,6 +32,7 @@ from scadbuddy.core.events import EventBus, PresetsChanged, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.deeplink import preset_path, preset_url
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
@@ -135,6 +136,25 @@ def require_saved(presets: PresetStore, slug: str, preset_id: str) -> None:
     )
 
 
+def linked(presets: list[ParamPreset], slug: str, public_url: str | None) -> list[ParamPreset]:
+    """``presets`` with their links (#1022): the app's path, and the absolute URL under
+    ``public_url`` when one is set."""
+    return [
+        preset.model_copy(
+            update={
+                "path": preset_path(slug, preset.id),
+                "url": preset_url(public_url, slug, preset.id),
+            }
+        )
+        for preset in presets
+    ]
+
+
+async def _linked(preset: ParamPreset, slug: str, state: AppState) -> ParamPreset:
+    public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
+    return linked([preset], slug, public_url)[0]
+
+
 def _changed(events: EventBus, slug: str) -> None:
     """Tells another tab, or the assistant's page, to read the presets again (#357)."""
     emit(events, PresetsChanged(slug=slug))
@@ -151,9 +171,11 @@ def _changed(events: EventBus, slug: str) -> None:
         "no longer has is kept here and is the client's to skip."
     ),
 )
-def list_presets(slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep) -> list[ParamPreset]:
+def list_presets(
+    slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep, store: SettingsStoreDep
+) -> list[ParamPreset]:
     require_model_exists(catalogue, slug)
-    return presets.presets(slug)
+    return linked(presets.presets(slug), slug, store.load().public_url)
 
 
 @router.post(
@@ -213,7 +235,7 @@ async def create_run(slug: str, body: ParamPresetCreate, state: AppState) -> Par
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     _changed(state.events, slug)
-    return created
+    return await _linked(created, slug, state)
 
 
 @router.post(
@@ -277,7 +299,7 @@ async def duplicate_run(
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     _changed(state.events, slug)
-    return created
+    return await _linked(created, slug, state)
 
 
 @router.patch(
@@ -331,7 +353,7 @@ async def update_run(
     except PresetExistsError as error:
         raise _taken(error) from None
     _changed(state.events, slug)
-    return updated
+    return await _linked(updated, slug, state)
 
 
 @router.delete(

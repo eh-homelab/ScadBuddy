@@ -182,6 +182,11 @@ export type FlowDefinition = Schemas['Definition']
 export type FlowSummary = Schemas['DefinitionSummary']
 /** #2503 — one version of a flow's git history. */
 export type FlowVersion = Schemas['FlowVersion']
+/** #3186 — a flow's display name and description (`flow.json`), and the change of them. */
+export type FlowDetails = Schemas['FlowDetails']
+export type FlowDetailsUpdate = Schemas['DetailsUpdate']
+/** #3186 — what a save is called in the flow's history: its commit message and body. */
+export type FlowCommitMessage = Schemas['CommitMessage']
 /** #2485 — whether a flow is archived or deleted, and by whom. */
 export type FlowState = Schemas['FlowState']
 /** #2487 — the editor's Save body, its check, and what it completes. */
@@ -284,6 +289,7 @@ export type LibraryListing = Schemas['LibraryListing']
 /** #2349 — one library file's name by id (`GET /print/library/names`). */
 export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryFileEntry = Schemas['LibraryFileEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
 export type LibrarySearchHit = Schemas['LibrarySearchHit']
@@ -366,6 +372,12 @@ export type OrderTotals = Schemas['OrderTotals']
 export type OrderPage = Schemas['OrderPage']
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
+/** Storefront phase 1 (#5280, spec 2026-11-02 §4): one design of an item, and how it is approved. */
+export type Revision = Schemas['Revision']
+export type RevisionAnswer = Revision['answer']
+export type Approval = OrderItem['approval']
+export type RevisionCreate = Defaulted<Schemas['RevisionCreate'], 'note'>
+export type RevisionAnswerInput = Defaulted<Schemas['RevisionAnswerInput'], 'note'>
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']

@@ -1925,6 +1925,40 @@ describe('preset tools carry a description and tags (#327)', () => {
   })
 })
 
+describe('preset tools hand back the link to a preset (#1022)', () => {
+  const MUM = {
+    id: 'p',
+    name: 'Mum',
+    origin: 'mine',
+    params: {},
+    description: '',
+    tags: [],
+    path: '/m/m?preset=p',
+    url: 'https://scad.test/m/m?preset=p',
+  }
+
+  it('says so, and passes the link through from the backend', async () => {
+    for (const name of ['list_presets', 'save_preset', 'update_preset', 'duplicate_preset']) {
+      expect(tool(name).description).toMatch(/`url`.*`path`/)
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json([MUM])),
+      http.post(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json(MUM, { status: 201 })),
+      http.patch(`${BACKEND}/api/v1/models/m/presets/p`, () => HttpResponse.json(MUM)),
+      http.post(`${BACKEND}/api/v1/models/m/presets/p/duplicate`, () =>
+        HttpResponse.json({ ...MUM, id: 'q', path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' }, { status: 201 })),
+    )
+    const listed = await runTool(tool('list_presets'), { slug: 'm' }, ctx())
+    expect(firstText(listed)).toMatchObject({ items: [{ path: MUM.path, url: MUM.url }] })
+    const saved = await runTool(tool('save_preset'), { slug: 'm', name: 'Mum' }, ctx())
+    expect(firstText(saved)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const updated = await runTool(tool('update_preset'), { slug: 'm', preset_id: 'p', name: 'Mum' }, ctx())
+    expect(firstText(updated)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const copied = await runTool(tool('duplicate_preset'), { slug: 'm', preset_id: 'p', name: 'Mum 2' }, ctx())
+    expect(firstText(copied)).toMatchObject({ path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' })
+  })
+})
+
 describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () => {
   const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
 

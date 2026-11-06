@@ -5,6 +5,8 @@ import {
   DEFAULT_QUERY,
   MAX_SEARCH_CHARS,
   MAX_TAG_CHARS,
+  MAX_TAG_FILTER_CHARS,
+  MAX_TAG_FILTERS,
   MAX_TAGS,
   type CatalogueQuery,
   clearFilters,
@@ -12,6 +14,7 @@ import {
   parseQuery,
   tagCounts,
   toParams,
+  unmatchable,
 } from './catalogueQuery'
 
 function query(patch: Partial<CatalogueQuery>): CatalogueQuery {
@@ -52,12 +55,12 @@ describe('parseQuery / toParams', () => {
     expect(parseQuery(new URLSearchParams(`?${search}`))).toEqual(full)
   })
 
-  it('keeps a hand-edited URL within what GET /models takes, so it never answers 422 (#5286 review)', () => {
+  it('keeps every tag of a hand-edited URL, and cuts only the search to what GET /models takes (#5288 review)', () => {
     const many = Array.from({ length: MAX_TAGS + 5 }, (_, n) => `tag=t${n}`).join('&')
     const long = 'x'.repeat(MAX_TAG_CHARS + 1)
     const parsed = parseQuery(new URLSearchParams(`${many}&tag=${long}&q=${'y'.repeat(MAX_SEARCH_CHARS + 9)}`))
-    expect(parsed.tags).toHaveLength(MAX_TAGS)
-    expect(parsed.tags).not.toContain(long)
+    expect(parsed.tags).toHaveLength(MAX_TAGS + 6)
+    expect(parsed.tags).toContain(long)
     expect(parsed.q).toHaveLength(MAX_SEARCH_CHARS)
   })
 
@@ -185,6 +188,19 @@ describe('tagCounts', () => {
     expect(tagCounts(models.slice(0, 1), ['KEYCHAIN'])).not.toContainEqual(
       expect.objectContaining({ tag: 'KEYCHAIN' }),
     )
+  })
+})
+
+describe('unmatchable (#5305 review)', () => {
+  it('is true past what GET /models takes, as sent: too many tags, or one too long', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAG_FILTERS + 1 }, (_, n) => `t${n}`))).toBe(true)
+    expect(unmatchable(['x'.repeat(MAX_TAG_FILTER_CHARS + 1)])).toBe(true)
+  })
+
+  it('leaves tags past the caps of a model to the route, which answers none', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAGS + 1 }, (_, n) => `t${n}`))).toBe(false)
+    // In code points, as the backend counts: 400 of them, 800 UTF-16 units.
+    expect(unmatchable(['😀'.repeat(MAX_TAG_FILTER_CHARS)])).toBe(false)
   })
 })
 

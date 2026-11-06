@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import scadbuddy.api.outputs as outputs_api
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import MAX_TAG_CHARS, MAX_TAGS
 from scadbuddy.library.outputs import META_NAME, OutputMeta
 from scadbuddy.render.glb import BoundingBox
 from tests.support.operations import press
@@ -222,6 +223,33 @@ def test_filtered_models_page_with_limit_and_after(client: TestClient) -> None:
     assert _slugs(rest) == ["charlie"]
     gone = client.get("/api/v1/models", params={**params, "after": "bravo"})
     assert gone.status_code == 409
+
+
+def test_tags_past_a_models_caps_select_none_rather_than_refuse(client: TestClient) -> None:
+    """#5305 review: more tags than a model may carry, or one longer than a model's tag
+    may be, can match no model, so the answer is empty, not 422. The browser cannot fold
+    as this does, so it sends the tags as typed and leaves the counting to the route."""
+    _seed_catalogue(client)
+    many = [("tag", f"t{n}") for n in range(MAX_TAGS + 1)]
+    listed = client.get("/api/v1/models", params=[*many, ("sort", "name")])
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == []
+    assert listed.headers["X-Total-Count"] == "0"
+    long = client.get("/api/v1/models", params={"tag": "x" * (MAX_TAG_CHARS + 1)})
+    assert long.status_code == 200, long.text
+    assert long.json() == []
+    facets = client.get("/api/v1/model-facets", params=many)
+    assert facets.status_code == 200, facets.text
+    assert facets.json()["matched"] == 0
+
+
+def test_tags_the_route_folds_apart_stay_apart(client: TestClient) -> None:
+    """Thai MAI HAN-AKAT has combining class 0, so it is kept: "กัน" and "กน" are two tags."""
+    _create(client, "thai", name="Thai", tags="กัน")
+    assert [m["slug"] for m in client.get("/api/v1/models", params={"tag": "กัน"}).json()] == [
+        "thai"
+    ]
+    assert client.get("/api/v1/models", params={"tag": "กน"}).json() == []
 
 
 def test_model_facets_count_tags_over_what_the_filters_select(client: TestClient) -> None:
