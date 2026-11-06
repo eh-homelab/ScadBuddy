@@ -268,9 +268,18 @@ async def open_runs_on_copies(
     """The output's print runs still open when it has native per-print copies, which
     `trash_copies` would trash with their slices (#4312 re-review I-a): a delete that
     trashes them refuses while one is open, and keeps the slices for one opened since."""
-    if not await uploads.for_output(output_id, native=True):
-        return []
-    return [run.id for run in await runs.running_for(output_id)]
+    return (await open_runs_on_outputs_copies(uploads, runs, [output_id]))[output_id]
+
+
+async def open_runs_on_outputs_copies(
+    uploads: BambuddyUploadStore, runs: PrintRunStore, output_ids: list[str]
+) -> dict[str, list[str]]:
+    """:func:`open_runs_on_copies` for several outputs, each id a key: one read of their
+    copies and one of their runs, not two per output (#5403)."""
+    copies = await uploads.for_outputs(output_ids, native=True)
+    with_copies = [output_id for output_id in output_ids if copies[output_id]]
+    running = await runs.running_for_outputs(with_copies) if with_copies else {}
+    return {output_id: [run.id for run in running.get(output_id, [])] for output_id in output_ids}
 
 
 async def release_moved(

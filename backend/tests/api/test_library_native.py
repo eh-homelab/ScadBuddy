@@ -24,6 +24,7 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.api import models as models_api
 from scadbuddy.api.deps import STATE_ATTR, get_render
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.bambuddy.print_run import PrintRunRequest
@@ -1262,6 +1263,62 @@ def test_a_failed_library_read_still_finishes_the_model_delete(
     assert forgotten == [widget]
     assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": widget}]
     assert any("could not tell which library" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.requires_git
+@pytest.mark.parametrize("failing", ["trash_filed", "trash_copies"])
+def test_a_failed_trash_of_one_output_still_finishes_the_model_delete(
+    native_client: TestClient,
+    widget: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failing: str,
+) -> None:
+    """#5403: a trash that fails for one output is logged; that output is still
+    forgotten, the other's copies are still trashed, and the upload rows and
+    ``model.deleted`` still go through."""
+    failed = _save(native_client, widget, "One").json()["id"]
+    trashed = _save(native_client, widget, "Two").json()["id"]
+    by_output = {f["output_id"]: f["id"] for f in _all_files(native_client)}
+    native = _native(native_client)
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    portal = native_client.portal
+    assert portal is not None
+    copies: dict[str, int] = {}
+    for output_id in (failed, trashed):
+        copy = portal.call(native.upload, f"{output_id}.3mf", io.BytesIO(b"c"), None)
+        portal.call(
+            state.uploads.record,
+            output_id,
+            LibraryCopy(id=copy.id, folder_id=None, target_key="t"),
+        )
+        copies[output_id] = copy.id
+    events = Recorded(state.events)
+    state.events.add_listener(events.record)
+    real = getattr(models_api, failing)
+
+    async def flaky(native: NativeLibrary, *args: Any, **kwargs: Any) -> Any:
+        output_id = args[1] if failing == "trash_copies" else args[0]
+        if output_id == failed:
+            raise psycopg.OperationalError("database is away")
+        return await real(native, *args, **kwargs)
+
+    monkeypatch.setattr(models_api, failing, flaky)
+
+    r = native_client.delete(f"/api/v1/models/{widget}?delete_inbox_copies=true", headers=press())
+
+    assert r.status_code == 204, r.text
+    live = {f.id: f.output_id for f in native.rows.files(None, every_folder=True)}
+    assert by_output[trashed] not in live
+    assert copies[trashed] not in live
+    # The failed output's filed copy, or its per-print copy, stays, naming no output.
+    kept = by_output[failed] if failing == "trash_filed" else copies[failed]
+    assert live[kept] is None
+    assert all(output_id is None for output_id in live.values())
+    found = portal.call(partial(state.uploads.for_outputs, [failed, trashed], native=True))
+    assert found == {failed: [], trashed: []}
+    assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": widget}]
+    assert any("could not trash" in rec.getMessage() for rec in caplog.records)
 
 
 @pytest.mark.requires_git
