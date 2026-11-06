@@ -166,14 +166,26 @@ async def to_thread_to_end[T](fn: Callable[[], T], landed: Callable[[T], None] |
 
         future.add_done_callback(ended)
     try:
-        result = await asyncio.shield(future)
+        result = await await_to_end(future)
     except asyncio.CancelledError:
-        while not future.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait({future})
-        if landed is not None and future.exception() is None:
+        if landed is not None and not future.cancelled() and future.exception() is None:
             landed(future.result())
         raise
     if landed is not None:
         landed(result)
     return result
+
+
+async def await_to_end[T](future: asyncio.Future[T]) -> T:
+    """``future`` awaited to its end: a cancel raises only once ``future`` has ended
+    (#5451, shared by :func:`to_thread_to_end` and the print dialog's slice start). A
+    failure of ``future`` past the cancel is never logged as an unretrieved exception
+    (``asyncio.shield`` retrieves it once its outer future is cancelled); the caller
+    gets the cancel."""
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({future})
+        raise

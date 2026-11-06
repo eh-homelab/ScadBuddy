@@ -852,6 +852,32 @@ async def test_the_reaper_removes_an_orphan_s_old_directory_too(
 
 
 @pytest.mark.requires_postgres
+async def test_the_reaper_removes_an_old_claimed_directory_that_holds_nothing(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#5448: a save that claimed its id (`OutputStore.claim`) and stopped before it
+    held its Parts leaves a directory with no meta.json and no hold. Past the grace it
+    goes, with no hold to release; one inside the grace, or one still held, stays."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    stale, fresh, held = "d" * 32, "e" * 32, "f" * 32
+    two_hours_ago = time.time() - 7200
+    for output_id in (stale, fresh, held):
+        assert store.claim(old.slug, output_id)
+    for output_id in (stale, held):
+        directory = store.paths.output_dir(old.slug, output_id)
+        os.utime(directory, (two_hours_ago, two_hours_ago))
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        hold_parts(refs, held, written.manifest, old.slug)  # inside its holds' grace
+        assert reap_orphan_holds(refs, store) == 0
+    assert not store.paths.output_dir(old.slug, stale).exists()
+    assert store.paths.output_dir(old.slug, fresh).is_dir()
+    assert store.paths.output_dir(old.slug, held).is_dir()
+    assert store.get(old.id).id == old.id
+
+
+@pytest.mark.requires_postgres
 async def test_the_reaper_never_removes_a_symlinked_orphan_directory(
     tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
 ) -> None:

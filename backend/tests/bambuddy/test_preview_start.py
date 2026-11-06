@@ -1,14 +1,17 @@
-"""The print dialog's background slice start (#2169) when it is cancelled (#5445)."""
+"""The print dialog's background slice start (#2169) when it is cancelled (#5445),
+and the cancel-to-end wait it shares with ``to_thread_to_end`` (#5451)."""
 
 from __future__ import annotations
 
 import asyncio
+import gc
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from scadbuddy.bambuddy import preview
+from scadbuddy.operations.kinds import await_to_end
 
 COPY = 41
 CREATED = "2026-10-10T23:40:00.123456"
@@ -65,3 +68,33 @@ async def test_a_cancelled_start_records_the_job_bambuddy_accepted(
     with pytest.raises(asyncio.CancelledError):
         await start
     assert [(row.job_id, row.subject) for row in recorded] == [(9, "order_item:i-1")]
+
+
+async def test_a_step_that_fails_past_the_cancel_still_raises_the_cancel() -> None:
+    """#5451: a step that fails after its caller was cancelled (a record that raises,
+    say) gives the caller the cancel, and its failure is retrieved, so the loop never
+    logs it as an unretrieved exception."""
+    loop = asyncio.get_running_loop()
+    lost: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _, context: lost.append(context))
+    running = asyncio.Event()
+    fail = asyncio.Event()
+
+    async def record() -> None:
+        running.set()
+        await fail.wait()
+        raise RuntimeError("the record failed")
+
+    step = asyncio.ensure_future(record())
+    caller = asyncio.create_task(await_to_end(step))
+    await running.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    assert not caller.done()
+    fail.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert step.done() and not step.cancelled()
+    del step
+    gc.collect()
+    assert lost == []

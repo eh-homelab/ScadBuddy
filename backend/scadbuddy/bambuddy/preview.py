@@ -21,7 +21,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from contextlib import aclosing, suppress
+from contextlib import aclosing
 from datetime import timedelta
 from typing import Literal
 
@@ -49,6 +49,7 @@ from scadbuddy.bambuddy.print_source import PrintSource, bambuddy_client
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.operations.kinds import await_to_end
 from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.slicing import slice_info
 from scadbuddy.slicing.catalogue import catalogue_for
@@ -223,23 +224,8 @@ async def _start_plate(
 
         # Run to the end even when cancelled (#5445): a job Bambuddy accepted but no
         # row records cannot be reused, so the next attempt would slice it again.
-        job_id = await _to_end(slice_and_record())
+        job_id = await await_to_end(asyncio.ensure_future(slice_and_record()))
     return PreviewStarted(job_id=job_id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
-
-
-async def _to_end[T](step: Awaitable[T]) -> T:
-    """``step`` awaited to its end: a cancel raises only once ``step`` has ended, as
-    :func:`~scadbuddy.operations.kinds.to_thread_to_end` does for a thread."""
-    task = asyncio.ensure_future(step)
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait({task})
-        if not task.cancelled():
-            task.exception()  # retrieved, so a failure past the cancel is not logged as lost
-        raise
 
 
 async def start_preview(
