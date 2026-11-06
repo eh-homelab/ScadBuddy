@@ -168,12 +168,11 @@ What changes:
 | API | reads and writes 8 `ai_*` tables; runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |
 | Postgres | no ingress policy | an ingress policy that admits the CRUD service only |
 
-Open question for #5298 and #5299: each caller reads its service credential from a database
-view of its own today (`backend/scadbuddy/auth/service_credentials.py`). With no database
-secret, a caller needs another way to get it: a Kubernetes Secret that the CRUD service
-writes and the pod mounts, a projected service-account token that the CRUD service
-exchanges for a short-lived credential, or the sealed credential delivered at start. One
-choice applies to every caller.
+Each caller reads its service credential from a database view of its own today
+(`backend/scadbuddy/auth/service_credentials.py`). With no database secret, it gets one as
+[the service-credentials spec](../superpowers/specs/2026-11-05-service-credentials-without-db-design.md)
+(#5325) decides: a projected ServiceAccount token, checked by TokenReview and exchanged at
+the CRUD service for a 15-minute credential, scoped per caller and denied by default.
 
 Do the steps in this order. Split the APIs out first. Lock down the network last, so its
 policies admit only the CRUD service.
