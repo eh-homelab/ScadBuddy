@@ -197,9 +197,14 @@ export function mountMcpUploads(app: Hono, deps: McpUploadDeps, http: McpHttpCon
     const ws: WorkspaceRef = { kind: 'principal', principalKind: principal.kind, principalId: principal.id }
     try {
       name = workspacePath(name)
-      const { fileMaxBytes } = await files.limits()
       const length = c.req.header('content-length')
-      if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > fileMaxBytes)) {
+      if (length !== undefined && !/^\d+$/.test(length)) {
+        return await refuse(400, `Content-Length ${JSON.stringify(length.slice(0, 40))} is not a byte count`, 'content_length')
+      }
+      // Refused before the caps are read and before the body: a chunked empty body is caught after the read.
+      if (length !== undefined && Number(length) === 0) return await refuse(400, 'the upload is empty: send the file as the body', 'empty')
+      const { fileMaxBytes } = await files.limits()
+      if (length !== undefined && Number(length) > fileMaxBytes) {
         throw new WorkspaceError('too_large', `the upload is larger than a workspace file may be (${fileMaxBytes} bytes)`)
       }
       const bytes = await readCapped(request.body, fileMaxBytes)
