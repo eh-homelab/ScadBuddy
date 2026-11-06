@@ -54,6 +54,7 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(psycopg, "connect", refuse("psycopg.connect"))
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", refuse("AsyncConnection.connect"))
     monkeypatch.setattr(psycopg_pool.ConnectionPool, "__init__", refuse("ConnectionPool"))
+    monkeypatch.setattr(psycopg_pool.AsyncConnectionPool, "__init__", refuse("AsyncConnectionPool"))
     return tried
 
 

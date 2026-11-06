@@ -13,8 +13,8 @@ A change to what a caller reads or writes changes its list in the same PR;
 its list.
 
 The `ai_*` tables are the agent's: its role creates and migrates them, so it owns them,
-and the agent grants what the API's role and `scadbuddy_projects` read of them
-(`agent/src/db/grants.ts`). The lists here hold the backend's relations only.
+and the agent grants what the API's role reads of them (`agent/src/db/grants.ts`). The
+lists here hold the backend's relations only.
 """
 
 from __future__ import annotations

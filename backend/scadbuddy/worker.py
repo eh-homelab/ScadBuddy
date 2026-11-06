@@ -41,6 +41,7 @@ from scadbuddy.auth.service_credentials import (
     ExchangeReader,
     ServiceAuth,
     ServiceCredentialConfigError,
+    exchange_source,
     token_source,
 )
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
@@ -1515,7 +1516,6 @@ async def run_projects_worker(
         logger.warning(
             "ignoring SCADBUDDY_DATABASE_URL: the projects worker holds no database (#5298)"
         )
-        settings = settings.model_copy(update={"database_url": ""})
     kek = settings_kek(settings.secret_key_file)
     if kek is None:
         raise ProjectsKeyMissingError(
@@ -1528,12 +1528,9 @@ async def run_projects_worker(
             " print and arrange call the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    if settings.service_token_file is None and settings.service_bootstrap_file is None:
-        raise ServiceCredentialConfigError(
-            "SCADBUDDY_SERVICE_TOKEN_FILE (or SCADBUDDY_SERVICE_BOOTSTRAP_FILE outside"
-            " Kubernetes) is required for --queue projects: it holds no database, so its"
-            " service credential comes only from the exchange (#5298)"
-        )
+    # #4975 phase 4, #5494: the service credential on the API's routes, exchanged for
+    # its proof, with no view to fall back to; no proof refuses the start.
+    credential = ServiceAuth(exchange_source("projects", settings))
     metrics = worker_metrics(settings, "projects")
     # #5298: no event bus. The API makes every write that announces, and the event
     # commits there.
@@ -1541,9 +1538,6 @@ async def run_projects_worker(
     routes: FlowRoutes | None = None
     try:
         runtime, sdk_port = _sdk_runtime(settings)
-        # #4975 phase 4: the projects worker's service credential on the API's routes,
-        # exchanged for its proof (#5494), with no view to fall back to.
-        credential = ServiceAuth(token_source("projects", settings, kek))
         # #5298: flow runs, decisions, grants, operations and payload keys through the
         # API's CRUD routes. A key comes sealed and is opened here with the KEK (plan D10).
         crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)

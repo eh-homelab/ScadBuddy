@@ -30,8 +30,9 @@ A caller gets its service credential from `auth/service_credentials.py` `token_s
 at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token.py`, class
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
-reads its sealed one from its view (`TokenReader`), as before (#5494). The projects worker
-has no view: without a proof it refuses to start (#5298). The API's own in-process callers use
+reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
+(the projects worker, #5298) takes `exchange_source` instead: the exchange only, with no
+view, and no proof refuses its start. The API's own in-process callers use
 `InProcessProvider` (`proof = inprocess`). A new caller-side client takes a `token_source`,
 never a `TokenReader` of its own.
 

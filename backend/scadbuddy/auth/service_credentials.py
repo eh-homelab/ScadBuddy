@@ -856,6 +856,29 @@ def token_source(caller: ServiceCaller, settings: Settings, kek: Kek | None) -> 
     )
 
 
+def exchange_source(caller: ServiceCaller, settings: Settings) -> ExchangeReader:
+    """The credential of a caller that holds no database (#5298): only the exchange of
+    ``SCADBUDDY_SERVICE_TOKEN_FILE`` or ``SCADBUDDY_SERVICE_BOOTSTRAP_FILE``, with no view
+    to fall back to, whatever ``SCADBUDDY_DATABASE_URL`` says. The projects worker's
+    now, the render worker's once its CRUD client takes it."""
+    proof: Literal["k8s", "bootstrap"]
+    if settings.service_token_file is not None:
+        proof_file, proof = settings.service_token_file, "k8s"
+    elif settings.service_bootstrap_file is not None:
+        proof_file, proof = settings.service_bootstrap_file, "bootstrap"
+    else:
+        raise ServiceCredentialConfigError(
+            "SCADBUDDY_SERVICE_TOKEN_FILE (or SCADBUDDY_SERVICE_BOOTSTRAP_FILE outside"
+            f" Kubernetes) is required for the {caller} service: it holds no database, so"
+            " its service credential comes only from the exchange (#5298)"
+        )
+    if settings.api_internal_url is None:
+        raise ServiceCredentialConfigError(
+            "SCADBUDDY_API_INTERNAL_URL is required to exchange the service credential"
+        )
+    return ExchangeReader(caller, settings.api_internal_url, proof_file, proof)
+
+
 class ServiceAuth(httpx.Auth):
     """``Authorization: Bearer <token>`` on every request, when the source has one. A 401
     answer drops that token, so the next request carries a fresh one; the refused

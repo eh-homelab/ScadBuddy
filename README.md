@@ -554,8 +554,8 @@ role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, an
 render worker's `RENDER_GRANTS`) and its credential's view; a role created after the
 API started is granted on the API's next start. A worker on its own role never
 migrates: it waits until the API has migrated and granted it. The agent's role owns the
-`ai_*` tables it migrates and grants what the API's role and `scadbuddy_projects` read
-of them (`agent/src/db/grants.ts`).
+`ai_*` tables it migrates and grants what the API's role reads of them
+(`agent/src/db/grants.ts`).
 
 On 2026-11-05 the render, print and projects workers connected as their own roles, and
 the agent sidecar and the agent workers still connected as the owner. **The target
