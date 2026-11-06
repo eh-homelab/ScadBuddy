@@ -68,6 +68,18 @@ _TRAILER_LINE = re.compile(r"^[A-Za-z0-9-]+: ")
 #: The trailers that mark a paragraph as the one ScadBuddy adds to a flow's commits.
 _OWN_TRAILERS = (f"{FLOW_TRAILER}: ", f"{DELETED_TRAILER}: ", f"{DETAILS_TRAILER}: ")
 _GITIGNORE = f"# Written by ScadBuddy.\n{LOCK_NAME}\n"
+
+
+def _umask() -> int:
+    """The process umask. os.umask can only be read by setting it, so read it once at
+    import, before any thread writes a file."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+# The mode a plain write gives a new file, for files written through mkstemp (0600).
+_FILE_MODE = 0o666 & ~_umask()
 _FORMAT = (
     "--format=format:%x1e%H%x1f%aI%x1f%s"
     f"%x1f%(trailers:key={FLOW_TRAILER},valueonly,separator=%x2c)"
@@ -390,8 +402,8 @@ class FlowHistory(GitRepo):
         crash left behind."""
         handle, staged = tempfile.mkstemp(dir=self.root / ".git", prefix="flow-json-")
         try:
-            # mkstemp makes the file 0600; give it the 0644 a plain write had.
-            os.fchmod(handle, 0o644)
+            # mkstemp makes the file 0600; give it the mode a plain write had.
+            os.fchmod(handle, _FILE_MODE)
             with os.fdopen(handle, "w", encoding="utf-8") as writer:
                 writer.write(text)
             os.replace(staged, path)
