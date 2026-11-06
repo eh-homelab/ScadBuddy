@@ -21,7 +21,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from datetime import timedelta
 from typing import Literal
 
@@ -200,24 +200,46 @@ async def _start_plate(
     key = slice_request(plate.plan, plate.plate_id).preset_key
     job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
     if job_id is None:
-        accepted = await client.slice(
-            planned.library_file_id, slice_request(plate.plan, plate.plate_id)
-        )
-        job_id = accepted.job_id
-        # What Bambuddy says of the job now, so a job of the same id after a restart of
-        # Bambuddy's is never taken for this one.
-        job = await client.slice_job(job_id)
-        await uploads.record_preview(
-            PreviewSlice(
-                job_id=job_id,
-                subject=subject,
-                library_file_id=planned.library_file_id,
-                preset_key=key,
-                plate_id=plate.plate_id,
-                job_created=job.created_at,
+        plan = plate.plan
+
+        async def slice_and_record() -> int:
+            accepted = await client.slice(
+                planned.library_file_id, slice_request(plan, plate.plate_id)
             )
-        )
+            # What Bambuddy says of the job now, so a job of the same id after a restart
+            # of Bambuddy's is never taken for this one.
+            job = await client.slice_job(accepted.job_id)
+            await uploads.record_preview(
+                PreviewSlice(
+                    job_id=accepted.job_id,
+                    subject=subject,
+                    library_file_id=planned.library_file_id,
+                    preset_key=key,
+                    plate_id=plate.plate_id,
+                    job_created=job.created_at,
+                )
+            )
+            return accepted.job_id
+
+        # Run to the end even when cancelled (#5445): a job Bambuddy accepted but no
+        # row records cannot be reused, so the next attempt would slice it again.
+        job_id = await _to_end(slice_and_record())
     return PreviewStarted(job_id=job_id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
+
+
+async def _to_end[T](step: Awaitable[T]) -> T:
+    """``step`` awaited to its end: a cancel raises only once ``step`` has ended, as
+    :func:`~scadbuddy.operations.kinds.to_thread_to_end` does for a thread."""
+    task = asyncio.ensure_future(step)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait({task})
+        if not task.cancelled():
+            task.exception()  # retrieved, so a failure past the cancel is not logged as lost
+        raise
 
 
 async def start_preview(
