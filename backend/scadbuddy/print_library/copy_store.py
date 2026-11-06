@@ -4,6 +4,7 @@ by the API process (the ``library`` worker runs inside it) over the settings poo
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from datetime import datetime
 from typing import Any
@@ -30,6 +31,8 @@ REASON_CHARS = 500
 #: (`TargetLocks`): the batch's own start-to-close timeout.
 TARGET_LOCK_TIMEOUT_MS = 30 * 60 * 1000
 TARGET_LOCK_CONNECT_TIMEOUT = 5
+#: How often a backend that waits on a lock checks that its client is still there.
+TARGET_LOCK_CHECK_INTERVAL_MS = 2000
 
 
 class PlannedFile(BaseModel):
@@ -105,30 +108,39 @@ class LibraryCopyStore:
             ).fetchall()
         return [PlannedFile.model_validate(r) for r in rows]
 
-    def begin(self, copy_id: str, source_id: int, *, limit: int) -> tuple[int, str | None, bool]:
+    def begin(
+        self, copy_id: str, source_id: int, *, limit: int
+    ) -> tuple[int, str | None, bool] | None:
         """One more try begun on a pending file, unless it has begun ``limit`` already:
         the tries begun so far (this one included), why the last try begun before this
         call did not end (``None`` when that try said nothing: it timed out, or its
         worker stopped), and whether the file has run out of tries. A file that ran out
         keeps its count, so it never reads more than ``limit``. The row keeps the older
-        reason with its ``reason_try``, which the status shows while this try runs."""
+        reason with its ``reason_try``, which the status shows while this try runs.
+
+        ``None`` when the file is no longer pending: an attempt that timed out but still
+        ran ended it after this batch read it as pending. Its ``attempts`` stays as that
+        attempt left it, and the caller skips the file."""
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "SELECT attempts, reason, reason_try FROM library_copy_files"
-                " WHERE copy_id = %s AND source_id = %s FOR UPDATE",
+                " WHERE copy_id = %s AND source_id = %s AND status = 'pending' FOR UPDATE",
                 (copy_id, source_id),
             ).fetchone()
-            assert row is not None
+            if row is None:
+                return None
             tries = int(row["attempts"])
             # Only the last try's own reason: an earlier one's is never named as the last.
             reason = row["reason"] if row["reason_try"] == tries else None
             if tries >= limit:
                 return tries, reason, True
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE library_copy_files SET attempts = attempts + 1, updated_at = now()"
-                " WHERE copy_id = %s AND source_id = %s",
+                " WHERE copy_id = %s AND source_id = %s AND status = 'pending'",
                 (copy_id, source_id),
             )
+            if cur.rowcount != 1:
+                return None
         return tries + 1, reason, False
 
     def server_error(self, copy_id: str, source_id: int) -> int:
@@ -283,7 +295,8 @@ class TargetLocks:
     the row writes need. Closing the connection ends every lock on it, so a worker that
     stops mid-put frees them. The calls block: run them on a thread. A wait that its
     caller gave up on (the activity was cancelled) is cancelled by the next
-    `release_all` or `close`, so neither queues behind it on the connection."""
+    `release_all` or `close`, so neither queues behind it on the connection. A wait that
+    the cancel does not end closes the connection (`_stop_wait`)."""
 
     def __init__(self, conninfo: Any) -> None:
         self._conninfo = conninfo
@@ -300,7 +313,11 @@ class TargetLocks:
                 info() if callable(info) else info,
                 autocommit=True,
                 connect_timeout=TARGET_LOCK_CONNECT_TIMEOUT,
-                options=f"-c lock_timeout={TARGET_LOCK_TIMEOUT_MS}",
+                # The check interval: a backend whose client closed the connection
+                # (`_stop_wait`) stops its lock wait, and frees the locks it holds, in
+                # seconds, not at `lock_timeout`.
+                options=f"-c lock_timeout={TARGET_LOCK_TIMEOUT_MS}"
+                f" -c client_connection_check_interval={TARGET_LOCK_CHECK_INTERVAL_MS}",
                 # A lock may be held for many minutes: a peer that went away is found as
                 # the settings pool finds one, and the server then frees the lock.
                 **TCP_KEEPALIVE,  # type: ignore[arg-type]
@@ -314,10 +331,19 @@ class TargetLocks:
         self._held.append(key)
 
     def _stop_wait(self) -> None:
-        """Cancel an `acquire` that still waits, and let it end first."""
-        if self._conn is not None and not self._idle.is_set():
+        """Cancel an `acquire` that still waits, and let it end first. A wait that does
+        not end within `TARGET_LOCK_CONNECT_TIMEOUT` closes the connection: an unlock
+        on it would queue behind the wait for up to `lock_timeout`. Closing it ends
+        every lock it held."""
+        if self._conn is None or self._idle.is_set():
+            return
+        # A cancel that did not reach the server: the connection is closed below.
+        with contextlib.suppress(psycopg.Error):
             self._conn.cancel_safe(timeout=TARGET_LOCK_CONNECT_TIMEOUT)
-            self._idle.wait(TARGET_LOCK_CONNECT_TIMEOUT)
+        if not self._idle.wait(TARGET_LOCK_CONNECT_TIMEOUT):
+            self._conn.close()
+            self._conn = None
+            self._held.clear()
 
     def release_all(self) -> None:
         """Every lock taken since the last release. The caller releases them once the
