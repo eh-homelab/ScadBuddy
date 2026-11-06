@@ -65,9 +65,9 @@ NOT_NATIVE = (
     " native first"
 )
 GONE_FROM_SOURCE = "it is no longer in the source library"
-#: `StoreFullError`'s reason, the 507 a native upload answers (plan Ruling 11).
 #: The batch attempt on which a file's 5xx is its own failure rather than a retry.
 FILE_ATTEMPTS = 3
+#: `StoreFullError`'s reason, the 507 a native upload answers (plan Ruling 11).
 STORE_FULL = "the blob store has no room for it (507)"
 
 
@@ -411,9 +411,12 @@ async def copy_batch(
     file's failure (gone from the source, refused by the target, the store full) is its
     row's ``reason`` and never stops the others. A 5xx raises, and the activity is
     retried, since it is as likely the library as the file; on the `FILE_ATTEMPTS`th
-    ``attempt`` it is the file's own failure, recorded as its reason, so one file a
-    library always 500s on (a 3MF its upload refuses, bytes gone from its disk) cannot
-    hold the job on that file forever. ``attempt`` is the activity's."""
+    ``attempt`` it is the file's own failure, recorded as its reason, and the batch
+    ends there, so one file a library always 500s on (a 3MF its upload refuses, bytes
+    gone from its disk) cannot hold the job on that file forever, while the rows after
+    it wait for the next batch, which starts at attempt 1 again: a library still down
+    is retried, never written off twenty files at a time. ``attempt`` is the
+    activity's, so it counts the batch's tries, and only that first row can spend it."""
     request = input.request
     rows = await asyncio.to_thread(store.pending, input.copy_id, limit=input.limit)
     target: _NativeTarget | _BambuddyTarget = (
@@ -422,6 +425,7 @@ async def copy_batch(
         else _BambuddyTarget(client, uploads, request.target_folder_id)
     )
     copied = skipped = failed = 0
+    ended_early = False
     for row in rows:
         beating = asyncio.create_task(beat_while(f"{row.path}/{row.name}", heartbeat))
         try:
@@ -432,12 +436,10 @@ async def copy_batch(
         except ApiError as error:
             # A 404 here is the target's (the source's own are answered above): a
             # folder deleted since the plan, say. The row says which.
-            if (
-                error.status >= 500
-                and error.status != status.HTTP_507_INSUFFICIENT_STORAGE
-                and attempt < FILE_ATTEMPTS
-            ):
-                raise  # the library is down, not this file: the batch is retried
+            if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
+                if attempt < FILE_ATTEMPTS:
+                    raise  # the library is down, not this file: the batch is retried
+                ended_early = True  # this file spent the batch's tries; the rest wait
             outcome = ("failed", None, None, _reason(error))
         except (StoreFullError, ValueError, OSError) as error:
             logger.warning("a library copy failed on one file", exc_info=True)
@@ -461,6 +463,8 @@ async def copy_batch(
             skipped += 1
         else:
             failed += 1
+        if ended_early:
+            break
     counts = await asyncio.to_thread(store.counts, input.copy_id)
     return LibraryCopyBatch(copied=copied, skipped=skipped, failed=failed, remaining=counts.pending)
 

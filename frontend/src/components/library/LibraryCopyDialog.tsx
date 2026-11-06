@@ -141,6 +141,7 @@ export function LibraryCopyDialog({ open, onClose, nativeFolders, picked, onCopi
   // Every read of the job, the first included: once it ended with something copied, the
   // page lists it. Then a running copy is read again until it ends.
   function read(next: LibraryCopyStatus) {
+    setError(null) // a read that worked clears the one before it that did not
     setStatus(next)
     if (!next.running && next.copied > 0 && !copied.current) {
       copied.current = true

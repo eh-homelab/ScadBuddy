@@ -85,6 +85,26 @@ describe('LibraryCopyDialog', () => {
     expect(await screen.findByTestId('library-copy-progress')).toBeInTheDocument()
   })
 
+  it('keeps polling after one failed status read, and drops its error once a read works', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/print/library-copies/:id', () => {
+        reads += 1
+        // The first read (after the start) works; the first poll fails; later polls fall through.
+        if (reads === 2) return HttpResponse.json({ type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'blip' }, { status: 502 })
+        return undefined
+      }),
+    )
+    const { user, onCopied } = renderDialog()
+    await user.click(await screen.findByTestId('library-copy-file-503'))
+    await user.click(screen.getByTestId('library-copy-start'))
+    expect(await screen.findByTestId('library-copy-progress')).toHaveTextContent(/Copying…/)
+    expect(await screen.findByRole('alert', {}, { timeout: POLL_MS * 4 })).toHaveTextContent('blip')
+    await waitFor(() => expect(screen.getByTestId('library-copy-progress')).toHaveTextContent(/Done:/), { timeout: POLL_MS * 4 })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(onCopied).toHaveBeenCalledTimes(1)
+  })
+
   it('shows a refusal from the start, with the selection kept', async () => {
     server.use(
       http.post('/api/v1/print/library-copies', () =>

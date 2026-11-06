@@ -204,13 +204,45 @@ async def test_a_file_the_library_always_500s_on_fails_alone_once_the_retries_ra
         await batch(FILE_ATTEMPTS - 1)
     assert retried.value.status == 502
     assert {f.status for f in store.files("library-copy-test")} == {"pending"}
-    done = await batch(FILE_ATTEMPTS)
-    assert (done.copied, done.failed, done.remaining) == (1, 1, 0)
+    last = await batch(FILE_ATTEMPTS)
+    assert (last.copied, last.failed, last.remaining) == (0, 1, 1)  # the batch ends there
+    done = await batch(1)  # the next batch, at attempt 1: the rest copy
+    assert (done.copied, done.failed, done.remaining) == (1, 0, 0)
     results = {f.source_id: (f.status, f.reason) for f in store.files("library-copy-test")}
     assert results[good.id] == ("copied", None)
     bad_status, bad_reason = results[bad.id]
     assert bad_status == "failed"
     assert bad_reason is not None and "500" in bad_reason
+
+
+async def test_the_last_attempt_fails_only_the_first_file_so_a_library_still_down_is_retried(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attempt is the batch's: on its last one, the first file that 5xxs is failed
+    and the batch ends, so the rows after it get a fresh batch, at attempt 1 again."""
+    one = await bambuddy.upload_library_file("one.3mf", b"one")
+    two = await bambuddy.upload_library_file("two.3mf", b"two")
+
+    def down(self: BambuddyClient, file_id: int) -> Any:
+        raise ApiError(503, "could not connect to Bambuddy")
+
+    monkeypatch.setattr(BambuddyClient, "download_library_file", down)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[one.id, two.id])
+    store = LibraryCopyStore(pool)
+    store.start("library-copy-test", request)
+    store.plan("library-copy-test", await plan_copy(request, bambuddy, native))
+    batch = await copy_batch(
+        store,
+        LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
+        client=bambuddy,
+        native=native,
+        uploads=_uploads(),
+        heartbeat=lambda _: None,
+        attempt=FILE_ATTEMPTS,
+    )
+    assert (batch.copied, batch.failed, batch.remaining) == (0, 1, 1)
+    results = {f.source_id: f.status for f in store.files("library-copy-test")}
+    assert results == {one.id: "failed", two.id: "pending"}
 
 
 async def test_a_full_store_is_a_failed_row_with_the_507(

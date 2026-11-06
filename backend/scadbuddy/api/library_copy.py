@@ -7,6 +7,7 @@ never match one request (``tests/api/test_routes.py``)."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -31,6 +32,8 @@ from scadbuddy.print_library.copy_models import (
 from scadbuddy.print_library.copy_store import LibraryCopyStore
 from scadbuddy.workflows.commands import execution_gone
 from scadbuddy.workflows.library_copy import LibraryCopy
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -99,9 +102,13 @@ async def post_library_copy(
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         )
     except Exception as error:
-        # The row would otherwise say `running` with no execution to ever end it.
+        # The row would otherwise say `running` with no execution to ever end it. A
+        # row write that fails too is logged, so the start's own error is the one seen.
         if not running:
-            await asyncio.to_thread(rows.finish, job_id, "failed", f"could not start: {error}")
+            try:
+                await asyncio.to_thread(rows.finish, job_id, "failed", f"could not start: {error}")
+            except Exception:
+                logger.warning("could not end the row of a copy that failed to start: %s", job_id)
         raise
     return LibraryCopyStarted(copy_id=started.id)
 
