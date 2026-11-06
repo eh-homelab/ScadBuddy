@@ -214,27 +214,42 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     expect(screen.getByRole('button', { name: 'Record only' })).toBeEnabled()
   })
 
+  // A slice quote not yet accepted, at 6.00 a unit: below the 9.00 real cost.
+  const lowSlice = (): Quote => ({
+    id: 'q-low',
+    order_item_id: ITEM_DRAFT,
+    created_at: '2026-11-05T10:00:00Z',
+    source: 'slice',
+    accepted: false,
+    sliced_sha256: null,
+    sliced_blob_key: null,
+    plates: [],
+    lines: [],
+    unit_cost_minor: 500,
+    unit_price_minor: 600,
+    quantity: 1,
+    total_minor: 600,
+    created_by: { kind: 'browser', principal: null, session: null },
+  })
+
   it('warns on a slice quote not yet accepted, and says nothing on a price that is not thin', async () => {
-    const slice: Quote = {
-      id: 'q-low',
-      order_item_id: ITEM_DRAFT,
-      created_at: '2026-11-05T10:00:00Z',
-      source: 'slice',
-      accepted: false,
-      sliced_sha256: null,
-      sliced_blob_key: null,
-      plates: [],
-      lines: [],
-      unit_cost_minor: 500,
-      unit_price_minor: 600,
-      quantity: 1,
-      total_minor: 600,
-      created_by: { kind: 'browser', principal: null, session: null },
-    }
-    const { user } = editor([slice])
+    const { user } = editor([lowSlice()])
     expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
     await user.type(screen.getByLabelText('Price per unit (USD)'), '12')
     await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+  })
+
+  it('warns about nothing while the typed price does not parse, and about the pending quote once the field is empty (#5533)', async () => {
+    const { user } = editor([lowSlice()])
+    const field = screen.getByLabelText('Price per unit (USD)')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+    await user.type(field, 'abc')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+    // The pending quote's answer does not come back while the field holds 'abc'.
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    await user.clear(field)
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
   })
 
   it('calls a price above the cost but under the thin threshold a thin margin, not a loss', async () => {
