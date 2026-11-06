@@ -627,6 +627,77 @@ async def test_a_file_two_attempts_end_is_counted_once(
     assert _rows(store)[file.id].status == "copied"
 
 
+async def test_a_retry_that_begins_after_another_attempt_ended_the_file_skips_it(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry reads a file as pending. Then an older attempt that timed out but still
+    runs ends it. The retry's `begin` adds no try to the ended row, and the retry skips
+    the file: it neither copies nor counts it (#5492)."""
+    file = await bambuddy.upload_library_file("one.3mf", b"one")
+    store = LibraryCopyStore(pool)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id])
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    stale = store.pending("library-copy-test", limit=10)
+    assert store.begin("library-copy-test", file.id, limit=MAX_FILE_TRIES) == (1, None, False)
+    store.record("library-copy-test", file.id, "copied", target_id=1000000007, sha256="ab" * 32)
+    monkeypatch.setattr(store, "pending", lambda copy_id, *, limit: stale)
+    batch = await _batch(store, request, bambuddy=bambuddy, native=native)
+    assert (batch.copied, batch.skipped, batch.failed, batch.remaining) == (0, 0, 0, 0)
+    row = _rows(store)[file.id]
+    assert (row.status, row.target_id, row.attempts) == ("copied", 1000000007, 1)
+    assert store.begin("library-copy-test", file.id, limit=MAX_FILE_TRIES) is None
+    assert await native.library_listing(folder_id=None) == []
+
+
+async def test_a_wait_that_does_not_cancel_closes_the_locks_connection(
+    pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`release_all` cannot cancel a wait on another copy's lock (the cancel request
+    is lost). It closes the connection instead of queueing an unlock behind the wait
+    for up to 30 minutes, and the server frees the locks that connection held (#5492)."""
+    holder = LibraryCopyStore(pool).locks()
+    await asyncio.to_thread(holder.acquire, "sb_to_bb", "ab" * 32)
+    waiter = LibraryCopyStore(pool).locks()
+    await asyncio.to_thread(waiter.acquire, "sb_to_bb", "cd" * 32)
+    assert waiter._conn is not None
+    monkeypatch.setattr(waiter._conn, "cancel_safe", lambda **_: None)
+    waiting = asyncio.ensure_future(asyncio.to_thread(waiter.acquire, "sb_to_bb", "ab" * 32))
+    try:
+        for _ in range(100):
+            if not waiter._idle.is_set():
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)  # the lock query is on the server, waiting
+        assert not waiting.done()
+        started = time.monotonic()
+        await asyncio.to_thread(waiter.release_all)
+        assert time.monotonic() - started < 10
+        assert waiter._conn is None
+        with pytest.raises(psycopg.Error):
+            await asyncio.wait_for(waiting, 10)
+
+        def free(key: str) -> bool:
+            with pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (key,)
+                ).fetchone()
+                assert row is not None
+                if row["got"]:
+                    conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+                return bool(row["got"])
+
+        key = f"scadbuddy:library-copy:sb_to_bb:{'cd' * 32}"
+        for _ in range(100):
+            if await asyncio.to_thread(free, key):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            pytest.fail("the closed connection's lock was never freed")
+    finally:
+        await asyncio.to_thread(waiter.close)
+        await asyncio.to_thread(holder.close)
+
+
 async def test_closing_the_locks_cancels_a_wait_it_gave_up_on(pool: Pool) -> None:
     """An activity cancelled while `acquire` waits on another copy's lock: `close`
     cancels the wait, so it does not queue behind it for up to 30 minutes."""

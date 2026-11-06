@@ -291,6 +291,15 @@ class _BambuddyTarget(_Target):
         return self._rows
 
     async def _hash(self, file_id: int) -> str | None:
+        """``None`` for a file Bambuddy no longer serves. Bambuddy v1.2.5.5's
+        ``GET /library/files/{id}`` answers 404 for a trashed file, so a trashed copy is
+        never taken as held: the route reads ``LibraryFile.active()``, which excludes
+        rows with ``deleted_at`` set, and `_ensure_library_file_visible` answers 404 for
+        a missing or trashed row (read in the source at tag v1.2.5.5):
+        https://github.com/maziggy/bambuddy/blob/c331a3aedf335e97e423add7463f715299fd89b0/backend/app/api/routes/library.py#L4996
+        https://github.com/maziggy/bambuddy/blob/c331a3aedf335e97e423add7463f715299fd89b0/backend/app/api/routes/library.py#L124-L125
+        https://github.com/maziggy/bambuddy/blob/c331a3aedf335e97e423add7463f715299fd89b0/backend/app/models/library.py#L187-L195
+        """
         if file_id not in self._hashes:
             try:
                 self._hashes[file_id] = (await self.client.library_file(file_id)).file_hash
@@ -496,6 +505,8 @@ async def copy_batch(
                 outcome = await _copy_one(
                     store, input.copy_id, row, target, client, native, locks, heartbeat
                 )
+                if outcome is None:
+                    continue  # another attempt ended this file first, and counted it
                 result, target_id, folder_id, reason, digest = outcome
                 recorded = await asyncio.to_thread(
                     store.record,
@@ -534,11 +545,13 @@ async def _copy_one(
     native: NativeLibrary,
     locks: TargetLocks,
     heartbeat: Callable[[str], None],
-) -> Outcome:
-    """One file's try: its outcome, or a raise that retries the batch."""
-    tries, last, spent = await asyncio.to_thread(
-        store.begin, copy_id, row.source_id, limit=MAX_FILE_TRIES
-    )
+) -> Outcome | None:
+    """One file's try: its outcome, or a raise that retries the batch. ``None`` when
+    the file is no longer pending (`LibraryCopyStore.begin`): the batch skips it."""
+    begun = await asyncio.to_thread(store.begin, copy_id, row.source_id, limit=MAX_FILE_TRIES)
+    if begun is None:
+        return None  # another attempt ended this file after this batch read it
+    tries, last, spent = begun
     if spent:
         return "failed", None, None, GAVE_UP.format(tries=tries, reason=last or NO_REASON), None
     beating = asyncio.create_task(beat_while(f"{row.path}/{row.name}", heartbeat))
