@@ -905,6 +905,31 @@ async def test_an_unlistable_directory_is_logged_when_no_hold_is_aged(
 
 
 @pytest.mark.requires_postgres
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory of mode 000")
+async def test_a_slug_directory_it_cannot_list_is_logged_when_no_hold_is_aged(
+    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#5453, with a real listing that fails: a slug directory of mode 000 is logged
+    when no hold is past the grace, and raises once one is."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    locked = store.paths.outputs / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        with store_pool(pg_conninfo) as pool:
+            refs = BlobRefs(pool)
+            hold_parts(refs, old.id, written.manifest, old.slug)  # inside the grace
+            with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+                assert reap_orphan_holds(refs, store) == 0
+            assert any("unheld directories" in r.getMessage() for r in caplog.records)
+            _age_holds(refs, old.id, 2)
+            with pytest.raises(PermissionError):
+                reap_orphan_holds(refs, store)
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.requires_postgres
 async def test_the_reaper_never_removes_a_symlinked_orphan_directory(
     tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
 ) -> None:

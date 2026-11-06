@@ -1047,9 +1047,11 @@ def reap_orphan_holds(
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
     listed that slug's directory. A slug directory that is missing (not yet copied onto
-    a new volume, say) releases nothing for that slug and is logged. A directory it
-    cannot list (permissions, a stale NFS handle) raises and ends the pass, since
-    ``Path.glob`` would skip it. An unmounted or empty volume lists no slug at all, so
+    a new volume, say) releases nothing for that slug and is logged. With a hold
+    past the grace, a directory it cannot list (permissions, a stale NFS handle)
+    raises and ends the pass, since ``Path.glob`` would skip it; with none, only the
+    unheld-directory pass walks, and a listing that fails is logged and ends it
+    (#5453). An unmounted or empty volume lists no slug at all, so
     releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
     and with no live output to learn it from) is never released here. The cost of all
     this: holds orphaned by a model's whole deletion stay until a person drops them."""
