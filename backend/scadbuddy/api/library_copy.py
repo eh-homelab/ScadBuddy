@@ -110,6 +110,10 @@ async def post_library_copy(
             except Exception:
                 logger.warning("could not end the row of a copy that failed to start: %s", job_id)
         raise
+    if not running and started.result_run_id is not None:
+        # The run this start began, or, for a start that raced another, the run it
+        # joined: `_settled` reads the job as ended only when that run's chain closed.
+        await asyncio.to_thread(rows.started, job_id, started.result_run_id)
     return LibraryCopyStarted(copy_id=started.id)
 
 
@@ -158,20 +162,33 @@ def _settled(
     summary: LibraryCopySummary, described: WorkflowExecutionDescription | None
 ) -> LibraryCopySummary:
     """``summary`` with the execution's word on whether it runs. A row left `running`
-    by an execution that closed after the row was started is shown `failed`, saying
-    so. The row is written before the execution starts (and reset before a rerun), so
-    no execution yet, or one that closed before `started_at`, is a copy about to run,
-    not one that ended."""
+    by the execution that its start began (`LibraryCopySummary.run_id`), now closed,
+    is shown `failed`, saying so. The match is by run id, on Temporal's side only:
+    never Temporal's ``close_time`` against Postgres' ``started_at``, because the two
+    clocks can differ (#5424). The row is written before the execution starts (and
+    reset before a rerun), so a row with no run id yet, or a closed execution of
+    another run (the one before a rerun), is a copy about to run, not one that ended."""
     running = described is not None and described.status == WorkflowExecutionStatus.RUNNING
     update: dict[str, object] = {"running": running}
     if (
         summary.status == "running"
+        and summary.run_id is not None
         and described is not None
         and described.close_time is not None
-        and described.close_time >= summary.started_at
+        and summary.run_id in _chain(described)
     ):
         update.update(status="failed", error=ENDED_UNFINISHED)
     return summary.model_copy(update=update)
+
+
+def _chain(described: WorkflowExecutionDescription) -> set[str]:
+    """The run ids that name the described execution's chain: its own and the first
+    run's (a copy continues as new every `BATCHES_PER_RUN` batches)."""
+    ids = {described.run_id}
+    first = described.raw_info.first_run_id
+    if first:
+        ids.add(first)
+    return ids
 
 
 async def _execution(ops: OperationsDep, copy_id: str) -> WorkflowExecutionDescription | None:

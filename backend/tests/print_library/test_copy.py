@@ -13,14 +13,19 @@ import httpx
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, Scope, map_response
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.print_library.copy import (
     FILE_ATTEMPTS,
+    GAVE_UP,
     GONE_FROM_SOURCE,
+    MAX_FILE_TRIES,
+    NO_REASON,
     TARGET_FOLDER_GONE,
+    CopyRefusedError,
+    _BambuddyTarget,
     copy_batch,
     plan_copy,
 )
@@ -170,11 +175,50 @@ async def test_a_source_file_that_is_gone_fails_alone(
     assert "no longer in the source" in (results[4242][1] or "")
 
 
-async def test_a_file_the_library_always_500s_on_fails_alone_once_the_retries_ran_out(
+def _batch(
+    store: LibraryCopyStore,
+    request: LibraryCopyRequest,
+    *,
+    bambuddy: BambuddyClient,
+    native: NativeLibrary,
+    copy_id: str = "library-copy-test",
+    limit: int = 10,
+) -> Any:
+    return copy_batch(
+        store,
+        LibraryCopyBatchInput(copy_id=copy_id, request=request, limit=limit),
+        client=bambuddy,
+        native=native,
+        uploads=_uploads(),
+        heartbeat=lambda _: None,
+    )
+
+
+async def _planned(
+    store: LibraryCopyStore,
+    request: LibraryCopyRequest,
+    *,
+    bambuddy: BambuddyClient,
+    native: NativeLibrary,
+    copy_id: str = "library-copy-test",
+) -> None:
+    store.start(copy_id, request)
+    bb_to_sb = request.direction == "bb_to_sb"
+    source, target = (bambuddy, native) if bb_to_sb else (native, bambuddy)
+    store.plan(copy_id, await plan_copy(request, source, target))
+
+
+def _rows(store: LibraryCopyStore, copy_id: str = "library-copy-test") -> dict[int, Any]:
+    return {f.source_id: f for f in store.files(copy_id)}
+
+
+async def test_a_file_the_library_always_500s_on_fails_alone_once_its_tries_ran_out(
     pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 5xx is retried, since it is as likely the library as the file; on the last
-    attempt it is the file's own failure, and the others still copy."""
+    """A 5xx is retried, since it is as likely the library as the file. The file counts
+    its own tries (#5424): on its `FILE_ATTEMPTS`th it is the file's own failure, and
+    the same batch goes on to copy the rest. While it is retried, the pending row says
+    why."""
     bad = await bambuddy.upload_library_file("bad.3mf", b"bad bytes")
     good = await bambuddy.upload_library_file("good.3mf", b"good bytes")
     download = BambuddyClient.download_library_file
@@ -192,64 +236,193 @@ async def test_a_file_the_library_always_500s_on_fails_alone_once_the_retries_ra
     monkeypatch.setattr(BambuddyClient, "download_library_file", failing)
     request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[bad.id, good.id])
     store = LibraryCopyStore(pool)
-    store.start("library-copy-test", request)
-    store.plan("library-copy-test", await plan_copy(request, bambuddy, native))
+    await _planned(store, request, bambuddy=bambuddy, native=native)
 
-    async def batch(attempt: int) -> Any:
-        return await copy_batch(
-            store,
-            LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
-            client=bambuddy,
-            native=native,
-            uploads=_uploads(),
-            heartbeat=lambda _: None,
-            attempt=attempt,
-        )
-
-    with pytest.raises(ApiError) as retried:
-        await batch(FILE_ATTEMPTS - 1)
-    assert retried.value.status == 502
-    assert {f.status for f in store.files("library-copy-test")} == {"pending"}
-    last = await batch(FILE_ATTEMPTS)
-    assert (last.copied, last.failed, last.remaining) == (0, 1, 1)  # the batch ends there
-    done = await batch(1)  # the next batch, at attempt 1: the rest copy
-    assert (done.copied, done.failed, done.remaining) == (1, 0, 0)
-    results = {f.source_id: (f.status, f.reason) for f in store.files("library-copy-test")}
-    assert results[good.id] == ("copied", None)
-    bad_status, bad_reason = results[bad.id]
-    assert bad_status == "failed"
-    assert bad_reason is not None and "500" in bad_reason
+    for tries in range(1, FILE_ATTEMPTS):
+        with pytest.raises(ApiError) as retried:
+            await _batch(store, request, bambuddy=bambuddy, native=native)
+        assert retried.value.status == 502
+        rows = _rows(store)
+        assert (rows[bad.id].status, rows[bad.id].attempts) == ("pending", tries)
+        assert "500" in (rows[bad.id].reason or "")
+        assert (rows[good.id].status, rows[good.id].attempts) == ("pending", 0)
+    last = await _batch(store, request, bambuddy=bambuddy, native=native)
+    assert (last.copied, last.failed, last.remaining) == (1, 1, 0)
+    rows = _rows(store)
+    assert rows[good.id].status == "copied" and rows[good.id].reason is None
+    assert rows[bad.id].status == "failed"
+    assert rows[bad.id].attempts == FILE_ATTEMPTS
+    assert "500" in (rows[bad.id].reason or "")
 
 
-async def test_a_library_that_does_not_answer_is_retried_and_no_file_is_written_off(
+async def test_a_file_written_before_the_raise_stays_recorded(
     pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Bambuddy that cannot be reached (a restart, a gateway's 503) is never a file's
-    failure, on any attempt: batch after batch raises, and every row stays pending."""
+    """A batch that raises on its second file keeps its first file's row: the retry
+    starts at the file that raised, and spends none of the first file's tries."""
+    first = await bambuddy.upload_library_file("a.3mf", b"first bytes")
+    second = await bambuddy.upload_library_file("b.3mf", b"second bytes")
+    download = BambuddyClient.download_library_file
+
+    def failing(self: BambuddyClient, file_id: int) -> Any:
+        if file_id == second.id:
+            raise ApiError(502, "could not reach Bambuddy", type_=UNAVAILABLE_PROBLEM)
+        return download(self, file_id)
+
+    monkeypatch.setattr(BambuddyClient, "download_library_file", failing)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[first.id, second.id])
+    store = LibraryCopyStore(pool)
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    with pytest.raises(ApiError):
+        await _batch(store, request, bambuddy=bambuddy, native=native)
+    rows = _rows(store)
+    assert (rows[first.id].status, rows[first.id].attempts) == ("copied", 1)
+    assert (rows[second.id].status, rows[second.id].attempts) == ("pending", 1)
+    monkeypatch.setattr(BambuddyClient, "download_library_file", download)
+    done = await _batch(store, request, bambuddy=bambuddy, native=native)
+    assert (done.copied, done.remaining) == (1, 0)
+    assert _rows(store)[first.id].attempts == 1
+
+
+@pytest.mark.parametrize("answer", ["unreachable", "429"])
+async def test_a_library_that_does_not_answer_is_retried_until_the_file_tries_run_out(
+    pool: Pool,
+    native: NativeLibrary,
+    bambuddy: BambuddyClient,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+) -> None:
+    """A Bambuddy that cannot be reached (a restart, a gateway's 503), or that limits
+    requests (429, #5424), is not the file's failure while the file has tries: past
+    `FILE_ATTEMPTS` the batch still raises. After `MAX_FILE_TRIES` the file fails with
+    the last reason, so a file that always times out cannot hold the job. The next file
+    then has tries of its own."""
     one = await bambuddy.upload_library_file("one.3mf", b"one")
     two = await bambuddy.upload_library_file("two.3mf", b"two")
 
     def down(self: BambuddyClient, file_id: int) -> Any:
-        raise ApiError(502, "could not reach Bambuddy: ConnectError", type_=UNAVAILABLE_PROBLEM)
+        if answer == "429":
+            raise ApiError(
+                502,
+                "Bambuddy is limiting requests and refused to download the file",
+                type_=UNAVAILABLE_PROBLEM,
+                bambuddy_status=429,
+            )
+        raise ApiError(504, "could not reach Bambuddy: ReadTimeout", type_=UNAVAILABLE_PROBLEM)
 
     monkeypatch.setattr(BambuddyClient, "download_library_file", down)
     request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[one.id, two.id])
     store = LibraryCopyStore(pool)
-    store.start("library-copy-test", request)
-    store.plan("library-copy-test", await plan_copy(request, bambuddy, native))
-    for attempt in (1, FILE_ATTEMPTS, FILE_ATTEMPTS + 1, 1, FILE_ATTEMPTS):
-        with pytest.raises(ApiError) as raised:
-            await copy_batch(
-                store,
-                LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
-                client=bambuddy,
-                native=native,
-                uploads=_uploads(),
-                heartbeat=lambda _: None,
-                attempt=attempt,
-            )
-        assert raised.value.status == 502
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    for _ in range(MAX_FILE_TRIES - 1):
+        with pytest.raises(ApiError):
+            await _batch(store, request, bambuddy=bambuddy, native=native)
+    rows = _rows(store)
+    assert {f.status for f in rows.values()} == {"pending"}
+    assert rows[one.id].attempts == MAX_FILE_TRIES - 1 and rows[two.id].attempts == 0
+    assert ("limiting" if answer == "429" else "ReadTimeout") in (rows[one.id].reason or "")
+    # The last try: the file fails with the reason, and the next file raises on its first.
+    with pytest.raises(ApiError):
+        await _batch(store, request, bambuddy=bambuddy, native=native)
+    rows = _rows(store)
+    assert rows[one.id].status == "failed"
+    assert (rows[one.id].reason or "").startswith(f"gave up after {MAX_FILE_TRIES} tries: ")
+    assert (rows[two.id].status, rows[two.id].attempts) == ("pending", 1)
+
+
+async def test_a_file_whose_tries_never_ended_fails_once_they_ran_out(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient
+) -> None:
+    """A batch that timed out, or whose worker stopped, records nothing, but its try
+    was counted when it began. After `MAX_FILE_TRIES` such tries the file fails."""
+    file = await bambuddy.upload_library_file("huge.3mf", b"huge")
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id])
+    store = LibraryCopyStore(pool)
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    for _ in range(MAX_FILE_TRIES):
+        store.begin("library-copy-test", file.id)
+    batch = await _batch(store, request, bambuddy=bambuddy, native=native)
+    assert (batch.failed, batch.remaining) == (1, 0)
+    row = _rows(store)[file.id]
+    assert row.reason == GAVE_UP.format(tries=MAX_FILE_TRIES, reason=NO_REASON)
+
+
+@pytest.mark.parametrize("code", [401, 403])
+async def test_bambuddy_refusing_the_key_fails_the_copy_not_each_file(
+    pool: Pool,
+    native: NativeLibrary,
+    bambuddy: BambuddyClient,
+    three_mf: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+) -> None:
+    """A 401 or 403 on one ``file_hash`` read (`_BambuddyTarget.has`) would fail every
+    file the same way (#5424). It raises `CopyRefusedError`, which fails the copy as a
+    whole with Bambuddy's reason; no file is written off for it, so a rerun with a
+    good key copies them all."""
+    await bambuddy.upload_library_file("there.3mf", three_mf.read_bytes())
+    one = await upload(native, three_mf)
+
+    async def refused(self: BambuddyClient, file_id: int) -> Any:
+        raise map_response(
+            httpx.Response(code, json={"detail": "nope"}),
+            scope=Scope.MANAGE_LIBRARY,
+            what="read a library file",
+        )
+
+    monkeypatch.setattr(BambuddyClient, "library_file", refused)
+    request = LibraryCopyRequest(direction="sb_to_bb", file_ids=[one.id])
+    store = LibraryCopyStore(pool)
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    with pytest.raises(CopyRefusedError, match="API key"):
+        await _batch(store, request, bambuddy=bambuddy, native=native)
     assert {f.status for f in store.files("library-copy-test")} == {"pending"}
+
+
+async def test_two_copies_of_the_same_bytes_into_bambuddy_upload_them_once(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, three_mf: Path
+) -> None:
+    """Two copies into one target at once (#5424): the lock on the bytes' SHA-256 in
+    that library holds from the hash check until the row is recorded, and a copy whose
+    listing is older than the other's put finds it through the rows. One uploads, the
+    other skips."""
+    one = await upload(native, three_mf)
+    store = LibraryCopyStore(pool)
+    first = LibraryCopyRequest(direction="sb_to_bb", file_ids=[one.id])
+    second = LibraryCopyRequest(direction="sb_to_bb", file_ids=[one.id], target_folder_id=None)
+    await _planned(store, first, bambuddy=bambuddy, native=native, copy_id="library-copy-a")
+    await _planned(store, second, bambuddy=bambuddy, native=native, copy_id="library-copy-b")
+    batches = await asyncio.gather(
+        _batch(store, first, bambuddy=bambuddy, native=native, copy_id="library-copy-a"),
+        _batch(store, second, bambuddy=bambuddy, native=native, copy_id="library-copy-b"),
+    )
+    assert sorted((b.copied, b.skipped) for b in batches) == [(0, 1), (1, 0)]
+    assert len(await bambuddy.library_listing(folder_id=None)) == 1
+    a, b = _rows(store, "library-copy-a")[one.id], _rows(store, "library-copy-b")[one.id]
+    assert a.target_id == b.target_id
+
+
+async def test_a_copy_whose_listing_is_stale_finds_another_copys_upload_by_its_row(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, three_mf: Path
+) -> None:
+    """`_BambuddyTarget.has` reads Bambuddy's listing once per batch. A file another
+    copy put after that read is found through that copy's row (`held`), and checked at
+    Bambuddy first."""
+    one = await upload(native, three_mf)
+    store = LibraryCopyStore(pool)
+    request = LibraryCopyRequest(direction="sb_to_bb", file_ids=[one.id])
+    await _planned(store, request, bambuddy=bambuddy, native=native, copy_id="library-copy-a")
+    target = _BambuddyTarget(bambuddy, _uploads(), None, store)
+    assert await target.has("ab" * 32, None) is None  # the listing is read now: empty
+    await _batch(store, request, bambuddy=bambuddy, native=native, copy_id="library-copy-a")
+    landed = _rows(store, "library-copy-a")[one.id]
+    assert landed.status == "copied"
+    source = native.rows.file(one.id)
+    assert source is not None and landed.target_id is not None
+    assert await target.has(source.sha256, None) == landed.target_id
+    await bambuddy.delete_library_file(landed.target_id)
+    fresh = _BambuddyTarget(bambuddy, _uploads(), None, store)
+    assert await fresh.has(source.sha256, None) is None
 
 
 async def test_a_full_store_is_a_failed_row_with_the_507(

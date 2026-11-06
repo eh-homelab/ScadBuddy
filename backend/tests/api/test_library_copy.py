@@ -8,15 +8,18 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
 from httpx import Response
+from temporalio.client import WorkflowExecutionStatus
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.api.library_copy import ENDED_UNFINISHED
+from scadbuddy.api.library_copy import ENDED_UNFINISHED, _settled
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -26,6 +29,7 @@ from scadbuddy.print_library.copy_models import (
     LibraryCopyBatch,
     LibraryCopyBatchInput,
     LibraryCopyRequest,
+    LibraryCopySummary,
 )
 from scadbuddy.print_library.copy_store import LibraryCopyStore, PlannedFile
 from tests.api.test_library_native import _native_settings
@@ -91,6 +95,13 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
     _until(lambda: status()["status"] != "running" and not status()["running"])
     done = status()
     assert (done["status"], done["total"], done["copied"], done["failed"]) == ("done", 2, 1, 1)
+    # The start recorded the run it began: the status matches the execution by it.
+    state: AppState = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    ops: OperationCommands = state.components.get(OPERATIONS)
+    portal = native_client.portal
+    assert portal is not None
+    described = portal.call(ops.client.get_workflow_handle(copy_id).describe)
+    assert done["run_id"] == described.raw_info.first_run_id
     assert done["request"] == {
         "direction": "bb_to_sb",
         "file_ids": [7, 8],
@@ -106,6 +117,7 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
         "size": None,
         "status": "failed",
         "reason": "it is no longer there",
+        "attempts": 0,
         "target_id": None,
         "target_folder_id": None,
     }
@@ -255,3 +267,41 @@ def test_bambuddy_is_browsed_as_a_source_while_native_serves(native_client: Test
     ]
     # The native library still serves the page itself: Bambuddy's folder is not its.
     assert native_client.get("/api/v1/print/library", params={"folder_id": 3}).status_code == 404
+
+
+def _summary(run_id: str | None, started_at: datetime) -> LibraryCopySummary:
+    return LibraryCopySummary(
+        copy_id="library-copy-skew",
+        direction="bb_to_sb",
+        request=LibraryCopyRequest(direction="bb_to_sb", file_ids=[7]),
+        status="running",
+        started_at=started_at,
+        run_id=run_id,
+    )
+
+
+def _closed(run_id: str, first_run_id: str, close_time: datetime) -> Any:
+    return SimpleNamespace(
+        status=WorkflowExecutionStatus.TERMINATED,
+        close_time=close_time,
+        run_id=run_id,
+        raw_info=SimpleNamespace(first_run_id=first_run_id),
+    )
+
+
+def test_settled_matches_the_run_by_its_id_not_by_two_clocks() -> None:
+    """#5424: Temporal's ``close_time`` and Postgres' ``started_at`` come from two
+    clocks. The row's own run, closed, reads as ended whatever the clocks say. The run
+    before a rerun never does."""
+    now = datetime.now(UTC)
+    early = now - timedelta(seconds=5)  # Temporal's clock behind Postgres'
+    late = now + timedelta(seconds=5)  # Temporal's clock ahead of Postgres'
+    ended = _settled(_summary("run-b", now), _closed("run-b", "run-b", early))
+    assert (ended.status, ended.error) == ("failed", ENDED_UNFINISHED)
+    # A chain that continued as new: matched by its first run.
+    chained = _settled(_summary("run-b", now), _closed("run-c", "run-b", early))
+    assert chained.status == "failed"
+    rerun = _settled(_summary("run-b", now), _closed("run-a", "run-a", late))
+    assert (rerun.status, rerun.error) == ("running", None)
+    unstarted = _settled(_summary(None, now), _closed("run-a", "run-a", late))
+    assert unstarted.status == "running"
