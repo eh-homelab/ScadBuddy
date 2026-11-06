@@ -354,7 +354,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   anything else), a 401 or 403 fails the whole copy (`CopyRefusedError`), a session
   advisory lock per target library and SHA-256 (`TargetLocks`) keeps two copies from
   putting the same bytes twice, and the status route matches the execution by the
-  row's `run_id`, never by comparing clocks (#5424). Agent
+  row's `run_id`; a row with no run id falls back to `close_time >= started_at +
+  NO_RUN_ID_MARGIN` (5 min) (#5424). Agent
   `copy_library_files` and `get_library_copy` (`agent/src/tools/libraryCopy.ts`);
   `list_library`'s `source: bambuddy`; frontend `components/library/LibraryCopyDialog.tsx`.
   A native run of several prints starts the later ones in `PrintLanSequence`

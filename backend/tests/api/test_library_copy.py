@@ -209,6 +209,39 @@ def test_a_copy_whose_execution_ended_unfinished_reads_failed_but_one_starting_d
     assert status(copy_id)["error"] is None
 
 
+def test_a_started_copy_whose_run_id_write_fails_still_answers_started(
+    native_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run id is written after the start. A failed write is logged, not a 500 for a
+    copy that did start: the copy runs to its end."""
+
+    async def plan(request: Any, source: Any, target: Any) -> list[PlannedFile]:
+        return [PlannedFile(source_id=7, path="", name="rex.3mf", size=3)]
+
+    async def batch(store: LibraryCopyStore, input: LibraryCopyBatchInput, **_: Any) -> Any:
+        store.record(input.copy_id, 7, "copied", target_id=NATIVE_FILE, target_folder_id=None)
+        return LibraryCopyBatch(copied=1, skipped=0, failed=0, remaining=0)
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(copy_module, "plan_copy", plan)
+    monkeypatch.setattr(copy_module, "copy_batch", batch)
+    monkeypatch.setattr(LibraryCopyStore, "started", fail)
+    started = native_client.post(
+        "/api/v1/print/library-copies", json={"direction": "bb_to_sb", "file_ids": [7]}
+    )
+    assert started.status_code == 202, started.text
+    copy_id = started.json()["copy_id"]
+
+    def status() -> dict[str, Any]:
+        got: dict[str, Any] = native_client.get(f"/api/v1/print/library-copies/{copy_id}").json()
+        return got
+
+    _until(lambda: status()["status"] == "done")
+    assert status()["run_id"] is None
+
+
 def test_a_copy_needs_the_native_library_and_a_bambuddy(
     client: TestClient, native_client: TestClient
 ) -> None:

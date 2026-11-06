@@ -585,3 +585,19 @@ async def test_two_copies_of_the_same_bambuddy_file_into_native_upload_it_once(
     )
     assert sorted((b.copied, b.skipped) for b in batches) == [(0, 1), (1, 0)]
     assert len(await native.library_listing(folder_id=None)) == 1
+
+
+async def test_a_file_that_already_ended_keeps_its_outcome(
+    pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient
+) -> None:
+    """A batch attempt that timed out but still runs, and its retry, can both end one
+    file. The second end (a skip on the first one's upload) never overwrites the first."""
+    file = await bambuddy.upload_library_file("one.3mf", b"one")
+    store = LibraryCopyStore(pool)
+    request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[file.id])
+    await _planned(store, request, bambuddy=bambuddy, native=native)
+    store.record("library-copy-test", file.id, "copied", target_id=1000000007, sha256="ab" * 32)
+    store.record("library-copy-test", file.id, "skipped_same_hash", target_id=1000000007)
+    row = _rows(store)[file.id]
+    assert (row.status, row.target_id) == ("copied", 1000000007)
+    assert store.held("bb_to_sb", "ab" * 32) == [1000000007]

@@ -165,11 +165,15 @@ class LibraryCopyStore:
         target_folder_id: int | None = None,
         sha256: str | None = None,
     ) -> None:
+        """How a pending file ended. A row that already ended keeps its outcome: a batch
+        attempt that timed out but still runs and its retry can both end one file, and
+        the second (a `skipped_same_hash` on the first's upload) must not overwrite the
+        first's `copied`."""
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE library_copy_files SET status = %s, reason = %s, target_id = %s,"
                 " target_folder_id = %s, sha256 = %s, reason_try = NULL, updated_at = now()"
-                " WHERE copy_id = %s AND source_id = %s",
+                " WHERE copy_id = %s AND source_id = %s AND status = 'pending'",
                 (
                     status,
                     None if reason is None else reason[:REASON_CHARS],

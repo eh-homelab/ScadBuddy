@@ -229,7 +229,7 @@ class _Target:
 
     async def has(self, digest: str, size: int | None) -> int | None:
         """The id of a live file whose bytes hash to ``digest``, or ``None``. The batch
-        calls it again before a put, under the lock on ``digest`` in this library
+        calls it before a put, under the lock on ``digest`` in this library
         (`TargetLocks`), so two copies into one target never both miss and both put
         the same bytes."""
         raise NotImplementedError

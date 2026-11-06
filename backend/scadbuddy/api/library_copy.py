@@ -119,7 +119,12 @@ async def post_library_copy(
     if not running and started.result_run_id is not None:
         # The run this start began, or, for a start that raced another, the run it
         # joined: `_settled` reads the job as ended only when that run's chain closed.
-        await asyncio.to_thread(rows.started, job_id, started.result_run_id)
+        # The copy started either way: a failed write is logged, not answered. A later
+        # start that joins writes the run id, and `NO_RUN_ID_MARGIN` covers the rest.
+        try:
+            await asyncio.to_thread(rows.started, job_id, started.result_run_id)
+        except Exception:
+            logger.warning("could not record the run of a started copy: %s", job_id, exc_info=True)
     return LibraryCopyStarted(copy_id=started.id)
 
 
@@ -177,12 +182,12 @@ def _settled(
 ) -> LibraryCopySummary:
     """``summary`` with the execution's word on whether it runs. A row left `running`
     by the execution that its start began (`LibraryCopySummary.run_id`), now closed,
-    is shown `failed`, saying so. The match is by run id, on Temporal's side only:
-    never Temporal's ``close_time`` against Postgres' ``started_at``, because the two
-    clocks can differ (#5424). The row is written before the execution starts (and
-    reset before a rerun), so a closed execution of another run (the one before a
-    rerun) is a copy about to run, not one that ended. A row with no run id falls back
-    to the two clocks, with `NO_RUN_ID_MARGIN`."""
+    is shown `failed`, saying so. For a row with a run id, the match is by run id, on
+    Temporal's side only, because Temporal's ``close_time`` and Postgres' ``started_at``
+    come from two clocks that can differ (#5424). The row is written before the
+    execution starts (and reset before a rerun), so a closed execution of another run
+    (the one before a rerun) is a copy about to run, not one that ended. A row with no
+    run id falls back to ``close_time >= started_at + NO_RUN_ID_MARGIN``."""
     running = described is not None and described.status == WorkflowExecutionStatus.RUNNING
     update: dict[str, object] = {"running": running}
     if (
