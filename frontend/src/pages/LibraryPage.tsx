@@ -229,6 +229,13 @@ export function LibraryPage() {
   const [renaming, setRenaming] = useState<LibraryEntry | null>(null)
   /** #1031 — the open details' file as a rename or move here left it, while no listing holds it. */
   const [detailsKept, setDetailsKept] = useState<LibraryEntry | null>(null)
+  // Kept for the details open when it was set only: closed (or another file's opened), it
+  // is dropped, so a later link to the file reads it as it is then (#5322 review).
+  const [keptFor, setKeptFor] = useState(detailsParam)
+  if (keptFor !== detailsParam) {
+    setKeptFor(detailsParam)
+    setDetailsKept(null)
+  }
   const [done, setDone] = useState<Done | null>(null)
   const [folderAction, setFolderAction] = useState<FolderAction | null>(null)
   const [folderError, setFolderError] = useState<string | null>(null)
@@ -516,7 +523,7 @@ export function LibraryPage() {
         setDetailsKept({ ...followed, folder_id: folderId })
         if (!searching) {
           const next = new URLSearchParams(search)
-          for (const name of ['by', 'project', 'shown']) next.delete(name)
+          for (const name of ['by', 'project', 'shown', 'file']) next.delete(name)
           navigate({ pathname: libraryPath(tree ?? [], folderId), search: `?${next.toString()}` }, { replace: true })
         }
       }
@@ -1190,8 +1197,8 @@ export function LibraryPage() {
             key={detailsParam}
             fileId={detailsParam}
             file={detailsFile}
-            listed={onScreen !== null}
-            advanced={advanced}
+            // A listing that failed (a link to a file the library lacks) holds nothing either.
+            listed={onScreen !== null || error !== null}
             folders={tree ?? []}
             // A search result names its folder by path, which the tree may not hold.
             folderPath={searching ? ((results?.files ?? []).find((row) => row.id === detailsParam)?.folder_path ?? null) : null}

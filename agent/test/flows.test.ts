@@ -167,6 +167,59 @@ describe('flow tools (#1057)', () => {
     expect(result.isError).toBe(true)
   })
 
+  it("sends a flow's details and every save's commit message (#3186)", async () => {
+    expect(tool('update_flow_details').risk).toBe('write')
+    const COMMIT = 'a'.repeat(40)
+    const sent: { route: string; body: unknown }[] = []
+    const record = async (route: string, request: Request) => {
+      const text = await request.text()
+      sent.push({ route, body: text ? JSON.parse(text) : null })
+    }
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows`, async ({ request }) => {
+        await record('register', request)
+        return HttpResponse.json({ id: DEFINITION, name: 'swap', version: 1, display_name: 'Nightly swap' }, { status: 201 })
+      }),
+      http.patch(`${BACKEND}/api/v1/workflows/names/swap`, async ({ request }) => {
+        await record('details', request)
+        return HttpResponse.json({ name: 'swap', display_name: 'Swap batch', description: null, commit: COMMIT })
+      }),
+      http.post(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/restore`, async ({ request }) => {
+        await record('restore', request)
+        return HttpResponse.json({ id: DEFINITION, name: 'swap', version: 2 }, { status: 201 })
+      }),
+      http.delete(`${BACKEND}/api/v1/workflows/names/swap`, async ({ request }) => {
+        await record('delete', request)
+        return HttpResponse.json({ name: 'swap', deleted_commit: 'd'.repeat(40) })
+      }),
+    )
+    await runTool(
+      tool('register_flow'),
+      { name: 'swap', script: 'x', message: 'First cut', body: 'Notes', display_name: 'Nightly swap', description: 'It swaps.' },
+      ctx(),
+    )
+    const details = await runTool(
+      tool('update_flow_details'),
+      { name: 'swap', display_name: 'Swap batch', message: 'Better name' },
+      ctx(),
+    )
+    expect(firstText(details)).toMatchObject({ display_name: 'Swap batch', commit: COMMIT })
+    await runTool(tool('restore_flow_version'), { name: 'swap', commit: COMMIT, message: 'Back' }, ctx())
+    await runTool(tool('restore_flow_version'), { name: 'swap', commit: COMMIT }, ctx())
+    await tool('delete_flow').execute({ name: 'swap', message: 'Retire', body: 'Old.' }, ctx())
+    expect(sent).toEqual([
+      {
+        route: 'register',
+        body: { name: 'swap', script: 'x', message: 'First cut', body: 'Notes', display_name: 'Nightly swap', description: 'It swaps.' },
+      },
+      { route: 'details', body: { display_name: 'Swap batch', description: null, message: 'Better name', body: null } },
+      { route: 'restore', body: { message: 'Back', body: null } },
+      { route: 'restore', body: null },
+      { route: 'delete', body: { message: 'Retire', body: 'Old.' } },
+    ])
+    expect(tool('delete_flow').summarize?.({ name: 'swap', message: 'Retire' })).toContain('swap')
+  })
+
   it('lists the reset points as a read (#2350)', async () => {
     expect(tool('get_flow_reset_points').risk).toBe('read')
     const RUN = '7a1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f'

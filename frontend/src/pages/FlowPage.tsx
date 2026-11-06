@@ -2,7 +2,9 @@ import { lazy, Suspense, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { FlowDefinition, FlowRegister, FlowScriptProblem, FlowVersion } from '../api/types'
+import { Markdown } from '../agent/chat/Markdown'
 import { FlowActions } from '../components/flows/FlowActions'
+import { CommitFields, commitMessage, EditFlowDetails } from '../components/flows/FlowDetails'
 import { FlowScript } from '../components/flows/FlowScript'
 import { StartRun } from '../components/flows/StartRun'
 import { FlowTriggers } from '../components/flows/Triggers'
@@ -15,7 +17,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { parseSchemaText, schemaText } from '../lib/flowInputs'
 import { timeAgo } from '../lib/format'
-import { actorText, flowPath, FLOWS_PATH, flowStateText } from '../lib/flows'
+import { actorText, flowPath, FLOWS_PATH, flowStateText, flowTitle } from '../lib/flows'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
@@ -58,6 +60,11 @@ function approvalTimeout(seconds: number | null | undefined): Pick<FlowRegister,
  * #2485 — Archive (undone by Unarchive) and Delete, each confirmed first. An archived or
  * deleted flow's runs never start; a deleted one's versions are still read from its
  * history, and Restore brings back the version viewed as its next.
+ *
+ * #3186 — the flow's display name heads the page (its name, the slug, beside it), with
+ * its Markdown description; Edit details changes both, one commit of `flow.json`. Save
+ * takes a commit message (and body), and the versions and the compare picker show each
+ * version's message.
  */
 export function FlowPage() {
   const { id = '' } = useParams()
@@ -97,7 +104,10 @@ export function FlowPage() {
             Flows
           </Link>
           <span className="text-muted-foreground">/</span>
-          <h1 className="text-[13px] font-medium">{flow.data ? `${flow.data.name} v${flow.data.version}` : id}</h1>
+          <h1 className="text-[13px] font-medium">{flow.data ? `${flowTitle(flow.data)} v${flow.data.version}` : id}</h1>
+          {flow.data?.display_name && (
+            <code className="font-mono text-[12px] text-muted-foreground">{flow.data.name}</code>
+          )}
         </div>
         {flow.error ? (
           <p role="alert" className="text-[13px] text-destructive">
@@ -145,6 +155,7 @@ export function FlowPage() {
                     : 'Unarchive it to run it again.'}
                 </Card>
               )}
+              {!deleted && <EditFlowDetails flow={flow.data} onSaved={() => flow.refresh()} />}
               <FlowActions
                 flow={flow.data}
                 onChanged={() => flow.refresh()}
@@ -166,7 +177,13 @@ export function FlowPage() {
                           className="flex items-baseline gap-2 rounded-md px-2 py-1 text-[12px] leading-snug hover:bg-muted aria-[current=page]:bg-muted"
                         >
                           <span className="text-[13px] font-medium">v{v.version}</span>{' '}
-                          <span className="min-w-0 truncate text-muted-foreground">{actorText(v.created_by)}</span>{' '}
+                          <span className="flex min-w-0 flex-col">
+                            {/* #3186: the version's commit message, its body on hover. */}
+                            <span className="truncate" title={v.body ?? undefined}>
+                              {v.message}
+                            </span>{' '}
+                            <span className="truncate text-muted-foreground">{actorText(v.created_by)}</span>
+                          </span>{' '}
                           <span className="ml-auto shrink-0 text-muted-foreground">{timeAgo(v.created_at)}</span>
                         </Link>
                       </li>
@@ -181,6 +198,11 @@ export function FlowPage() {
               </section>
             </aside>
             <div className="flex min-w-0 flex-1 flex-col gap-5">
+              {flow.data.description && (
+                <section aria-label="Description" className="text-[13px]">
+                  <Markdown text={flow.data.description} />
+                </section>
+              )}
               <section aria-label="Flow script">
                 <h2 className="mb-1 text-[13px] font-medium">Script</h2>
                 {phone ? (
@@ -236,6 +258,9 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
   const [checkError, setCheckError] = useState<string>()
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
+  // #3186: what the new version's commit is called, and its longer notes.
+  const [message, setMessage] = useState('Update script')
+  const [body, setBody] = useState('')
   // #2651: completion for the schema as last checked, so `inputs()` and `FlowInputs`
   // follow the draft; a schema that is not JSON keeps what was completed before it.
   const [helpSchema, setHelpSchema] = useState(savedSchema)
@@ -287,14 +312,17 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
     setSaving(true)
     setSaveError(undefined)
     try {
-      onSaved(
-        await api.registerFlow({
-          name: flow.name,
-          script: draft,
-          ...approvalTimeout(flow.approval_timeout_s),
-          ...(parsed.schema ? { inputs_schema: parsed.schema } : {}),
-        }),
-      )
+      const saved = await api.registerFlow({
+        name: flow.name,
+        script: draft,
+        ...approvalTimeout(flow.approval_timeout_s),
+        ...(parsed.schema ? { inputs_schema: parsed.schema } : {}),
+        ...commitMessage(message, body),
+      })
+      // The next save is described afresh, not with this one's message.
+      setMessage('Update script')
+      setBody('')
+      onSaved(saved)
     } catch (caught) {
       const refused = refusedProblems(caught)
       if (refused) setCheckResult({ script: both, problems: refused })
@@ -335,6 +363,9 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
         array of one, with an optional default and description. The script reads them with <code>inputs()</code>;
         blank, its runs take none.
       </p>
+      <div className="mt-1 max-w-xl">
+        <CommitFields message={message} body={body} onMessage={setMessage} onBody={setBody} placeholder="Update script" />
+      </div>
       <div className="flex flex-wrap items-center gap-3">
         <Button onClick={() => void save()} disabled={!dirty || saving} aria-busy={saving}>
           {saving && <Spinner />}
@@ -404,7 +435,10 @@ function Compare({
         <SelectContent>
           {versions.map((v) => (
             <SelectItem key={v.commit} value={v.commit}>
-              v{v.version}
+              {/* #3186: the version's commit message beside its number. */}
+              <span className="max-w-64 truncate">
+                v{v.version} <span className="text-muted-foreground">{v.message}</span>
+              </span>
             </SelectItem>
           ))}
         </SelectContent>

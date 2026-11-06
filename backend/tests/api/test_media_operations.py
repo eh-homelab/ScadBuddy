@@ -163,9 +163,9 @@ def test_an_old_claims_staging_is_not_swept_under_its_run(
         os.utime(store.root / name, (old, old))
         link(store, name, target)
 
-    def swept(*args: Any) -> Any:
+    def swept(*args: Any, **kwargs: Any) -> Any:
         catalogue.sweep_duplicate_staging()
-        return add_media(*args)
+        return add_media(*args, **kwargs)
 
     monkeypatch.setattr(ClaimStore, "link", aged)
     monkeypatch.setattr(catalogue, "add_media", swept)

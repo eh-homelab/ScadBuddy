@@ -18,7 +18,7 @@ import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
 import { RawInputs } from '../components/RawInputs'
-import { PresetPicker, type SelectedElsewhere } from '../components/PresetPicker'
+import { PresetPicker, type OfferedPreset, type SelectedElsewhere } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
 import { Hint } from '../components/Hint'
@@ -85,6 +85,8 @@ const WARN = 'border-destructive/40 bg-destructive/10 text-destructive'
 const NOTHING: ParamValues = Object.freeze({})
 /** #4885 — the budget a parameter tool gives `schemaLoaded`; `render` gives it its own `timeout_ms`. */
 const SCHEMA_WAIT_MS = 10_000
+/** #1022 — how long a preset link waits for the presets before it opens on the defaults. */
+const PRESET_LINK_TIMEOUT_MS = 15_000
 
 /** The model an agent tool call was made on, to check the page against after every wait. */
 type CallOn = { slug: string; version: string | undefined }
@@ -340,6 +342,14 @@ export function CustomizePage() {
   const linkPending = linkKey !== null && linkKey !== linkDone && presetInUse?.id !== linkedPreset
   /** Why the linked preset could not be applied, shown over the defaults it left. */
   const [linkMissing, setLinkMissing] = useState<{ slug: string; message: string } | null>(null)
+  /**
+   * The linked preset, handed to the picker to apply as a pick there is: over unsaved
+   * edits it asks first. A one-shot message, cleared once the picker has taken it.
+   */
+  const [presetOffer, setPresetOffer] = useState<OfferedPreset | null>(null)
+  useEffect(() => {
+    if (presetOffer) setPresetOffer((current) => (current === presetOffer ? null : current))
+  }, [presetOffer])
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -541,12 +551,17 @@ export function CustomizePage() {
   // A preset's stored inputs, brought up to the template version before the picker cuts
   // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
   // they are, at once; ones that cannot be migrated show read-only instead.
+  // `stillWanted` is asked when a failure lands, and guards only the failure: a link that
+  // gave up waiting (#1022) must not put a late failure's inputs on screen beside the
+  // defaults it opened on. A late success is still returned; the caller must drop it
+  // itself, as the link's `Promise.race` does.
   const migratePreset = useCallback(
-    (saved: JsonObject): JsonObject | Promise<JsonObject | null> => {
+    (saved: JsonObject, stillWanted?: () => boolean): JsonObject | Promise<JsonObject | null> => {
       const v = typeof saved.v === 'number' ? saved.v : 0
       if (inputsVersion === undefined || v === inputsVersion) return saved
       return migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
         if (outcome.kind === 'failed') {
+          if (stillWanted && !stillWanted()) return null
           setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
           return null
         }
@@ -603,7 +618,7 @@ export function CustomizePage() {
   }, [live])
   /**
    * Puts `preset` on screen (its `inputs` already migrated) and shows it selected in the
-   * picker, as a pick there does: a template UI's `presets.load` and a link (#1022).
+   * picker, as a pick there does: a template UI's `presets.load`.
    */
   const showPreset = useLatest((preset: ParamPreset) => {
     if (!schema) throw new Error('the schema is still loading')
@@ -629,28 +644,60 @@ export function CustomizePage() {
       setLinkDone(linkKey)
     }
     void (async () => {
-      let preset: ParamPreset | undefined
+      // Bounded: no render starts while the link is pending, so a list or a migration
+      // that never answers would leave the page with no preview and nothing said.
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let gaveUp = false
+      const late = new Promise<'late'>((resolve) => {
+        timer = setTimeout(() => {
+          gaveUp = true
+          resolve('late')
+        }, PRESET_LINK_TIMEOUT_MS)
+      })
+      const tooLate = () =>
+        missing('The linked preset could not be read: the server did not answer in time. Showing the defaults.')
       try {
-        preset = (await api.listPresets(slug)).find((candidate) => candidate.id === linkedPreset)
-      } catch (caught) {
-        const why = caught instanceof ApiError ? caught.detail : String(caught)
-        missing(`The linked preset could not be read: ${why}. Showing the defaults.`)
-        return
+        let preset: ParamPreset | undefined
+        try {
+          const listed = await Promise.race([api.listPresets(slug), late])
+          if (listed === 'late') return tooLate()
+          preset = listed.find((candidate) => candidate.id === linkedPreset)
+        } catch (caught) {
+          const why = caught instanceof ApiError ? caught.detail : String(caught)
+          return missing(`The linked preset could not be read: ${why}. Showing the defaults.`)
+        }
+        if (!preset) {
+          return missing('The linked preset is not on this model; it may have been deleted. Showing the defaults.')
+        }
+        const stored = isJsonObject(preset.inputs)
+          ? (preset.inputs as JsonObject)
+          : joinInputs(preset.params ?? {}, NO_EXTRA)
+        const migrated = await Promise.race([
+          Promise.resolve(migratePreset(stored, () => !gaveUp && current())),
+          late,
+        ])
+        if (migrated === 'late') return tooLate()
+        if (!current()) return
+        // One that cannot be migrated is shown read-only by `migratePreset`, as a pick's is.
+        if (migrated === null) {
+          setLinkDone(linkKey)
+          return
+        }
+        // The picker answers it: applied, the link is done once the picker shows it. Over
+        // edits the user made (not the values the page opened on) it asks first, and a
+        // Cancel leaves the edits and lets the link go.
+        setPresetOffer({
+          preset: { ...preset, inputs: migrated },
+          ask: isDirty.current(),
+          onDeclined: () => {
+            if (current()) setLinkDone(linkKey)
+          },
+        })
+      } finally {
+        clearTimeout(timer)
       }
-      if (!preset) {
-        missing('The linked preset is not on this model; it may have been deleted. Showing the defaults.')
-        return
-      }
-      const stored = isJsonObject(preset.inputs)
-        ? (preset.inputs as JsonObject)
-        : joinInputs(preset.params ?? {}, NO_EXTRA)
-      const migrated = await migratePreset(stored)
-      if (!current()) return
-      // One that cannot be migrated is shown read-only by `migratePreset`, as a pick's is.
-      if (migrated !== null) showPreset.current({ ...preset, inputs: migrated })
-      setLinkDone(linkKey)
     })()
-  }, [linkPending, linkReady, linkKey, linkedPreset, slug, migratePreset, showPreset])
+  }, [linkPending, linkReady, linkKey, linkedPreset, slug, migratePreset, isDirty])
 
   // The URL follows the picker (#1022): a pick names its preset, none takes it out.
   // `replace`, as the page's other search-param writes: a pick is not a navigation.
@@ -1206,6 +1253,7 @@ export function CustomizePage() {
       resetKey={resets}
       selected={presetElsewhere}
       onSelected={onPresetSelected}
+      offered={presetOffer}
     />
   )
   const templateUi = customUi && (
@@ -1475,6 +1523,7 @@ export function CustomizePage() {
                     resetKey={resets}
                     selected={presetElsewhere}
                     onSelected={onPresetSelected}
+                    offered={presetOffer}
                   />
                 </>
               }

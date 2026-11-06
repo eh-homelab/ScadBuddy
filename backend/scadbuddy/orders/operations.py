@@ -50,7 +50,7 @@ from scadbuddy.orders.bambuddy import download_sliced, quote_preview_job, start_
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
-from scadbuddy.orders.printing import print_check, print_item
+from scadbuddy.orders.printing import print_check, print_item, test_print_check
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import item_project
 from scadbuddy.orders.quote import (
@@ -391,18 +391,32 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         return dumped
 
     async def item_print_check(request: dict[str, Any]) -> dict[str, Any]:
-        """§5.4's refusals (``orders/printing.py`` ``print_check``), then the printer the
-        run would refuse, as a quote's check refuses it."""
+        """§5.4's refusals (``orders/printing.py`` ``print_check``; a test print's,
+        ``test_print_check``, when the request names its ``revision_id``), then the
+        printer the run would refuse, as a quote's check refuses it."""
         orders = components.get(ORDERS)
         body = PrintRunRequest.model_validate(request["request"])
-        checked = await print_check(
-            orders.store,
-            core.outputs,
-            core.store.blobs,
-            request["order_id"],
-            request["item_id"],
-            schema_of=lambda reference: reference_schema(core, reference),
-        )
+        revision_id = request.get("revision_id")
+        if revision_id is not None:
+            checked = await test_print_check(
+                orders.lifecycle,
+                core.outputs,
+                core.store.blobs,
+                request["order_id"],
+                request["item_id"],
+                revision_id,
+                schema_of=lambda reference: reference_schema(core, reference),
+                by=Actor.model_validate(request["by"]),
+            )
+        else:
+            checked = await print_check(
+                orders.store,
+                core.outputs,
+                core.store.blobs,
+                request["order_id"],
+                request["item_id"],
+                schema_of=lambda reference: reference_schema(core, reference),
+            )
         if body.printer is not None:
             settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
@@ -486,7 +500,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
     async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The item claimed, then its print started as the print route starts one
-        (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``)."""
+        (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
+        a test print of the request's ``revision_id`` when it names one."""
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
@@ -546,6 +561,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             sliced_sha256=checked["sliced_sha256"],
             sliced_blob_key=checked["sliced_blob_key"],
             project_id=project_id,
+            revision_id=request.get("revision_id"),
         )
         dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped
@@ -570,6 +586,13 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if attempt is None or attempt.order_item_id != item_id:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item"
+                )
+        revision_id = request.get("revision_id")
+        if revision_id is not None:
+            revision = await asyncio.to_thread(store.revision, revision_id)
+            if revision is None or revision.item_id != item_id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no revision {revision_id!r} of that item"
                 )
         return {}
 
@@ -613,6 +636,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     blob_key=key,
                     caption=request["caption"],
                     fulfilment_id=request.get("fulfilment_id"),
+                    revision_id=request.get("revision_id"),
                 )
             )
         except LifecycleError as error:
