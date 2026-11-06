@@ -397,6 +397,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return 0
 
     monkeypatch.setattr(main, "reap_orphan_quote_holds", slow_quote_holds)
+    # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
+    monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
     # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
     async def slow_sync(*args: object) -> SimpleNamespace:

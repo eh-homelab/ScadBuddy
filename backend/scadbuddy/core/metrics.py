@@ -127,12 +127,18 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "worker_cache_bytes",
         "render_data_bytes",
         "store_render_key_fallback",
+        "crud_client_seconds",
     },
     "print": _WORKER_COMMON
     | _LISTENING
     | _OPERATIONS
-    | {"activity_write_failures", "print_follows_running", "rack_watch_settle_failed"},
-    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS,
+    | {
+        "activity_write_failures",
+        "print_follows_running",
+        "rack_watch_settle_failed",
+        "crud_client_seconds",
+    },
+    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS | {"crud_client_seconds"},
 }
 
 
@@ -360,6 +366,17 @@ class Metrics:
             "Time from submit to a settled job, by kind and outcome: what the user waits for.",
             ["kind", "outcome"],
             buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+        self.crud_client_seconds = Histogram(
+            "scadbuddy_crud_client_seconds",
+            "Each attempt of a worker's call to the API's CRUD routes (#5298), by caller, "
+            "area (the first path segment after the caller) and outcome: ok, refused, "
+            "route_missing (an old API pod), unavailable (5xx), transport or reexchange "
+            "(a 401 or out-of-scope 403: the credential is stale, so the call retries with "
+            "a backoff until a new one is exchanged or its 30 s budget ends).",
+            ["caller", "area", "outcome"],
+            buckets=HTTP_BUCKETS,
             registry=r,
         )
         self.stage_duration = Histogram(

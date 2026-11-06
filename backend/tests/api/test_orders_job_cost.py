@@ -9,6 +9,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import orders as orders_api
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order, pin_created
 from tests.api.test_orders_lifecycle import fulfil, quote_and_accept
@@ -106,11 +107,8 @@ def accepted(client: TestClient, customer: str) -> tuple[str, str]:
     return order, item
 
 
-def test_the_list_shows_each_orders_margin_and_filters_by_it(
-    client: TestClient, pg_conninfo: str
-) -> None:
-    """§6.2, §7 (#5327): each row carries its order's margin, the figures of its costs
-    read, and ``margin_state`` narrows the list, a page at a time."""
+def margin_orders(client: TestClient, pg_conninfo: str) -> tuple[str, str, str, str]:
+    """Four orders, oldest first: a loss, an ok, a thin and an uncharged one."""
     loss, [item] = accepted_order(client)  # charged 1200 by the typed quote
     cost = {"order_item_id": item, "kind": "material", "amount_minor": 1500}
     assert client.post(f"/api/v1/orders/{loss}/cost-entries", json=cost).status_code == 201
@@ -121,6 +119,15 @@ def test_the_list_shows_each_orders_margin_and_filters_by_it(
     assert client.post(f"/api/v1/orders/{thin}/cost-entries", json=cost).status_code == 201
     uncharged = create_order(client, customer)["id"]
     pin_created(pg_conninfo, [loss, ok, thin, uncharged])
+    return loss, ok, thin, uncharged
+
+
+def test_the_list_shows_each_orders_margin_and_filters_by_it(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """§6.2, §7 (#5327): each row carries its order's margin, the figures of its costs
+    read, and ``margin_state`` narrows the list, a page at a time."""
+    loss, ok, thin, uncharged = margin_orders(client, pg_conninfo)
 
     rows = client.get("/api/v1/orders").json()["items"]
     by_id = {row["id"]: row for row in rows}
@@ -185,3 +192,54 @@ def test_the_unit_cost_history_warns_below_the_models_real_cost(
     none = client.get("/api/v1/orders/history/unit-cost", params={"slug": "nothing"}).json()
     assert (none["jobs"], none["unit_cost_minor"], none["warning"]) == (0, None, False)
     assert client.get("/api/v1/orders/history/unit-cost").status_code == 422
+
+
+def test_the_margin_filter_scans_a_bounded_number_of_orders(
+    client: TestClient, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5515: a ``margin_state`` request reads at most ``MAX_SCAN_PAGES`` store pages. At
+    the cap it returns what it found, maybe nothing, and the cursor it reached; following
+    the cursors finds every match once."""
+    loss, _, thin, _ = margin_orders(client, pg_conninfo)
+    monkeypatch.setattr(orders_api, "SCAN_PAGE_SIZE", 1)
+    monkeypatch.setattr(orders_api, "MAX_SCAN_PAGES", 1)
+    query = "/api/v1/orders?margin_state=loss&margin_state=thin"
+
+    first = client.get(query).json()  # reads the uncharged order only
+    assert first["items"] == []
+    assert first["next_cursor"] is not None
+
+    found: list[str] = []
+    page = first
+    for _ in range(10):
+        if page["next_cursor"] is None:
+            break
+        page = client.get(f"{query}&cursor={page['next_cursor']}").json()
+        found += [row["id"] for row in page["items"]]
+    assert page["next_cursor"] is None
+    assert found == [thin, loss]
+
+
+def test_a_short_page_at_the_scan_cap_carries_the_cursor_where_the_scan_stopped(
+    client: TestClient, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5519: the cap is reached after a match. The page is short but not empty, and its
+    ``next_cursor`` is the store's cursor at the last order read (``ok``), not at the last
+    match (``thin``). Following it finds the later match once."""
+    loss, ok, thin, uncharged = margin_orders(client, pg_conninfo)
+    newest = client.get("/api/v1/orders?limit=3").json()
+    assert [r["id"] for r in newest["items"]] == [uncharged, thin, ok]
+    at_ok = newest["next_cursor"]
+    at_thin = client.get("/api/v1/orders?limit=2").json()["next_cursor"]
+    assert at_ok != at_thin
+    monkeypatch.setattr(orders_api, "SCAN_PAGE_SIZE", 1)
+    monkeypatch.setattr(orders_api, "MAX_SCAN_PAGES", 3)
+    query = "/api/v1/orders?margin_state=loss&margin_state=thin"
+
+    first = client.get(query).json()  # reads uncharged, thin and ok
+    assert [r["id"] for r in first["items"]] == [thin]
+    assert first["next_cursor"] == at_ok
+
+    second = client.get(f"{query}&cursor={first['next_cursor']}").json()
+    assert [r["id"] for r in second["items"]] == [loss]
+    assert second["next_cursor"] is None

@@ -595,7 +595,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`_order_costs`) over `OrderStore.cost_rows`, which reads every table once for all the
   orders given (one order for the page, a page for the list); never a second formula. A
   margin is not stored, so the filter computes each store page's margins until the page is
-  full (`api/orders.py` `_order_page`). Frontend: the list's Margin column, its sort (the
+  full or `MAX_SCAN_PAGES` pages were read (`api/orders.py` `_order_page`, #5515): a page
+  can be short or empty while a cursor remains. Frontend: the list's Margin column, its sort (the
   rows loaded, `components/orders/marginSort.ts`) and the "Loss or thin" chip
   (`lib/ordersQuery.ts` `margin=loss_thin`); agent `order_list`'s `margin_state`.
   Job cost phase 3 (#5328, §6.3): `GET /orders/history/unit-cost?slug=` (`orders/history.py`

@@ -6,11 +6,16 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI
+from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, APIWebSocketRoute
+from starlette.routing import BaseRoute
 
 import scadbuddy.api
 from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, Service, SessionKind
@@ -26,6 +31,10 @@ from scadbuddy.auth.routes import (
     route_class,
     would_refuse,
 )
+from scadbuddy.core.settings import Settings
+from scadbuddy.crud.guard import crud_router
+from scadbuddy.main import create_app
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
 def _routes() -> list[Route]:
@@ -52,6 +61,10 @@ def test_every_route_has_a_class() -> None:
             "internal.workspace",
             "transfer",
             "exchange",
+            "crud.projects",
+            "crud.render",
+            "crud.print",
+            "flow.host",
         )
 
 
@@ -86,6 +99,62 @@ def test_the_internal_routes_are_internal() -> None:
     for route in ROUTES:
         if route.path.startswith("/internal/"):
             assert route_class(route) != "api", endpoint_name(route)
+
+
+def _mounted(routes: Sequence[BaseRoute]) -> list[Route]:
+    """Every route of the app, through the nested routers FastAPI keeps (>= 0.140)."""
+    found: list[Route] = []
+    for route in routes:
+        if isinstance(route, APIRoute | APIWebSocketRoute):
+            found.append(route)
+        elif (inner := getattr(route, "routes", None)) is not None:
+            found += _mounted(inner)
+        elif (router := getattr(route, "original_router", None)) is not None:
+            found += _mounted(router.routes)
+    return found
+
+
+def _depends_on_guard(route: Route, caller: str) -> bool:
+    return any(
+        d.call is not None and d.call.__name__ == f"require_crud_{caller}"
+        for d in _all_dependencies(route.dependant)
+    )
+
+
+def _all_dependencies(dependant: Dependant) -> list[Dependant]:
+    return [d for sub in dependant.dependencies for d in (sub, *_all_dependencies(sub))]
+
+
+def test_every_crud_route_has_its_callers_class_and_guard() -> None:
+    app = create_app(
+        Settings(
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        )
+    )
+    for route in _mounted(app.routes):
+        match = re.match(r"/api/v1/internal/crud/([a-z]+)/", route.path)
+        if match:
+            caller = match.group(1)
+            assert route_class(route) == f"crud.{caller}", route.path
+            assert _depends_on_guard(route, caller), route.path
+
+
+def test_a_crud_router_route_is_classed_and_guarded() -> None:
+    """The check above is empty until the first CRUD route lands; this one is not."""
+    router = crud_router("render")
+
+    @router.get("/x")
+    def x() -> None: ...
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    routes = [r for r in _mounted(app.routes) if r.path.endswith("/crud/render/x")]
+    assert len(routes) == 1
+    assert route_class(routes[0]) == "crud.render"
+    assert _depends_on_guard(routes[0], "render")
+    assert not _depends_on_guard(routes[0], "print")
 
 
 AT = datetime(2026, 11, 1, tzinfo=UTC)
@@ -129,6 +198,14 @@ def _person(kind: SessionKind = "login") -> Person:
         ("person", Service("agent", frozenset({"api"})), True, "not_a_person"),
         ("person", ANONYMOUS, False, "signed_out"),
         ("internal.outputs", ANONYMOUS, False, "no_credential"),
+        ("crud.render", ANONYMOUS, False, "no_credential"),
+        ("crud.render", _person(), True, "no_credential"),
+        ("crud.render", Service("render", frozenset({"crud.render"})), False, None),
+        ("crud.render", Service("print", frozenset({"crud.print"})), False, "wrong_caller"),
+        ("crud.render", Service("print", frozenset({"crud.render"})), False, "wrong_caller"),
+        ("crud.projects", Service("projects", frozenset({"api"})), False, "out_of_scope"),
+        ("flow.host", Service("projects", frozenset({"flow.host"})), False, None),
+        ("flow.host", Service("projects", frozenset({"api"})), False, "out_of_scope"),
         ("internal.outputs", _person(), True, "no_credential"),
         ("internal.outputs", Service("print", frozenset({"internal.outputs"})), False, None),
         (

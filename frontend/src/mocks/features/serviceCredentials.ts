@@ -10,7 +10,12 @@ function credential(caller: ServiceCaller): ServiceCredentialView {
   return {
     id: counter.toString(16).padStart(16, '0'),
     caller,
-    scopes: caller === 'print' ? ['internal.library', 'internal.outputs'] : ['api'],
+    scopes:
+      caller === 'print'
+        ? ['crud.print', 'internal.library', 'internal.outputs']
+        : caller === 'projects'
+          ? ['api', 'crud.projects']
+          : ['api'],
     created_at: '2026-11-01T12:00:00Z',
     expires_at: '2026-12-01T12:00:00Z',
     revoked_at: null,

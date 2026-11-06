@@ -521,6 +521,19 @@ credential's `proof`, `pod_name` and `pod_uid` (the Settings page does not show 
 (`PUT`/`DELETE /api/v1/auth/service-callers/{caller}/suspension`), which refuses its
 exchanges and revokes what it holds until it is resumed.
 
+**The CRUD port (#5298).** The API process also listens on `SCADBUDDY_CRUD_PORT`
+(default `8082`), started by the app itself, so the image's one `uvicorn` command serves
+both ports. That port answers only the workers' CRUD routes
+(`/api/v1/internal/crud/<caller>/…`, each refused without that caller's service
+credential in every `SCADBUDDY_AUTH_MODE`), `POST /api/v1/auth/service-token` and
+`/healthz`; every other path is a plain `404` there. The exchange stays on `8080` too. A
+pod admitted only to `8082` (the render worker's) reaches nothing else of the API. A
+second dev API on one host must set `SCADBUDDY_CRUD_PORT` (`0` picks a free port).
+`GET /api/v1/internal/crud/<caller>/areas` lists the CRUD areas the pod serves to that
+caller. A write that is not idempotent by itself takes an `Idempotency-Key`; its reply is
+kept 24 h in `crud_requests`, written in the write's own transaction, and a retry with the
+same key gets it back (another body under the same key is `422`).
+
 **Each caller's own database role (#5210).** This is today's state, not the target
 (see the next paragraph). Like the render worker's
 `scadbuddy_render` (below), each caller should connect as a role of its own, so it holds
@@ -836,7 +849,7 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Each of those route groups takes only the
   service credential whose scope names it (#4975: the print worker's covers
-  `internal.outputs` and `internal.library`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
+  `internal.outputs`, `internal.library` and `crud.print`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
   and `observe` they still serve anyone who reaches the API, so until `enforce` they are
   internal by path only. The agent's workspace blob routes
   (`/api/v1/internal/workspace-blobs/…`, #4789) are the agent's credential's

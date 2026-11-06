@@ -291,6 +291,12 @@ A new page, Orders → Profit, `GET /orders/reports/profit?from=&to=&group=model
 - How the list and the report compute margins at scale (one SQL query, a view, or a
   per-order cache invalidated by the order's events), provided the figures match the
   per-order read exactly.
+  As built for the list (#5327, #5515): `GET /orders` computes each page's margins in
+  Python, with the same computation as the per-order read (`costs.py` `order_margins`).
+  The `margin_state` filter reads store pages of 100 and computes their margins. It
+  stops at 10 pages (`api/orders.py` `MAX_SCAN_PAGES`) and returns the rows found and
+  the cursor reached, so a page can be short or empty while a cursor remains. The
+  report is still open.
 - The weighting of a multi-filament estimate when the sliced split is unknown.
 - The report's chart, if any.
 

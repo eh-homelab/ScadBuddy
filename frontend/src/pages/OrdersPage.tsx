@@ -234,7 +234,9 @@ export function OrdersPage() {
             rowKey={(o) => o.id}
             rowTestId={(o) => `order-row-${o.id}`}
             rowClassName={(o) => marginTint(o.margin_state)}
-            empty="No orders match."
+            // #5515: a margin filter reads a bounded number of orders a request, so a page
+            // can be empty while older orders are still to search.
+            empty={cursor ? 'No matches yet. Load more to search older orders.' : 'No orders match.'}
           />
         )}
         {moreFailed === key && (

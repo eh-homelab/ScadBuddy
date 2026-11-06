@@ -87,6 +87,8 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.crud import idempotency
+from scadbuddy.crud import listener as crud_listener
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -1102,10 +1104,16 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         logger.exception("could not issue the service credentials")
 
 
+def _prune_crud_requests(state: AppState) -> None:
+    with state.settings_store.pool.connection() as conn:
+        idempotency.prune(conn)
+
+
 async def _sweep_auth_sessions_logged(state: AppState) -> None:
     """#4975: the signed-in sessions no request can use again, and (in the activity, so
-    the workflow's history is unchanged) the service credentials' rotation (phase 4) and
-    the spent delegation codes and long-dead access tokens (phase 6)."""
+    the workflow's history is unchanged) the service credentials' rotation (phase 4), the
+    spent delegation codes and long-dead access tokens (phase 6), and the CRUD routes'
+    idempotency replies past their 24 h (#5298, plan D5)."""
     auth = state.components.get(AUTH)
     try:
         deleted = await asyncio.to_thread(auth.sessions.delete_expired)
@@ -1122,6 +1130,11 @@ async def _sweep_auth_sessions_logged(state: AppState) -> None:
         await asyncio.to_thread(auth.tokens.delete_expired)
     except Exception:
         logger.exception("could not delete the spent delegation codes or old access tokens")
+        raise
+    try:
+        await asyncio.to_thread(_prune_crud_requests, state)
+    except Exception:
+        logger.exception("could not prune the CRUD routes' idempotency ledger")
         raise
     if deleted:
         logger.info("deleted expired sessions", extra={"sessions": deleted})
@@ -1907,6 +1920,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # backfill's Schedule (#1054), triggered once the library worker connects.
         if state.previews is not None:
             state.previews.start()
+        # #5298 (plan D3): the workers' CRUD port, once the app can answer.
+        await crud_listener.start(app, state.settings.crud_port)
         logger.info(
             "scadbuddy started",
             extra={
@@ -1920,6 +1935,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         yield
     finally:
+        # First: no worker's CRUD call starts on stores closing below.
+        await crud_listener.stop(app)  # never raises: the rest of the shutdown runs
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()

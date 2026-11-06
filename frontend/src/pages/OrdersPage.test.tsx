@@ -8,6 +8,7 @@ import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import type { OrderRow } from '../api/types'
 import { sortByMargin } from '../components/orders/marginSort'
+import { DEFAULT_ORDERS_QUERY } from '../lib/ordersQuery'
 import { OrdersPage } from './OrdersPage'
 
 function Location() {
@@ -208,6 +209,60 @@ describe('OrdersPage margin (#5327)', () => {
     const margin = within(row).getByTestId('order-margin')
     expect(margin).toHaveTextContent(`${costs.margin_percent}%`)
     expect(margin.getAttribute('title')).toMatch(/^Margin /)
+  })
+
+  it('cycles the Margin header through ascending, descending and none, with aria-sort (#5515)', async () => {
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 1_000_000 })
+    const loaded = (await api.orders(DEFAULT_ORDERS_QUERY, { limit: 50 })).items
+    const { user } = renderPage(<OrdersPage />, { route: '/orders' })
+    const table = await screen.findByRole('table', { name: 'Orders' })
+    const header = within(table).getByRole('columnheader', { name: 'Margin' })
+    const order = () => within(table).getAllByRole('row').slice(1).map((r) => r.getAttribute('data-testid'))
+    const ids = (rows: OrderRow[]) => rows.map((r) => `order-row-${r.id}`)
+    const unsorted = order()
+    expect(unsorted).toEqual(ids(loaded))
+    expect(header).toHaveAttribute('aria-sort', 'none')
+
+    await user.click(within(header).getByRole('button', { name: 'Margin' }))
+    expect(header).toHaveAttribute('aria-sort', 'ascending')
+    expect(order()).toEqual(ids(sortByMargin(loaded, 'ascending')))
+    expect(order()[0]).toBe(`order-row-${ORDER_ACCEPTED}`)
+    expect(order().at(-1)).toBe(`order-row-${ORDER_DRAFT}`)
+
+    await user.click(within(header).getByRole('button', { name: 'Margin' }))
+    expect(header).toHaveAttribute('aria-sort', 'descending')
+    expect(order()).toEqual(ids(sortByMargin(loaded, 'descending')))
+    expect(order().at(-1)).toBe(`order-row-${ORDER_DRAFT}`)
+
+    await user.click(within(header).getByRole('button', { name: 'Margin' }))
+    expect(header).toHaveAttribute('aria-sort', 'none')
+    expect(order()).toEqual(unsorted)
+  })
+
+  it('keeps Load more on an empty page that still has a cursor (#5515)', async () => {
+    const [row] = (await api.orders(DEFAULT_ORDERS_QUERY, { limit: 1 })).items
+    if (!row) throw new Error('the mocks hold no order')
+    const list = vi.spyOn(api, 'orders')
+    // Two empty pages that each end on a cursor, then a page with the match.
+    const pages: Record<string, { items: OrderRow[]; next_cursor: string | null }> = {
+      first: { items: [], next_cursor: 'c1' },
+      c1: { items: [], next_cursor: 'c2' },
+      c2: { items: [row], next_cursor: null },
+    }
+    list.mockImplementation(async (_query, options) => pages[options?.cursor ?? 'first'] ?? { items: [], next_cursor: null })
+    const { user } = renderPage(<OrdersPage />, { route: '/orders?margin=loss_thin' })
+    expect(await screen.findByText('No matches yet. Load more to search older orders.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(list.mock.calls.some(([, options]) => options?.cursor === 'c1')).toBe(true))
+    expect(await screen.findByRole('button', { name: 'Load more' })).toBeEnabled()
+    expect(screen.getByText('No matches yet. Load more to search older orders.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByTestId(`order-row-${row.id}`)).toBeInTheDocument()
+    expect(list.mock.calls.some(([, options]) => options?.cursor === 'c2')).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    list.mockRestore()
   })
 
   it('sorts by margin, worst first, with no margin last', () => {

@@ -3,7 +3,8 @@ import { api, type ApiError } from '../../../api/client'
 import { DEFAULT_ORDERS_QUERY } from '../../../lib/ordersQuery'
 import { MAZE_SLUG } from '../../fixtures'
 import { resetMockState } from '../../handlers'
-import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS } from './state'
+import { MAX_SCAN_PAGES, SCAN_PAGE_SIZE } from './orders'
+import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, state } from './state'
 
 // The mock answers the lifecycle's refusals as the backend does (orders/lifecycle.py,
 // api/orders.py): 409 problems typed `orders/<slug>` naming the ids in the way, so the
@@ -30,6 +31,48 @@ describe('orders mock (#4249)', () => {
     const response = await fetch('/api/v1/orders?customer=x')
     expect(response.status).toBe(400)
     expect(((await response.json()) as { type: string }).type).toMatch(/unknown-parameter$/)
+  })
+
+  it('caps the margin scan as the backend does: an empty page can still have a cursor (#5519)', async () => {
+    const states = 'margin_state=ok&margin_state=thin&margin_state=loss&margin_state=unknown'
+    const before = (await (await fetch(`/api/v1/orders?${states}`)).json()) as { items: { id: string }[] }
+    expect(before.items.length).toBeGreaterThan(0)
+    // A full scan of newer orders with no items, so no margin state, ahead of the seeds.
+    const template = state.orders.find((o) => o.id === ORDER_DRAFT)
+    if (!template) throw new Error('no seed order')
+    for (let n = 0; n < MAX_SCAN_PAGES * SCAN_PAGE_SIZE; n++) {
+      const stamp = new Date(Date.UTC(2026, 10, 1, 0, 0, n)).toISOString()
+      state.orders.push({ ...template, id: `filler-${String(n).padStart(4, '0')}`, number: `ORD-F-${n}`, created_at: stamp })
+    }
+    const first = (await (await fetch(`/api/v1/orders?${states}`)).json()) as { items: { id: string }[]; next_cursor: string | null }
+    expect(first.items).toEqual([])
+    expect(first.next_cursor).not.toBeNull()
+    const next = (await (await fetch(`/api/v1/orders?${states}&cursor=${first.next_cursor}`)).json()) as { items: { id: string }[]; next_cursor: string | null }
+    expect(next.items.map((o) => o.id)).toEqual(before.items.map((o) => o.id))
+    expect(next.next_cursor).toBeNull()
+  })
+
+  it('at the cap a short page carries the cursor of the last row read, not of its last match (#5520)', async () => {
+    const states = 'margin_state=ok&margin_state=thin&margin_state=loss&margin_state=unknown'
+    const before = (await (await fetch(`/api/v1/orders?${states}`)).json()) as { items: { id: string }[] }
+    expect(before.items.length).toBeGreaterThan(1)
+    const template = state.orders.find((o) => o.id === ORDER_DRAFT)
+    if (!template) throw new Error('no seed order')
+    for (let n = 0; n < MAX_SCAN_PAGES * SCAN_PAGE_SIZE; n++) {
+      const stamp = new Date(Date.UTC(2026, 10, 1, 0, 0, n)).toISOString()
+      state.orders.push({ ...template, id: `filler-${String(n).padStart(4, '0')}`, number: `ORD-F-${n}`, created_at: stamp })
+    }
+    // One match, newer than every filler: the scan finds it, then reads fillers to the cap.
+    const match = state.orders.find((o) => o.id === before.items[0]?.id)
+    if (!match) throw new Error('no matching order')
+    match.created_at = new Date(Date.UTC(2026, 11, 1)).toISOString()
+    const first = (await (await fetch(`/api/v1/orders?${states}`)).json()) as { items: { id: string }[]; next_cursor: string | null }
+    expect(first.items.map((o) => o.id)).toEqual([match.id])
+    expect(first.next_cursor).not.toBeNull()
+    const next = (await (await fetch(`/api/v1/orders?${states}&cursor=${first.next_cursor}`)).json()) as { items: { id: string }[]; next_cursor: string | null }
+    // The cursor is past the fillers read, so the match is not repeated and the rest follow.
+    expect(next.items.map((o) => o.id)).toEqual(before.items.slice(1).map((o) => o.id))
+    expect(next.next_cursor).toBeNull()
   })
 
   it('accepts only an order whose open items are quoted, naming the rest', async () => {
