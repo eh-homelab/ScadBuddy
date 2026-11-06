@@ -527,7 +527,8 @@ both ports. That port answers only the workers' CRUD routes
 (`/api/v1/internal/crud/<caller>/…`, each refused without that caller's service
 credential in every `SCADBUDDY_AUTH_MODE`), `POST /api/v1/auth/service-token` and
 `/healthz`; every other path is a plain `404` there. The exchange stays on `8080` too. A
-pod admitted only to `8082` (the render worker's) reaches nothing else of the API.
+pod admitted only to `8082` (the render worker's) reaches nothing else of the API. A
+second dev API on one host must set `SCADBUDDY_CRUD_PORT` (`0` picks a free port).
 `GET /api/v1/internal/crud/<caller>/areas` lists the CRUD areas the pod serves to that
 caller. A write that is not idempotent by itself takes an `Idempotency-Key`; its reply is
 kept 24 h in `crud_requests`, written in the write's own transaction, and a retry with the

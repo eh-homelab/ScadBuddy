@@ -7,7 +7,7 @@ CREATE TABLE crud_requests (
     key         text NOT NULL,
     route       text NOT NULL,
     body_sha256 text NOT NULL,
-    status      int NOT NULL,
+    status      int NOT NULL CHECK (status BETWEEN 100 AND 599),
     body        jsonb NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (caller, key)

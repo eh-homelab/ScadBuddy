@@ -1936,7 +1936,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         # First: no worker's CRUD call starts on stores closing below.
-        await crud_listener.stop(app)
+        await crud_listener.stop(app)  # never raises: the rest of the shutdown runs
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent, prune, record
+from scadbuddy.crud.idempotency import Replay, idempotent, idempotent_write, prune, record
 from scadbuddy.main import _prune_crud_requests
 from tests.conftest import PgPool
 
@@ -26,17 +27,16 @@ def pool(pg_pool: PgPool) -> PgPool:
 
 
 def _write(pool: PgPool, key: str, body: dict[str, Any], *, fail: bool = False) -> Replay:
-    """A route's write under ``key``: the ledger, then the write, then its reply."""
-    with pool.connection() as conn, conn.transaction():
-        stored = idempotent(conn, "render", key, ROUTE, body)
-        if stored is not None:
-            return stored
-        conn.execute("INSERT INTO writes (n) VALUES (%s)", (body["n"],))
-        reply = Replay(201, {"wrote": body["n"], "count": _count(conn)})
-        if fail:
-            raise RuntimeError("the write failed after its ledger row")
-        record(conn, "render", key, reply)
-        return reply
+    """A route's write under ``key``, through `idempotent_write`."""
+    with pool.connection() as conn:
+
+        def write() -> Replay:
+            conn.execute("INSERT INTO writes (n) VALUES (%s)", (body["n"],))
+            if fail:
+                raise RuntimeError("the write failed")
+            return Replay(201, {"wrote": body["n"], "count": _count(conn)})
+
+        return idempotent_write(conn, "render", key, ROUTE, body, write)
 
 
 def _count(conn: Any, table: str = "writes") -> int:
@@ -105,3 +105,61 @@ def test_the_auth_sweep_prunes_the_ledger(pool: PgPool) -> None:
     _prune_crud_requests(state)  # type: ignore[arg-type]
     with pool.connection() as conn:
         assert _count(conn, "crud_requests") == 0
+
+
+def test_a_write_that_never_records_leaves_nothing_to_replay(pool: PgPool) -> None:
+    """Only `record` inserts a ledger row, and only with the reply: a route that wrote
+    without it leaves no row, so a retry writes again rather than replaying no reply."""
+    with pool.connection() as conn, conn.transaction():
+        assert idempotent(conn, "render", "k1", ROUTE, {"n": 7}) is None
+    with pool.connection() as conn:
+        assert _count(conn, "crud_requests") == 0
+    assert _write(pool, "k1", {"n": 7}).status == 201
+
+
+def test_a_reply_outside_http_statuses_is_refused(pool: PgPool) -> None:
+    with pool.connection() as conn, conn.transaction(), pytest.raises(Exception, match="check"):
+        record(conn, "render", "k1", ROUTE, {"n": 7}, Replay(0, None))
+
+
+def _second(pool: PgPool, key: str, body: dict[str, Any]) -> tuple[threading.Thread, list[Any]]:
+    """`_write` in a thread; the list gets its reply (or error)."""
+    out: list[Any] = []
+
+    def run() -> None:
+        try:
+            out.append(_write(pool, key, body))
+        except Exception as error:
+            out.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, out
+
+
+@pytest.mark.parametrize("commit", [True, False])
+def test_a_second_request_with_the_key_waits_for_the_first(pool: PgPool, commit: bool) -> None:
+    """B blocks on A's lock; it replays A's reply once A commits, and writes once A rolls
+    back."""
+    body = {"n": 7}
+    with pool.connection() as a:
+        a.execute("BEGIN")
+        assert idempotent(a, "render", "k1", ROUTE, body) is None
+        a.execute("INSERT INTO writes (n) VALUES (7)")
+        thread, out = _second(pool, "k1", body)
+        thread.join(timeout=1.0)
+        assert thread.is_alive(), "B did not wait for A's transaction"
+        if commit:
+            record(a, "render", "k1", ROUTE, body, Replay(201, {"by": "a"}))
+            a.execute("COMMIT")
+        else:
+            a.execute("ROLLBACK")
+        thread.join(timeout=10)
+    assert not thread.is_alive()
+    if commit:
+        assert out == [Replay(201, {"by": "a"})]
+    else:
+        assert out == [Replay(201, {"wrote": 7, "count": 1})]
+    with pool.connection() as conn:
+        assert _count(conn) == 1
+        assert _count(conn, "crud_requests") == 1

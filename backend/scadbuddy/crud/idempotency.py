@@ -1,19 +1,21 @@
 """The idempotency ledger of the CRUD routes' non-natural writes (#5298, plan D5).
 
 A write whose retry after a lost answer would change the state or the answer takes an
-``Idempotency-Key``. Inside the write's own transaction the route calls `idempotent`
-first: it answers the reply stored under that key, refuses the key with another route or
-body (422), or answers None, and the route writes and then calls `record`. The ledger row
-commits with the write or not at all, so a rolled-back write leaves no reply to replay.
-Two requests with one key are serialised by a transaction-scoped advisory lock on the
-key, so the second waits and replays the first. Rows are kept `RETENTION` (`prune`, in
-the auth sweep).
+``Idempotency-Key``. A route runs it through `idempotent_write`, which opens the write's
+transaction and, inside it, answers the reply stored under that key, refuses the key with
+another route or body (422), or runs the write and records its reply. The ledger row is
+only ever inserted whole, with the reply, and commits with the write or not at all: a
+rolled-back write leaves no reply to replay. Two requests with one key are serialised by a
+transaction-scoped advisory lock on the key, so the second waits and replays the first.
+Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record` are the
+two halves, for a route whose write cannot be one callable.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated, Any, Final
@@ -53,7 +55,8 @@ def idempotent(
     conn: Connection[DictRow], caller: CrudCaller, key: str, route: str, body: Any
 ) -> Replay | None:
     """In the write's transaction, before it: the stored reply of ``key``, or None when
-    the key is new (then write, and `record` the reply). ``route`` names the route, as
+    the key is new (then write, and `record` the reply in the same transaction). It holds
+    the key's lock to the transaction's end. ``route`` names the route, as
     ``"POST /blob-index/{key}"``; ``body`` is the request's JSON-able body."""
     conn.execute(
         "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
@@ -64,11 +67,6 @@ def idempotent(
         (caller, key),
     ).fetchone()
     if row is None:
-        conn.execute(
-            "INSERT INTO crud_requests (caller, key, route, body_sha256, status, body)"
-            " VALUES (%s, %s, %s, %s, 0, 'null')",
-            (caller, key, route, _digest(body)),
-        )
         return None
     if row["route"] != route or row["body_sha256"] != _digest(body):
         raise ApiError(
@@ -79,12 +77,40 @@ def idempotent(
     return Replay(row["status"], row["body"])
 
 
-def record(conn: Connection[DictRow], caller: CrudCaller, key: str, reply: Replay) -> None:
+def record(
+    conn: Connection[DictRow],
+    caller: CrudCaller,
+    key: str,
+    route: str,
+    body: Any,
+    reply: Replay,
+) -> None:
     """After the write, in its transaction: the reply a retry of ``key`` gets."""
     conn.execute(
-        "UPDATE crud_requests SET status = %s, body = %s WHERE caller = %s AND key = %s",
-        (reply.status, Jsonb(reply.body), caller, key),
+        "INSERT INTO crud_requests (caller, key, route, body_sha256, status, body)"
+        " VALUES (%s, %s, %s, %s, %s, %s)",
+        (caller, key, route, _digest(body), reply.status, Jsonb(reply.body)),
     )
+
+
+def idempotent_write(
+    conn: Connection[DictRow],
+    caller: CrudCaller,
+    key: str,
+    route: str,
+    body: Any,
+    write: Callable[[], Replay],
+) -> Replay:
+    """``write`` once per ``key``, in one transaction with its ledger row: the stored reply
+    of a key seen before, else ``write``'s, recorded. A ``write`` that raises records
+    nothing, and nothing it wrote commits."""
+    with conn.transaction():
+        stored = idempotent(conn, caller, key, route, body)
+        if stored is not None:
+            return stored
+        reply = write()
+        record(conn, caller, key, route, body, reply)
+        return reply
 
 
 def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:

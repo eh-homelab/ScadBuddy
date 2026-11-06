@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import posixpath
 from collections.abc import Iterator
 from typing import Final
@@ -23,12 +24,18 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from scadbuddy.crud.guard import PREFIX
 
+logger = logging.getLogger(__name__)
+
 CRUD_PATH_PREFIX: Final = f"/api/v1{PREFIX}/"
 EXACT_PATHS: Final = frozenset({"/api/v1/auth/service-token", "/healthz"})
 #: Where the lifespan keeps the running listener, on ``app.state``.
 STATE_ATTR: Final = "crud_listener"
 #: The interface it binds, as the image's main port.
 HOST: Final = "0.0.0.0"  # the pod's port; the NetworkPolicy admits callers
+#: How long `stop` lets in-flight CRUD requests finish. The API pod sets no
+#: terminationGracePeriodSeconds (clusters `applications/scadbuddy/scadbuddy.yaml`), so
+#: Kubernetes' default 30 s applies; 20 s leaves the rest of the lifespan's shutdown room.
+GRACEFUL_SHUTDOWN: Final = 20
 
 
 def serves(path: str) -> bool:
@@ -48,9 +55,6 @@ class CrudOnly:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and serves(scope["path"]):
             await self.app(scope, receive, send)
-            return
-        if scope["type"] == "websocket":
-            await send({"type": "websocket.close", "code": 1008})
             return
         await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
 
@@ -79,7 +83,9 @@ async def start(app: FastAPI, port: int) -> None:
         # As the image's main port (Dockerfile CMD): `core/proxies.py` decides who is
         # believed about a forwarded client, never uvicorn.
         proxy_headers=False,
+        # No CRUD route is a WebSocket; uvicorn answers an upgrade without the app.
         ws="none",
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN,
         # The app's logging stays as `configure_logging` set it.
         log_config=None,
     )
@@ -97,18 +103,34 @@ async def start(app: FastAPI, port: int) -> None:
             task.result()
             raise CrudListenerError("the CRUD listener stopped before it listened")
         await asyncio.sleep(0.01)
+
+    def ended(done: asyncio.Task[None]) -> None:
+        if getattr(app.state, STATE_ATTR, None) is None:
+            return  # `stop` asked; it reports what the task raised
+        error = None if done.cancelled() else done.exception()
+        logger.error(
+            "the CRUD listener on %s stopped while the API runs",
+            port,
+            exc_info=error,
+        )
+
+    task.add_done_callback(ended)
     setattr(app.state, STATE_ATTR, (server, task))
 
 
 async def stop(app: FastAPI) -> None:
-    """Stop the listener `start` started, if any, waiting for its requests to end."""
+    """Stop the listener `start` started, if any, waiting for its requests to end. Never
+    raises: a listener that failed is logged, so the rest of the shutdown still runs."""
     running: tuple[uvicorn.Server, asyncio.Task[None]] | None = getattr(app.state, STATE_ATTR, None)
     if running is None:
         return
     server, task = running
     setattr(app.state, STATE_ATTR, None)
     server.should_exit = True
-    await task
+    try:
+        await task
+    except Exception:
+        logger.exception("the CRUD listener failed")
 
 
 def crud_listener_port(app: FastAPI) -> int | None:

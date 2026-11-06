@@ -3,6 +3,8 @@ the CRUD routes, the service-token exchange and ``/healthz``."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import socket
 from types import SimpleNamespace
 
@@ -91,6 +93,35 @@ async def test_a_taken_port_fails_the_start() -> None:
         with pytest.raises(CrudListenerError):
             await listener.start(app, taken.getsockname()[1])
         assert crud_listener_port(app) is None
+
+
+async def test_a_listener_that_ends_on_its_own_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    app = FastAPI()
+    await listener.start(app, 0)
+    server, task = getattr(app.state, listener.STATE_ATTR)
+    with caplog.at_level(logging.ERROR, logger=listener.__name__):
+        server.should_exit = True  # as if uvicorn's loop ended by itself
+        await task
+        await asyncio.sleep(0)
+    assert "stopped while the API runs" in caplog.text
+    await listener.stop(app)
+
+
+async def test_stop_logs_a_failed_listener_and_returns(caplog: pytest.LogCaptureFixture) -> None:
+    app = FastAPI()
+    await listener.start(app, 0)
+    server, task = getattr(app.state, listener.STATE_ATTR)
+    server.should_exit = True
+    await task
+
+    async def failed() -> None:
+        raise RuntimeError("the listener crashed")
+
+    setattr(app.state, listener.STATE_ATTR, (server, asyncio.create_task(failed())))
+    with caplog.at_level(logging.ERROR, logger=listener.__name__):
+        await listener.stop(app)
+    assert "the listener crashed" in caplog.text
+    assert crud_listener_port(app) is None
 
 
 @pytest.mark.requires_postgres
