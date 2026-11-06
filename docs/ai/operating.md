@@ -1800,7 +1800,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     after percent-decoding, so `..`, an absolute path and a NUL never pass.
   - The body is read as a stream and stopped at `workspace_file_max_bytes` (`413`); a
     `Content-Length` over it is refused unread. The quota and the file count apply as to
-    any write (`413`). An empty body is `400`. A form body (`multipart/form-data` or
+    any write (`413`). An empty body is `400`; a `Content-Length: 0` is refused before the
+    caps or the body are read. A `Content-Length` that is not a byte count is `400`. A
+    form body (`multipart/form-data` or
     `application/x-www-form-urlencoded`) or a `Content-Encoding` is `415`.
   - The stored type is ScadBuddy's own guess (the image signature, then the extension,
     then text or not), never the client's `Content-Type`. When the name's extension, the

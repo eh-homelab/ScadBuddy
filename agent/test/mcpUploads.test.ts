@@ -21,8 +21,10 @@ type Written = { ws: WorkspaceRef; path: string; bytes: Uint8Array; options: Wri
 
 function fakeWorkspace(fileMaxBytes = 1000) {
   const written: Written[] = []
+  const reads = { limits: 0 }
   const workspace = {
     async limits() {
+      reads.limits += 1
       return { fileMaxBytes, workspaceMaxBytes: 10 * fileMaxBytes }
     },
     async write(ws: WorkspaceRef, path: string, bytes: Uint8Array, options: WriteOptions = {}): Promise<WorkspaceFileInfo> {
@@ -34,11 +36,11 @@ function fakeWorkspace(fileMaxBytes = 1000) {
       return { path, mediaType: options.mediaType ?? 'application/octet-stream', size: bytes.byteLength, sha256, source: options.source ?? null, createdAt: new Date(0), updatedAt: new Date(0) }
     },
   } as unknown as SessionFiles
-  return { workspace, written }
+  return { workspace, written, reads }
 }
 
 async function setup(options: { tier?: 'read' | 'write' | 'outward'; mode?: 'bearer' | 'disabled'; fileMaxBytes?: number } = {}) {
-  const { workspace, written } = fakeWorkspace(options.fileMaxBytes)
+  const { workspace, written, reads } = fakeWorkspace(options.fileMaxBytes)
   const audit = new MemoryAudit()
   const t = testApp({
     services: services({ workspace }),
@@ -52,7 +54,7 @@ async function setup(options: { tier?: 'read' | 'write' | 'outward'; mode?: 'bea
     appFetch(t.app, { address: INGRESS, headers: { ...headers, ...extra } })(`${UPLOAD_URL}/${path}`, { method, body, duplex: 'half' } as RequestInit)
   /** The route's audit rows (tool calls over /mcp would add their own). */
   const uploads = () => audit.entries.filter((e) => e.action === 'workspace_upload')
-  return { ...t, written, put, record, uploads }
+  return { ...t, written, reads, put, record, uploads }
 }
 
 describe('PUT /mcp/workspace/<path>', () => {
@@ -189,6 +191,35 @@ describe('PUT /mcp/workspace/<path>', () => {
     it('refuses an empty body', async () => {
       const { put } = await setup()
       expect((await put('a.stl', new Uint8Array())).status).toBe(400)
+    })
+
+    it('refuses Content-Length: 0 before it reads the caps or the body', async () => {
+      const { put, reads, uploads } = await setup()
+      const res = await put('a.stl', new Uint8Array(), { 'content-length': '0' })
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toContain('empty')
+      expect(reads.limits).toBe(0)
+      expect(uploads()).toEqual([expect.objectContaining({ outcome: 'refused', inputSummary: '"a.stl": empty' })])
+    })
+
+    it('refuses a chunked empty body after the read', async () => {
+      const { put, reads, written } = await setup()
+      const empty = new ReadableStream<Uint8Array>({ start: (controller) => controller.close() })
+      const res = await put('a.stl', empty)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toContain('empty')
+      expect(reads.limits).toBe(1)
+      expect(written).toHaveLength(0)
+    })
+
+    it('answers 400 naming the header for a Content-Length that is not a byte count, and audits it', async () => {
+      const { put, reads, written, uploads } = await setup()
+      const res = await put('a.stl', STL, { 'content-length': '12abc' })
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toContain('Content-Length')
+      expect(reads.limits).toBe(0)
+      expect(written).toHaveLength(0)
+      expect(uploads()).toEqual([expect.objectContaining({ outcome: 'refused', inputSummary: '"a.stl": content_length' })])
     })
   })
 
