@@ -550,3 +550,17 @@ def test_display_names_are_read_at_head_and_cached_until_it_moves(
     history.set_details("swap", display_name="Renamed")
     assert definitions._display_names({"swap"}) == {"swap": "Renamed"}
     assert reads == ["swap"]
+
+
+def test_the_umask_is_read_without_setting_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Linux the umask comes from /proc/self/status, so no thread ever sees a umask
+    of 0 while it is read (#5397)."""
+    from scadbuddy.flows import repository
+
+    def refuse(_mask: int) -> int:
+        raise AssertionError("os.umask was called")
+
+    expected = os.umask(0o022)
+    os.umask(expected)
+    monkeypatch.setattr("scadbuddy.flows.repository.os.umask", refuse)
+    assert repository._umask() == expected
