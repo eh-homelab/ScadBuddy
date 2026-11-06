@@ -73,12 +73,15 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mosquitto
           if [ -f /etc/apparmor.d/mosquitto ]; then
             sudo ln -sf /etc/apparmor.d/mosquitto /etc/apparmor.d/disable/mosquitto
-            if sudo grep '^mosquitto ' /sys/kernel/security/apparmor/profiles; then
-              sudo apparmor_parser -R /etc/apparmor.d/mosquitto
-              echo "Unloaded the mosquitto AppArmor profile."
-            else
-              echo "The mosquitto AppArmor profile is not loaded."
-            fi
+            found=0
+            sudo grep '^mosquitto ' /sys/kernel/security/apparmor/profiles || found=$?
+            case "$found" in
+              0)
+                sudo apparmor_parser -R /etc/apparmor.d/mosquitto
+                echo "Unloaded the mosquitto AppArmor profile." ;;
+              1) echo "The mosquitto AppArmor profile is not loaded." ;;
+              *) echo "Could not read the loaded AppArmor profiles; did not unload mosquitto's." ;;
+            esac
           fi
 
       - name: ruff over e2e-stack
