@@ -477,6 +477,50 @@ and each caller reads its current one from a view of its own and unseals it with
 KEK, so **each caller needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. Settings → System →
 Service credentials lists, rotates and revokes them.
 
+**The service-token exchange (#5494).** A caller can prove who it is instead, and get a
+15-minute credential with no sealed copy and no database read
+(`docs/superpowers/specs/2026-11-05-service-credentials-without-db-design.md`, PR #5332).
+It presents its proof at `POST /api/v1/auth/service-token` (RFC 8693 form fields
+`grant_type`, `subject_token`, `subject_token_type`) and renews the credential at half-life
+and at once after a 401. Each caller picks its proof with one variable; setting both is a
+start error, and setting neither reads the view as above:
+
+| Proof | On the caller | On the API |
+|---|---|---|
+| Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, and reads the cluster's issuer discovery and JWKS. The API needs two roles: `system:auth-delegator` (TokenReview) and `system:service-account-issuer-discovery` (the discovery and the JWKS). A default ClusterRoleBinding [gives the second to every ServiceAccount](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#service-account-issuer-discovery) (`system:serviceaccounts`); an explicit binding to the API's ServiceAccount (eh-homelab/clusters#3246) keeps the JWKS read from depending on that default |
+| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named `render`, `print`, `projects` or `agent`; only the hashes are kept |
+
+The API takes a proof only when its own variable is set. The ServiceAccounts it maps are
+`scadbuddy-render` (caller `render`), `scadbuddy-print`, `scadbuddy-projects`,
+`scadbuddy-agent-worker` and `scadbuddy` (both `agent`); `default`, any other
+ServiceAccount and any other namespace are refused, and so is a token bound to no pod.
+Each Kubernetes credential is bound to its pod's name and uid. The route answers at most 6
+exchanges a minute per pod and 30 per caller, then `429` with `Retry-After`. Before any
+TokenReview the API checks a token offline against the cluster's JWKS, fetched from the
+apiserver with its own token and kept an hour; an unknown `kid` refetches it at most
+every 30 s. When the hourly refresh fails, the last good JWKS still serves for up to 24 h
+after the first failure (TokenReview still decides every token, an unknown `kid` is still
+refused), the refresh is retried at most every 30 s, and each such use is logged and
+counted in `scadbuddy_service_jwks_stale_uses_total`; after 24 h every Kubernetes exchange
+answers `503`. The check covers the signature (RS256 or ES256 only), `iss` (from the
+apiserver's `/.well-known/openid-configuration`), `aud` containing `scadbuddy`,
+`exp`/`nbf` with 30 s of skew, a `kubernetes.io.pod` claim with a `name` and `uid` (a
+token bound to no pod is refused), and a `sub` that names a caller above. A token that fails
+is refused `401` with no TokenReview and spends nothing, so forged or junk tokens never
+hold a real caller back. Each API process sends at most 60 TokenReviews a minute, then
+answers `429` (`result="limited"`). A bootstrap secret is checked locally against its
+hash, with no budget; a `client_id` sent beside any proof must name the caller it proves.
+The counter
+`scadbuddy_service_token_exchanges_total{caller, proof, result}` counts them. An exchange
+the API answers `404` (an older API pod during a roll) falls back to the view while the
+caller still has a database URL. The API's own in-process `projects` worker gets its
+credential minted in memory. `GET /api/v1/auth/service-credentials` returns each
+credential's `proof`, `pod_name` and `pod_uid` (the Settings page does not show them, or the
+`render` caller, yet), and the API also revokes every credential of a pod
+(`DELETE /api/v1/auth/service-credentials/pods/{pod_uid}`) and suspends a caller
+(`PUT`/`DELETE /api/v1/auth/service-callers/{caller}/suspension`), which refuses its
+exchanges and revokes what it holds until it is resumed.
+
 **Each caller's own database role (#5210).** This is today's state, not the target
 (see the next paragraph). Like the render worker's
 `scadbuddy_render` (below), each caller should connect as a role of its own, so it holds

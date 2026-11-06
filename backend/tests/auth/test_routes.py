@@ -15,6 +15,7 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 import scadbuddy.api
 from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, Service, SessionKind
 from scadbuddy.auth.routes import (
+    EXCHANGE_ENDPOINTS,
     INTERNAL_MODULES,
     PERSON_ENDPOINTS,
     PUBLIC_ENDPOINTS,
@@ -50,6 +51,7 @@ def test_every_route_has_a_class() -> None:
             "internal.library",
             "internal.workspace",
             "transfer",
+            "exchange",
         )
 
 
@@ -58,6 +60,7 @@ def test_every_named_endpoint_and_module_exists() -> None:
     modules = {route.endpoint.__module__ for route in ROUTES}
     assert names >= PUBLIC_ENDPOINTS
     assert names >= PERSON_ENDPOINTS
+    assert names >= EXCHANGE_ENDPOINTS
     assert modules >= PUBLIC_MODULES
     assert set(INTERNAL_MODULES) <= modules
 
@@ -111,6 +114,11 @@ def _person(kind: SessionKind = "login") -> Person:
     [
         ("public", ANONYMOUS, False, None),
         ("transfer", ANONYMOUS, False, None),
+        # #5494: the exchange's proof is in its body.
+        ("exchange", ANONYMOUS, False, None),
+        # The render worker's credential reaches no route yet (#5298 adds `crud.render`).
+        ("api", Service("render", frozenset({"crud.render"})), False, "out_of_scope"),
+        ("internal.outputs", Service("render", frozenset({"crud.render"})), False, "no_credential"),
         ("api", ANONYMOUS, False, "signed_out"),
         ("api", _person(), True, None),
         ("api", _person(), False, "no_request_header"),

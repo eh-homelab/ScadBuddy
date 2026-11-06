@@ -82,6 +82,15 @@ export type Config = {
    * logged (`observe`) or not looked at (`off`, the default).
    */
   authMode: AuthMode
+  /**
+   * SCADBUDDY_SERVICE_TOKEN_FILE (#5494, spec 2026-11-05 §6.3): the agent's projected
+   * ServiceAccount token (audience `scadbuddy`), exchanged at the backend for its service
+   * credential. Unset with SCADBUDDY_SERVICE_BOOTSTRAP_FILE unset too → the credential is
+   * read from the database view, as before.
+   */
+  serviceTokenFile?: string | undefined
+  /** SCADBUDDY_SERVICE_BOOTSTRAP_FILE (§7.2): its bootstrap secret outside Kubernetes. Never with the above. */
+  serviceBootstrapFile?: string | undefined
 }
 
 export const AUTH_MODES = ['off', 'observe', 'enforce'] as const
@@ -112,6 +121,8 @@ export const ENV_VARS = [
   'SCADBUDDY_VERSION',
   'SCADBUDDY_AGENT_ROLE',
   'SCADBUDDY_AUTH_MODE',
+  'SCADBUDDY_SERVICE_TOKEN_FILE',
+  'SCADBUDDY_SERVICE_BOOTSTRAP_FILE',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -226,5 +237,20 @@ export function loadConfig(env: Env = process.env): Config {
     buildId: temporalValue('SCADBUDDY_BUILD_ID', present(env.SCADBUDDY_BUILD_ID)) ?? imageTag(env.SCADBUDDY_VERSION),
     agentRole: agentRole(present(env.SCADBUDDY_AGENT_ROLE)),
     authMode: authMode(present(env.SCADBUDDY_AUTH_MODE)),
+    ...serviceProof(present(env.SCADBUDDY_SERVICE_TOKEN_FILE), present(env.SCADBUDDY_SERVICE_BOOTSTRAP_FILE)),
+  }
+}
+
+/** One proof of who the agent is, never both (spec 2026-11-05 §7.2): both set is a start error. */
+function serviceProof(
+  tokenFile: string | undefined,
+  bootstrapFile: string | undefined,
+): Pick<Config, 'serviceTokenFile' | 'serviceBootstrapFile'> {
+  if (tokenFile !== undefined && bootstrapFile !== undefined) {
+    throw new ConfigError('Set SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, not both')
+  }
+  return {
+    ...(tokenFile !== undefined ? { serviceTokenFile: tokenFile } : {}),
+    ...(bootstrapFile !== undefined ? { serviceBootstrapFile: bootstrapFile } : {}),
   }
 }

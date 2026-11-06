@@ -527,6 +527,20 @@ class Metrics:
             ["class", "reason"],
             registry=r,
         )
+        # #5494 (spec 2026-11-05 §8 step 3): the service-token exchange, by caller
+        # (`unknown` for a proof that named none), proof and result. Closed sets
+        # (`api/service_token.py`).
+        self.service_token_exchanges = Counter(
+            "scadbuddy_service_token_exchanges",
+            "Service-token exchanges, by caller, proof and result.",
+            ["caller", "proof", "result"],
+            registry=r,
+        )
+        self.service_jwks_stale_uses = Counter(
+            "scadbuddy_service_jwks_stale_uses",
+            "Service tokens checked against a cluster JWKS that could not be refreshed.",
+            registry=r,
+        )
 
         self.http_requests = Counter(
             "scadbuddy_http_requests",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationError, ValidationInfo, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -266,6 +267,39 @@ class Settings(BaseSettings):
     # (an IdP inside the cluster or LAN). Off, they are fetched only from public
     # addresses, as a URL import is (`library/url_import.py` `PublicOnlyBackend`).
     auth_oidc_private_network: bool = False
+
+    # Service credentials by exchange (#5494, spec 2026-11-05 §6, §7.2). On a caller:
+    # SCADBUDDY_SERVICE_TOKEN_FILE, its projected ServiceAccount token (audience
+    # `scadbuddy`), or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, its bootstrap secret outside
+    # Kubernetes, exchanged at `POST /api/v1/auth/service-token`; both set is a start
+    # error, neither reads the credential's view as before. On the API:
+    # SCADBUDDY_SERVICE_BOOTSTRAP_DIR, one secret file per caller (only their hashes are
+    # kept; unset, no bootstrap secret is accepted), and
+    # SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE, the namespace whose ScadBuddy ServiceAccounts
+    # may exchange (unset, no Kubernetes token is accepted).
+    service_token_file: Path | None = None
+    service_bootstrap_file: Path | None = None
+    service_bootstrap_dir: Path | None = None
+    service_account_namespace: str = ""
+
+    @model_validator(mode="after")
+    def _one_service_proof(self) -> Settings:
+        if self.service_token_file is not None and self.service_bootstrap_file is not None:
+            raise ValueError(
+                "Set SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, not"
+                " both: a caller proves itself one way"
+            )
+        return self
+
+    @field_validator("service_account_namespace")
+    @classmethod
+    def _namespace_is_a_name(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", value):
+            raise ValueError(
+                f"SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE: {value!r} is not a Kubernetes namespace"
+            )
+        return value
 
     @field_validator("orders_currency")
     @classmethod
@@ -664,6 +698,22 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "auth_oidc_private_network": (
             "Whether the issuer may be fetched from a private address; the deployment knows"
             " where its identity provider runs (#4975)."
+        ),
+        "service_token_file": (
+            "Where the kubelet puts this caller's projected ServiceAccount token, which proves"
+            " who it is to the API (#5494); the deployment mounts it."
+        ),
+        "service_bootstrap_file": (
+            "This caller's bootstrap secret outside Kubernetes (#5494). A secret kept in the"
+            " database it unlocks would protect nothing."
+        ),
+        "service_bootstrap_dir": (
+            "The callers' bootstrap secrets the API checks (#5494). Set in Settings, anyone"
+            " who could write it could mint a service credential."
+        ),
+        "service_account_namespace": (
+            "Whose ServiceAccounts may exchange for a service credential (#5494): the"
+            " deployment's namespace, never a stored setting."
         ),
         "trusted_proxies": (
             "Which peers are believed about the client they forward for. Like the allowed"

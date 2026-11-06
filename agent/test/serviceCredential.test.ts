@@ -1,7 +1,14 @@
 import { randomBytes } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { credentialAad, REREAD_MS, ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
+import {
+  credentialAad,
+  ExchangeCredential,
+  REREAD_MS,
+  ServiceCredential,
+  serviceCredentialMiddleware,
+  withServiceCredential,
+} from '../src/api/serviceCredential.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 
 // #4975 phase 4: the agent's service credential, read from its view and unsealed.
@@ -84,5 +91,210 @@ describe('ServiceCredential', () => {
     const request = new Request('http://backend/api/v1/models')
     const sent = (await middleware.onRequest!({ request } as never)) as Request
     expect(sent.headers.get('authorization')).toBe(`Bearer ${TOKEN}`)
+  })
+})
+
+// #5494 (spec 2026-11-05 §6.3, §8 step 1): the exchange against a fake backend route.
+
+type Exchange = {
+  grant_type: string | null
+  subject_token: string | null
+  subject_token_type: string | null
+  client_id: string | null
+}
+
+function fakeBackend() {
+  const state = {
+    status: 200,
+    retryAfter: '7',
+    issued: 0,
+    calls: [] as Exchange[],
+  }
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    expect(url).toBe('http://backend:8080/api/v1/auth/service-token')
+    expect(init?.method).toBe('POST')
+    const form = new URLSearchParams(String(init?.body))
+    state.calls.push({
+      grant_type: form.get('grant_type'),
+      subject_token: form.get('subject_token'),
+      subject_token_type: form.get('subject_token_type'),
+      client_id: form.get('client_id'),
+    })
+    if (state.status !== 200) {
+      return new Response('{}', {
+        status: state.status,
+        headers: state.status === 429 ? { 'retry-after': state.retryAfter } : {},
+      })
+    }
+    state.issued += 1
+    return Response.json({
+      access_token: `sbsvc_${state.issued.toString(16).padStart(16, '0')}.${'a'.repeat(43)}`,
+      token_type: 'Bearer',
+      expires_in: 900,
+      scope: 'api crud.agent internal.workspace',
+      issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+    })
+  }) as typeof fetch
+  return { state, fetchImpl }
+}
+
+function exchanging(
+  backend: ReturnType<typeof fakeBackend>,
+  clock: { now: number },
+  options: { proof?: 'k8s' | 'bootstrap'; fallback?: ServiceCredential; proofText?: () => string } = {},
+) {
+  return new ExchangeCredential({
+    backendUrl: 'http://backend:8080/',
+    proofFile: '/var/run/scadbuddy/token',
+    proof: options.proof ?? 'k8s',
+    ...(options.fallback ? { fallback: options.fallback } : {}),
+    fetchImpl: backend.fetchImpl,
+    readProof: async () => (options.proofText ?? (() => 'jwt-1\n'))(),
+    now: () => clock.now,
+    log: () => undefined,
+  })
+}
+
+describe('ExchangeCredential', () => {
+  it('exchanges the projected token and renews it at half-life', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    let proof = 'jwt-1'
+    const credential = exchanging(backend, clock, { proofText: () => proof })
+    const first = await credential.current()
+    expect(first).toMatch(/^sbsvc_/)
+    expect(backend.state.calls).toEqual([
+      {
+        grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+        subject_token: 'jwt-1',
+        subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+        client_id: 'agent',
+      },
+    ])
+    clock.now = 449_000
+    expect(await credential.current()).toBe(first)
+    // The kubelet rotated the projected token: it is read again before each exchange.
+    proof = 'jwt-2'
+    clock.now = 450_000
+    const second = await credential.current()
+    expect(second).not.toBe(first)
+    expect(backend.state.calls.at(-1)?.subject_token).toBe('jwt-2')
+  })
+
+  it('sends the bootstrap token type', async () => {
+    const backend = fakeBackend()
+    await exchanging(backend, { now: 0 }, { proof: 'bootstrap' }).current()
+    expect(backend.state.calls[0]?.subject_token_type).toBe('urn:scadbuddy:params:token-type:bootstrap')
+  })
+
+  it('keeps the token through a failed exchange and backs off 5 s doubling to 60 s', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const credential = exchanging(backend, clock)
+    const token = await credential.current()
+    backend.state.status = 503
+    clock.now = 450_000
+    expect(await credential.current()).toBe(token)
+    let calls = backend.state.calls.length
+    for (const delay of [5, 10, 20, 40, 60, 60]) {
+      clock.now += delay * 1000 - 500
+      await credential.current()
+      expect(backend.state.calls.length).toBe(calls)
+      clock.now += 500
+      await credential.current()
+      calls += 1
+      expect(backend.state.calls.length).toBe(calls)
+    }
+    clock.now = 900_000
+    expect(await credential.current()).toBeUndefined()
+  })
+
+  it('waits out a 429 for its Retry-After', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const credential = exchanging(backend, clock)
+    backend.state.status = 429
+    backend.state.retryAfter = '30'
+    expect(await credential.current()).toBeUndefined()
+    clock.now = 29_000
+    await credential.current()
+    expect(backend.state.calls.length).toBe(1)
+    backend.state.status = 200
+    clock.now = 30_000
+    expect(await credential.current()).toMatch(/^sbsvc_/)
+  })
+
+  it('exchanges again at once after a 401, but not in a loop', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const credential = exchanging(backend, clock)
+    const first = (await credential.current())!
+    clock.now = 20_000
+    credential.invalidate(first)
+    const second = (await credential.current())!
+    expect(second).not.toBe(first)
+    credential.invalidate(second)
+    expect(await credential.current()).toBeUndefined()
+    expect(backend.state.calls.length).toBe(2)
+    clock.now = 30_000
+    expect(await credential.current()).toMatch(/^sbsvc_/)
+    const calls = backend.state.calls.length
+    credential.invalidate(first)
+    expect(backend.state.calls.length).toBe(calls)
+  })
+
+  it('falls back to the view while an old API answers 404', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const view = new ServiceCredential(fakeSql(() => [row()]).sql, kek, () => clock.now)
+    const credential = exchanging(backend, clock, { fallback: view })
+    backend.state.status = 404
+    expect(await credential.current()).toBe(TOKEN)
+    clock.now = 30_000
+    expect(await credential.current()).toBe(TOKEN)
+    expect(backend.state.calls.length).toBe(1)
+    backend.state.status = 200
+    clock.now = 60_000
+    const token = await credential.current()
+    expect(token).toMatch(/^sbsvc_/)
+    expect(token).not.toBe(TOKEN)
+  })
+
+  it('has nothing on a 404 without a database to fall back to', async () => {
+    const backend = fakeBackend()
+    backend.state.status = 404
+    expect(await exchanging(backend, { now: 0 }).current()).toBeUndefined()
+  })
+
+  it('drops a token the backend answered 401 to, without sending the request again', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const credential = exchanging(backend, clock)
+    const seen: (string | null)[] = []
+    const inner = (async (_input: string | URL | Request, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get('authorization'))
+      return new Response('{}', { status: seen.length === 1 ? 401 : 200 })
+    }) as typeof fetch
+    const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
+    expect((await wrapped('http://backend:8080/api/v1/internal/workspace-blobs/uploads', { method: 'POST' })).status).toBe(401)
+    clock.now = 10_000
+    expect((await wrapped('http://backend:8080/api/v1/internal/workspace-blobs/uploads', { method: 'POST' })).status).toBe(200)
+    expect(seen.length).toBe(2)
+    expect(seen[0]).not.toBe(seen[1])
+    expect(seen[1]).toMatch(/^Bearer sbsvc_/)
+  })
+
+  it("the client's middleware drops a token the backend answered 401 to", async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const credential = exchanging(backend, clock)
+    const middleware = serviceCredentialMiddleware(credential)
+    const request = (await middleware.onRequest!({ request: new Request('http://backend/api/v1/models') } as never)) as Request
+    const first = request.headers.get('authorization')
+    await middleware.onResponse!({ request, response: new Response('{}', { status: 401 }) } as never)
+    clock.now = 10_000
+    const again = (await middleware.onRequest!({ request: new Request('http://backend/api/v1/models') } as never)) as Request
+    expect(again.headers.get('authorization')).not.toBe(first)
   })
 })

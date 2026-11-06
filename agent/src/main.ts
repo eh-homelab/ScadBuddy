@@ -51,7 +51,13 @@ import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { toolSecrets } from './plugins/secrets.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
-import { ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
+import {
+  type CredentialSource,
+  ExchangeCredential,
+  ServiceCredential,
+  serviceCredentialMiddleware,
+  withServiceCredential,
+} from './api/serviceCredential.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
@@ -295,7 +301,19 @@ await startCredentialGateway()
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
 // #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
-const serviceCredential = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+// #5494: exchanged for its proof when one is configured, falling back to the view while the
+// agent has a database (an old backend answers the exchange 404); otherwise read from the view.
+const credentialView = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
+const serviceCredential: CredentialSource | undefined =
+  proofFile !== undefined
+    ? new ExchangeCredential({
+        backendUrl: config.backendUrl,
+        proofFile,
+        proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap',
+        ...(credentialView ? { fallback: credentialView } : {}),
+      })
+    : credentialView
 const backend = createBackendClient(
   config.backendUrl,
   globalThis.fetch,

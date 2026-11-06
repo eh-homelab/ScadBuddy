@@ -34,7 +34,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
-from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
+from scadbuddy.auth.service_credentials import ServiceAuth, token_source
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -1153,10 +1153,11 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     pool = settings_store.pool
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
-    # #4975 phase 4: the print worker's service credential on the internal routes, read
-    # from its own view and unsealed with the KEK (none without one).
+    # #4975 phase 4: the print worker's service credential on the internal routes:
+    # exchanged for its proof when one is configured (#5494), else read from its own view
+    # and unsealed with the KEK (none without one).
     credential = ServiceAuth(
-        TokenReader("print", settings.database_url, settings_kek(settings.secret_key_file))
+        token_source("print", settings, settings_kek(settings.secret_key_file))
     )
     outputs = RemoteOutputs(
         settings.api_internal_url,
@@ -1418,9 +1419,10 @@ async def run_projects_worker(
     try:
         await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
-        # #4975 phase 4: the projects worker's service credential on the API's routes.
+        # #4975 phase 4: the projects worker's service credential on the API's routes,
+        # exchanged for its proof when one is configured (#5494).
         credential = ServiceAuth(
-            TokenReader("projects", settings.database_url, settings_kek(settings.secret_key_file))
+            token_source("projects", settings, settings_kek(settings.secret_key_file))
         )
         client = await connect_flows(
             settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime

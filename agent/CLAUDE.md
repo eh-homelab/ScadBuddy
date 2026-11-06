@@ -20,6 +20,13 @@ become routes, and Claude Code and plugin code run where no database secret exis
 `ai_*` grant or a trigger on another service's table; add a CRUD route that requires a
 service credential instead.
 
+The agent's service credential (`src/api/serviceCredential.ts`, wired in `main.ts`): with
+`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` (both is a `ConfigError`)
+`ExchangeCredential` exchanges that proof at the backend's `POST /api/v1/auth/service-token`
+for a 15-minute credential, renews it at half-life and after a 401, and falls back to the view
+on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed one from
+`service_credentials_agent`, as before (#5494).
+
 ## Commands
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):

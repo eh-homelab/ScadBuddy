@@ -24,6 +24,15 @@ the API moves to `enforce` (#5297). Template Python and openscad move to a pod w
 database secret (#5296). Never add a worker table grant, a cross-service table read or a
 new database client; add a CRUD route that requires a service credential instead.
 
+A caller gets its service credential from `auth/service_credentials.py` `token_source`: with
+`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` it exchanges that proof
+at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token.py`, class
+`exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
+credential, falling back to its view on a 404; otherwise it reads its sealed one from its
+view (`TokenReader`), as before (#5494). The API's own in-process callers use
+`InProcessProvider` (`proof = inprocess`). A new caller-side client takes a `token_source`,
+never a `TokenReader` of its own.
+
 ## Commands
 
 Backend (`backend/`, Python 3.12, uv). CI runs these inside the Dockerfile's `test`
