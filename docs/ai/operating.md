@@ -1765,7 +1765,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   fails, and so do `workspace_read` and every upload until a fetch succeeds. For 30 s after
   a failure (`PACKAGE_SECRETS_FAILURE_MS`) that pin is refused again at once, with no new
   fetch, so the calls do not each wait for a fetch to time out. It is still a refusal,
-  never an empty list (#5488). The operator fixes the fetch, or disables or
+  never an empty list (#5488), and it covers the UI's pick too. A copy that hashes to the
+  pin ends it at once: a turn's load that fetches the package, or a copy already in the
+  cache, is read first (#5490). The operator fixes the fetch, or disables or
   removes the package in Settings. On a fresh replica the first read can wait on that
   fetch when the start-up warm-up has not finished (`plugin package warm-up` in the log).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
