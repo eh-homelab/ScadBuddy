@@ -12,6 +12,7 @@ name here that matches no route, and for an endpoint that refuses agents
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from fastapi.routing import APIRoute, APIWebSocketRoute
@@ -27,6 +28,12 @@ RouteClass = Literal[
     "internal.workspace",
     "transfer",
     "exchange",
+    # The CRUD routes (#5298): one class per caller, `/internal/crud/<caller>/…`.
+    "crud.projects",
+    "crud.render",
+    "crud.print",
+    # The projects worker's flow host routes (#5298 Task 8).
+    "flow.host",
 ]
 Reason = Literal[
     "signed_out",
@@ -144,6 +151,15 @@ SCRIPTLESS_GETS = frozenset(
     }
 )
 
+#: A CRUD route's path (#5298): the class is its caller's, whatever the module.
+CRUD_PATH = re.compile(r"(?:/api/v1)?/internal/crud/([a-z]+)(?:/|$)")
+CRUD_CLASSES: dict[str, RouteClass] = {
+    "projects": "crud.projects",
+    "render": "crud.render",
+    "print": "crud.print",
+}
+CRUD_CALLERS = frozenset(CRUD_CLASSES)
+
 Route = APIRoute | APIWebSocketRoute
 
 
@@ -159,6 +175,8 @@ def route_class(route: Route) -> RouteClass:
         return "exchange"
     if endpoint_name(route) in PERSON_ENDPOINTS:
         return "person"
+    if (match := CRUD_PATH.match(route.path)) and match.group(1) in CRUD_CALLERS:
+        return CRUD_CLASSES[match.group(1)]
     return INTERNAL_MODULES.get(module, "api")
 
 
@@ -192,7 +210,7 @@ def would_refuse(
     ``header_needed`` is false for a socket and for a scriptless GET."""
     if route_cls in ("public", "transfer", "exchange"):
         return None
-    if route_cls.startswith("internal."):
+    if route_cls.startswith(("internal.", "crud.")) or route_cls == "flow.host":
         if isinstance(caller, Service) and route_cls in caller.scopes:
             return None
         return "no_credential"

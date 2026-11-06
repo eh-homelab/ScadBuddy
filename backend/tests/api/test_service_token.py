@@ -99,7 +99,7 @@ def test_a_pod_token_is_exchanged_for_a_15_minute_credential(
     body = response.json()
     assert body["token_type"] == "Bearer"
     assert body["expires_in"] == 900
-    assert body["scope"] == "internal.library internal.outputs"
+    assert body["scope"] == "crud.print internal.library internal.outputs"
     assert body["issued_token_type"] == "urn:ietf:params:oauth:token-type:access_token"
     assert response.headers["cache-control"] == "no-store"
     token = body["access_token"]
