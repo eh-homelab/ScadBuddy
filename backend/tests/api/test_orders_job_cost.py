@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.api.test_customers import create as create_customer
-from tests.api.test_orders import create_order
+from tests.api.test_orders import create_order, pin_created
 from tests.api.test_orders_lifecycle import quote_and_accept
 from tests.api.test_orders_reopen import item_of
 from tests.api.test_orders_unfulfil import accepted_order
@@ -102,7 +102,9 @@ def accepted(client: TestClient, customer: str) -> tuple[str, str]:
     return order, item
 
 
-def test_the_list_shows_each_orders_margin_and_filters_by_it(client: TestClient) -> None:
+def test_the_list_shows_each_orders_margin_and_filters_by_it(
+    client: TestClient, pg_conninfo: str
+) -> None:
     """§6.2, §7 (#5327): each row carries its order's margin, the figures of its costs
     read, and ``margin_state`` narrows the list, a page at a time."""
     loss, [item] = accepted_order(client)  # charged 1200 by the typed quote
@@ -114,6 +116,7 @@ def test_the_list_shows_each_orders_margin_and_filters_by_it(client: TestClient)
     cost = {"order_item_id": item, "kind": "material", "amount_minor": 1100}
     assert client.post(f"/api/v1/orders/{thin}/cost-entries", json=cost).status_code == 201
     uncharged = create_order(client, customer)["id"]
+    pin_created(pg_conninfo, [loss, ok, thin, uncharged])
 
     rows = client.get("/api/v1/orders").json()["items"]
     by_id = {row["id"]: row for row in rows}

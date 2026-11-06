@@ -3,14 +3,29 @@ Rulings 8-12)."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from fastapi.testclient import TestClient
 
 from tests.api.test_customers import ADA
 from tests.api.test_customers import create as create_customer
 
 AGENT = {"X-ScadBuddy-Agent-Author": "token:t1", "X-ScadBuddy-Agent-Author-Session": "s1"}
+
+
+def pin_created(pg_conninfo: str, ids: list[str]) -> None:
+    """Set the orders' ``created_at`` one minute apart, in the order given. The list sorts
+    by it, and each insert takes Postgres's ``now()``: when the host's wall clock jumps back
+    between two inserts (WSL2's does, by seconds), the later order sorts as the older."""
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        for n, order_id in enumerate(ids):
+            conn.execute(
+                "UPDATE orders SET created_at = %s WHERE id = %s",
+                (start + timedelta(minutes=n), order_id),
+            )
 
 
 def create_order(client: TestClient, customer_id: str, **fields: Any) -> dict[str, Any]:
@@ -60,11 +75,12 @@ def test_a_body_with_a_status_or_an_author_is_422(client: TestClient) -> None:
     )
 
 
-def test_the_list_pages_newest_first_and_filters(client: TestClient) -> None:
+def test_the_list_pages_newest_first_and_filters(client: TestClient, pg_conninfo: str) -> None:
     ada = create_customer(client)
     bob = create_customer(client, {**ADA, "display_name": "Bob", "contacts": [], "addresses": []})
     made = [create_order(client, ada["id"] if n % 2 else bob["id"]) for n in range(5)]
     ids = [o["id"] for o in made]
+    pin_created(pg_conninfo, ids)
 
     page = client.get("/api/v1/orders", params={"limit": 2}).json()
     assert [o["id"] for o in page["items"]] == ids[4:2:-1]
