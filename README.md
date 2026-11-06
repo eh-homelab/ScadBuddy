@@ -725,8 +725,11 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
   role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
-  `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
-  id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
+  `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
+  id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL` (the API's Service; the
+  worker reads the store settings through its CRUD route, #5298) and
+  `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it
+  exchanges for its service credential. Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
@@ -739,12 +742,14 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `render_jobs`,
   `events`, `blob_refs`, the blob index `store_blobs` and `store_folders`, `assets`,
   the library leases (`library_leases`, `library_pin_holds`,
-  `library_install_slots`), the migrations ledger (read only) and the
-  `render_settings` view. It gets nothing on `settings`: the view shows only the
-  store's settings (backend, Bambuddy URL, library folder, render key), plus the full
-  Bambuddy key **only while no render key is saved** in Settings, the fallback
-  `/healthz` reports as `render_key_fallback`. Save a render key and the worker
-  cannot read the full key at all. A role created after the API started is granted
+  `library_install_slots`) and the migrations ledger (read only). It gets nothing
+  on `settings`: it reads the store's settings (backend, Bambuddy URL, library
+  folder, render key, S3 keys) from the API's CRUD route
+  `/api/v1/internal/crud/render/settings` (#5298), which answers the full Bambuddy
+  key **only while no render key is saved** in Settings, the fallback `/healthz`
+  reports as `render_key_fallback`. Save a render key and the worker cannot read the
+  full key at all. A role granted the older `render_settings` view keeps it until
+  #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API has applied every migration its build has and its role holds

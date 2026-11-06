@@ -111,7 +111,7 @@ class WorkerDeps:
     openscad_version: str = ""
     #: The interpreter template activities run under: this worker's own (§5.2).
     template_python: str = sys.executable
-    #: `solid_concurrency` as it is now (the `render_settings` view, re-read on its
+    #: `solid_concurrency` as it is now (the store settings, re-read on their source's
     #: TTL), asked by every solids stage; None keeps `config`'s, read at start.
     stored_solid_concurrency: Callable[[], Awaitable[int]] | None = None
 

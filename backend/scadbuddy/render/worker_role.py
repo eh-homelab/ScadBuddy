@@ -58,9 +58,8 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     "library_leases": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "library_pin_holds": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "library_install_slots": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    # The store's settings, and nothing else of `settings`
-    # (`library/settings_store.py` `load_render_store_settings`).
-    "render_settings": ("SELECT",),
+    # No `render_settings`: the store settings come from the API's CRUD route (#5298,
+    # `crud/render.py`). A role granted it before keeps it until the role is revoked.
     # Whether the API has migrated to this build's schema (`wait_until_ready`).
     "scadbuddy_migrations": ("SELECT",),
 }

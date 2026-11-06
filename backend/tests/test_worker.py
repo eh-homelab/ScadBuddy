@@ -53,10 +53,13 @@ from temporalio.worker import (
 )
 
 from scadbuddy import worker as worker_module
+from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import ROLE_SERIES, Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
@@ -65,7 +68,7 @@ from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import RenderSettingsSource, StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
@@ -109,6 +112,7 @@ from tests.conftest import (
     PgPool,
     fake_3mf_openscad,
 )
+from tests.crud.crud_support import FixedToken, static_render_crud
 from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
@@ -188,7 +192,13 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
         async with temporal_client() as client:
             stop = asyncio.Event()
             worker = asyncio.create_task(
-                run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+                run_worker(
+                    cfg,
+                    stop=stop,
+                    health_port=health_socket,
+                    client=client,
+                    crud=static_render_crud(),
+                )
             )
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
@@ -384,6 +394,53 @@ async def test_the_projects_worker_refuses_to_start_without_the_api_url(tmp_path
     )
     with pytest.raises(worker_module.ApiUrlMissingError, match="--queue projects"):
         await worker_module.run_projects_worker(settings, health_port=None)
+
+
+async def test_the_render_worker_refuses_to_start_without_the_api_url(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        api_internal_url=None,
+    )
+    with pytest.raises(worker_module.ApiUrlMissingError, match="the render worker"):
+        await worker_module.run_worker(settings, health_port=None)
+
+
+async def test_the_render_worker_waits_for_the_settings_area(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """During a roll the API may be older than the worker (#5298): it reads no settings
+    and opens nothing until the API serves the `settings` area; a stop ends the wait."""
+    asked: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        return httpx.Response(200, json={"areas": []}, headers=CRUD_HEADERS)
+
+    def build(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("built before the API served the settings area")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    crud = CrudClient(
+        "http://api", "render", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
+    )
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        worker_module.run_worker(settings, stop=stop, health_port=None, crud=crud)
+    )
+    async with asyncio.timeout(10):
+        while not asked:
+            await asyncio.sleep(0.01)
+    assert not worker.done()
+    stop.set()
+    await asyncio.wait_for(worker, timeout=10)
+    assert set(asked) == {"/api/v1/internal/crud/render/areas"}
 
 
 @pytest.mark.parametrize("queue", ["render", "bambuddy"])
@@ -2247,6 +2304,13 @@ def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: P
     assert worker_module._allocated_bytes(root) == int(du.stdout.split()[0])
 
 
+def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
+    """`build_worker_deps` on the default store settings (the local store), read once."""
+    source, current = StoreSettingsSource(), RenderStoreSettings()
+    source.seed(current)
+    return worker_module.build_worker_deps(settings, source, current)
+
+
 def test_a_refused_store_closes_the_projection_the_worker_opened(
     settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2264,7 +2328,7 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     monkeypatch.setattr(worker_module, "JobProjection", Recording)
     monkeypatch.setattr(worker_module, "build_store", refuse)
     with pytest.raises(StoreNotReadyError):
-        worker_module.build_worker_deps(settings)
+        _built(settings)
     assert len(opened) == 1 and opened[0].pool.closed
 
 
@@ -2282,7 +2346,9 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
 
     monkeypatch.setattr(worker_module, "JobProjection", Recording)
     stop = asyncio.Event()
-    worker = asyncio.create_task(worker_module.run_worker(settings, stop=stop, health_port=None))
+    worker = asyncio.create_task(
+        worker_module.run_worker(settings, stop=stop, health_port=None, crud=static_render_crud())
+    )
     for _ in range(600):
         if opened:
             break
@@ -2302,7 +2368,7 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
     """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
     loops: list[asyncio.AbstractEventLoop | None] = []
 
-    def build(_settings: Settings, **_: object) -> NoReturn:
+    def build(_settings: Settings, *_: object, **__: object) -> NoReturn:
         try:
             loops.append(asyncio.get_running_loop())
         except RuntimeError:
@@ -2311,7 +2377,7 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
 
     monkeypatch.setattr(worker_module, "build_worker_deps", build)
     with pytest.raises(StoreNotReadyError):
-        await worker_module.run_worker(settings, health_port=None)
+        await worker_module.run_worker(settings, health_port=None, crud=static_render_crud())
     assert loops == [None]
 
 
@@ -2325,7 +2391,7 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
     (seed / "BOSL2" / commit / "BOSL2" / "std.scad").write_text("// std\n")
     data = tmp_path / "worker-data"
     cfg = settings.model_copy(update={"data_dir": data, "seed_libraries_dir": seed})
-    deps, store = worker_module.build_worker_deps(cfg)
+    deps, store = _built(cfg)
     try:
         checkout = deps.paths.libraries / "BOSL2" / commit / "BOSL2" / "std.scad"
         assert checkout.read_text() == "// std\n"
@@ -2341,7 +2407,7 @@ async def test_the_render_workers_projection_writes_activity(
     """Without it a render's state changes on a worker are missing from activity until
     the repair sweep."""
     cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
-    deps, store = worker_module.build_worker_deps(cfg)
+    deps, store = _built(cfg)
     try:
         assert deps.projection.activity is not None
     finally:
@@ -2599,7 +2665,13 @@ async def test_the_render_workers_readyz_waits_for_the_render_queue_to_route_to_
     async with temporal_client() as client:
         stop = asyncio.Event()
         worker = asyncio.create_task(
-            run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+            run_worker(
+                cfg,
+                stop=stop,
+                health_port=health_socket,
+                client=client,
+                crud=static_render_crud(),
+            )
         )
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
