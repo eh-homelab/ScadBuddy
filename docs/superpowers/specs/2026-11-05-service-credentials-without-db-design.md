@@ -503,7 +503,9 @@ Every step merges with the mode where it is today, and old and new builds run si
    false` on every ScadBuddy pod; the projected volume and `SCADBUDDY_SERVICE_TOKEN_FILE`
    on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator` (TokenReview) and to
    `system:service-account-issuer-discovery` (the issuer and JWKS reads of §6.2 step 0; Kubernetes
-   binds that role to no one by default)
+   binds that role to every ServiceAccount, `system:serviceaccounts`, today (read live
+   on v1.35.9+rke2r1, eh-homelab/clusters#3246); the explicit binding keeps the read from
+   depending on that default)
    and its own apiserver token mounted in the API container only. Merge after step 1's
    image is deployed.
 3. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
