@@ -1388,6 +1388,7 @@ export function CustomizePage() {
                 slug={slug}
                 name={displayName}
                 nativeLibrary={settings?.library_backend === 'native'}
+                settingsFailed={settingsRead.error !== undefined}
               />
             </>
           )}

@@ -34,10 +34,15 @@ interface Props {
    * `delete_inbox_copies` acts on. False (or not yet known) leaves the choice out.
    */
   nativeLibrary: boolean
+  /**
+   * #5431 — the settings read failed, so `nativeLibrary` is not known. The dialog says why
+   * the inbox-copies choice is missing.
+   */
+  settingsFailed: boolean
 }
 
 /** Deletes the model after a confirm, then goes back to the catalogue, which refetches on mount. */
-export function DeleteModelButton({ slug, name, nativeLibrary }: Props) {
+export function DeleteModelButton({ slug, name, nativeLibrary, settingsFailed }: Props) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -149,6 +154,12 @@ export function DeleteModelButton({ slug, name, nativeLibrary }: Props) {
                 output on its own for those.
               </p>
             </div>
+          )}
+          {!nativeLibrary && settingsFailed && (
+            <p className="text-xs text-muted-foreground">
+              The settings did not load, so the choice to also delete the inbox copies in ScadBuddy&apos;s library is
+              not offered.
+            </p>
           )}
           {duplicates && (
             <div role="alert" className="text-sm text-destructive">

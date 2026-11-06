@@ -8,13 +8,24 @@ import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { DELETE_RETRY_MS, DELETE_WAIT_LIMIT_MS, DeleteModelButton } from './DeleteModelButton'
 
-function render(userEventOptions?: { advanceTimers: (ms: number) => unknown }, nativeLibrary = true) {
+function render(
+  userEventOptions?: { advanceTimers: (ms: number) => unknown },
+  nativeLibrary = true,
+  settingsFailed = false,
+) {
   return renderPage(
     <Routes>
       <Route path="/" element={<CataloguePage />} />
       <Route
         path="/m/:slug"
-        element={<DeleteModelButton slug="name-keychain" name="Name Keychain" nativeLibrary={nativeLibrary} />}
+        element={
+          <DeleteModelButton
+            slug="name-keychain"
+            name="Name Keychain"
+            nativeLibrary={nativeLibrary}
+            settingsFailed={settingsFailed}
+          />
+        }
       />
     </Routes>,
     { route: '/m/name-keychain', ...(userEventOptions ? { userEventOptions } : {}) },
@@ -96,6 +107,23 @@ describe('DeleteModelButton', () => {
 
     expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
     expect(searches).toEqual([''])
+  })
+
+  it('says why the inbox-copies choice is missing when the settings did not load (#5431)', async () => {
+    const { user } = render(undefined, false, true)
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete Name Keychain?' })
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(dialog).toHaveTextContent('The settings did not load')
+  })
+
+  it('says nothing about the settings when they loaded', async () => {
+    const { user } = render(undefined, false)
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete Name Keychain?' })
+    expect(dialog).not.toHaveTextContent('The settings did not load')
   })
 
   it('sends delete_inbox_copies when ticked', async () => {
