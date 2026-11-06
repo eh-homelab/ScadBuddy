@@ -49,6 +49,7 @@ from scadbuddy.flow_triggers.component import Triggers, TriggersDep
 from scadbuddy.flow_triggers.fire import pause_for_flow
 from scadbuddy.flow_triggers.models import RunTrigger
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
+from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
     FlowDeletedError,
@@ -243,6 +244,9 @@ class PendingEntry(BaseModel):
     #: What the call does, in ScadBuddy's own words, when it reads it from ScadBuddy's
     #: own records: a `print_output` call's registry printer (#4445). Never the input.
     summary: str | None = None
+    #: With `summary`: the input hash the approval binds (the printer the summary names),
+    #: which an approval sends back as `bound_hash` (#4445).
+    bound_hash: str | None = None
 
 
 class GrantUseView(BaseModel):
@@ -743,7 +747,7 @@ async def _starting(client: Client, run_id: str) -> RunView | None:
 
 
 async def _pending(
-    client: Client, run: Run, lookup: PrinterLookup
+    client: Client, run: Run, lookup: PrinterLookup, hash_key: bytes | None
 ) -> tuple[list[PendingEntry], bool]:
     """The run's parked calls: from the workflow's `agent_status`, joined with the row's
     `waiting_on` for the prompt and the time; from the row alone if it does not answer.
@@ -768,7 +772,10 @@ async def _pending(
         )
         if (call := parked_call(approval.tool_name, approval.tool_input)) is not None:
             _, tool, args = call
-            entries[-1].summary = (await bind_call(tool, args, lookup)).summary
+            bound = await bind_call(tool, args, lookup)
+            entries[-1].summary = bound.summary
+            if bound.summary is not None and hash_key is not None and tool is not None:
+                entries[-1].bound_hash = input_hash(hash_key, tool, bound.args)
     for callback in status_.pending_callbacks:
         seen = waiting.get(callback.tool_id)
         entries.append(
@@ -828,7 +835,9 @@ async def _run_view(run_id: str, flows: Flows, printers: Printers) -> RunView:
     if flows.client is None:
         view.pending = [PendingEntry.model_validate(w.model_dump()) for w in run.waiting_on]
         return view
-    view.pending, view.live = await _pending(flows.client, run, _registry(printers))
+    view.pending, view.live = await _pending(
+        flows.client, run, _registry(printers), approval_key(flows.settings)
+    )
     return view
 
 
@@ -934,6 +943,9 @@ class DecideBody(BaseModel):
     #: (`GET .../proposals/{call_id}`). Any other, or none, is refused: the person
     #: approves what they saw, never a proposal replaced since.
     proposal_hash: str | None = Field(default=None, max_length=128)
+    #: The pending entry's `bound_hash` the person was shown (#4445): an approval of a
+    #: print on a registry printer is refused (409) unless the row still links that pair.
+    bound_hash: str | None = Field(default=None, max_length=128)
 
 
 class ProposalView(BaseModel):

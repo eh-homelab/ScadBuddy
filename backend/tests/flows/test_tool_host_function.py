@@ -22,7 +22,7 @@ from scadbuddy.api.flows import _pending
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
+from scadbuddy.flows.operations import FLOW_DECIDE, PRINTER_CHANGED, flow_kinds, request_id
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.flow_tools import (
     FLOW_BEATLESS_CALL_PATCH,
@@ -211,12 +211,13 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
         assert printer == PRINTER
         return _printer(2)
 
-    pending, live = await _pending(outward.client, parked, lookup)
+    pending, live = await _pending(outward.client, parked, lookup, HASH_KEY)
     assert live
-    assert [(p.call_id, p.summary) for p in pending] == [
-        (call_id, "Prints on Garage (Bambuddy printer 2)")
+    bound = input_hash(HASH_KEY, "print_output", {**call, "printer_id": 2})
+    assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [
+        (call_id, "Prints on Garage (Bambuddy printer 2)", bound)
     ]
-    request = {"run_id": run_id, "call_id": call_id, "approved": True}
+    request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": bound}
     env = ActivityEnvironment(client=outward.client)
     # Without the API to read the row from, nothing is approved.
     blind = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
@@ -224,13 +225,24 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
         await env.run(blind.run, request, await env.run(blind.check, request))
     assert refused.value.status == 503
     assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    # Re-linked since the page showed it, or an approval that names no binding: a 409,
+    # and nothing is recorded, so the person sees the printer that would print and decides again.
+    moved = next(
+        k for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api(5)) if k.name == FLOW_DECIDE
+    )
     decide = next(
         k for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api(2)) if k.name == FLOW_DECIDE
     )
+    unbound = {k: v for k, v in request.items() if k != "bound_hash"}
+    for kind, sent in [(moved, request), (decide, unbound)]:
+        with pytest.raises(ApiError) as stale:
+            await env.run(kind.run, sent, await env.run(kind.check, sent))
+        assert (stale.value.status, stale.value.type) == (409, PRINTER_CHANGED)
+        assert await outward.store.get_decision(request_id(parked, call_id)) is None
     await env.run(decide.run, request, await env.run(decide.check, request))
     decision = await outward.store.get_decision(request_id(parked, call_id))
     assert decision is not None
-    assert decision.input_hash == input_hash(HASH_KEY, "print_output", {**call, "printer_id": 2})
+    assert decision.input_hash == bound
     run = await outward.finished(run_id)
     assert run.result == "result: 'printing'"
     # The workflow sends the script's arguments: the agent adds the pair and checks it.

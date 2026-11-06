@@ -989,14 +989,58 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
       })
 
       it('runs one approved for the raw arguments (a run grant, a narrowing) as they were sent', async () => {
-        const grant: FlowRuns = {
-          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
-          approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', named),
-        }
+        const rawApproved = async (requestId: string, inputHash?: string) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', named)
+        const grant: FlowRuns = { startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined), approved: rawApproved, approvedUnresolved: rawApproved }
         const state = registry()
         const h = harness({ flows: grant, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
         await env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named)
         expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
+      })
+
+      it("refuses a person's decision on the raw arguments: it never falls back past the resolution", async () => {
+        const person: FlowRuns = {
+          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+          approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', named),
+          approvedUnresolved: async () => false,
+        }
+        const state = registry()
+        const h = harness({ flows: person, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named))
+        expect(refused.type).toBe('NotApproved')
+        expect(state.posted).toEqual([])
+      })
+
+      it('runs a row only the LAN reaches as approved with printer_id null, sending no printer_id', async () => {
+        const lanOnly: FlowRuns = {
+          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+          approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', { ...named, printer_id: null }),
+        }
+        // A row that links no Bambuddy printer.
+        const state = { ...registry(), linked: null as unknown as number }
+        const h = harness({ flows: lanOnly, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        await env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named)
+        expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: null })])
+      })
+
+      // #4445 security review: a row only the LAN reached at approval binds printer_id null, so
+      // a Bambuddy link made before the run hashes otherwise and the raw hash is never tried.
+      it('refuses it, and sends nothing, when a row only the LAN reached at approval was linked since', async () => {
+        const unresolved: string[] = []
+        const lanOnly: FlowRuns = {
+          startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+          approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('print_output', { ...named, printer_id: null }),
+          approvedUnresolved: async (_id, inputHash) => {
+            unresolved.push(inputHash ?? '')
+            return false
+          },
+        }
+        const state = registry(2)
+        const h = harness({ flows: lanOnly, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+        const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.print_output!, named))
+        expect(refused.nonRetryable).toBe(true)
+        expect(refused.type).toBe('NotApproved')
+        expect(state.posted).toEqual([])
+        expect(unresolved).toEqual([hash('print_output', named)])
       })
     })
   })

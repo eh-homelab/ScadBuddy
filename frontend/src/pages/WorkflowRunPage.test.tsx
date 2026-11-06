@@ -130,11 +130,24 @@ describe('WorkflowRunPage', () => {
   })
 
   // #4445 — a print_output call says which registry printer prints, as the backend resolved it.
-  it("names the printer an outward call prints on, under the card's heading", async () => {
-    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 2)')
-    render('run-print')
+  it("names the printer an outward call prints on, and approves exactly the pair it named", async () => {
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 2)', 'b'.repeat(64))
+    const { user } = render('run-print')
     const card = await screen.findByRole('region', { name: /^Waiting for approval/ })
     expect(card).toHaveTextContent('Prints on Garage (Bambuddy printer 2)')
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-1', approved: true, bound_hash: 'b'.repeat(64) })
+  })
+
+  it('says so when the printer was re-linked since the card named it', async () => {
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 2)', 'b'.repeat(64))
+    const { user } = render('run-print')
+    const card = await screen.findByRole('region', { name: /^Waiting for approval/ })
+    // The backend's binding moved on: the row now links another printer.
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 5)', 'c'.repeat(64))
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    expect(await screen.findByText(/not the one you were shown/)).toBeInTheDocument()
   })
 
   // #2482 — a call outside the run's grant: where it waits, why, and its way up.

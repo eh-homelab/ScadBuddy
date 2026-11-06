@@ -300,7 +300,9 @@ function PendingCard({ entry, runId, step, respond }: CardProps) {
               <Button
                 size="sm"
                 disabled={busy}
-                onClick={() => void act(() => api.decideFlowRun(runId, entry.call_id, true, text || undefined))}
+                onClick={() =>
+                  void act(() => api.decideFlowRun(runId, entry.call_id, true, text || undefined, undefined, entry.bound_hash ?? undefined))
+                }
               >
                 Approve
               </Button>

@@ -174,6 +174,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     expect(await flows.lapsed(c1, 'h1')).toBe(true)
   })
 
+  // #4445: only an approval that never saw the resolution (a grant's match, a narrowing) lets
+  // a call run on its raw arguments; a person's own decision binds the resolved printer.
+  it("approves a call's raw arguments only for a grant's match or a narrowing, never a person's decision", async () => {
+    const id = await run({ kind: 'browser' })
+    await t.db.sql`
+      INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by, approved_at, expires_at)
+      VALUES ('g1', ${id}, 'approved', '{}', '{"kind": "browser"}', 'browser', now(), now() + interval '1 hour')`
+    const decide = async (call: string, responder: string, response: object) =>
+      t.db.sql`
+        INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder, input_hash, response)
+        VALUES (${flowRequestId(id, 'wr1', call)}, ${id}, 'wr1', ${call}, 'approval', 'approved', ${responder}, 'h1', ${t.db.sql.json(response as never)})`
+    await decide('grant', 'grant:g1', {})
+    await decide('narrowed', 'browser', { args: {}, narrowed_by: 'session:s1' })
+    await decide('person', 'browser', {})
+    expect(await flows.approvedUnresolved(flowRequestId(id, 'wr1', 'grant'), 'h1')).toBe(true)
+    expect(await flows.approvedUnresolved(flowRequestId(id, 'wr1', 'narrowed'), 'h1')).toBe(true)
+    expect(await flows.approvedUnresolved(flowRequestId(id, 'wr1', 'person'), 'h1')).toBe(false)
+    expect(await flows.approvedUnresolved(flowRequestId(id, 'wr1', 'grant'), 'h2')).toBe(false)
+    expect(await flows.approvedUnresolved(flowRequestId(id, 'wr1', 'grant'))).toBe(false)
+    await t.db.sql`UPDATE flow_grants SET revoked_at = now(), revoked_by = 'browser' WHERE id = 'g1'`
+    expect(await flows.approvedUnresolved(flowRequestId(id, 'wr1', 'grant'), 'h1')).toBe(false)
+  })
+
   // #2728: a flow's outward turn tool runs with its recorded approval, bound to the input.
   it('runs an approved outward turn tool in a flow, and refuses another input', async () => {
     const id = await run({ kind: 'browser' })

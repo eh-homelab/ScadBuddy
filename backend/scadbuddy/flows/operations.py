@@ -99,6 +99,8 @@ PROPOSAL_CHANGED = "https://scadbuddy.dev/problems/flow-escalation-proposal-chan
 NOT_NARROWER = "https://scadbuddy.dev/problems/flow-escalation-not-a-narrowing"
 PARENT_TIER = "https://scadbuddy.dev/problems/flow-escalation-parent-tier"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
+#: A print's registry printer links another printer than the run page showed (#4445).
+PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
@@ -161,6 +163,14 @@ def _proposal_changed() -> ApiError:
         status.HTTP_409_CONFLICT,
         "That proposal is not the one you were shown, or it no longer fits the call. Reload it.",
         type_=PROPOSAL_CHANGED,
+    )
+
+
+def _printer_changed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The printer this call prints on is not the one you were shown. Reload it.",
+        type_=PRINTER_CHANGED,
     )
 
 
@@ -347,10 +357,12 @@ def flow_kinds(
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
-    async def parked_hash(checked: dict[str, Any], call_id: str) -> str | None:
+    async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:
         """The input hash of the call as it is parked (#2318): an outward agent tool's
         name and arguments, which the agent hashes again from the call it is asked to
-        run. None for a ScadBuddy host function (the workflow runs it itself)."""
+        run. None for a ScadBuddy host function (the workflow runs it itself). A print
+        on a registry printer is bound to the pair its row links now (#4445), which must
+        be the `bound_hash` the run page showed (`shown`): else a 409."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
@@ -373,6 +385,10 @@ def flow_kinds(
                     args = (await bind_call(name, args, api_lookup(client))).args
                 finally:
                     await client.aclose()
+                bound = input_hash(hash_key, name, args)
+                if not isinstance(shown, str) or not hmac.compare_digest(shown, bound):
+                    raise _printer_changed()
+                return bound
             return input_hash(hash_key, name, args)
         raise _stale()
 
@@ -399,7 +415,9 @@ def flow_kinds(
         elif approved and await store.get_decision(decision.request_id) is None:
             # Bound to the call as it waits now, which is what the person was shown; a
             # resend keeps the hash its first attempt recorded.
-            decision.input_hash = await parked_hash(checked, decision.call_id)
+            decision.input_hash = await parked_hash(
+                checked, decision.call_id, request.get("bound_hash")
+            )
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:

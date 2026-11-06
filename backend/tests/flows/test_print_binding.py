@@ -51,15 +51,17 @@ async def test_a_pair_the_script_sent_is_bound_as_sent() -> None:
     assert bound.summary == "Prints on Garage (Bambuddy printer 2)"
 
 
-async def test_a_printer_only_the_lan_reaches_is_bound_as_sent() -> None:
+# Security review: never the raw arguments, so a row linked after the approval hashes
+# otherwise, and the agent never falls back to the raw hash for a person's decision.
+async def test_a_printer_only_the_lan_reaches_binds_no_printer_id() -> None:
     bound = await bind_call("print_output", CALL, holding(row(None)))
-    assert bound.args == CALL
+    assert bound.args == {**CALL, "printer_id": None}
     assert bound.summary == "Prints on Garage over the LAN"
 
 
-async def test_a_printer_the_registry_does_not_hold_is_bound_as_sent() -> None:
+async def test_a_printer_the_registry_does_not_hold_binds_no_printer_id() -> None:
     bound = await bind_call("print_output", CALL, holding(None))
-    assert bound.args == CALL
+    assert bound.args == {**CALL, "printer_id": None}
     assert bound.summary == f"Prints on printer {PRINTER}, which the registry does not hold"
 
 

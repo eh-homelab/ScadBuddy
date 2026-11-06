@@ -300,8 +300,8 @@ const messages = new Map<string, { message: string; body: string | null }>()
 const moved = new Set<string>()
 /** Runs whose view says the workflow did not answer (`live: false`). */
 const offline = new Set<string>()
-/** #4445: each parked call's line from ScadBuddy's records, by `<run>:<call>`. */
-const summaries = new Map<string, string>()
+/** #4445: each parked call's line from ScadBuddy's records and its bound hash, by `<run>:<call>`. */
+const summaries = new Map<string, { summary: string; bound_hash: string }>()
 /** Runs that exist only as an accepted start (`starting`, no row yet). */
 const starting = new Set<string>()
 let requests: { path: string; key: string | null; body: Record<string, unknown> }[] = []
@@ -344,9 +344,13 @@ export function setFlowRunChildren(id: string, next: Extract<FlowQueueEntry, { s
   children.set(id, next)
 }
 
-/** Tests: the line the view gives a run's parked call (#4445: a print's registry printer). */
-export function setFlowPendingSummary(id: string, callId: string, summary: string): void {
-  summaries.set(`${id}:${callId}`, summary)
+/**
+ * Tests: the line the view gives a run's parked call (#4445: a print's registry printer) and
+ * the hash an approval must send back; an approval with another is refused 409, as the
+ * backend refuses one whose printer was re-linked since the card showed it.
+ */
+export function setFlowPendingSummary(id: string, callId: string, summary: string, boundHash: string): void {
+  summaries.set(`${id}:${callId}`, { summary, bound_hash: boundHash })
 }
 
 /** #2477: each run's images, as the view lists them. */
@@ -479,7 +483,8 @@ function view(id: string): FlowRunView | undefined {
     reason,
     proposed,
     hops,
-    summary: summaries.get(`${id}:${call_id}`) ?? null,
+    summary: summaries.get(`${id}:${call_id}`)?.summary ?? null,
+    bound_hash: summaries.get(`${id}:${call_id}`)?.bound_hash ?? null,
   }))
   return {
     id,
@@ -528,11 +533,21 @@ function resolve(id: string, callId: string): boolean {
   return true
 }
 
+/** #4445: backend flows/operations.py PRINTER_CHANGED. */
+const PRINTER_CHANGED = 'https://scadbuddy.dev/problems/flow-printer-changed'
+
 function respond(outcome: (body: Record<string, unknown>) => string) {
   return async ({ request, params }: { request: Request; params: Record<string, string | readonly string[] | undefined> }) => {
     const id = String(params['id'])
     const body = (await request.json()) as Record<string, unknown>
     requests.push({ path: new URL(request.url).pathname, key: request.headers.get('Idempotency-Key'), body })
+    const bound = summaries.get(`${id}:${String(body['call_id'])}`)?.bound_hash
+    if (bound !== undefined && body['approved'] && body['bound_hash'] !== bound) {
+      return HttpResponse.json(
+        { type: PRINTER_CHANGED, title: 'Conflict', status: 409, detail: 'The printer this call prints on is not the one you were shown. Reload it.' },
+        { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
     if (!resolve(id, String(body['call_id']))) {
       return HttpResponse.json(
         { type: STALE, title: 'Conflict', status: 409, detail: 'That question or approval is no longer waiting: the run moved on. Reload it.' },
