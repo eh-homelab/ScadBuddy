@@ -368,7 +368,8 @@ The CRUD service, for a JWT:
 
 0. Checks the JWT's signature offline against the cluster issuer's JWKS (cached; an unknown
    `kid` refetches at most once per 30 s), with `iss`, `aud` containing `scadbuddy`, `exp`
-   and `nbf`, and RS256 or ES256 only. A forged or malformed token is refused here with no
+   and `nbf`, RS256 or ES256 only, and a `kubernetes.io.pod` claim (a token not bound to a
+   pod is refused here, so it costs no TokenReview). A forged or malformed token is refused here with no
    TokenReview and no rate-limit cost, so unauthenticated traffic can never lock a caller out
    or spend the TokenReview budget (60 a minute per API process, signature-valid tokens of a
    mapped ServiceAccount only).
@@ -377,7 +378,8 @@ The CRUD service, for a JWT:
 2. Maps `status.user.username` to the caller (§6.1). Refuses an unmapped one.
 3. Reads the pod name and uid from `status.user.extra`
    (`authentication.kubernetes.io/pod-name`, `…/pod-uid`) and the JTI
-   (`…/credential-id`) (§2.5).
+   (`…/credential-id`) (§2.5). Refuses (`401`) unless both the pod name and the pod uid are
+   present, so every credential can be revoked by deleting its pod or by `pod_uid`.
 4. Mints a credential: a row in `service_credentials` as today, with new columns
    `proof` (`legacy` for a sealed 30-day row, `k8s`, `bootstrap`, `inprocess`), `pod_name`, `pod_uid`, and **no sealed
    copy**. `expires_at` = now + 15 minutes.
@@ -566,8 +568,13 @@ Each one takes the more secure option. The cost is stated with it.
 4. **Lifetimes.** The Kubernetes token lives 600 s, the minimum. The ScadBuddy credential
    lives 15 minutes and is renewed at half-life, so a stolen one is good for at most
    15 minutes. Cost: about 1,900 rows a day (§6.3), pruned after a day.
-5. **Rate limit.** 6 exchanges a minute per pod and 30 a minute per caller, then `429` with
-   `Retry-After`. A renewing pod needs about one exchange every 7.5 minutes.
+5. **Rate limits**, the one list: 6 credentials minted a minute per pod and 30 a minute per
+   caller, then `429` with `Retry-After`; at most 60 TokenReview calls a minute per API
+   process, spent only by signature-valid, pod-bound tokens of a mapped ServiceAccount
+   (§6.2 step 0). A renewing pod needs about one exchange every 7.5 minutes. A refused proof
+   (a forged JWT, or a wrong bootstrap secret, checked locally in constant time) counts
+   against no limit, so unauthenticated traffic can never lock a caller out; only a
+   successful mint counts against its caller and pod.
 6. **The KEK goes to the CRUD service only.** A key-release route hands a subject's
    unwrapped data key to a caller whose scope covers that subject, and logs each release;
    secrets a caller needs in plaintext (printer access codes, render keys) come from routes
