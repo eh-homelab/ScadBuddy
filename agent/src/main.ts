@@ -48,7 +48,7 @@ import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { PluginOAuth } from './plugins/oauthStore.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
-import { readPluginSecrets } from './plugins/secrets.js'
+import { toolSecrets } from './plugins/secrets.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
@@ -441,9 +441,6 @@ if (role.http && database && workspace && workspaceBytesStatus) {
     })
     .catch((err: unknown) => console.error('workspace files: moving them to the blob store failed; retried at the next start:', (err as Error).message))
 }
-// Each saved Claude credential's secret, read at the call. None without the KEK, which opens them.
-const credentialSecrets = async (): Promise<string[]> =>
-  credentials && kek.ok ? (await credentials.revealAll(kek.kek)).flatMap((row) => (row.credential ? [row.credential.secret] : [])) : []
 const stopWorkspaceSweep = !role.http ? undefined : workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('workspace sweep failed:', (err as Error).message),
@@ -777,38 +774,20 @@ const durableCredentialSecrets = async () => {
 // A durable session's MCP client on each remote plugin, kept on the replica its calls
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
-/**
- * The plugin secrets the agent holds (plugins/secrets.ts `readPluginSecrets`: remote plugins'
- * and package http servers' header values, and OAuth sign-ins' tokens), read from their stores
- * alone. The turn's own forwarder URLs never reach Claude Code with the turn's tools proxied
- * (plan 2026-10-13 Step 9.3). A workspace file picked in the UI is searched for the same (#4703).
- */
-const readHeaderSecrets = (): Promise<string[]> =>
-  readPluginSecrets({
-    kek: kek.ok ? kek.kek : undefined,
-    plugins,
-    oauth: pluginOAuth,
-    ...(pluginPackages ? { packages: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-  })
-/** How long one read of them serves every tool call: a header changed since is redacted once it lapses. */
-const HEADER_SECRETS_MS = 30_000
-let headerSecrets: { at: number; read: Promise<string[]> } | undefined
-const turnHeaderSecrets = (): Promise<string[]> => {
-  if (!headerSecrets || Date.now() - headerSecrets.at > HEADER_SECRETS_MS) {
-    const read = readHeaderSecrets()
-    headerSecrets = { at: Date.now(), read }
-    // A read that failed is not kept: the next call reads again.
-    read.catch(() => {
-      if (headerSecrets?.read === read) headerSecrets = undefined
-    })
-  }
-  return headerSecrets.read
-}
 // What every tool redacts and every upload refuses, in every mode (an in-process turn, a
-// ToolCall, /mcp, a background task) (#5480): the saved credentials and every plugin secret.
-// A turn adds its loaded plugins' current headers on top (tools/harness.ts), so a header it
-// signed in with since the last read is covered too.
-toolServices.secrets = async () => [...(await credentialSecrets()), ...(await turnHeaderSecrets())]
+// ToolCall, /mcp, a background task) (#5480): the saved credentials and every plugin secret
+// (plugins/secrets.ts `toolSecrets`, #5483). A turn adds its loaded plugins' current headers on
+// top (tools/harness.ts), so a header it signed in with since the last read is covered too. The
+// turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (plan
+// 2026-10-13 Step 9.3).
+const agentSecrets = toolSecrets({
+  kek: kek.ok ? kek.kek : undefined,
+  credentials,
+  plugins,
+  oauth: pluginOAuth,
+  ...(pluginPackages ? { packages: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
+})
+toolServices.secrets = agentSecrets.secrets
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -1172,7 +1151,7 @@ const app = !role.http
   // A file picked from a workspace (#4703) is refused when it holds one of these: every saved
   // Claude credential and every plugin secret, as a turn's upload tools search for them.
   // Read fresh, not through the 30 s cache: a pick is rare, and a secret stored a moment ago counts.
-  workspaceSecrets: async () => [...(await credentialSecrets()), ...(await readHeaderSecrets())],
+  workspaceSecrets: agentSecrets.fresh,
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),

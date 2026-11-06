@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Database } from '../src/db.js'
 import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
 import { PluginStore } from '../src/plugins/registry.js'
-import { readPluginSecrets } from '../src/plugins/secrets.js'
+import { toolSecrets } from '../src/plugins/secrets.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -15,12 +15,13 @@ import { SERVER_NAME } from '../src/tools/projections.js'
 import { SessionFiles } from '../src/workspace/store.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { MemoryCredentials } from './support/memoryCredentials.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // #5480: a turn without Temporal (the in-process harness, tools/harness.ts) checks an
 // upload against the same list as a ToolCall and the UI's pick: the saved credentials and
-// every plugin secret (plugins/secrets.ts readPluginSecrets, as main.ts builds
-// `toolServices.secrets`), with the turn's own loaded headers on top.
+// every plugin secret (plugins/secrets.ts `toolSecrets`, which main.ts wires as
+// `toolServices.secrets`, #5483), with the turn's own loaded headers on top.
 
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
@@ -41,6 +42,7 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
   let files: SessionFiles
   let oauth: PluginOAuth
   let plugins: PluginStore
+  let credentials: MemoryCredentials
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
@@ -48,6 +50,8 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
     files = new SessionFiles(db.sql)
     oauth = new PluginOAuth(db.sql)
     plugins = new PluginStore(db.sql, { oauth })
+    credentials = new MemoryCredentials()
+    await credentials.create({ kind: 'anthropic_api_key', secret: SAVED }, kek)
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner, workspace: files })
     await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' }, kek)
     const grant = {
@@ -73,9 +77,7 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
 
   /** The in-process server a turn without Temporal calls, wired as main.ts wires `toolServices.secrets`. */
   async function turn(session: string) {
-    const wired = harnessTools(
-      services({ workspace: files, secrets: async () => [SAVED, ...(await readPluginSecrets({ kek, plugins, oauth }))] }),
-    )
+    const wired = harnessTools(services({ workspace: files, secrets: toolSecrets({ kek, credentials, plugins, oauth }).secrets }))
     const servers = wired.mcpServers({ id: session, owner: browser }, undefined, { secrets: () => [UNSAVED_HEADER] })
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
     await servers[SERVER_NAME]!.instance.connect(serverSide)

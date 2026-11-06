@@ -1747,8 +1747,18 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   secret (each enabled plugin's header, each package server's header, each OAuth
   sign-in's tokens and client secret) from text before the model sees it, in every
   mode: an in-process turn, a ToolCall, `/mcp` and a background task read one list
-  (`ToolServices.secrets`, `main.ts`; `plugins/secrets.ts` `readPluginSecrets`, #5480).
-  An in-process turn adds its loaded plugins' current headers to it.
+  (`ToolServices.secrets`, `main.ts`; `plugins/secrets.ts` `toolSecrets` over
+  `readPluginSecrets`, #5480, #5483). An in-process turn adds its loaded plugins' current
+  headers to it. One read of the plugin secrets serves every call for 30 s.
+- The list fails closed, in every mode. When the read of the plugin stores fails
+  (`ai_plugins`, `ai_plugin_packages`, `ai_plugin_oauth`), `workspace_read` and every
+  upload fail too, and the next call reads again. Before #5480 this happened only to a
+  ToolCall. An operator who sees these tools fail checks the agent's log and Postgres.
+  A package that cannot be loaded (its fetch, hash or vetting fails) does not fail the
+  read: it is left out, its headers with it, and the package's load check in Settings
+  shows why (`routes/pluginPackages.ts`, `packageLoadCheck`). On a fresh replica the first read also loads the enabled packages, so it can
+  wait on their fetch when the start-up warm-up has not finished (`plugin package
+  warm-up` in the log).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. Claude Code's own file tools (§9) reach the workspace only
   through the session's directory, the copy below, which is written back by sha256.
@@ -1771,8 +1781,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     enabled remote plugin's and package http server's header value, and every OAuth
     sign-in's access and refresh tokens and client secret
     ([`agent/src/plugins/secrets.ts`](../../agent/src/plugins/secrets.ts)
-    `readPluginSecrets`). The same reader gives a turn's ToolCall tools the plugin secrets
-    they redact and refuse to upload.
+    `readPluginSecrets`). The same reader gives every tool, in every mode (an in-process
+    turn, a ToolCall, `/mcp` and a background task), the plugin secrets it redacts and
+    refuses to upload (`toolSecrets`, #5480).
   - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
     file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
     replaced one). A path that exists without it, or with a stale one, is `409`; past
