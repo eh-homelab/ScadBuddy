@@ -18,6 +18,7 @@ from scadbuddy.auth.gate import AuthGate, caller_of
 from scadbuddy.auth.models import ANONYMOUS, Service
 from scadbuddy.auth.service_credentials import (
     LIFETIME,
+    REREAD_MIN_SECONDS,
     ROTATE_BEFORE,
     SCOPES,
     ServiceCredentialStore,
@@ -53,6 +54,37 @@ def test_rotation_issues_one_per_caller_and_again_only_when_due(
     assert len(store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE + timedelta(hours=1))) == 3
     # A new KEK: the callers could not open the old ones, so new ones at once.
     assert len(store.rotate_due(Kek("k2", os.urandom(32)), now=now)) == 3
+
+
+def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
+    store: ServiceCredentialStore, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5298: a release that changes a caller's scopes mints it a credential with them at
+    the API's start, not when the old one is due; the old one stays live for the old pods
+    of the roll, and a reader refused with the old one reads the new one."""
+    now = datetime.now(UTC)
+    with monkeypatch.context() as patched:
+        patched.setitem(SCOPES, "projects", frozenset({"api"}))
+        store.rotate_due(KEK, now=now)
+    clock = [0.0]
+    reader = TokenReader("projects", pg_conninfo, KEK, clock=lambda: clock[0])
+    old = reader.token()
+    assert old is not None
+    assert store.resolve(old) == Service("projects", frozenset({"api"}))
+
+    later = now + timedelta(minutes=1)
+    (minted,) = store.rotate_due(KEK, now=later)
+    assert [c.caller for c in store.list() if c.id == minted] == ["projects"]
+    assert store.rotate_due(KEK, now=later) == []
+    assert store.resolve(old) == Service("projects", frozenset({"api"}))
+
+    reader.invalidate(old)
+    clock[0] = REREAD_MIN_SECONDS - 0.1
+    assert reader.token() == old
+    clock[0] = REREAD_MIN_SECONDS
+    new = reader.token()
+    assert new is not None and new != old
+    assert store.resolve(new) == Service("projects", SCOPES["projects"])
 
 
 def test_a_caller_reads_its_token_and_the_api_verifies_it(
