@@ -18,9 +18,17 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 from starlette.routing import BaseRoute
 
 import scadbuddy.api
-from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, Service, SessionKind
+from scadbuddy.auth.models import (
+    ANONYMOUS,
+    AuthSession,
+    Person,
+    PersonalToken,
+    Service,
+    SessionKind,
+)
 from scadbuddy.auth.routes import (
     EXCHANGE_ENDPOINTS,
+    FLOW_HOST_ENDPOINTS,
     INTERNAL_MODULES,
     PERSON_ENDPOINTS,
     PUBLIC_ENDPOINTS,
@@ -74,6 +82,7 @@ def test_every_named_endpoint_and_module_exists() -> None:
     assert names >= PUBLIC_ENDPOINTS
     assert names >= PERSON_ENDPOINTS
     assert names >= EXCHANGE_ENDPOINTS
+    assert names >= FLOW_HOST_ENDPOINTS
     assert modules >= PUBLIC_MODULES
     assert set(INTERNAL_MODULES) <= modules
 
@@ -204,8 +213,17 @@ def _person(kind: SessionKind = "login") -> Person:
         ("crud.render", Service("print", frozenset({"crud.print"})), False, "wrong_caller"),
         ("crud.render", Service("print", frozenset({"crud.render"})), False, "wrong_caller"),
         ("crud.projects", Service("projects", frozenset({"api"})), False, "out_of_scope"),
+        # #5298: a flow host route takes everyone an `api` route takes, and the projects
+        # credential, which holds `flow.host` and not `api`.
         ("flow.host", Service("projects", frozenset({"flow.host"})), False, None),
-        ("flow.host", Service("projects", frozenset({"api"})), False, "out_of_scope"),
+        ("api", Service("projects", frozenset({"flow.host"})), False, "out_of_scope"),
+        ("flow.host", Service("projects", frozenset({"api"})), False, None),
+        ("flow.host", Service("agent", frozenset({"api"})), False, None),
+        ("flow.host", Service("print", frozenset({"internal.outputs"})), False, "out_of_scope"),
+        ("flow.host", ANONYMOUS, False, "signed_out"),
+        ("flow.host", _person(), True, None),
+        ("flow.host", _person(), False, "no_request_header"),
+        ("flow.host", _person("delegated"), True, None),
         ("internal.outputs", _person(), True, "no_credential"),
         ("internal.outputs", Service("print", frozenset({"internal.outputs"})), False, None),
         (
@@ -221,6 +239,22 @@ def test_would_refuse(route_cls: object, caller: object, header: bool, reason: o
         would_refuse(route_cls, caller, request_header=header, header_needed=True)  # type: ignore[arg-type]
         == reason
     )
+
+
+def test_a_personal_token_takes_a_flow_host_route_as_an_api_one() -> None:
+    for scope, method, reason in (
+        ("read", "GET", None),
+        ("read", "POST", "out_of_scope"),
+        ("write", "POST", None),
+    ):
+        token = PersonalToken("t1", "user:i#s", scope)
+        for route_cls in ("api", "flow.host"):
+            assert (
+                would_refuse(
+                    route_cls, token, request_header=False, header_needed=True, method=method
+                )
+                == reason
+            ), (route_cls, scope, method)
 
 
 def test_no_header_is_needed_where_none_can_be_sent() -> None:

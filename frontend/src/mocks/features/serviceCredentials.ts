@@ -5,17 +5,20 @@ import type { ServiceCaller, ServiceCredentialView } from '../../api/types'
 
 let counter = 0
 
+/** `auth/service_credentials.py` `SCOPES`, sorted as the API stores them. */
+const SCOPES: Record<ServiceCaller, string[]> = {
+  agent: ['api', 'internal.workspace'],
+  print: ['crud.print', 'internal.library', 'internal.outputs'],
+  projects: ['crud.projects', 'flow.host'],
+  render: ['crud.render'],
+}
+
 function credential(caller: ServiceCaller): ServiceCredentialView {
   counter += 1
   return {
     id: counter.toString(16).padStart(16, '0'),
     caller,
-    scopes:
-      caller === 'print'
-        ? ['crud.print', 'internal.library', 'internal.outputs']
-        : caller === 'projects'
-          ? ['api', 'crud.projects']
-          : ['api'],
+    scopes: SCOPES[caller],
     created_at: '2026-11-01T12:00:00Z',
     expires_at: '2026-12-01T12:00:00Z',
     revoked_at: null,

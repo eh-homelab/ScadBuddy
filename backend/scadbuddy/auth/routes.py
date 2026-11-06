@@ -1,10 +1,10 @@
 """Route classes and what each takes (#4975 phase 3, spec 2026-11-01 §5.3, §8.1).
 
 Every mounted route falls in exactly one class, by its endpoint: the public ones, the
-person-only ones, the service-token exchange and the internal modules are named here,
-and every other ``/api/v1`` route is ``api``. ``tests/auth/test_routes.py`` fails for a
-name here that matches no route, and for an endpoint that refuses agents
-(``_browser_only``) that is not ``person``.
+person-only ones, the service-token exchange, the flow host routes and the internal
+modules are named here, and every other ``/api/v1`` route is ``api``.
+``tests/auth/test_routes.py`` fails for a name here that matches no route, and for an
+endpoint that refuses agents (``_browser_only``) that is not ``person``.
 
 :func:`would_refuse` says why ``enforce`` refuses a request, or ``None``.
 ``auth/check.py`` refuses it in ``enforce`` and counts it in ``observe``.
@@ -32,7 +32,7 @@ RouteClass = Literal[
     "crud.projects",
     "crud.render",
     "crud.print",
-    # The projects worker's flow host routes (#5298 Task 8).
+    # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
 ]
 Reason = Literal[
@@ -100,6 +100,28 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.service_credentials.list_service_callers",
         "scadbuddy.api.service_credentials.suspend_service_caller",
         "scadbuddy.api.service_credentials.resume_service_caller",
+    }
+)
+#: The public routes the projects worker's flow host functions and grant checks call
+#: (#5298): `workflows/flow_tools.py` through `workflows/flow_routes.py`,
+#: `workflows/flow_grants.py` `facts_of`, and `flows/print_binding.py` `api_lookup` for the
+#: `flow_decide` operation. They take everyone `api` takes, as `api`; the projects
+#: credential holds `flow.host`, not `api`, and reaches only these.
+#: `tests/flows/test_flow_host_paths.py` fails for a call to a route not listed here,
+#: and for a listed one nothing calls.
+FLOW_HOST_ENDPOINTS = frozenset(
+    {
+        "scadbuddy.api.jobs.render_model",
+        "scadbuddy.api.jobs.get_job",
+        "scadbuddy.api.outputs.create_output",
+        "scadbuddy.api.outputs.get_output",
+        "scadbuddy.api.outputs.arrange_outputs",
+        "scadbuddy.api.operations.get_operation",
+        "scadbuddy.api.printing.post_run",
+        "scadbuddy.api.library_print.post_library_run",
+        "scadbuddy.api.printing.get_run",
+        "scadbuddy.api.settings.get_print_options",
+        "scadbuddy.api.printers.get_printer",
     }
 )
 #: The hidden internal routes, each the scope of one service credential (§7.1).
@@ -177,6 +199,8 @@ def route_class(route: Route) -> RouteClass:
         return "exchange"
     if endpoint_name(route) in PERSON_ENDPOINTS:
         return "person"
+    if endpoint_name(route) in FLOW_HOST_ENDPOINTS:
+        return "flow.host"
     if (match := CRUD_PATH.match(route.path)) and match.group(1) in CRUD_CALLERS:
         return CRUD_CLASSES[match.group(1)]
     return INTERNAL_MODULES.get(module, "api")
@@ -216,7 +240,7 @@ def would_refuse(
         if isinstance(caller, Service) and route_cls in caller.scopes:
             return None
         return "no_credential"
-    if route_cls.startswith("crud.") or route_cls == "flow.host":
+    if route_cls.startswith("crud."):
         # A live service credential of another caller, or without the class, is a 403
         # as `crud/guard.py` answers it in `off`; only no live credential is a 401.
         if not isinstance(caller, Service):
@@ -224,10 +248,17 @@ def would_refuse(
         if route_cls.startswith("crud.") and route_cls != f"crud.{caller.caller}":
             return "wrong_caller"
         return None if route_cls in caller.scopes else "out_of_scope"
+    # A flow host route is an `api` route, and also the projects credential's (#5298).
+    if route_cls == "flow.host" and isinstance(caller, Service) and "flow.host" in caller.scopes:
+        return None
     if isinstance(caller, Anonymous):
         return "signed_out"
-    # A credential whose scopes leave out the public routes (the print worker's).
-    if route_cls == "api" and isinstance(caller, Service) and "api" not in caller.scopes:
+    # A credential whose scopes leave out the public routes (the print and projects ones).
+    if (
+        route_cls in ("api", "flow.host")
+        and isinstance(caller, Service)
+        and "api" not in caller.scopes
+    ):
         return "out_of_scope"
     # A person's access token (§7.5): the api routes only, and writes with `write` only.
     if isinstance(caller, PersonalToken):

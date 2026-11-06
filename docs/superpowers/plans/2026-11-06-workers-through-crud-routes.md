@@ -484,13 +484,13 @@ Per-step specifics are in each task's **Rolling deploy** line.
 **Files:**
 - Modify: `auth/routes.py` (`FLOW_HOST_ENDPOINTS`: the endpoints `workflows/flow_tools.py:358-484`, `workflows/flow_grants.py:109-127` and `flows/operations.py:412`, `:656` call: render, jobs read, outputs create and read, operations read, print runs create and read, arrange, print options read, the printer reads `bind_call` makes)
 - Modify: `auth/service_credentials.py` (`SCOPES["projects"] = {"flow.host", "crud.projects"}`)
-- Test: `tests/auth/test_routes.py`, `tests/workflows/test_flow_host_paths.py`
+- Test: `tests/auth/test_routes.py`, `tests/flows/test_flow_host_paths.py`, `tests/api/test_auth_enforce.py`
 
 - [ ] **Step 1:** Write a test that records every path the flow host functions and grant checks call (run them against an `httpx.MockTransport` that logs paths) and asserts each one matches a `flow.host` route, and that no other route is `flow.host`.
-- [ ] **Step 2:** Implement. `would_refuse` already admits a class in the scopes (Task 1).
+- [ ] **Step 2:** Implement. `flow.host` is an extra admission, not a narrowing: `would_refuse` answers a flow host route as an `api` route for every caller, and also admits a service credential that holds `flow.host`.
 - [ ] **Step 3:** Backend check; commit `feat(auth): flow.host, the projects worker's only public routes (#5298)`. PR P4.
 
-**Rolling deploy:** a credential an old pod minted still carries `api`; an exchanged one expires within 15 minutes (spec §6.3), and a sealed one read through the view is replaced at the new API's start (`rotate_due` mints on a scope change) but stays live until it expires. In `off` nothing is refused yet; `scadbuddy_auth_would_refuse_total{class="api"}` for `projects` must stay 0 for a day before #5297 moves to `enforce`.
+**Rolling deploy:** the projects worker reads a legacy credential from its view; it has no token exchange yet (eh-homelab/clusters#3246), so the exchange's 15 minutes (spec §6.3) do not apply to it. The new API mints a new credential at once when `SCOPES` changes (`rotate_due`), and keeps the old one, which carries `api`, live until it expires. A worker reads the newest again on a refusal (at most every 5 s, `REREAD_MIN_SECONDS`) and every hour (`REREAD_SECONDS`): an old pod keeps a credential with `api` until its hourly read, then takes the new one. In `off` and `observe` nothing is refused. `flow.host` takes everyone `api` takes, so a person, a personal token and the agent get the same answers there in every mode; only their refusals there are counted as `class="flow.host"`, not `class="api"`. The counter has no caller label: after the roll, a rise in `scadbuddy_auth_would_refuse_total{class="api", reason="out_of_scope"}` is a credential without `api` (the projects, print or render worker's) on a public route outside its classes, and the log line names the route. Old pods add nothing to it while their credential holds `api`; `tests/flows/test_flow_host_paths.py` keeps the list whole. It must stay 0 for a day before #5297 moves to `enforce`.
 
 ### Task 9: The projects worker needs no database
 
