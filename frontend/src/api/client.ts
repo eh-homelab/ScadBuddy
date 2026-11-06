@@ -218,6 +218,10 @@ import type {
   OrderDetail,
   OrderEstimate,
   OrderCosts,
+  TimeEntry,
+  TimeEntryCreate,
+  CostEntry,
+  CostEntryCreate,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -2301,6 +2305,17 @@ export const api = {
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
   /** #4251 §6.4 — the accepted quotes beside the attempts. */
   orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
+  /** #5326 — time on the order or (with `order_item_id`) one of its items, at today's
+   * labour rate, which the entry keeps. Allowed in every order status. */
+  addTimeEntry: (orderId: string, body: TimeEntryCreate) =>
+    request<TimeEntry>(`/orders/${seg(orderId)}/time-entries`, { method: 'POST', body: JSON.stringify(body) }),
+  removeTimeEntry: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/time-entries/${seg(id)}`, { method: 'DELETE' }),
+  /** #5326 — money the job cost, in the order's currency. */
+  addCostEntry: (orderId: string, body: CostEntryCreate) =>
+    request<CostEntry>(`/orders/${seg(orderId)}/cost-entries`, { method: 'POST', body: JSON.stringify(body) }),
+  removeCostEntry: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/cost-entries/${seg(id)}`, { method: 'DELETE' }),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),

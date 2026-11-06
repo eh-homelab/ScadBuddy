@@ -552,6 +552,25 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
+  `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
+  only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
+  in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
+  audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
+  currency), and an entry's `source` (a timer's `timer:<item or order>:<started_at>`, a form's
+  `manual:<uuid>`, a writer's id) makes a retry write once (200 with the first entry; a time
+  entry's is unique per order whatever its kind, a cost entry's per order and kind). An item with entries is never deleted, only
+  cancelled (`delete_item`, `item_has_entries`), and a cancelled order is charged nothing, its
+  charges included (§5). `orders/costs.py`
+  `order_costs(..., CostRates)` computes on read each attempt's filament and machine cost
+  (`estimated`/`unknown` when a figure is not measured), each item's labour (entries, else
+  a default), other costs, `revenue_minor`, margin and `margin_state`, and the order's sums
+  with its shipments' cost and every charge but tax. Settings `pricing_labour_rate_per_hour`,
+  `pricing_usd_rate`, `orders_thin_margin_percent` (live). Routes `POST`/`DELETE
+  /orders/{id}/time-entries` and `…/cost-entries`; agent `order_time_add`, `order_cost_add`
+  (write); the order page's `components/orders/OrderCosts.tsx` and `CostEntryForms.tsx`.
+  Every attempt counts, test prints (#5280) too (`OrderStore.order_fulfilments`, every
+  purpose, one query per order, as `order_quotes` is).
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)

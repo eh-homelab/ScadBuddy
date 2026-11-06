@@ -300,10 +300,13 @@ export const orderTools: Tool[] = [
     name: 'order_costs',
     label: "Read an order's real cost",
     description:
-      "An order's real cost (#4251): per item, its accepted quote's seconds, grams and filament cost for the " +
-      "item's quantity beside every attempt's actual seconds and grams, failed attempts included, the grams " +
-      "priced at the quote's own price per gram (a manual quote prices none). `bambuddy_cost` is Bambuddy's own " +
-      'cost of an attempt, shown and never in any sum.',
+      "An order's real cost and margin (#4251, #5326): per item, its accepted quote beside every attempt, failed " +
+      'ones included, each costed in filament and machine time (`estimated` names a figure taken from the quote ' +
+      "or today's settings; `unknown` an attempt with no source), its labour (`time_entries`, else a default, " +
+      '`labour_default`), its `cost_entries`, what it was charged (`revenue_minor`) and its `margin_minor`, ' +
+      '`margin_percent` and `margin_state` (`ok`, `thin`, `loss`, `unknown`); the order adds its own entries, its ' +
+      "shipments' cost and every charge but tax. `bambuddy_cost` is Bambuddy's own cost of an attempt, shown and " +
+      'never in any sum.',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}/costs'],
@@ -312,6 +315,73 @@ export const orderTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/orders/{order_id}/costs', { params: { path: { order_id } } }),
           `get the costs of order ${order_id}`,
+        ),
+      ),
+  }),
+  // Job cost (#5326, spec 2026-11-05 §4.3, §4.4): a record of what the job took, in any
+  // order status. Removing one is the order page's (coverage.ts).
+  defineTool({
+    name: 'order_time_add',
+    label: 'Log time on an order',
+    description:
+      'Record time spent on an order, or on one of its items with `order_item_id`: `design`, `setup`, ' +
+      "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
+      "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
+      'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
+    input: z.object({
+      order_id: orderId,
+      order_item_id: itemId.optional(),
+      kind: z.enum(['design', 'setup', 'post_processing', 'packing', 'other']),
+      minutes: z.number().int().min(1).max(1_000_000),
+      note: z.string().max(1000).default(''),
+      started_at: datetime.optional(),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/time-entries'],
+    title: ({ order_id, minutes }) => `Log ${minutes} minutes on order ${order_id}`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/time-entries', { params: { path: { order_id } }, body }),
+          `log time on order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_cost_add',
+    label: 'Add a cost to an order',
+    description:
+      "Record money a job cost, in the order's currency's minor units, on the order or one of its items: " +
+      "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
+      "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
+      'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
+      'this call names, and writes nothing. Allowed in every order status.',
+    input: z.object({
+      order_id: orderId,
+      order_item_id: itemId.optional(),
+      kind: z.enum(['assistant', 'payment_fee', 'material', 'other']),
+      amount_minor: money.min(1),
+      note: z.string().max(1000).default(''),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/cost-entries'],
+    title: ({ order_id, kind }) => `Add a ${kind} cost to order ${order_id}`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/cost-entries', { params: { path: { order_id } }, body }),
+          `add a cost to order ${order_id}`,
         ),
       ),
   }),
@@ -501,7 +571,8 @@ export const orderTools: Tool[] = [
       '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
       'order_item_accept_quote). A `reference` or ' +
       '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
-      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead). ' +
+      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead), and one ' +
+      'with time or cost entries with `item_has_entries` (remove them, or cancel it). ' +
       '`approval` sets how the customer approves the item: the design first, or design and price together.',
     input: z.object({
       order_id: orderId,

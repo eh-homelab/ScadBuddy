@@ -182,6 +182,15 @@ class Settings(BaseSettings):
     # `to_minor_unit`: the unit price is its lines, each rounded once; `to_major`: then
     # rounded up to a whole currency unit, the difference a line of its own.
     pricing_rounding: Literal["to_minor_unit", "to_major"] = "to_minor_unit"
+    # Job cost (spec 2026-11-05 §4.3, §4.4, §5, #5326), decimal strings in the shop's
+    # `orders_currency`: the labour rate per hour a time entry copies when it is written
+    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which will
+    # convert the assistant's spend once it is recorded on a job (#5327 to #5330; nothing
+    # reads it yet; `SCADBUDDY_PRICING_USD_RATE`, more than 0), and the margin percent
+    # below which a job is thin (`SCADBUDDY_ORDERS_THIN_MARGIN_PERCENT`).
+    pricing_labour_rate_per_hour: str = "0"
+    pricing_usd_rate: str = "1"
+    orders_thin_margin_percent: str = "15"
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
@@ -276,11 +285,14 @@ class Settings(BaseSettings):
         "pricing_labour_per_item",
         "pricing_markup_percent",
         "rough_estimate_factor",
+        "pricing_labour_rate_per_hour",
+        "pricing_usd_rate",
+        "orders_thin_margin_percent",
     )
     @classmethod
     def _decimal_rate(cls, value: str, info: ValidationInfo) -> str:
         name = info.field_name or ""
-        positive = name == "rough_estimate_factor"
+        positive = name in {"rough_estimate_factor", "pricing_usd_rate"}
         return decimal_string(value, env_var(name), positive=positive)
 
     @field_validator("store_s3_prefix")
@@ -835,6 +847,10 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "pricing_markup_percent": "live",
         "pricing_rounding": "live",
         "rough_estimate_factor": "live",
+        # Read by each time entry and each costs read (#5326).
+        "pricing_labour_rate_per_hour": "live",
+        "pricing_usd_rate": "live",
+        "orders_thin_margin_percent": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.

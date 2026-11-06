@@ -132,6 +132,35 @@ describe('order tools (#4249)', () => {
     expect(firstText(result)).toEqual({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false })
   })
 
+  it('logs time and adds costs as writes, leaving their removal to the page (#5326)', async () => {
+    const sent: { path: string; body: unknown }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/time-entries`, async ({ request }) => {
+        sent.push({ path: 'time', body: await request.json() })
+        return HttpResponse.json({ id: 't1', minutes: 25 }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/cost-entries`, async ({ request }) => {
+        sent.push({ path: 'cost', body: await request.json() })
+        return HttpResponse.json({ id: 'c1', amount_minor: 120 }, { status: 201 })
+      }),
+    )
+    expect([tool('order_time_add').risk, tool('order_cost_add').risk]).toEqual(['write', 'write'])
+
+    const time = await tool('order_time_add').execute({ order_id: ORDER, order_item_id: ITEM, kind: 'post_processing', minutes: 25 }, ctx())
+    const cost = await tool('order_cost_add').execute({ order_id: ORDER, kind: 'assistant', amount_minor: 120, source: 'ai_session:s1' }, ctx())
+
+    expect(firstText(time)).toEqual({ id: 't1', minutes: 25 })
+    expect(firstText(cost)).toEqual({ id: 'c1', amount_minor: 120 })
+    expect(sent).toEqual([
+      { path: 'time', body: { order_item_id: ITEM, kind: 'post_processing', minutes: 25, note: '' } },
+      { path: 'cost', body: { kind: 'assistant', amount_minor: 120, note: '', source: 'ai_session:s1' } },
+    ])
+    expect(() => tool('order_cost_add').execute({ order_id: ORDER, kind: 'material', amount_minor: 0 }, ctx())).toThrow('amount_minor')
+    const removals = NOT_A_TOOL.map((n) => n.operation)
+    expect(removals).toContain('DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}')
+    expect(removals).toContain('DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}')
+  })
+
   it('passes the list filters and the cursor through to the backend', async () => {
     let url = ''
     server.use(

@@ -100,6 +100,15 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +
       'Activity.',
   },
+  ...(['DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}', 'DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "Removing a time or cost entry (#5326) is the order page's: a person corrects the job's cost record, " +
+        'on the audit line. The agent records entries with order_time_add and order_cost_add, and reads them in ' +
+        'order_costs.',
+    }),
+  ),
   {
     operation: 'GET /api/v1/activity/facets',
     reason: "The UI's filter bar; activity_list's own filters say the same.",

@@ -680,6 +680,11 @@ class SettingsPatch(BaseModel):
     pricing_rounding: Literal["to_minor_unit", "to_major"] | None = None
     #: The rough estimate's factor over a part's volume (orders spec §5.3).
     rough_estimate_factor: str | None = None
+    #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
+    #: the thin-margin threshold percent.
+    pricing_labour_rate_per_hour: str | None = None
+    pricing_usd_rate: str | None = None
+    orders_thin_margin_percent: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).

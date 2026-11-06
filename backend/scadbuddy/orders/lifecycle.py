@@ -27,6 +27,7 @@ import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -44,6 +45,8 @@ from scadbuddy.orders.models import (
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    CostEntry,
+    CostEntryInput,
     Fulfilment,
     FulfilmentPurpose,
     ItemStatus,
@@ -59,8 +62,10 @@ from scadbuddy.orders.models import (
     Revision,
     Shipment,
     ShipmentItem,
+    TimeEntry,
+    TimeEntryInput,
 )
-from scadbuddy.orders.pricing import Plate, Priced
+from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
@@ -246,6 +251,14 @@ class OrderEdit(BaseModel):
     shipping_address_id: str | UnsetType | None = UNSET
     billing_address_id: str | UnsetType | None = UNSET
     charges: list[ChargeInput] | None = None
+
+
+@dataclass(frozen=True)
+class LabourRate:
+    """``pricing_labour_rate_per_hour`` and the shop's ``orders_currency`` it is in."""
+
+    per_hour: Decimal
+    currency: str
 
 
 @dataclass
@@ -534,6 +547,116 @@ class Lifecycle:
             self._event(conn, order, by, "payment.added", payment_id=payment.id)
         self._told(_Change(order))
         return payment
+
+    # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
+    # A record of what the job took, allowed in every status, ended and on hold included:
+    # a fee or a label often arrives after the order moved on. Nothing here moves a status.
+
+    def _entry_item(self, conn: Conn, order: Order, item_id: str | None) -> list[OrderItem]:
+        return [] if item_id is None else [self._item_of(conn, order, item_id)]
+
+    def add_time_entry(
+        self, order_id: str, body: TimeEntryInput, by: Actor, *, labour_rate: LabourRate
+    ) -> tuple[TimeEntry, bool]:
+        """Time spent, at the labour rate now (copied, in the order's minor units, under
+        the order's lock, so a currency change cannot slip in between), and whether this
+        call wrote it: a second write of one ``source`` returns the first entry and writes
+        nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            rate = (
+                to_minor(labour_rate.per_hour, order.currency)
+                if order.currency == labour_rate.currency
+                else None
+            )
+            entry, written = self.store.insert_time_entry(
+                conn, order.id, body, rate_minor_per_hour=rate, created_by=by
+            )
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "time.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def remove_time_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_time_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "time_entry_not_found",
+                    f"no time entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "time.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
+
+    def add_cost_entry(
+        self, order_id: str, body: CostEntryInput, by: Actor
+    ) -> tuple[CostEntry, bool]:
+        """Money spent, and whether this call wrote it: a second write of one ``source``
+        returns the first entry and writes nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_cost_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "cost_entry_not_found",
+                    f"no cost entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)
@@ -1325,6 +1448,15 @@ class Lifecycle:
                 raise LifecycleError(
                     "item_not_draft",
                     f"item {item_id} has print attempts: cancel it instead"
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    items=[item.id],
+                )
+            if self.store.item_has_entries(conn, item.id):
+                # Logged time and costs are the job's record (#5326): never dropped with
+                # the item, and its delete has no audit row for them.
+                raise LifecycleError(
+                    "item_has_entries",
+                    f"item {item_id} has time or cost entries: remove them or cancel it"
                     f" (POST /orders/{order_id}/items/{item_id}/cancel)",
                     items=[item.id],
                 )

@@ -400,6 +400,11 @@ export type OrderEvent = Schemas['OrderEvent']
 export type OrderCosts = Schemas['OrderCosts']
 export type ItemCost = Schemas['ItemCost']
 export type AttemptCost = Schemas['AttemptCost']
+// #5326 — job cost: the time and the other costs a job took.
+export type TimeEntry = Schemas['TimeEntry']
+export type CostEntry = Schemas['CostEntry']
+export type TimeEntryCreate = Defaulted<Schemas['TimeEntryInput'], 'note' | 'order_item_id' | 'started_at' | 'source'>
+export type CostEntryCreate = Defaulted<Schemas['CostEntryInput'], 'note' | 'order_item_id' | 'source'>
 export type AddressSnapshot = Schemas['AddressSnapshot']
 export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
 export type OrderPatch = Partial<Schemas['OrderPatch']>

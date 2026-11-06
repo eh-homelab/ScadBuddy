@@ -85,3 +85,24 @@ describe('Orders, Unfulfil (#4953)', () => {
     expect(mockSettings().sources?.['orders_allow_unfulfil']).toBe('stored')
   })
 })
+
+describe('Orders, job cost (#5326)', () => {
+  it('saves the labour rate and the thin threshold, and refuses a USD rate of 0', async () => {
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const field = (label: string) => within(region('Orders')).getByLabelText(label)
+    expect(field('Labour rate per hour')).toHaveValue('0')
+    expect(field('Thin margin below, percent')).toHaveValue('15')
+
+    await user.clear(field('Labour rate per hour'))
+    await enter(user, field('Labour rate per hour'), '25')
+    await user.clear(field('Thin margin below, percent'))
+    await enter(user, field('Thin margin below, percent'), '20')
+    await user.click(within(region('Orders')).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().pricing_labour_rate_per_hour).toBe('25'))
+    expect(mockSettings().orders_thin_margin_percent).toBe('20')
+
+    await expect(api.putSettings({ pricing_usd_rate: '0' })).rejects.toThrow()
+    expect(mockSettings().pricing_usd_rate).toBe('1')
+  })
+})

@@ -811,6 +811,13 @@ export const handlers = [
       if (found.status !== 'draft') {
         throw new Refused('item_not_draft', `item ${found.id} is ${found.status}: cancel it instead (POST /orders/${order.id}/items/${found.id}/cancel)`, [found.id])
       }
+      if (state.timeEntries.some((e) => e.order_item_id === found.id) || state.costEntries.some((e) => e.order_item_id === found.id)) {
+        throw new Refused(
+          'item_has_entries',
+          `item ${found.id} has time or cost entries: remove them or cancel it (POST /orders/${order.id}/items/${found.id}/cancel)`,
+          [found.id],
+        )
+      }
       // Its files go with it (`Lifecycle.delete_item`), each on the audit line.
       for (const attachment of state.attachments.filter((a) => a.item_id === found.id)) {
         event(order, 'attachment.removed', { attachment_id: attachment.id, item_id: found.id, filename: attachment.filename, was_delivered: found.delivered_attachment_id === attachment.id })
