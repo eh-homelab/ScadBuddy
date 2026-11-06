@@ -86,12 +86,10 @@ test.describe('customizer', () => {
       page,
     }) => {
       await page.setViewportSize(viewport)
-      await page.goto('/m/name-keychain')
+      // The bookmark's eight groups wrap at the panel's real width (#5376).
+      await page.goto('/m/bookmark')
       const tablist = page.getByRole('tablist', { name: 'Parameter groups' })
-      await expect(tablist.getByRole('tab')).toHaveCount(3)
-      // Narrow enough that each tab takes a row of its own, as the bookmark's eight groups
-      // wrap in the real panel.
-      await tablist.evaluate((element) => element.setAttribute('style', 'width: 90px'))
+      await expect(tablist.getByRole('tab')).toHaveCount(8)
 
       const layout = await tablist.evaluate((element) => {
         const box = (el: typeof element) => {
