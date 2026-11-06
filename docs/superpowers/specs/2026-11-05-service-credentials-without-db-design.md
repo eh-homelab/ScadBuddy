@@ -574,7 +574,9 @@ Each one takes the more secure option. The cost is stated with it.
    (§6.2 step 0). A renewing pod needs about one exchange every 7.5 minutes. A refused proof
    (a forged JWT, or a wrong bootstrap secret, checked locally in constant time) counts
    against no limit, so unauthenticated traffic can never lock a caller out; only a
-   successful mint counts against its caller and pod.
+   successful mint counts against its caller and pod. The per-pod limit is keyed by `pod_uid` for a `k8s`
+   proof; a `bootstrap` caller counts as one pod (its caller name is the key); an `inprocess`
+   mint (no network, no proof to forge) is not limited.
 6. **The KEK goes to the CRUD service only.** A key-release route hands a subject's
    unwrapped data key to a caller whose scope covers that subject, and logs each release;
    secrets a caller needs in plaintext (printer access codes, render keys) come from routes
