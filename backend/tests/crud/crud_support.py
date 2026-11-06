@@ -88,7 +88,9 @@ def api_payload_keys(store: FlowStore) -> PgPayloadKeys:
 class DerivedPayloadKeys(PgPayloadKeys):
     """The API's payload keys, each made as `tests/flows/flows_support.py` `Keys` derives
     it, so a history recorded over the routes replays under `Keys`
-    (`test_project_replay.py`), and a test's own `Keys` opens what the worker sealed."""
+    (`test_project_replay.py`), and a test's own `Keys` opens what the worker sealed. It
+    skips `create_key`'s advisory lock on purpose: a derived key is the same whoever makes
+    it. Production code takes the lock."""
 
     async def sealed_key(self, subject: str, create: bool) -> tuple[bytes, str] | None:
         if create:

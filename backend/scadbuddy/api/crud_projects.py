@@ -339,7 +339,7 @@ async def payload_key(subject: str, body: KeyRequest, flows: FlowsDep) -> Sealed
     if sealed is None:
         raise ApiError(
             status.HTTP_410_GONE,
-            f"The payloads of {subject} cannot be decoded: its key was deleted.",
+            f"{subject} has no payload key: it was forgotten, or (a session) never made one.",
             reason=SUBJECT_FORGOTTEN,
         )
     return SealedKey(dek_sealed=base64.b64encode(sealed[0]).decode(), kek_id=sealed[1])
