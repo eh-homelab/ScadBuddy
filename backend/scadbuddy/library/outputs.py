@@ -1070,11 +1070,13 @@ def reap_orphan_holds(
         # hold to release, the walk below raises as before.
         try:
             _, bare = _live_outputs(root) if root.is_dir() else ({}, [])
-        except OSError:
+        except OSError as error:
+            # It repeats on every tick while the directory stays unlistable, so it names
+            # the path to fix (#5462).
             logger.warning(
                 "could not list the outputs to remove unheld directories",
                 exc_info=True,
-                extra={"root": str(root)},
+                extra={"root": str(root), "path": error.filename},
             )
             return 0
         _remove_unheld_directories(bare, holding, grace)

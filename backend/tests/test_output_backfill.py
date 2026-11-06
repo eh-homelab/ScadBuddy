@@ -921,7 +921,8 @@ async def test_a_slug_directory_it_cannot_list_is_logged_when_no_hold_is_aged(
             hold_parts(refs, old.id, written.manifest, old.slug)  # inside the grace
             with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
                 assert reap_orphan_holds(refs, store) == 0
-            assert any("unheld directories" in r.getMessage() for r in caplog.records)
+            warned = [r for r in caplog.records if "unheld directories" in r.getMessage()]
+            assert [r.__dict__["path"] for r in warned] == [str(locked)]
             _age_holds(refs, old.id, 2)
             with pytest.raises(PermissionError):
                 reap_orphan_holds(refs, store)
