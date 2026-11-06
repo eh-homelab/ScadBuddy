@@ -24,6 +24,12 @@ from starlette.requests import HTTPConnection
 from scadbuddy.api.components import component_dep
 from scadbuddy.auth import delegation
 from scadbuddy.auth.config import LoginConfig, LoginConfigStore
+from scadbuddy.auth.exchange import (
+    BootstrapVerifier,
+    ExchangeProof,
+    ProofVerifier,
+    TokenReviewVerifier,
+)
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Caller
 from scadbuddy.auth.observe import WouldRefuse
@@ -74,6 +80,15 @@ class AuthComponent:
         self._credentials = ServiceCredentialStore(self._pool)
         self._tokens = PersonalTokenStore(self._pool)
         self._run_key: tuple[str, bytes] | None = None
+        # #5494 (spec 2026-11-05 §6.2, §7.2): the proofs the service-token exchange
+        # accepts, by proof. TokenReview only in a cluster with the namespace set; the
+        # bootstrap secrets only with their directory set (a bad one stops the start).
+        self.verifiers: dict[ExchangeProof, ProofVerifier] = {}
+        review = TokenReviewVerifier.in_cluster(settings.service_account_namespace)
+        if review is not None:
+            self.verifiers["k8s"] = review
+        if settings.service_bootstrap_dir is not None:
+            self.verifiers["bootstrap"] = BootstrapVerifier.from_dir(settings.service_bootstrap_dir)
 
     def _open(self) -> None:
         with self._lock:

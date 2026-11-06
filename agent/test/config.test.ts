@@ -56,6 +56,18 @@ describe('loadConfig', () => {
     })
   })
 
+  it('reads one service-credential proof, and refuses both (#5494)', () => {
+    expect(loadConfig({ SCADBUDDY_SERVICE_TOKEN_FILE: '/var/run/scadbuddy/token' }).serviceTokenFile).toBe(
+      '/var/run/scadbuddy/token',
+    )
+    expect(loadConfig({ SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/run/bootstrap/agent' }).serviceBootstrapFile).toBe(
+      '/run/bootstrap/agent',
+    )
+    expect(() =>
+      loadConfig({ SCADBUDDY_SERVICE_TOKEN_FILE: '/a', SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/b' }),
+    ).toThrow(ConfigError)
+  })
+
   it('takes SCADBUDDY_AUTH_MODE=enforce, and refuses an unknown mode', () => {
     expect(loadConfig({ SCADBUDDY_AUTH_MODE: 'enforce' }).authMode).toBe('enforce')
     expect(() => loadConfig({ SCADBUDDY_AUTH_MODE: 'strict' })).toThrow(ConfigError)

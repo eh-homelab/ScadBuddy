@@ -94,6 +94,23 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: "DELETE /api/v1/auth/service-credentials/{credential_id}",
     reason: "The services' credentials (#4975, spec 2026-11-01 §7.2): an agent must never mint, rotate or revoke the credentials it and the workers present.",
   },
+  ...([
+    'DELETE /api/v1/auth/service-credentials/pods/{pod_uid}',
+    'GET /api/v1/auth/service-callers',
+    'PUT /api/v1/auth/service-callers/{caller}/suspension',
+    'DELETE /api/v1/auth/service-callers/{caller}/suspension',
+  ] as const).map((operation) => ({
+    operation,
+    reason:
+      "Revoking a pod's credentials and suspending a caller (#5494, spec 2026-11-05 §6.5): a person's answer to " +
+      'a compromised service; an agent must never revoke or suspend the credentials it and the workers present.',
+  })),
+  {
+    operation: 'POST /api/v1/auth/service-token',
+    reason:
+      "The service-token exchange (#5494, spec 2026-11-05 §6.2): the agent's own credential source " +
+      '(`api/serviceCredential.ts` `ExchangeCredential`) calls it with its proof; never a tool.',
+  },
   {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
