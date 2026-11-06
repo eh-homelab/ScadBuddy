@@ -13,7 +13,8 @@ from __future__ import annotations
 from datetime import timedelta
 
 from temporalio import workflow
-from temporalio.common import VersioningBehavior
+from temporalio.common import RetryPolicy, VersioningBehavior
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.print_library.copy import (
@@ -38,6 +39,9 @@ HEARTBEAT_TIMEOUT = timedelta(seconds=60)
 #: One batch: `BATCH_FILES` transfers, each up to the download cap over the LAN.
 BATCH_TIMEOUT = timedelta(minutes=30)
 PLAN_TIMEOUT = timedelta(minutes=10)
+#: A library down at plan time is retried this often, then the job fails with the
+#: cause as its reason rather than running on with no files and nothing to show.
+PLAN_RETRIES = RetryPolicy(maximum_attempts=5)
 
 
 @workflow.defn(name=LIBRARY_COPY_WORKFLOW)
@@ -47,13 +51,26 @@ class LibraryCopy:
         batches_done = input.batches_done
         if not input.planned:
             # A plan that refuses recorded why on the job's row first; the failure
-            # then ends this execution, and the status route reads the row.
-            await workflow.execute_activity(
-                LIBRARY_COPY_PLAN,
-                input,
-                result_type=LibraryCopyPlan,
-                start_to_close_timeout=PLAN_TIMEOUT,
-            )
+            # then ends this execution, and the status route reads the row. A plan
+            # whose retries ran out records the cause here, then ends it the same way.
+            try:
+                await workflow.execute_activity(
+                    LIBRARY_COPY_PLAN,
+                    input,
+                    result_type=LibraryCopyPlan,
+                    start_to_close_timeout=PLAN_TIMEOUT,
+                    retry_policy=PLAN_RETRIES,
+                )
+            except ActivityError as error:
+                cause = error.cause
+                if cause is None or getattr(cause, "non_retryable", False):
+                    raise
+                await workflow.execute_activity(
+                    LIBRARY_COPY_FINISH,
+                    LibraryCopyFinishInput(copy_id=input.copy_id, error=str(cause)),
+                    start_to_close_timeout=timedelta(minutes=1),
+                )
+                raise
             input = input.model_copy(update={"planned": True})
         counts = LibraryCopyCounts()
         for _ in range(BATCHES_PER_RUN):

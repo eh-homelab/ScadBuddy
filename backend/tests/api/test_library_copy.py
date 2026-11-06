@@ -4,6 +4,8 @@ serves `/print/library`."""
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -13,11 +15,18 @@ import respx
 from fastapi.testclient import TestClient
 from httpx import Response
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.library_copy import ENDED_UNFINISHED
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.print_library import copy as copy_module
-from scadbuddy.print_library.copy_models import LibraryCopyBatch, LibraryCopyBatchInput
+from scadbuddy.print_library.copy_models import (
+    LibraryCopyBatch,
+    LibraryCopyBatchInput,
+    LibraryCopyRequest,
+)
 from scadbuddy.print_library.copy_store import LibraryCopyStore, PlannedFile
 from tests.api.test_library_native import _native_settings
 from tests.api.test_send import BASE, configure
@@ -111,6 +120,70 @@ def test_a_copy_runs_once_per_request_and_its_rows_are_its_status(
     assert rerun.status_code == 202 and rerun.json() == {"copy_id": copy_id}
     _until(lambda: len(plans) == 2 and status()["status"] == "done")
     assert native_client.get("/api/v1/print/library-copies/nope").status_code == 404
+
+
+def test_a_copy_whose_execution_ended_unfinished_reads_failed_but_one_starting_does_not(
+    native_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminated execution leaves its row `running`; the status says it ended. A
+    row written before its execution starts (a new id, a rerun) is not that."""
+    gates: list[threading.Event] = []
+
+    async def plan(request: Any, source: Any, target: Any) -> list[PlannedFile]:
+        return [PlannedFile(source_id=7, path="", name="rex.3mf", size=3)]
+
+    async def batch(store: LibraryCopyStore, input: LibraryCopyBatchInput, **_: Any) -> Any:
+        gate = threading.Event()
+        gates.append(gate)
+        await asyncio.to_thread(gate.wait)
+        store.record(input.copy_id, 7, "copied", target_id=NATIVE_FILE, target_folder_id=None)
+        return LibraryCopyBatch(copied=1, skipped=0, failed=0, remaining=0)
+
+    monkeypatch.setattr(copy_module, "plan_copy", plan)
+    monkeypatch.setattr(copy_module, "copy_batch", batch)
+    state: AppState = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    ops: OperationCommands = state.components.get(OPERATIONS)
+    rows = LibraryCopyStore(state.settings_store.pool)
+
+    def status(copy_id: str) -> dict[str, Any]:
+        answer = native_client.get(f"/api/v1/print/library-copies/{copy_id}")
+        assert answer.status_code == 200, answer.text
+        got: dict[str, Any] = answer.json()
+        return got
+
+    # A row with no execution yet is a copy about to run.
+    fresh = LibraryCopyRequest(direction="bb_to_sb", file_ids=[9])
+    rows.start("library-copy-fresh", fresh)
+    shown = status("library-copy-fresh")
+    assert (shown["status"], shown["running"], shown["error"]) == ("running", False, None)
+
+    body = {"direction": "bb_to_sb", "file_ids": [7]}
+    started = native_client.post("/api/v1/print/library-copies", json=body)
+    assert started.status_code == 202, started.text
+    copy_id = started.json()["copy_id"]
+    _until(lambda: len(gates) == 1)  # the batch is in flight: the execution runs
+    assert status(copy_id)["running"] is True
+    portal = native_client.portal
+    assert portal is not None  # a client in its `with` block has one
+    portal.call(ops.client.get_workflow_handle(copy_id).terminate)
+    gates[0].set()
+    _until(lambda: status(copy_id)["running"] is False)
+    ended = status(copy_id)
+    assert (ended["status"], ended["error"]) == ("failed", ENDED_UNFINISHED)
+    listed = {r["copy_id"]: r for r in native_client.get("/api/v1/print/library-copies").json()}
+    assert (listed[copy_id]["status"], listed[copy_id]["error"]) == ("failed", ENDED_UNFINISHED)
+    assert listed["library-copy-fresh"]["status"] == "running"
+
+    # Rerun: the row is reset before the new execution starts, and the old one closed
+    # before that, so the window between the two reads as running, not ended.
+    rerun = native_client.post("/api/v1/print/library-copies", json=body)
+    assert rerun.status_code == 202 and rerun.json() == {"copy_id": copy_id}
+    assert status(copy_id)["status"] == "running"
+    _until(lambda: len(gates) == 2)
+    assert status(copy_id)["status"] == "running"
+    gates[1].set()
+    _until(lambda: status(copy_id)["status"] == "done")
+    assert status(copy_id)["error"] is None
 
 
 def test_a_copy_needs_the_native_library_and_a_bambuddy(

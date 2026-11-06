@@ -10,7 +10,7 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.client import WorkflowExecutionDescription, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
@@ -113,7 +113,7 @@ async def get_library_copies(
 ) -> list[LibraryCopySummary]:
     rows = LibraryCopyStore(state.settings_store.pool)
     recent = await asyncio.to_thread(rows.recent, limit=limit)
-    return [_settled(row, await _running(ops, row.copy_id)) for row in recent]
+    return [_settled(row, await _execution(ops, row.copy_id)) for row in recent]
 
 
 @router.get(
@@ -132,7 +132,7 @@ async def get_library_copy(copy_id: str, state: StateDep, ops: OperationsDep) ->
     if summary is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"no library copy {copy_id}")
     files = await asyncio.to_thread(rows.files, copy_id)
-    settled = _settled(summary, await _running(ops, copy_id))
+    settled = _settled(summary, await _execution(ops, copy_id))
     return LibraryCopyStatus(**settled.model_dump(), files=files)
 
 
@@ -141,23 +141,34 @@ async def get_library_copy(copy_id: str, state: StateDep, ops: OperationsDep) ->
 ENDED_UNFINISHED = "the copy's workflow ended before it finished; start it again"
 
 
-def _settled(summary: LibraryCopySummary, running: bool) -> LibraryCopySummary:
-    """``summary`` with the execution's word on whether it runs; a row left `running`
-    by an execution that is not is shown `failed`, saying so."""
+def _settled(
+    summary: LibraryCopySummary, described: WorkflowExecutionDescription | None
+) -> LibraryCopySummary:
+    """``summary`` with the execution's word on whether it runs. A row left `running`
+    by an execution that closed after the row was started is shown `failed`, saying
+    so. The row is written before the execution starts (and reset before a rerun), so
+    no execution yet, or one that closed before `started_at`, is a copy about to run,
+    not one that ended."""
+    running = described is not None and described.status == WorkflowExecutionStatus.RUNNING
     update: dict[str, object] = {"running": running}
-    if summary.status == "running" and not running:
+    if (
+        summary.status == "running"
+        and described is not None
+        and described.close_time is not None
+        and described.close_time >= summary.started_at
+    ):
         update.update(status="failed", error=ENDED_UNFINISHED)
     return summary.model_copy(update=update)
 
 
-async def _running(ops: OperationsDep, copy_id: str) -> bool:
+async def _execution(ops: OperationsDep, copy_id: str) -> WorkflowExecutionDescription | None:
+    """The copy's execution, or ``None`` when none has run under its id."""
     try:
-        described = await ops.client.get_workflow_handle(copy_id).describe()
+        return await ops.client.get_workflow_handle(copy_id).describe()
     except RPCError as error:
         if execution_gone(error):
-            return False
+            return None
         raise
-    return described.status == WorkflowExecutionStatus.RUNNING
 
 
 @router.get(
