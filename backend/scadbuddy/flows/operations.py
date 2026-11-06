@@ -105,6 +105,8 @@ PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
 PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
 #: The API refused the projects worker's read of a print's registry printer (#5466).
 PRINTER_REFUSED = "https://scadbuddy.dev/problems/flow-printer-refused"
+#: The statuses of that read that no retry mends: the worker's service credential (#5472).
+REFUSED_READS = frozenset({401, 403})
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
@@ -419,9 +421,10 @@ def flow_kinds(
                     activity.logger.warning(
                         "could not read the printer a flow's print names", exc_info=True
                     )
-                    if err.response.status_code < 500:
-                        # A refusal (401, 403, ...): another try is refused the same way.
+                    if err.response.status_code in REFUSED_READS:
+                        # The worker's credential refused: another try is refused the same way.
                         raise _printer_refused(err.response.status_code) from None
+                    # Any other status (408, 429, a 5xx, ...) may pass on another try.
                     raise _printer_unreadable() from None
                 except httpx.HTTPError:
                     # Nothing is recorded: the person approves again once the row reads.

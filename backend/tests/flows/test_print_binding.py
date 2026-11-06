@@ -1,13 +1,17 @@
 """#4445: a flow's `print_output` call names, and its approval binds, the registry
 printer that prints, as the agent's `prepareApproval` resolves it."""
 
+import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 
+from scadbuddy.api import flows as flows_api
 from scadbuddy.flows.print_binding import api_lookup, bind_call
+from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.printers.component import Printers
 from scadbuddy.printers.models import PrinterRow
 
 PRINTER = "00000000-0000-4000-8000-0000000000aa"
@@ -167,3 +171,59 @@ async def test_the_api_lookup_raises_when_the_api_fails() -> None:
     ) as client:
         with pytest.raises(httpx.HTTPStatusError):
             await api_lookup(client)(PRINTER)
+
+
+class _Settings:
+    """The settings store, counting its reads."""
+
+    def __init__(self) -> None:
+        self.loads = 0
+
+    def load(self) -> object:
+        self.loads += 1
+        return object()
+
+
+class _Printers:
+    store = None
+    reports = None
+
+
+# #5472: the run page reads which printers a run reaches over the LAN once, and a failed
+# read once: two linked entries make one read and one log line, and name no path.
+async def test_a_failed_lan_read_is_read_and_logged_once_per_page(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    reads: list[object] = []
+
+    async def failing(settings: object, printers: object, reports: object) -> list[str]:
+        reads.append(settings)
+        raise RuntimeError("the registry is away")
+
+    monkeypatch.setattr(flows_api, "lan_printers", failing)
+    settings = _Settings()
+    check = flows_api._native(cast(Printers, _Printers()), cast(SettingsStore, settings))
+    with caplog.at_level(logging.WARNING, logger=flows_api.logger.name):
+        lines = [
+            (await bind_call("print_output", CALL, holding(row(2)), check)).summary
+            for _ in range(2)
+        ]
+    assert lines == ["Prints on Garage", "Prints on Garage"]
+    assert (settings.loads, len(reads)) == (1, 1)
+    assert [r.getMessage() for r in caplog.records] == [
+        "could not read which printers a run reaches over the LAN"
+    ]
+
+
+async def test_a_lan_read_answers_every_entry_on_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def lan(settings: object, printers: object, reports: object) -> list[str]:
+        return [PRINTER]
+
+    monkeypatch.setattr(flows_api, "lan_printers", lan)
+    settings = _Settings()
+    check = flows_api._native(cast(Printers, _Printers()), cast(SettingsStore, settings))
+    assert [await check(PRINTER), await check("00000000-0000-4000-8000-0000000000bb")] == [
+        True,
+        False,
+    ]
+    assert settings.loads == 1

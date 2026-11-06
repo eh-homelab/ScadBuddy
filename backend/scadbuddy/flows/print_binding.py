@@ -56,7 +56,8 @@ PrinterLookup = Callable[[str], Awaitable[PrinterRow | None]]
 #: Whether a run on a registry row goes over the LAN, never through Bambuddy (the row's
 #: id in `print_run.lan_printers`, as the agent's `linkedNative` reads the choices'
 #: `lan_printers`, #4660). Only the run page's line reads it; the binding never does.
-NativeCheck = Callable[[str], Awaitable[bool]]
+#: None: it could not be read, and the line names no path.
+NativeCheck = Callable[[str], Awaitable[bool | None]]
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,8 @@ async def _path_of(row: PrinterRow, native: NativeCheck | None) -> str:
     except Exception:
         # Only the line's wording: the binding stands, and the line says no path.
         logger.warning("could not read whether a run on a printer goes over the LAN", exc_info=True)
+        return ""
+    if lan is None:
         return ""
     return " over the LAN" if lan else f" (Bambuddy printer {row.bambuddy_printer_id})"
 
