@@ -94,8 +94,7 @@ async def revoke_service_credential(
     caller = await asyncio.to_thread(auth.credentials.revoke, credential_id)
     if caller is None:
         raise ApiError(404, "No live credential has that id", type_=f"{PROBLEMS}not-found")
-    if not await asyncio.to_thread(auth.credentials.has_live, caller):
-        kek = auth.kek
-        if kek is not None:
-            await asyncio.to_thread(auth.credentials.mint, kek, caller)
+    kek = auth.kek
+    if kek is not None:
+        await asyncio.to_thread(auth.credentials.replace_if_none, kek, caller)
     return await _list(auth)
