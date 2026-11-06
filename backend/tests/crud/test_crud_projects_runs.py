@@ -321,6 +321,23 @@ async def test_decisions_record_twice_and_delete(
         await remote.record_decision(_decision(call_id="gone"), at_hop="parent")
 
 
+async def test_a_request_id_with_a_slash_reaches_its_route(
+    remote: RemoteFlowStore, store: FlowStore
+) -> None:
+    """A request id is free text: a ``/`` (or ``?``, ``&``, ``#``) in it still names its
+    row, not a route that is missing."""
+    await started(store)
+    decision = _decision(request_id="flow:r1/wr1?a=1&b#c")
+    assert await remote.record_decision(decision) is True
+    held = await remote.get_decision(decision.request_id)
+    assert held is not None and held.request_id == decision.request_id
+    assert await remote.grant_use(decision.request_id) is None
+    assert await remote.get_proposal(decision.request_id) is None
+    await remote.withdraw_grant_decision(decision.request_id)
+    await remote.delete_decision(decision.request_id)
+    assert await store.get_decision(decision.request_id) is None
+
+
 async def test_a_hop_moved_since_this_very_decision_still_answers_recorded(
     remote: RemoteFlowStore, store: FlowStore
 ) -> None:

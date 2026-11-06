@@ -290,9 +290,13 @@ All Deployments run the same image and roll together with `maxSurge: 1`,
 `X-ScadBuddy-Crud` (D4). The client retries a route-missing answer on a new connection
 for up to 30 s, then raises `CrudUnavailableError`, which is retryable, so Temporal retries
 the activity. Before it polls Temporal, a new worker waits until `GET …/<caller>/areas` lists
-every area it needs (once the first new API pod is ready). A credential minted by an old API
-pod lacks a new class: a 403 `out_of_scope` on a CRUD route makes the client exchange once
-more and retry inside the same 30 s.
+every area it needs (once the first new API pod is ready; `crud/client.py` `wait_for_areas`).
+A credential minted by an old API pod lacks a new class: a 403 `out_of_scope` on a CRUD
+route makes the client drop its token and retry inside the same 30 s. An exchanging caller
+exchanges once more. A caller that still reads its view (no exchange deployed) reads it
+again at most every 5 s (`TokenReader.invalidate`, `REREAD_MIN_SECONDS`), and finds a new
+one: a new API pod's start mints one when the newest live credential's scopes differ from
+`SCOPES` (`rotate_due`), and keeps the old one live until it expires, for the old pods.
 
 **Old worker, new API.** The old worker still runs SQL. Its grants stay, because `grant_role`
 never revokes and only D13 step 3 revokes. Schema changes are additive. The route runs the
@@ -486,7 +490,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - [ ] **Step 2:** Implement. `would_refuse` already admits a class in the scopes (Task 1).
 - [ ] **Step 3:** Backend check; commit `feat(auth): flow.host, the projects worker's only public routes (#5298)`. PR P4.
 
-**Rolling deploy:** a credential an old pod minted still carries `api`; it expires within 15 minutes (spec §6.3). In `off` nothing is refused yet; `scadbuddy_auth_would_refuse_total{class="api"}` for `projects` must stay 0 for a day before #5297 moves to `enforce`.
+**Rolling deploy:** a credential an old pod minted still carries `api`; an exchanged one expires within 15 minutes (spec §6.3), and a sealed one read through the view is replaced at the new API's start (`rotate_due` mints on a scope change) but stays live until it expires. In `off` nothing is refused yet; `scadbuddy_auth_would_refuse_total{class="api"}` for `projects` must stay 0 for a day before #5297 moves to `enforce`.
 
 ### Task 9: The projects worker needs no database
 

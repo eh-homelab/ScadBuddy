@@ -1,7 +1,7 @@
 """The projects worker's CRUD routes served for a test (#5298): the routes of
-`api/crud_projects.py` over a real `FlowStore`, behind the real `auth_check` and gate and
-the CRUD listener on a local port, and a `RemoteFlowStore` that reaches them with an
-in-process credential, as the projects worker does."""
+`api/crud_projects.py` over a real `FlowStore` and `api/crud_areas.py`, behind the real
+`auth_check` and gate and the CRUD listener on a local port, and a `RemoteFlowStore`
+that reaches them with an in-process credential, as the projects worker does."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
-from scadbuddy.api import crud_projects
+from scadbuddy.api import crud_areas, crud_projects
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
@@ -53,6 +53,7 @@ def crud_app(
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_projects.router, prefix="/api/v1")
+    app.include_router(crud_areas.router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
     return app

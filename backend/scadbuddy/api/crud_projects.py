@@ -6,6 +6,9 @@ write that announces the run (`insert_run`, `project`, `move_hop`) runs here, so
 `flow_run.changed` event still commits with it (D7). Logic that holds a lock runs here
 too (D6): a grant's consume chooses its rule under the grant's row lock, and a Reset's
 Temporal call runs under the run's row lock.
+
+A request id is a query parameter, never a path segment: it is free text, and a ``/`` in
+it is decoded before routing, so no route would match.
 """
 
 from __future__ import annotations
@@ -204,7 +207,7 @@ async def move_hop(run_id: str, body: HopMove, flows: FlowsDep) -> FlowWaiting |
     return entry.model_copy(update={"hops": entry.hops[: mine + 1], "resolved_at": None})
 
 
-@router.get("/decisions/{request_id}", name="crud_projects_get_decision")
+@router.get("/decisions", name="crud_projects_get_decision")
 async def get_decision(request_id: str, flows: FlowsDep) -> Decision:
     decision = await flows.store.get_decision(request_id)
     if decision is None:
@@ -242,7 +245,7 @@ def _same(held: Decision, decision: Decision) -> bool:
 
 
 @router.delete(
-    "/decisions/{request_id}",
+    "/decisions",
     name="crud_projects_delete_decision",
     status_code=status.HTTP_204_NO_CONTENT,
 )
@@ -251,7 +254,7 @@ async def delete_decision(request_id: str, flows: FlowsDep) -> None:
 
 
 @router.delete(
-    "/decisions/{request_id}/grant",
+    "/decisions/grant",
     name="crud_projects_withdraw_grant_decision",
     status_code=status.HTTP_204_NO_CONTENT,
 )
@@ -264,7 +267,7 @@ async def get_grant(run_id: str, flows: FlowsDep) -> Grant | None:
     return await flows.store.get_grant(run_id)
 
 
-@router.get("/grant-uses/{request_id}", name="crud_projects_grant_use")
+@router.get("/grant-uses", name="crud_projects_grant_use")
 async def grant_use(request_id: str, flows: FlowsDep) -> GrantUse | None:
     return await flows.store.grant_use(request_id)
 
@@ -277,7 +280,7 @@ async def consume_grant(run_id: str, body: ConsumeRequest, flows: FlowsDep) -> U
     return NotUsed(outside=taken) if isinstance(taken, str) else Used(use=taken)
 
 
-@router.get("/proposals/{request_id}", name="crud_projects_get_proposal")
+@router.get("/proposals", name="crud_projects_get_proposal")
 async def get_proposal(request_id: str, flows: FlowsDep) -> Proposal:
     proposal = await flows.store.get_proposal(request_id)
     if proposal is None:

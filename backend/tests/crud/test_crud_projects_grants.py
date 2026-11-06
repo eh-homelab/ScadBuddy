@@ -6,6 +6,7 @@ the run's row lock."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -15,9 +16,11 @@ from typing import Any
 import pytest
 from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.api.crud_areas import CRUD_AREAS
-from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
+from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError, wait_for_areas
 from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.grants import (
@@ -28,6 +31,7 @@ from scadbuddy.flows.grants import (
     GrantUse,
 )
 from scadbuddy.flows.models import Decision
+from scadbuddy.flows.operations import FLOW_RESET, flow_kinds
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
 from tests.crud.crud_support import served_flow_store
@@ -109,6 +113,26 @@ async def _grant(store: FlowStore, run_id: str, **rule: Any) -> None:
 
 def test_the_flows_area_is_listed() -> None:
     assert "flows" in CRUD_AREAS["projects"]
+
+
+async def test_a_worker_waits_until_its_areas_are_listed(
+    store: FlowStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stop = asyncio.Event()
+    async with served_flow_store(store) as remote:
+        crud = remote._client
+        assert await wait_for_areas(crud, "projects", {"flows"}, stop, poll=0.05) is True
+        # An API pod from before the area: the worker keeps waiting, saying so once.
+        monkeypatch.setitem(CRUD_AREAS, "projects", [])
+        caplog.set_level(logging.INFO, logger="scadbuddy.crud.client")
+        waiting = asyncio.create_task(wait_for_areas(crud, "projects", {"flows"}, stop, poll=0.05))
+        await asyncio.sleep(0.4)
+        assert not waiting.done()
+        stop.set()
+        assert await waiting is False
+    assert [r.getMessage() for r in caplog.records if r.name == "scadbuddy.crud.client"] == [
+        "waiting for the API's projects CRUD areas (missing ['flows'])"
+    ]
 
 
 async def test_a_consume_sent_twice_records_one_use_and_spends_once(
@@ -290,6 +314,28 @@ async def test_temporal_refusing_a_reset_is_refused_at_once(
     assert refused.value.problem["grpc_status"] == "INVALID_ARGUMENT"
     assert len(service.resets) == 1
     assert await store.get_run("r1") == before
+
+
+async def test_the_reset_operation_refuses_temporal_s_refusal_for_good(
+    crud_app: RemoteFlowStore, store: FlowStore, service: _Service
+) -> None:
+    """The `flow_reset` operation over the routes: Temporal's refusal is the person's
+    422, not retried."""
+    await _history(store)
+    service.error = RPCError("no such event", RPCStatusCode.INVALID_ARGUMENT, b"")
+    (reset,) = [k for k in flow_kinds(crud_app, None, None) if k.name == FLOW_RESET]
+    env = ActivityEnvironment(client=_temporal(service))
+    with pytest.raises(ApiError) as refused:
+        await env.run(
+            reset.run,
+            {"run_id": "r1", "event_id": 26},
+            {"workflow_id": "flow-r1", "replaced": "wr1"},
+        )
+    assert refused.value.status == 422
+    assert refused.value.detail == (
+        "Temporal refused to reset the run to event 26; check its history again."
+    )
+    assert len(service.resets) == 1
 
 
 async def test_a_transient_temporal_failure_is_retried(store: FlowStore, service: _Service) -> None:

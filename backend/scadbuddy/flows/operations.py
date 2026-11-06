@@ -64,6 +64,8 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
+from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.crud.projects import RESET_REFUSED
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
@@ -840,6 +842,14 @@ def flow_kinds(
                 status.HTTP_409_CONFLICT,
                 "Another Reset moved the run first; check its history again.",
                 type_=RESET_CHANGED,
+            ) from None
+        except CrudRefusedError as err:
+            # The API's own refusal of a Reset Temporal refused for good: no retry mends it.
+            if err.status != 422 or err.problem.get("reason") != RESET_REFUSED:
+                raise
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Temporal refused to reset the run to event {event_id}; check its history again.",
             ) from None
         if run is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")

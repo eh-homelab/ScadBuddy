@@ -10,9 +10,10 @@ A render, print or projects worker holds no database secret: it calls
 - A 4xx with the header is `CrudRefusedError`, carrying the problem, except a stale
   credential: a 401 (the credential died or none could be had) and a 403 ``out_of_scope``
   (its scopes are stale; `refresh` drops it, and only when the request carried one). A new
-  worker can hold a credential from an old API pod for a moment, and `ExchangeReader`
-  holds a new exchange off for ``REEXCHANGE_MIN``, so these retry with a backoff in the
-  same budget, and the budget's end is `CrudUnavailableError`, not a refusal.
+  worker can hold a credential from an old API pod for a moment, `ExchangeReader` holds
+  a new exchange off for ``REEXCHANGE_MIN`` and `TokenReader` a new read of its view for
+  ``REREAD_MIN_SECONDS``, so these retry with a backoff in the same budget, and the
+  budget's end is `CrudUnavailableError`, not a refusal.
 - A retry after a missing route goes through a short-lived client of its own, closed after
   it, so it cannot reuse the pooled keep-alive connection of the pod that lacked the route
   (the Service picks a pod per connection). The shared client is never closed under other
@@ -21,14 +22,17 @@ A render, print or projects worker holds no database secret: it calls
   the same on every attempt of one Temporal activity.
 - ``timeout`` on a request replaces the client's per-request timeout for a route that
   answers later by design (a flow Reset waits on Temporal under the run's lock).
+- `wait_for_areas` is a worker's start gate (plan "Rolling deploy"): it polls
+  ``GET …/<caller>/areas`` until the API lists every area the worker needs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import Any, Literal
 
 import httpx
@@ -38,8 +42,12 @@ from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.crud.guard import CRUD_HEADER, PREFIX, CrudCaller
 
+logger = logging.getLogger(__name__)
+
 #: How long a missing route, a 5xx or a transport failure is retried (D4).
 UNAVAILABLE_BUDGET = 30.0
+#: Seconds between two reads of the areas while a worker waits for them.
+AREAS_POLL = 2.0
 BACKOFF_FIRST = 0.25
 BACKOFF_MAX = 2.0
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -299,3 +307,42 @@ class CrudSyncClient(_Base):
                 call.refresh = False
                 self._auth.refresh(response.request)
             self._sleep(call.delay())
+
+
+async def wait_for_areas(
+    crud: CrudClient,
+    caller: CrudCaller,
+    areas: Collection[str],
+    stop: asyncio.Event,
+    *,
+    poll: float = AREAS_POLL,
+) -> bool:
+    """Waits until the API lists every one of ``areas`` for ``caller``, reading them every
+    ``poll`` seconds: during a roll an old API pod lacks the route or an area. Logs once
+    while it waits. False when ``stop`` came first."""
+    wanted = set(areas)
+    logged = False
+    stopped = asyncio.create_task(stop.wait())
+    try:
+        while True:
+            asking = asyncio.create_task(crud.request("GET", f"/api/v1{PREFIX}/{caller}/areas"))
+            await asyncio.wait({asking, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if stopped.done():
+                asking.cancel()
+                await asyncio.gather(asking, return_exceptions=True)
+                return False
+            try:
+                missing = wanted - set(asking.result().json()["areas"])
+                why = f"missing {sorted(missing)}"
+            except CrudUnavailableError as error:
+                missing, why = wanted, str(error)
+            if not missing:
+                return True
+            if not logged:
+                logger.info("waiting for the API's %s CRUD areas (%s)", caller, why)
+                logged = True
+            await asyncio.wait({stopped}, timeout=poll)
+            if stopped.done():
+                return False
+    finally:
+        stopped.cancel()

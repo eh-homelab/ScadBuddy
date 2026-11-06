@@ -27,10 +27,12 @@ from scadbuddy.flows.store import (
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, Hop, HopRecord, ProjectionWrite
 
 BASE = f"/api/v1{PREFIX}/projects"
-#: `api/crud_projects.py` `HOP_MOVED`, `RESET_SUPERSEDED`, `RESET_BEFORE_FLOOR`.
+#: `api/crud_projects.py` `HOP_MOVED`, `RESET_SUPERSEDED`, `RESET_BEFORE_FLOOR`,
+#: `RESET_REFUSED`.
 HOP_MOVED = "hop_moved"
 RESET_SUPERSEDED = "reset-superseded"
 RESET_BEFORE_FLOOR = "reset-before-floor"
+RESET_REFUSED = "reset-refused"
 #: A Reset's request: the route holds the run's lock for up to `RESET_CALL_S` while
 #: Temporal answers, then writes the row.
 RESET_REQUEST_S = RESET_CALL_S + 10.0
@@ -138,11 +140,11 @@ class RemoteFlowStore:
         return bool(response.json()["recorded"])
 
     async def get_decision(self, request_id: str) -> Decision | None:
-        body = await self._found(f"/decisions/{_part(request_id)}")
+        body = await self._found(f"/decisions?request_id={_part(request_id)}")
         return None if body is None else Decision.model_validate(body)
 
     async def delete_decision(self, request_id: str) -> None:
-        await self._send("DELETE", f"/decisions/{_part(request_id)}")
+        await self._send("DELETE", f"/decisions?request_id={_part(request_id)}")
 
     async def record_grant_decision(self, decision: Decision) -> bool:
         response = await self._send(
@@ -151,7 +153,7 @@ class RemoteFlowStore:
         return bool(response.json()["recorded"])
 
     async def withdraw_grant_decision(self, request_id: str) -> None:
-        await self._send("DELETE", f"/decisions/{_part(request_id)}/grant")
+        await self._send("DELETE", f"/decisions/grant?request_id={_part(request_id)}")
 
     # -- grants (#2481) -----------------------------------------------------------
 
@@ -161,7 +163,7 @@ class RemoteFlowStore:
         return None if body is None else Grant.model_validate(body)
 
     async def grant_use(self, request_id: str) -> GrantUse | None:
-        response = await self._send("GET", f"/grant-uses/{_part(request_id)}")
+        response = await self._send("GET", f"/grant-uses?request_id={_part(request_id)}")
         body = response.json()
         return None if body is None else GrantUse.model_validate(body)
 
@@ -197,7 +199,7 @@ class RemoteFlowStore:
         return None if moved is None else FlowWaiting.model_validate(moved)
 
     async def get_proposal(self, request_id: str) -> Proposal | None:
-        body = await self._found(f"/proposals/{_part(request_id)}")
+        body = await self._found(f"/proposals?request_id={_part(request_id)}")
         return None if body is None else Proposal.model_validate(body)
 
     async def parent_tiers(self, session: str, principal: str) -> list[str] | None:

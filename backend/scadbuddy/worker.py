@@ -62,7 +62,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
-from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.operations import flow_kinds
@@ -1384,6 +1384,10 @@ class ProjectsKeyMissingError(ValueError):
     pass
 
 
+#: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
+PROJECTS_CRUD_AREAS = frozenset({"flows"})
+
+
 async def run_projects_worker(
     settings: Settings,
     *,
@@ -1417,6 +1421,7 @@ async def run_projects_worker(
     settings_store = SettingsStore(settings, events=events)
     # #5210: on a role of its own, wait for the API's migrations and grants.
     await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
+    crud: CrudClient | None = None
     try:
         await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
@@ -1466,24 +1471,28 @@ async def run_projects_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            async with LoopWatch(metrics):
-                await _serve_versioned(
-                    client,
-                    [worker],
-                    stop,
-                    build_id=build_id,
-                    deployment_name=PROJECTS_DEPLOYMENT_NAME,
-                    task_queue=queue,
-                    drain_timeout=None,
-                    ready=(queue, routed),
-                )
+            # During a roll the API pod may be older than this worker: poll Temporal only
+            # once it serves every area the worker calls.
+            if await wait_for_areas(crud, "projects", PROJECTS_CRUD_AREAS, stop):
+                async with LoopWatch(metrics):
+                    await _serve_versioned(
+                        client,
+                        [worker],
+                        stop,
+                        build_id=build_id,
+                        deployment_name=PROJECTS_DEPLOYMENT_NAME,
+                        task_queue=queue,
+                        drain_timeout=None,
+                        ready=(queue, routed),
+                    )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
                 await serving
             await routes.aclose()
-            await crud.aclose()
     finally:
+        if crud is not None:
+            await crud.aclose()
         await events.aclose()
         await asyncio.to_thread(settings_store.close)
 
