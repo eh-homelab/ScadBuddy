@@ -6,6 +6,7 @@ import { EgressError, type Resolver, systemResolver } from '../../http/egress.js
 import { assertEndpointAllowed, PluginError } from '../registry.js'
 import { type Checkout, extractSubdir, FetchError, type RepoFetcher } from './git.js'
 import { hashTree, PackageContentError } from './hash.js'
+import { declaredHeaderSecrets } from './mcp.js'
 import {
   DEFAULT_REF,
   normaliseGitUrl,
@@ -201,6 +202,20 @@ export class PackageInstaller {
    * allow is in the review's `refused`.
    */
   private async extractAndVet(checkout: Checkout, subpath: string, dest: string, fallbackName: string) {
+    const tree = await this.extract(checkout, subpath, dest)
+    const vetting = vetPackage(dest, fallbackName)
+    const builtIn = vetting.review && builtInNamed(vetting.review.name)
+    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
+    const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
+    // A fatal problem refuses the package outright, but the refusal names
+    // every problem: the allowable ones are reasons too. Fatal first, so the
+    // cap never hides one.
+    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.problems]))
+    return { tree, review: vetting.review }
+  }
+
+  /** Extracts `subpath` of `checkout` into `dest` (regular files only) and hashes it, with no vetting. */
+  private async extract(checkout: Checkout, subpath: string, dest: string) {
     const special = await this.fetcher.specialPaths(checkout, subpath)
     if (special.length) {
       throw new PackageRefusedError(special.map((s) => `${s}: a package holds regular files only`))
@@ -211,22 +226,12 @@ export class PackageInstaller {
       if (err instanceof FetchError) throw new PluginError(err.message, 422)
       throw err
     }
-    let tree
     try {
-      tree = await hashTree(dest)
+      return await hashTree(dest)
     } catch (err) {
       if (err instanceof PackageContentError) throw new PackageRefusedError([err.message])
       throw err
     }
-    const vetting = vetPackage(dest, fallbackName)
-    const builtIn = vetting.review && builtInNamed(vetting.review.name)
-    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
-    const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
-    // A fatal problem refuses the package outright, but the refusal names
-    // every problem: the allowable ones are reasons too. Fatal first, so the
-    // cap never hides one.
-    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.problems]))
-    return { tree, review: vetting.review }
   }
 
   /**
@@ -391,8 +396,22 @@ export class PackageInstaller {
     })
   }
 
-  /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
-  private async verifiedCopy(pin: PackagePin): Promise<string> {
+  /**
+   * The header values `pin`'s http MCP servers declare (#5485, mcp.ts `declaredHeaderSecrets`),
+   * read from the copy that hashes to the pin, fetched again when there is none. Never vetted and
+   * never checked for address or listing size, so a package that fails to load still gives them:
+   * they stay secrets that every tool redacts and every upload refuses. Throws when no copy can
+   * be had (the fetch fails), so the secrets read fails closed. Runs in the package's queue.
+   */
+  headerSecrets(pin: PackagePin): Promise<string[]> {
+    return this.serial(pin.name, async () => declaredHeaderSecrets(await this.verifiedCopy(pin, { vet: false })))
+  }
+
+  /**
+   * The cached directory of `pin` when every file hashes to it, else fetched again at the pinned
+   * commit, vetted unless `vet` is false (a load re-vets the copy anyway, `materialiseNow`).
+   */
+  private async verifiedCopy(pin: PackagePin, options: { vet?: boolean } = {}): Promise<string> {
     const dir = this.cacheDir(pin)
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
@@ -404,7 +423,10 @@ export class PackageInstaller {
           throw new PluginError(`fetched commit ${checkout.commit}, the pin is ${pin.commit}`, 502)
         }
         const pkg = path.join(tmp, 'pkg')
-        const { tree } = await this.extractAndVet(checkout, pin.fetchPath, pkg, pin.name)
+        const tree =
+          options.vet === false
+            ? await this.extract(checkout, pin.fetchPath, pkg)
+            : (await this.extractAndVet(checkout, pin.fetchPath, pkg, pin.name)).tree
         if (tree.hash !== pin.contentHash) {
           throw new PluginError(
             `the files at commit ${pin.commit} hash to ${tree.hash}, not the pinned ${pin.contentHash}`,

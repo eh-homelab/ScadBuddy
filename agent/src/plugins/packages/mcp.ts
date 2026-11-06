@@ -177,16 +177,27 @@ export async function serverAccess(
 export type PackageServerConfig = { pkg: string; server: string; name: string; plugin: RemotePlugin; address: string }
 
 /**
- * The header values every package's http MCP servers declare, and their bare tokens: what a turn
- * redacts of them (forwardPackageServers' `secrets`), read from the packages alone, with no
- * address check and no forwarder route, for every tool's redaction and upload check
- * (plugins/secrets.ts `readPluginSecrets`, plan 2026-10-13 Step 9.2).
+ * The header values every loaded package's http MCP servers declare, and their bare tokens
+ * (`declaredHeaderSecrets` of each package's directory).
  */
 export function packageHeaderSecrets(loaded: readonly LoadedPackage[]): string[] {
-  return offeredServers(loaded).flatMap(({ config, local }) =>
-    !local && isRecord(config.headers)
-      ? Object.values(config.headers).flatMap((value) => (typeof value === 'string' ? headerSecretVariants(value) : []))
-      : [],
+  return loaded.flatMap((pkg) => declaredHeaderSecrets(pkg.dir))
+}
+
+/**
+ * The header values the http MCP servers in a package's files declare, and their bare tokens,
+ * read from the files alone: not vetted, no address check, no forwarder route. The values are
+ * literals in the pinned files (vetting refuses a `$` in them, vet.ts), so the files say all of
+ * them. A package that fails to load gives them too (install.ts `headerSecrets`, #5485): every
+ * tool redacts them and every upload refuses them (plugins/secrets.ts `readPluginSecrets`).
+ */
+export function declaredHeaderSecrets(dir: string): string[] {
+  return declaredConfigs(dir).mcp.flatMap(({ map }) =>
+    entries(map).flatMap(([, config]) =>
+      typeof config.url === 'string' && noCommand(config) && isRecord(config.headers)
+        ? Object.values(config.headers).flatMap((value) => (typeof value === 'string' ? headerSecretVariants(value) : []))
+        : [],
+    ),
   )
 }
 

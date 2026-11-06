@@ -1754,11 +1754,17 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   (`ai_plugins`, `ai_plugin_packages`, `ai_plugin_oauth`), `workspace_read` and every
   upload fail too, and the next call reads again. Before #5480 this happened only to a
   ToolCall. An operator who sees these tools fail checks the agent's log and Postgres.
-  A package that cannot be loaded (its fetch, hash or vetting fails) does not fail the
-  read: it is left out, its headers with it, and the package's load check in Settings
-  shows why (`routes/pluginPackages.ts`, `packageLoadCheck`). On a fresh replica the first read also loads the enabled packages, so it can
-  wait on their fetch when the start-up warm-up has not finished (`plugin package
-  warm-up` in the log).
+  A package server's header values are literals in the package's pinned files (vetting
+  refuses a `$` in them), so they are read from the copy that hashes to the pin, not from
+  what a turn loaded (`install.ts` `headerSecrets`, #5485). A package that a turn cannot
+  load (vetting, the egress check of its endpoints, or the listing budget refuses it)
+  stays in the list, and the package's load check in Settings shows why it is not loaded
+  (`routes/pluginPackages.ts`, `packageLoadCheck`). When no verified copy is cached, the
+  read fetches the pin again without vetting it. When that fetch fails too (the git host
+  is down, or the pinned commit is gone), the read fails, and so do `workspace_read` and
+  every upload until a fetch succeeds. The operator fixes the fetch, or disables or
+  removes the package in Settings. On a fresh replica the first read can wait on that
+  fetch when the start-up warm-up has not finished (`plugin package warm-up` in the log).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. Claude Code's own file tools (§9) reach the workspace only
   through the session's directory, the copy below, which is written back by sha256.

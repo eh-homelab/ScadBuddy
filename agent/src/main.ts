@@ -785,7 +785,7 @@ const agentSecrets = toolSecrets({
   credentials,
   plugins,
   oauth: pluginOAuth,
-  ...(pluginPackages ? { packages: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
+  ...(pluginPackages ? { packages: { store: pluginPackages, installer: packageInstaller } } : {}),
 })
 toolServices.secrets = agentSecrets.secrets
 const turnToolDeps = temporal
