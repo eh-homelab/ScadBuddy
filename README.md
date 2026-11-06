@@ -544,7 +544,7 @@ store or another caller's credential:
 |---|---|---|
 | render worker | `scadbuddy_render` | `scadbuddy-render.yaml` |
 | print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
-| flow runs' worker | `scadbuddy_projects` | `scadbuddy-projects.yaml` |
+| flow runs' worker | `scadbuddy_projects`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-projects.yaml` |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
@@ -979,11 +979,18 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 `python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
 `applications/scadbuddy/scadbuddy-projects.yaml`, same image.
 
-- **What it needs:** `SCADBUDDY_DATABASE_URL`, the KEK (`SCADBUDDY_SECRET_KEY_FILE`: a
-  flow's payloads are sealed per run, and the worker refuses to start without it),
-  `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and `SCADBUDDY_API_INTERNAL_URL`: a flow's
+- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations
+  and payload keys go through the API's CRUD routes, and it starts only once the API
+  lists the `flows`, `operations` and `payload-keys` areas. A `SCADBUDDY_DATABASE_URL`
+  that is still set is logged once and ignored. It needs the KEK
+  (`SCADBUDDY_SECRET_KEY_FILE`: a flow's payloads are sealed per run, and the worker
+  refuses to start without it), `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and
+  `SCADBUDDY_API_INTERNAL_URL`: the CRUD routes and the exchange are there, and a flow's
   `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
-  (`workflows/flow_routes.py`). Its service credential holds `flow.host` and
+  (`workflows/flow_routes.py`). It also needs `SCADBUDDY_SERVICE_TOKEN_FILE` (its
+  projected ServiceAccount token), or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` outside
+  Kubernetes: it exchanges that proof for its service credential, and with neither it
+  refuses to start. Its service credential holds `flow.host` and
   `crud.projects`, not `api` (#5298). So in `SCADBUDDY_AUTH_MODE=enforce` it reaches only
   the public routes those calls, its grant checks and its printer reads use
   (`auth/routes.py` `FLOW_HOST_ENDPOINTS`); those routes still take everyone an `api`

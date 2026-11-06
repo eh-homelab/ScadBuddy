@@ -96,13 +96,13 @@ PRINT_SEQUENCES = (
     "native_slices_id_seq",
 )
 
-#: What the projects worker (`--queue projects`, flow runs) touches of the backend's. Its
-#: flow runs, decisions, grants and operations go through the API's CRUD routes (#5298,
-#: `crud/projects.py`, `crud/operations.py`), and it has no event bus; the grants it held
-#: for them are never revoked from a live role.
-PROJECTS_GRANTS: Grants = {
-    "scadbuddy_migrations": _READ,
-}
+#: What the projects worker (`--queue projects`, flow runs) touches of the backend's:
+#: nothing. It holds no database (#5298): its flow runs, decisions, grants, operations
+#: and payload keys go through the API's CRUD routes (`crud/projects.py`,
+#: `crud/operations.py`). An existing role keeps the grants it held: they are never
+#: revoked from a live role here, but by the role's revoke (#5298, plan 2026-11-06
+#: Task 11).
+PROJECTS_GRANTS: Grants = {}
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads
 #: flow runs and their decisions, and its session files' trigger
