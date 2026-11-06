@@ -28,7 +28,12 @@ path, and they follow the inbox's rules:
   is released with its slices (`copies.release_moved`): a move the routes did not release,
   or one whose release never ran. A person's own file of the same name and bytes never
   carries one either (case 5).
+  A copy found unmarked in its own folder is logged as a warning (#5156): a restore, or
+  a copy an earlier build's print worker uploaded unmarked during a rollout, which the
+  next run then lays out again and nothing ever sweeps.
 * A subject a run still uses (`PrintRunStore.subjects_in_use`) is left alone.
+* A pass reads `SUBJECT_PAGE` subjects at a time (#5156): every read is bounded by a
+  page, never by the library.
 
 "Goes" is the trash: the row, and with it the blob (`live_file_keys`), stays for
 `LIBRARY_TRASH_TTL`, restorable, until `sweep_library` purges it.
@@ -101,6 +106,10 @@ COPY_ORPHAN_GRACE = timedelta(days=1)
 COPY_REUSE_GRACE = timedelta(minutes=30)
 
 
+#: How many subjects one page of `sweep_print_copies` reads (#5156).
+SUBJECT_PAGE = 200
+
+
 class CopySweep(BaseModel):
     #: Files trashed as a folder's older copies of a subject, with their slices.
     superseded: int
@@ -108,6 +117,9 @@ class CopySweep(BaseModel):
     orphans: int
     #: Recorded copies released to the person (moved or restored), each with its slices.
     released: int
+    #: Of ``released``, those found unmarked in their own folder (#5156): restored, or
+    #: uploaded unmarked by an earlier build, which then stays in the folder for good.
+    released_in_place: int = 0
 
 
 async def sweep_print_copies(
@@ -119,8 +131,53 @@ async def sweep_print_copies(
     now: datetime,
     grace: timedelta = COPY_ORPHAN_GRACE,
     reuse_grace: timedelta = COPY_REUSE_GRACE,
+    page: int = SUBJECT_PAGE,
 ) -> CopySweep:
-    """Trash the per-print copies and slices nothing keeps (module docstring). The marked
+    """Trash the per-print copies and slices nothing keeps (module docstring), ``page``
+    subjects at a time, in the subjects' order (#5156). A subject's files are all in one
+    page, so each page is judged as a whole pass would judge it (`_sweep_subjects`)."""
+    total = CopySweep(superseded=0, orphans=0, released=0)
+    after: str | None = None
+    while True:
+        subjects = await asyncio.to_thread(native.rows.print_subjects, after, page)
+        if not subjects:
+            break
+        done = await _sweep_subjects(
+            native,
+            uploads,
+            subjects,
+            subjects_in_use,
+            slicing,
+            now=now,
+            grace=grace,
+            reuse_grace=reuse_grace,
+        )
+        total = CopySweep(
+            superseded=total.superseded + done.superseded,
+            orphans=total.orphans + done.orphans,
+            released=total.released + done.released,
+            released_in_place=total.released_in_place + done.released_in_place,
+        )
+        if len(subjects) < page:
+            break
+        after = subjects[-1]
+    if total.superseded or total.orphans or total.released:
+        logger.info("swept the native per-print copies", extra=total.model_dump())
+    return total
+
+
+async def _sweep_subjects(
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    page: list[str],
+    subjects_in_use: Callable[[], Awaitable[set[str]]],
+    slicing: Callable[[list[int]], Awaitable[set[int]]],
+    *,
+    now: datetime,
+    grace: timedelta,
+    reuse_grace: timedelta,
+) -> CopySweep:
+    """One page of `sweep_print_copies`: the files ``page``'s subjects mark. The marked
     files are read before the subjects in use, so a run that started before the read is
     seen; the subjects in use are read again before anything is trashed, and a subject a
     run took up in between keeps all its files. A folder's superseded copies are trashed
@@ -132,7 +189,7 @@ async def sweep_print_copies(
     person's move or restore wins). A superseded copy a slice still reads (``slicing``,
     the running native slices' files) or last used within ``reuse_grace`` is kept too:
     the dialog's background slice and an order's quote slice one with no run (#5189)."""
-    files = {f.id: f for f in await asyncio.to_thread(native.rows.per_print)}
+    files = {f.id: f for f in await asyncio.to_thread(native.rows.per_print, page)}
     busy = await subjects_in_use()
     recorded = await uploads.recorded_files(list(files))
     subjects = sorted({f.print_subject for f in files.values() if f.print_subject} - busy)
@@ -140,13 +197,14 @@ async def sweep_print_copies(
     by_use = await uploads.copies_by_use(subjects)
     # The recorded copies that carry no mark: theirs if live (moved, restored), else gone.
     unmarked = [c.id for found in copies.values() for c in found if c.id not in files]
-    live = {f.id for f in await asyncio.to_thread(native.rows.files_by_ids, unmarked)}
+    live = {f.id: f for f in await asyncio.to_thread(native.rows.files_by_ids, unmarked)}
     there = await asyncio.to_thread(native.rows.existing, unmarked)
     superseded: dict[tuple[str, int | None], list[LibraryCopy]] = {}
     #: Each folder's copy kept, the newest by the first read's order of use.
     kept: dict[tuple[str, int | None], LibraryCopy] = {}
     gone: list[tuple[str, int]] = []
     released: list[int] = []
+    in_place = 0
     for subject in subjects:
         recorded_copies = {c.id: c for c in copies[subject]}
         for copy_id in by_use[subject]:  # least recently used first
@@ -164,8 +222,26 @@ async def sweep_print_copies(
                 # A person's: moved (outside the routes, or a move whose release never
                 # ran) or restored. Theirs, with its slices.
                 released.append(copy.id)
+                found = live.get(copy.id)
+                if row is None and found is not None and found.folder_id == copy.folder_id:
+                    # Unmarked where it was recorded: restored, or uploaded unmarked by
+                    # an earlier build's print worker. Released, the latter stays in the
+                    # folder for good beside the next run's copy (#5156).
+                    in_place += 1
+                    logger.warning(
+                        "released a recorded native copy found unmarked in its folder",
+                        extra={"subject": subject, "library_file_id": copy.id},
+                    )
                 continue
             if row.print_subject != subject:
+                # Recorded under a subject other than its mark's. A native copy is
+                # recorded only under the subject that uploaded and marked it
+                # (`ensure_native_copy`; #2476's shared copies are the Bambuddy inbox's,
+                # `send.ensure_uploaded`), so this is a guard: the mark's subject judges
+                # it. The backfill (`20261101T1528Z_library_files_print_subject`, step 1)
+                # marks the oldest record's subject for the same reason: the first record
+                # is the upload, and a run marks its own upload. `outputs_for_files`
+                # takes the later record for another question, Arrange's (#5157).
                 continue
             older = kept.get((subject, copy.folder_id))
             kept[(subject, copy.folder_id)] = copy
@@ -217,7 +293,6 @@ async def sweep_print_copies(
                 if copy.id in went:
                     await uploads.forget(subject, copy.id)
             trashed += len(went)
-    done = CopySweep(superseded=trashed, orphans=orphaned, released=len(released))
-    if done.superseded or done.orphans or done.released:
-        logger.info("swept the native per-print copies", extra=done.model_dump())
-    return done
+    return CopySweep(
+        superseded=trashed, orphans=orphaned, released=len(released), released_in_place=in_place
+    )
