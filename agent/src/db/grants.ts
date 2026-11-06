@@ -10,23 +10,25 @@ import type { Sql } from 'postgres'
 
 type Grants = Readonly<Record<string, readonly string[]>>
 
-/** The projects worker (`--queue projects`): a run's payload keys (`workflows/payload_codec.py`),
- * and what `flows/store.py` reads of a session's tiers and the approval timeout. */
+/** The projects worker (`--queue projects`): a run's payload keys (`workflows/payload_codec.py`).
+ * A session's tiers and the approval timeout it reads through the API's CRUD routes
+ * (ScadBuddy#5298); the grants it held for them are never revoked from a live role. */
 export const PROJECTS_AI_GRANTS: Grants = {
   ai_payload_keys: ['SELECT', 'INSERT'],
   ai_forgotten_subjects: ['SELECT'],
-  ai_sessions: ['SELECT'],
-  ai_mcp_tokens: ['SELECT'],
-  ai_settings: ['SELECT'],
 }
 
-/** The API's own role: the projects worker's reads (it runs that worker in-process), the
- * activity list's (`activity/index.py`, `activity/kinds.py`), a flow's images
- * (`flows/images.py`) and forgetting a run (`flows/forget.py`). */
+/** The API's own role: the projects worker's reads (it runs that worker in-process, and
+ * serves its CRUD routes), what `flows/store.py` reads of a session's tiers and the
+ * approval timeout, the activity list's (`activity/index.py`, `activity/kinds.py`), a
+ * flow's images (`flows/images.py`) and forgetting a run (`flows/forget.py`). */
 export const API_AI_GRANTS: Grants = {
   ...PROJECTS_AI_GRANTS,
   ai_payload_keys: ['SELECT', 'INSERT', 'DELETE'],
   ai_forgotten_subjects: ['SELECT', 'INSERT'],
+  ai_sessions: ['SELECT'],
+  ai_mcp_tokens: ['SELECT'],
+  ai_settings: ['SELECT'],
   ai_flow_blobs: ['SELECT', 'DELETE'],
   ai_operations: ['SELECT'],
   ai_activity_kinds: ['SELECT'],

@@ -42,7 +42,7 @@ is the root of its identity" (auth spec §7.2). This spec reopens D4.
   7 days": the API mints the next credential when the newest live one has **fewer than 7
   days left** (`ROTATE_BEFORE`, `:65`; `rotate_due`, `:126-143`). So a new token appears
   about every 23 days, and the two overlap for 7 days. It also mints when the newest one is
-  sealed under another KEK (`:141`).
+  sealed under another KEK (`:141`), and (#5298) when its scopes differ from `SCOPES`.
 - Who rotates: the API, at start after its migrations (`backend/scadbuddy/main.py:1075-1089`
   `_grant_and_rotate_at_start`) and in the auth sweep on the prune Schedule
   (`main.py:1092-1106`). Without the KEK it issues nothing (`main.py:1061-1072`).

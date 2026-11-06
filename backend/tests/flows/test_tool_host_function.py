@@ -148,7 +148,7 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     assert served.calls == []
     preview = await outward_since(outward.client, parked, 1)
     assert preview.calls == []
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -263,7 +263,7 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": bound}
     env = ActivityEnvironment(client=outward.client)
     # Without the API to read the row from, nothing is approved.
-    blind = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    blind = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     with pytest.raises(ApiError) as refused:
         await env.run(blind.run, request, await env.run(blind.check, request))
     assert refused.value.status == 503
@@ -272,7 +272,7 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     for code in (None, 408, 429, 503):
         kind = next(
             k
-            for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api_away(code))
+            for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api_away(code))
             if k.name == FLOW_DECIDE
         )
         with pytest.raises(ApiError) as unread:
@@ -285,7 +285,7 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     for code in (401, 403):
         kind = next(
             k
-            for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api_away(code))
+            for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api_away(code))
             if k.name == FLOW_DECIDE
         )
         with pytest.raises(ApiError) as refused_read:
@@ -297,10 +297,14 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     # Re-linked since the page showed it, or an approval that names no binding: a 409,
     # and nothing is recorded, so the person sees the printer that would print and decides again.
     moved = next(
-        k for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api(5)) if k.name == FLOW_DECIDE
+        k
+        for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api(5))
+        if k.name == FLOW_DECIDE
     )
     decide = next(
-        k for k in flow_kinds(outward.store, Keys(), HASH_KEY, api=_api(2)) if k.name == FLOW_DECIDE
+        k
+        for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api(2))
+        if k.name == FLOW_DECIDE
     )
     unbound = {k: v for k, v in request.items() if k != "bound_hash"}
     for kind, sent, problem in [
@@ -515,7 +519,7 @@ async def test_tooled(outward: Outward, tools: tuple[Tools, str]) -> None:
         tool_tiers={"get_model": "read", "send_to_bambuddy": "outward"},
     )
     call_id = await outward.approval(run_id)
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -784,7 +788,7 @@ async def test_an_outward_turn_tool_waits_for_approval(
         ("tool:scadbuddy_http__http_request", "approval")
     ]
     assert served.calls == []
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -827,7 +831,7 @@ async def test_an_approved_turn_tool_runs_on_the_replica_live_once_approved(
 
 
 async def _approve(outward: Outward, run_id: str, call_id: str) -> None:
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -939,7 +943,7 @@ async def test_an_approved_turn_tool_in_a_run_from_before_2937_runs_on_the_live_
     served = TurnTools(f"{tools_queue}.gone")
     live = f"{tools_queue}.live"
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
-    activities = outward_activities(outward.store, None)
+    activities = outward_activities(outward.remote, None)
     patched = workflow.patched
 
     def before_2937(patch_id: str) -> bool:
@@ -1052,7 +1056,7 @@ async def test_a_beatless_tier_in_a_run_from_before_4262_still_fails_and_replays
     served = TurnTools(f"{queue}.host-1")
     served.tier_beatless = True
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
-    activities = outward_activities(outward.store, None)
+    activities = outward_activities(outward.remote, None)
     # The workflow sandbox passes `temporalio` through, so the run sees this stand-in
     # (as `before_2937` above); were it not, the run would fall back and the assertions
     # on the timeout below would fail.
@@ -1193,7 +1197,7 @@ async def test_a_beatless_read_in_a_run_from_before_4281_still_fails_and_replays
     served = TurnTools(f"{queue}.host-1")
     served.call_beatless = True
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
-    activities = outward_activities(outward.store, None)
+    activities = outward_activities(outward.remote, None)
     # As `before_4262` above: the sandbox passes `temporalio` through to the run.
     patched = workflow.patched
 

@@ -46,11 +46,11 @@ of them (`pg_tables`). Connected roles on 2026-11-05: `scadbuddy` (68 connection
 
 | Process | Code | Database secret (clusters manifest) | Tables it may touch | SQL into the other service's tables |
 |---|---|---|---|---|
-| API, 3 replicas | `backend/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:376-379`) | all | reads and writes 8 `ai_*` tables (`agent/src/db/grants.ts:26-33` `API_AI_GRANTS`) |
+| API, 3 replicas | `backend/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:376-379`) | all | reads and writes 8 `ai_*` tables (`agent/src/db/grants.ts:25-35` `API_AI_GRANTS`) |
 | render worker, 2 replicas | `backend/` | `scadbuddy-render-db` as `PGPASSWORD` (`scadbuddy-render.yaml:163-168`) | 13 (`backend/scadbuddy/render/worker_role.py:34` `RENDER_GRANTS`) | none |
 | print worker, 1 replica | `backend/` | `scadbuddy-print-db` (`scadbuddy-print.yaml:140-145`) | 34 (`backend/scadbuddy/auth/caller_grants.py:43` `PRINT_GRANTS`) | none |
-| projects worker, 1 replica | `backend/` | `scadbuddy-projects-db` (`scadbuddy-projects.yaml:132-137`) | 14 (`caller_grants.py:100` `PROJECTS_GRANTS`) | reads or writes 5 `ai_*` tables (`agent/src/db/grants.ts:15-21` `PROJECTS_AI_GRANTS`) |
-| agent sidecar (in the API pod) | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:549-552`) | all | 6 backend tables (`caller_grants.py:126-133` `AGENT_GRANTS`): it reads `events` and `workflow_runs`, updates `flow_grants`, and a trigger writes `blob_refs` |
+| projects worker, 1 replica | `backend/` | `scadbuddy-projects-db` (`scadbuddy-projects.yaml:132-137`) | 7 in its list (`caller_grants.py:102` `PROJECTS_GRANTS`; flow runs, decisions and grants go through CRUD routes, #5298), but an existing role still holds the 7 flow relations it held before, until the revoke in #5298 Task 11: 14 | 2 `ai_*` tables in its list (`agent/src/db/grants.ts:16-19` `PROJECTS_AI_GRANTS`), but an existing role still holds `ai_sessions`, `ai_mcp_tokens` and `ai_settings` until that revoke: 5 |
+| agent sidecar (in the API pod) | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:549-552`) | all | 6 backend tables (`caller_grants.py:116-123` `AGENT_GRANTS`): it reads `events` and `workflow_runs`, updates `flow_grants`, and a trigger writes `blob_refs` |
 | agent worker, 3 replicas | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy-agent-worker.yaml:102-105`) | all | as the sidecar |
 | agent-durable, 0 replicas | `agent-durable/` | `scadbuddy-db-app`, the owner (`scadbuddy-agent-durable.yaml:87-90`) | all | none it runs today: it runs no worker |
 | slicer worker, 1 replica | `workers/rust/` | none (`scadbuddy-slicer.yaml`) | 0 | none: transfer URLs only |
@@ -162,7 +162,7 @@ What changes:
 |---|---|---|
 | render worker | 13 tables over SQL; template Python and openscad in the same pod | render jobs, blob refs and assets through CRUD routes; template Python and openscad in a sandbox pod with no secret |
 | print worker | 34 tables over SQL | print runs, outcomes, slices and printer state through CRUD routes (it already reads outputs through `/api/v1/internal/outputs`) |
-| projects worker | 14 tables and 5 `ai_*` tables over SQL | flow runs, decisions, grants and payload keys through CRUD routes |
+| projects worker | 7 tables and 2 `ai_*` tables over SQL in its lists; flow runs, decisions and grants through CRUD routes (#5298). An existing role keeps the 7 flow relations and `ai_sessions`, `ai_mcp_tokens`, `ai_settings` until the revoke in #5298 Task 11 | flow runs, decisions, grants and payload keys through CRUD routes |
 | agent services | the owner role; 46 `ai_*` tables and 6 backend tables | sessions, transcripts, approvals and credentials through CRUD routes; Claude Code and plugins in a sandbox pod; no database secret |
 | agent-durable | the owner role, 0 replicas | no database secret |
 | API | reads and writes 8 `ai_*` tables; runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |

@@ -67,7 +67,7 @@ export class ServiceCredential implements CredentialSource {
     try {
       const rows = await this.sql<Row[]>`
         SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id
-        FROM service_credentials_agent ORDER BY expires_at DESC LIMIT 1`
+        FROM service_credentials_agent ORDER BY expires_at DESC, created_at DESC, id DESC LIMIT 1`
       const row = rows[0]
       this.token =
         row === undefined

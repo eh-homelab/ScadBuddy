@@ -374,8 +374,11 @@ The API issues and rotates them; nobody pastes a secret into a manifest (§13 D4
 - At start, and on the prune Schedule, the API checks each caller's newest live
   credential; when it has fewer than 7 days left, the API mints the next one, valid for
   30 days. The overlap is those 7 days: both are live, so a rotation never cuts a caller
-  off mid-call; one past `expires_at` is refused.
-- A caller reads its current token at start and every hour from a view that its own
+  off mid-call; one past `expires_at` is refused. It also mints the next one at once when
+  the newest live one carries other scopes than the release names (`SCOPES`, #5298); the
+  old one stays live until it expires.
+- A caller reads its current token at start and every hour (and again, at most every 5 s,
+  after the API answers it 401 or 403 `out_of_scope`, #5298) from a view that its own
   Postgres role alone may select (`service_credentials_<caller>`, granted as
   `worker_role.py` grants `RENDER_GRANTS` to `scadbuddy_render`, #601), and unseals it
   with the KEK. Today only the render worker has a role of its own: the print and

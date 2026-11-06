@@ -100,7 +100,7 @@ class Child:
         self.env.info = dataclasses.replace(
             self.env.info, workflow_id=f"session-{DURABLE}", workflow_run_id="swr"
         )
-        self.grants = FlowGrants(outward.store, api_client_of(api), HASH_KEY)
+        self.grants = FlowGrants(outward.remote, api_client_of(api), HASH_KEY)
 
     async def check(self, use: str, args: dict[str, Any] = SEND, **over: Any) -> GrantVerdict:
         body: dict[str, Any] = {

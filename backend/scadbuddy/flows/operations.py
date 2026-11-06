@@ -59,11 +59,13 @@ from temporalio import activity
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import ResetReapplyExcludeType
 from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
-from temporalio.client import WorkflowUpdateFailedError
+from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
+from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.crud.projects import RESET_REFUSED
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
@@ -83,6 +85,7 @@ from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
+    from scadbuddy.crud.projects import RemoteFlowStore
 
 FLOW_ANSWER = "flow_answer"
 FLOW_DECIDE = "flow_decide"
@@ -114,6 +117,29 @@ LANDED_PROBE = timedelta(seconds=10)
 #: The harness tool an outward `tool(...)` call parks as (`flow_tools.approved_tool`):
 #: its input names the agent tool and its arguments.
 APPROVED_TOOL = "approved_tool"
+
+
+async def reset_execution(
+    client: Client, workflow_id: str, *, replaced: str, point: int, request_id: str, reason: str
+) -> str:
+    """Reset the execution `replaced` to event `point` under `request_id` (Temporal dedupes
+    on it): the new execution's run id."""
+    answer = await client.workflow_service.reset_workflow_execution(
+        ResetWorkflowExecutionRequest(
+            namespace=client.namespace,
+            workflow_execution=WorkflowExecution(workflow_id=workflow_id, run_id=replaced),
+            reason=reason,
+            workflow_task_finish_event_id=point,
+            request_id=request_id,
+            # Every answer, approval and `close` after the point is undone with it: the
+            # calls past it run again and park again for a person.
+            reset_reapply_exclude_types=[
+                ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL,
+                ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE,
+            ],
+        )
+    )
+    return answer.run_id
 
 
 def request_id(run: Run, call_id: str) -> str:
@@ -252,7 +278,7 @@ def _same(existing: Decision, kind: str, request: dict[str, Any], answer: str | 
 
 
 def flow_kinds(
-    store: FlowStore,
+    store: FlowStore | RemoteFlowStore,
     keys: PayloadKeys | None,
     hash_key: bytes | None,
     *,
@@ -784,33 +810,30 @@ def flow_kinds(
         replaced = str(checked["replaced"])
         event_id = int(request["event_id"])
 
+        # The operation's own id: a retried run resets once, and the row records it to
+        # tell that retry from another Reset.
+        reset_id = str(activity.info().workflow_id)
+        responder = str(request.get("responder") or "browser")
+
         async def reset() -> str:
-            answer = await client.workflow_service.reset_workflow_execution(
-                ResetWorkflowExecutionRequest(
-                    namespace=client.namespace,
-                    workflow_execution=WorkflowExecution(workflow_id=workflow_id, run_id=replaced),
-                    reason=f"flow reset by {request.get('responder') or 'browser'}",
-                    workflow_task_finish_event_id=event_id,
-                    # The operation's own id: a retried run resets once, and the row
-                    # records it to tell that retry from another Reset.
-                    request_id=str(activity.info().workflow_id),
-                    # Every answer, approval and `close` after the point is undone with it:
-                    # the calls past it run again and park again for a person.
-                    reset_reapply_exclude_types=[
-                        ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL,
-                        ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE,
-                    ],
-                )
+            return await reset_execution(
+                client,
+                workflow_id,
+                replaced=replaced,
+                point=event_id,
+                request_id=reset_id,
+                reason=f"flow reset by {responder}",
             )
-            return answer.run_id
 
         try:
+            # On `RemoteFlowStore` the API resets under the row's lock, not `reset` (#5298).
             run = await store.reset_run(
                 str(request["run_id"]),
                 replaced=replaced,
                 point=event_id,
-                request_id=str(activity.info().workflow_id),
+                request_id=reset_id,
                 reset=reset,
+                responder=responder,
             )
         except ResetBeforeFloorError as err:
             raise _before_floor(err.floor) from None
@@ -819,6 +842,14 @@ def flow_kinds(
                 status.HTTP_409_CONFLICT,
                 "Another Reset moved the run first; check its history again.",
                 type_=RESET_CHANGED,
+            ) from None
+        except CrudRefusedError as err:
+            # The API's own refusal of a Reset Temporal refused for good: no retry mends it.
+            if err.status != 422 or err.problem.get("reason") != RESET_REFUSED:
+                raise
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Temporal refused to reset the run to event {event_id}; check its history again.",
             ) from None
         if run is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")

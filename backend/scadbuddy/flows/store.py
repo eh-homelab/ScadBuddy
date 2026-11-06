@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -26,7 +26,16 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
-from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse, RuleUse
+from scadbuddy.flows.grants import (
+    ConsumeRequest,
+    Consumption,
+    Grant,
+    GrantSpec,
+    GrantStatus,
+    GrantUse,
+    RuleUse,
+    picker,
+)
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
@@ -267,6 +276,7 @@ class FlowStore:
         point: int,
         request_id: str,
         reset: Callable[[], Coroutine[Any, Any, str]],
+        responder: str | None = None,
     ) -> Run | None:
         """Reset the run's execution `replaced` to event `point` with `reset` (which
         answers the new execution's run id), and move the row with it, holding the row's
@@ -280,7 +290,10 @@ class FlowStore:
         A Reset that landed although this call failed (the RPC timed out, or the worker
         died before the commit) leaves the row rolled back while the new execution
         writes to it. The retry's `reset` answers the same execution (Temporal dedupes
-        on the request id), and what that execution recorded is kept as it is."""
+        on the request id), and what that execution recorded is kept as it is.
+
+        `responder` (who asked) is for `RemoteFlowStore`, whose API names it in the
+        Reset's reason; here `reset` names it already."""
         loop = asyncio.get_running_loop()
 
         def call() -> str:
@@ -345,6 +358,11 @@ class FlowStore:
         run's row lock, so it happens once. None when the call is not waiting at hop
         `parent`."""
         return await asyncio.to_thread(self._move_hop, run_id, call_id, record, proposal)
+
+    async def hop_entry(self, run_id: str, call_id: str) -> FlowWaiting | None:
+        """The call's parked entry, still waiting or resolved since (the latest one): how a
+        resent `move_hop` finds the move it made (`api/crud_projects.py`)."""
+        return await asyncio.to_thread(self._hop_entry, run_id, call_id)
 
     async def get_proposal(self, request_id: str) -> Proposal | None:
         """A parent's narrowed input for the call, its hash, and who proposed it."""
@@ -412,6 +430,15 @@ class FlowStore:
         one `pick` chooses against the counters as they are, recorded with them; else
         `pick`'s reason."""
         return await asyncio.to_thread(self._consume_grant, run_id, request_id, pick)
+
+    async def consume(self, run_id: str, request: ConsumeRequest) -> GrantUse | str:
+        """`consume_grant` with the pick `request` describes, checked against now. The use
+        recorded for its request id answers first, whatever the grant's state since: sent
+        again after a lost answer (D5, #5298), it answers the first call's use."""
+        if (prior := await self.grant_use(request.request_id)) is not None:
+            return prior
+        pick = picker(run_id, request, datetime.now(UTC))
+        return await self.consume_grant(run_id, request.request_id, pick)
 
     async def orphan_grants(self, older_than: timedelta) -> list[str]:
         """The run ids of grants older than `older_than` whose run has no row: a start
@@ -804,6 +831,17 @@ class FlowStore:
             assert updated is not None
             self._announce(conn, Run.model_validate(updated))
         return moved
+
+    def _hop_entry(self, run_id: str, call_id: str) -> FlowWaiting | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT waiting_on, waiting_done FROM workflow_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        entries = [FlowWaiting.model_validate(w) for w in row["waiting_on"]]
+        entries += reversed(_done(row))
+        return next((w for w in entries if w.call_id == call_id), None)
 
     def _get_proposal(self, request_id: str) -> Proposal | None:
         with self._pool.connection() as conn:

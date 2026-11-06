@@ -2,8 +2,9 @@
 
 An opaque bearer token per caller, ``sbsvc_<id>.<secret>``, issued and rotated by the
 API: at start and on the prune Schedule each caller's newest live credential is checked,
-and when it has fewer than :data:`ROTATE_BEFORE` left the next one is minted for
-:data:`LIFETIME`, so the two overlap and a rotation never cuts a caller off. A caller
+and when it has fewer than :data:`ROTATE_BEFORE` left, or other scopes than
+:data:`SCOPES` names, the next one is minted for :data:`LIFETIME`, so the two overlap and
+a rotation never cuts a caller off. A caller
 reads its current token from ``service_credentials_<caller>`` (granted to its own
 Postgres role only, when the deployment made one) and unseals it with the KEK
 (:class:`TokenReader`). Verification is the SHA-256; the sealed copy exists only for
@@ -89,6 +90,9 @@ VIEWS: Mapping[ServiceCaller, tuple[str, ...]] = {
 PREFIX = "sbsvc_"
 LIFETIME = timedelta(days=30)
 ROTATE_BEFORE = timedelta(days=7)
+#: A caller's newest live sealed credential, the one it is handed: latest to expire, then
+#: latest created (`_insert`), then by id, so a tie always picks the same row.
+NEWEST = " ORDER BY expires_at DESC, created_at DESC, id DESC LIMIT 1"
 #: An exchanged credential's lifetime (spec 2026-11-05 §11 D4); the caller renews it at
 #: half-life.
 EXCHANGE_LIFETIME = timedelta(minutes=15)
@@ -208,10 +212,13 @@ def _insert(conn: Connection[Any], kek: Kek, caller: ServiceCaller, at: datetime
     token = f"{PREFIX}{credential_id}.{secrets.token_urlsafe(32)}"
     scopes = sorted(SCOPES[caller])
     envelope = seal_secret(kek, token, aad(credential_id, caller, scopes))
+    # `created_at` strictly after the caller's last one (callers hold its lock), so the
+    # newest of two minted at one instant is the later (`NEWEST`).
     conn.execute(
         "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
         " secret_sealed, dek_sealed, kek_id, created_at, expires_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, GREATEST(%s, (SELECT max(created_at)"
+        " + interval '1 microsecond' FROM service_credentials WHERE caller = %s)), %s)",
         (
             credential_id,
             caller,
@@ -221,6 +228,7 @@ def _insert(conn: Connection[Any], kek: Kek, caller: ServiceCaller, at: datetime
             envelope.dek_sealed,
             envelope.kek_id,
             at,
+            caller,
             at + LIFETIME,
         ),
     )
@@ -250,7 +258,9 @@ class ServiceCredentialStore:
     def rotate_due(self, kek: Kek, *, now: datetime | None = None) -> list[str]:
         """Mints the next credential of every legacy caller whose newest live sealed one
         has fewer than :data:`ROTATE_BEFORE` left, is sealed under another KEK (a rotated
-        key the caller can no longer open), or is missing; the ids minted. Each caller is
+        key the caller can no longer open), carries other scopes than :data:`SCOPES` (a
+        release changed them; the old one stays live until it expires, for the old pods
+        of a roll), or is missing; the ids minted. Each caller is
         checked and minted under its lock, so a replica's start, the prune Schedule
         and a revoke's replacement never mint two at once (#5393). A suspended caller
         gets none."""
@@ -262,12 +272,17 @@ class ServiceCredentialStore:
                 if _suspended(conn, caller):
                     continue
                 row = conn.execute(
-                    "SELECT expires_at, kek_id FROM service_credentials"
+                    "SELECT expires_at, kek_id, scopes FROM service_credentials"
                     " WHERE caller = %s AND proof = 'legacy' AND revoked_at IS NULL"
-                    " AND expires_at > %s ORDER BY expires_at DESC LIMIT 1",
+                    " AND expires_at > %s" + NEWEST,
                     (caller, at),
                 ).fetchone()
-                if row is None or row["expires_at"] - at < ROTATE_BEFORE or row["kek_id"] != kek.id:
+                if (
+                    row is None
+                    or row["expires_at"] - at < ROTATE_BEFORE
+                    or row["kek_id"] != kek.id
+                    or frozenset(row["scopes"]) != SCOPES[caller]
+                ):
                     minted.append(_insert(conn, kek, caller, at))
         return minted
 
@@ -482,7 +497,8 @@ def grant_caller_views(conn: Connection[Any]) -> list[str]:
 
 class TokenSource(Protocol):
     """Where a caller's current credential comes from: ``token`` is called on a worker
-    thread before each request, ``invalidate`` with a token the API answered 401 to."""
+    thread before each request, ``invalidate`` with a token the API answered 401, or 403
+    ``out_of_scope``, to."""
 
     def token(self) -> str | None: ...
 
@@ -494,12 +510,18 @@ REREAD_SECONDS = 3600.0
 #: How soon it reads again while it has no token: one started before the API minted
 #: its credential, or whose read failed (review of #5211).
 RETRY_SECONDS = 60.0
+#: How soon it reads again after a refusal (`invalidate`), but not sooner than this after
+#: the last read: a route that keeps refusing cannot turn every request into a database
+#: read, and the new credential (one the API minted at start for new scopes) is still
+#: reached inside the CRUD client's 30 s retry budget.
+REREAD_MIN_SECONDS = 5.0
 
 
 class TokenReader:
     """A caller's current token, read from its view and unsealed with the KEK; ``None``
     without a KEK or a live credential. The newest live one is presented, so a rotation
-    reaches the caller within :data:`REREAD_SECONDS`, inside the seven days' overlap."""
+    reaches the caller within :data:`REREAD_SECONDS`, inside the seven days' overlap, or
+    within :data:`REREAD_MIN_SECONDS` of a refusal that invalidates it."""
 
     def __init__(
         self,
@@ -515,13 +537,17 @@ class TokenReader:
         self._lock = threading.Lock()
         self._read_at: float | None = None
         self._token: str | None = None
+        self._stale = False
 
     def token(self) -> str | None:
         if self._kek is None:
             return None
         with self._lock:
             now = self._clock()
-            wait = REREAD_SECONDS if self._token is not None else RETRY_SECONDS
+            if self._stale:
+                wait = REREAD_MIN_SECONDS
+            else:
+                wait = REREAD_SECONDS if self._token is not None else RETRY_SECONDS
             if self._read_at is not None and now - self._read_at < wait:
                 return self._token
             try:
@@ -536,17 +562,23 @@ class TokenReader:
             except Exception:
                 logger.exception("could not open the %s service credential", self.caller)
             self._read_at = now
+            self._stale = False
             return self._token
 
     def invalidate(self, token: str) -> None:
-        """Nothing: a sealed credential is replaced by the rotation, read within the hour."""
+        """Reads again on the next :meth:`token`, :data:`REREAD_MIN_SECONDS` after the last
+        read at the soonest: after a 401 or a 403 ``out_of_scope`` the newest one may be
+        another (the API mints one at start when a release changed the caller's scopes).
+        The refused token is kept until then."""
+        with self._lock:
+            if token == self._token:
+                self._stale = True
 
     def _read(self, kek: Kek) -> str | None:
         with psycopg.connect(self._database_url, autocommit=True, row_factory=dict_row) as conn:
             row = conn.execute(
                 sql.SQL(
-                    "SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id FROM {}"
-                    " ORDER BY expires_at DESC LIMIT 1"
+                    "SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id FROM {}" + NEWEST
                 ).format(sql.Identifier(f"service_credentials_{self.caller}"))
             ).fetchone()
         if row is None:
