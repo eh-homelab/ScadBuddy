@@ -506,7 +506,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 **Files (eh-homelab/clusters):**
 - Modify: `applications/scadbuddy/scadbuddy-projects.yaml:131-137` (drop `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`); add `SCADBUDDY_API_INTERNAL_URL` port 8082 for crud if it differs
 - Modify: `applications/scadbuddy/networkpolicy-projects.yaml` (drop the Postgres egress rule)
-- Modify: `applications/scadbuddy/scadbuddy.yaml` (Service port 8082) and `networkpolicy-agent.yaml` (admit print, projects, render to 8082)
+- Modify: `applications/scadbuddy/scadbuddy.yaml` (Service port 8082) and `networkpolicy-agent.yaml` (admit print and projects to 8082). This task owns the Service port; Task 12 adds only render's admission and egress.
 
 - [ ] **Step 1:** Before merge: `kubectl --context primary -n bambuddy exec scadbuddy-db-1 -- psql -c "select count(*) from pg_stat_activity where usename='scadbuddy_projects'"` is 0 for 24 h after P5 deployed. Record the output in the PR.
 - [ ] **Step 2:** Edit, `kustomize build` the app, open the PR (`fix(scadbuddy): projects worker without a database secret (ScadBuddy#5298)`).
@@ -530,7 +530,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 ### Task 12: Clusters: the render worker reaches the CRUD port
 
-**Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy-render.yaml` (`SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`, the projected token of #5494 if not there), `networkpolicy-agent.yaml` (render to 8082 only; replace the comment at `:58`), and a new egress policy for render: DNS, the API on 8082, Temporal, Postgres (until Task 21), the store's endpoints (Bambuddy, S3), OTLP.
+**Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy-render.yaml` (`SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`, the projected token of #5494 if not there), `networkpolicy-agent.yaml` (render to 8082 only; replace the comment at `:58`; the Service port 8082 is Task 10's), and a new egress policy for render: DNS, the API on 8082, Temporal, Postgres (until Task 21), the store's endpoints (Bambuddy, S3), OTLP.
 
 - [ ] **Step 1:** Edit; `kubectl --context primary -n bambuddy exec deploy/scadbuddy-render -- python -c "import httpx;print(httpx.get('http://scadbuddy:8082/api/v1/models').status_code)"` answers 404 and `…:8080/…` times out after merge. Record it.
 
@@ -636,7 +636,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 ### Task 23: Print: the settings projection
 
-**Files:** `library/settings_store.py` (`print_projection(stored) -> StoredSettings` that blanks every sealed field but the Bambuddy key and each spool provider's key; list them in `PRINT_SECRETS`); `api/crud_print.py`; `crud/print.py` (`RemoteSettingsStore` with sync `load()` and `pool` absent); `worker.py:1150-1153` (callers of `settings_store.load`); `auth/caller_grants.py` (drop `model_print_choices`); test `tests/crud/test_crud_print_settings.py`.
+**Files:** `library/settings_store.py` (`print_projection(stored) -> StoredSettings` that blanks every sealed field but the Bambuddy key and each spool provider's key; list them in `PRINT_SECRETS`); `api/crud_print.py`; `crud/print.py` (`RemoteSettingsStore` with sync `load()` and `pool` absent); `worker.py:1150-1153` (callers of `settings_store.load`); `auth/caller_grants.py` (drop `model_print_choices`; keep `settings` and `printer_bed_types`, which the printer merge, `printers/store.py` `_merge`, writes until Task 29); test `tests/crud/test_crud_print_settings.py`.
 
 **Interfaces:** `GET /api/v1/internal/crud/print/settings` → `StoredSettings` (D8). Area `settings`.
 
@@ -647,7 +647,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 ### Task 24: Print: runs, outcomes, operations, events; no LISTEN
 
-**Files:** `api/crud_print.py` (include `operations_router("print")`); `crud/print.py` (`RemotePrintRunStore`, `RemoteOutcomes`, `RemoteEvents` with `publish(event)` posting to `/events`); `core/pg_events.py` (`write_event_once`: `ON CONFLICT (event_id) DO NOTHING`, NOTIFY only when inserted); `bambuddy/runs.py:635-700` (`RecentRuns` without the listener: reads through the store each time); `worker.py:1146-1190`, `:1231`; `auth/caller_grants.py` (drop `operations`, `print_runs`, `print_outcomes`, `events`); test `tests/crud/test_crud_print_runs.py`.
+**Files:** `api/crud_print.py` (include `operations_router("print")`); `crud/print.py` (`RemotePrintRunStore`, `RemoteOutcomes`, `RemoteEvents` with `publish(event)` posting to `/events`); `core/pg_events.py` (`write_event_once`: `ON CONFLICT (event_id) DO NOTHING`, NOTIFY only when inserted); `bambuddy/runs.py:635-700` (`RecentRuns` without the listener: reads through the store each time); `worker.py:1146-1190`, `:1231`; `auth/caller_grants.py` (drop `operations`, `print_outcomes`, `events`; `print_runs` stays until Task 31, because `spools/native.py:286` (Q29) and the printer merge's `PrinterReference("print_runs", "printer")` (`printers/store.py:226`, Q24) still read it); test `tests/crud/test_crud_print_runs.py`.
 
 **Interfaces:** `/runs` routes for Q10 to Q13 (`POST /runs` `{output_id, request, …}` → `PrintRun`, natural on the run key; `POST /runs/{id}/start-enqueue|succeed|fail|fail-lost|result|lan-stopped`, state-guarded; reads `GET /runs/{id}`, `GET /runs?ids=`, `GET /runs/latest?output_id=`, `GET /runs/find?key=&has_request_id=`, `GET /runs/lan-waiting?printers=`, `GET /runs/running?output_id=`); `POST /outcomes` (Q14, natural); `POST /events` `{event}` with kinds `print.progress`, the kinds `bambuddy/progress.py:639` emits, `printer.report`, `printer.changed` (Q5). Areas `runs`, `operations`, `events`.
 
@@ -716,7 +716,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 ### Task 31: Print: spools, native spools, held presets, native slices
 
-**Files:** `api/crud_print.py`, `crud/print.py` (`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`); `worker.py:1211-1214`, `:1235-1246`; `spools/spool_providers.py:116`; drop `physical_spools`, `spool_provider_records`, `spool_record_links`, `spool_provider_refreshes`, `tray_spool_links`, `native_spools`, `native_spool_uses`, `held_local_presets`, `native_slices` and its sequence; test `tests/crud/test_crud_spools.py`.
+**Files:** `api/crud_print.py`, `crud/print.py` (`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`); `worker.py:1211-1214`, `:1235-1246`; `spools/spool_providers.py:116`; drop `physical_spools`, `spool_provider_records`, `spool_record_links`, `spool_provider_refreshes`, `tray_spool_links`, `native_spools`, `native_spool_uses`, `held_local_presets`, `native_slices` and its sequence, and `print_runs` (its last readers, Q29 here and the merge of Task 29, are gone); test `tests/crud/test_crud_spools.py`.
 
 **Interfaces:** one route per method in Q28 to Q30. `replace_records` and `link` take `Idempotency-Key`; `NativeSliceStore.start` is natural on its workflow id (`slicing/store.py:125`). Area `spools`.
 
