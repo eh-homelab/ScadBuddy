@@ -503,6 +503,9 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'PUT /api/v1/ai/capabilities/{source}',
     'PUT /api/v1/ai/capabilities/{source}/items/{item}',
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}',
+    // A ScadBuddy tool's loading (#838).
+    'PUT /api/v1/ai/capabilities/{source}/items/{item}/loading',
+    'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',
