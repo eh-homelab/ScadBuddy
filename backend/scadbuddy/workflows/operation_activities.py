@@ -21,6 +21,7 @@ from temporalio import activity
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import (
     CHECK_ON_BAMBUDDY,
@@ -186,6 +187,10 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
         except ApiError as error:
             again = kind.run_attempts > 1 and is_transient(error)
             raise raised_as(error, FAILED, non_retryable=not again) from None
+        except CrudRefusedError as refused:
+            # The API's 4xx through a CRUD route (#5298): the same answer every time.
+            final = ApiError(refused.status, str(refused.problem.get("detail", refused)))
+            raise raised_as(final, FAILED, non_retryable=True) from None
         finally:
             OPERATION_RUN.reset(operation)
 

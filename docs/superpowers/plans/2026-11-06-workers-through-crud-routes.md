@@ -500,7 +500,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - Test: `tests/test_projects_worker_nodb.py`
 
 - [ ] **Step 1:** Test: build and start the projects worker with `SCADBUDDY_DATABASE_URL` unset and `psycopg.connect`, `psycopg.AsyncConnection.connect` and `ConnectionPool.__init__` patched to raise; run one flow through record, a decision, a grant consume and close against the `crud_app` fixture.
-- [ ] **Step 2:** Implement `crud/start.py` `wait_for_areas` (polls every 2 s, logs what is missing, honours `stopping`).
+- [ ] **Step 2:** Widen the projects worker's start gate (`crud/client.py` `wait_for_areas`, added in P1) to every area it calls.
 - [ ] **Step 3:** Backend check; commit `feat(projects): the projects worker needs no database (#5298)`. PR P5.
 
 **Rolling deploy:** every area exists on the API since P1 to P3. The Deployment still sets the secret; the worker ignores it. Rollback to P4's build works (secret still there).
