@@ -69,9 +69,9 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
-from scadbuddy.crud.projects import RemoteFlowStore
+from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.crud.render import RemoteRenderSettingsSource
-from scadbuddy.flows.keys import approval_key, payload_keys
+from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
@@ -1467,7 +1467,7 @@ class ProjectsKeyMissingError(ValueError):
 
 
 #: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PROJECTS_CRUD_AREAS = frozenset({"flows", "operations"})
+PROJECTS_CRUD_AREAS = frozenset({"flows", "operations", "payload-keys"})
 
 
 async def run_projects_worker(
@@ -1484,8 +1484,8 @@ async def run_projects_worker(
     (`client.projects_deployment`), never pinned (plan 2026-10-09 Ruling 13), so it stops
     without a drain; a run in flight moves to the current build at its next task."""
     stop = stop or asyncio.Event()
-    keys = payload_keys(settings)
-    if keys is None:
+    kek = settings_kek(settings.secret_key_file)
+    if kek is None:
         raise ProjectsKeyMissingError(
             "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"
             " are sealed under keys the KEK protects (spec 2026-10-01 §6.5)"
@@ -1508,21 +1508,21 @@ async def run_projects_worker(
         runtime, sdk_port = _sdk_runtime(settings)
         # #4975 phase 4: the projects worker's service credential on the API's routes,
         # exchanged for its proof when one is configured (#5494).
-        credential = ServiceAuth(
-            token_source("projects", settings, settings_kek(settings.secret_key_file))
-        )
-        client = await connect_flows(
-            settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
-        )
-        # #5298: flow runs, decisions, grants and operations through the API's CRUD routes.
+        credential = ServiceAuth(token_source("projects", settings, kek))
+        # #5298: flow runs, decisions, grants, operations and payload keys through the
+        # API's CRUD routes. A key comes sealed and is opened here with the KEK (plan D10).
         crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
+        keys = RemotePayloadKeys(crud, kek)
+        client = await connect_flows(
+            settings.temporal_address, settings.temporal_namespace, keys, runtime=runtime
+        )
         store = RemoteFlowStore(crud)
         queue = settings.temporal_task_queue_projects
         kinds = {
             kind.name: kind
             for kind in flow_kinds(
                 store,
-                keys[0],
+                keys,
                 approval_key(settings),
                 api=lambda: api_client(settings.api_internal_url, credential),
             )

@@ -1,5 +1,6 @@
 """The projects worker's flow-run routes (#5298, inventory J6-J23): thin calls to the
-flows component's `FlowStore`, for `crud/projects.py` `RemoteFlowStore`.
+flows component's `FlowStore`, for `crud/projects.py` `RemoteFlowStore`, and its payload
+keys, for `RemotePayloadKeys`.
 
 Every write is natural (plan D5): sent again, it answers as it did the first time. A
 write that announces the run (`insert_run`, `project`, `move_hop`) runs here, so its
@@ -13,6 +14,7 @@ it is decoded before routing, so no route would match.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from fastapi import status
@@ -34,6 +36,7 @@ from scadbuddy.workflows.flow_models import (
     HopRecord,
     ProjectionWrite,
 )
+from scadbuddy.workflows.payload_codec import subject_of
 
 #: A decision refused because its call left the hop it was made for.
 HOP_MOVED = "hop_moved"
@@ -43,6 +46,10 @@ RESET_SUPERSEDED = "reset-superseded"
 RESET_BEFORE_FLOOR = "reset-before-floor"
 #: A Reset Temporal refused for good; any other failure of its call is a 5xx, retried.
 RESET_REFUSED = "reset-refused"
+#: A payload key refused: its subject was forgotten (forgetSubject).
+SUBJECT_FORGOTTEN = "subject-forgotten"
+#: A payload key refused for good: not a flow run's or a session's, or a session's to make.
+SUBJECT_REFUSED = "subject-refused"
 #: The gRPC statuses that no retry of the same Reset mends.
 RESET_REFUSALS = frozenset(
     {
@@ -103,6 +110,16 @@ class Tiers(BaseModel):
 
 class Expiry(BaseModel):
     seconds: int
+
+
+class KeyRequest(BaseModel):
+    create: bool
+
+
+class SealedKey(BaseModel):
+    #: The data key sealed under the KEK `kek_id`, base64.
+    dek_sealed: str
+    kek_id: str
 
 
 def _missing(what: str) -> ApiError:
@@ -299,3 +316,26 @@ async def parent_tiers(session: str, principal: str, flows: FlowsDep) -> Tiers:
 @router.get("/approval-expiry", name="crud_projects_approval_expiry")
 async def approval_expiry(flows: FlowsDep) -> Expiry:
     return Expiry(seconds=await flows.store.approval_expiry_s())
+
+
+@router.post("/payload-keys/{subject}", name="crud_projects_payload_key")
+async def payload_key(subject: str, body: KeyRequest, flows: FlowsDep) -> SealedKey:
+    """A subject's data key as stored, sealed (plan D10): the worker opens it with its own
+    KEK, so the open key never crosses the wire. With `create`, a flow run's key is made
+    first, under the subject's lock (`payload_codec.create_key`); a session's is only read."""
+    if subject_of(subject) != subject or (body.create and not subject.startswith("flow-")):
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "The projects worker has no such payload key to ask for.",
+            reason=SUBJECT_REFUSED,
+        )
+    if flows.keys is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "Flows have no KEK.")
+    sealed = await flows.keys.sealed_key(subject, body.create)
+    if sealed is None:
+        raise ApiError(
+            status.HTTP_410_GONE,
+            f"The payloads of {subject} cannot be decoded: its key was deleted.",
+            reason=SUBJECT_FORGOTTEN,
+        )
+    return SealedKey(dek_sealed=base64.b64encode(sealed[0]).decode(), kek_id=sealed[1])

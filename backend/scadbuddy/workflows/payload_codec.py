@@ -24,6 +24,7 @@ import json
 import os
 import re
 import time
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
@@ -144,22 +145,48 @@ class PayloadKeys(Protocol):
     async def key_for(self, subject: str, create: bool) -> bytes: ...
 
 
-class PgPayloadKeys:
-    """``ai_payload_keys``, sealed under the KEK; a key stays in memory 30 s at most.
+async def read_key(conn: psycopg.AsyncConnection[Any], subject: str) -> tuple[bytes, str] | None:
+    """The subject's data key as stored, sealed under the KEK ``kek_id``; None without one."""
+    cur = await conn.execute(
+        "SELECT dek_sealed, kek_id FROM ai_payload_keys WHERE subject = %s", (subject,)
+    )
+    row = await cur.fetchone()
+    return None if row is None else (bytes(row[0]), row[1])
+
+
+async def create_key(conn: psycopg.AsyncConnection[Any], subject: str, kek: Kek) -> None:
+    """Make the subject's data key, sealed under ``kek``, unless it has one already."""
+    sealed = seal_bytes(kek.key, os.urandom(KEK_BYTES), payload_key_context(subject))
+    # Never for a forgotten subject: its payloads stay unreadable, new ones too.
+    # Under the subject's lock, which forgetSubject also takes, so the
+    # tombstone check never reads from before a forget that is committing.
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", (payload_key_lock(subject),)
+        )
+        await conn.execute(
+            "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)"
+            " SELECT %s, %s, %s WHERE NOT EXISTS"
+            " (SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s)"
+            " ON CONFLICT (subject) DO NOTHING",
+            (subject, sealed, kek.id, subject),
+        )
+
+
+class CachedPayloadKeys(ABC):
+    """Data keys opened with the KEK; a key stays in memory 30 s at most.
 
     30 s is how long another process can still open a subject after forgetSubject.
     """
 
     def __init__(
         self,
-        connect: Connect,
         kek: Kek,
         *,
         previous: Kek | None = None,
         cache_s: float = 30.0,
         cache_max: int = 1000,
     ) -> None:
-        self._connect = connect
         self._kek = kek
         self._previous = previous
         self._cache_s = cache_s
@@ -167,46 +194,24 @@ class PgPayloadKeys:
         self._cache: OrderedDict[str, tuple[bytes, float]] = OrderedDict()
 
     def __repr__(self) -> str:
-        return f"PgPayloadKeys(kek={self._kek.id}, cached={len(self._cache)})"
+        return f"{type(self).__name__}(kek={self._kek.id}, cached={len(self._cache)})"
 
-    async def _row(self, conn: psycopg.AsyncConnection[Any], subject: str) -> Any:
-        cur = await conn.execute(
-            "SELECT dek_sealed, kek_id FROM ai_payload_keys WHERE subject = %s", (subject,)
-        )
-        return await cur.fetchone()
+    @abstractmethod
+    async def sealed_key(self, subject: str, create: bool) -> tuple[bytes, str] | None:
+        """The subject's key sealed and its ``kek_id``, made first when ``create``; None
+        for a forgotten subject."""
 
     async def key_for(self, subject: str, create: bool) -> bytes:
         cached = self._cache.get(subject)
         if cached is not None and cached[1] > time.monotonic():
             return cached[0]
         self._cache.pop(subject, None)
-        async with self._connect() as conn:
-            row = await self._row(conn, subject)
-            if row is None and create:
-                sealed = seal_bytes(
-                    self._kek.key, os.urandom(KEK_BYTES), payload_key_context(subject)
-                )
-                # Never for a forgotten subject: its payloads stay unreadable, new ones too.
-                # Under the subject's lock, which forgetSubject also takes, so the
-                # tombstone check never reads from before a forget that is committing.
-                async with conn.transaction():
-                    await conn.execute(
-                        "SELECT pg_advisory_xact_lock(hashtext(%s))", (payload_key_lock(subject),)
-                    )
-                    await conn.execute(
-                        "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)"
-                        " SELECT %s, %s, %s WHERE NOT EXISTS"
-                        " (SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s)"
-                        " ON CONFLICT (subject) DO NOTHING",
-                        (subject, sealed, self._kek.id, subject),
-                    )
-                # Whoever inserted first, this is the key every encoder of the subject uses.
-                row = await self._row(conn, subject)
+        row = await self.sealed_key(subject, create)
         if row is None:
             raise SubjectForgottenError(
                 f"the payloads of {subject} cannot be decoded: its key was deleted"
             )
-        dek_sealed, kek_id = bytes(row[0]), row[1]
+        dek_sealed, kek_id = row
         if kek_id == self._kek.id:
             kek = self._kek
         elif self._previous is not None and kek_id == self._previous.id:
@@ -222,6 +227,31 @@ class PgPayloadKeys:
             self._cache.popitem(last=False)
         self._cache[subject] = (key, time.monotonic() + self._cache_s)
         return key
+
+
+class PgPayloadKeys(CachedPayloadKeys):
+    """``ai_payload_keys``, sealed under the KEK."""
+
+    def __init__(
+        self,
+        connect: Connect,
+        kek: Kek,
+        *,
+        previous: Kek | None = None,
+        cache_s: float = 30.0,
+        cache_max: int = 1000,
+    ) -> None:
+        super().__init__(kek, previous=previous, cache_s=cache_s, cache_max=cache_max)
+        self._connect = connect
+
+    async def sealed_key(self, subject: str, create: bool) -> tuple[bytes, str] | None:
+        async with self._connect() as conn:
+            row = await read_key(conn, subject)
+            if row is None and create:
+                await create_key(conn, subject, self._kek)
+                # Whoever inserted first, this is the key every encoder of the subject uses.
+                row = await read_key(conn, subject)
+        return row
 
 
 class SubjectPayloadCodec(PayloadCodec, WithSerializationContext):

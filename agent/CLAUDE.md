@@ -9,9 +9,9 @@ the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep
 `ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
 `workflow_run_decisions`, `flow_grants`, `flow_grant_uses`, and `blob_refs` through a
 trigger; `backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). `src/db/grants.ts`
-grants the API's and the projects worker's roles their `ai_*` reads. Claude Code, and any
-plugin package approved with `allow_refused`, runs in the same pod as the owner URL and
-the KEK (`docs/ai/security.md`, "Plugin packages").
+grants the API's role its `ai_*` reads; the projects worker's list is empty (#5298).
+Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
+as the owner URL and the KEK (`docs/ai/security.md`, "Plugin packages").
 
 Under the rule the agent holds no database secret. Its data (sessions, transcripts,
 approvals, credentials, payload keys) goes behind CRUD routes, the cross-service reads

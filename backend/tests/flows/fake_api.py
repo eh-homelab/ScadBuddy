@@ -22,11 +22,10 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes
-from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 from scadbuddy.workflows.projects_worker import projects_worker
-from tests.crud.crud_support import served_flow_store
-from tests.flows.flows_support import HASH_KEY, Flows, Keys, define
+from tests.crud.crud_support import served_projects
+from tests.flows.flows_support import HASH_KEY, Flows, define
 
 PROBLEM = "application/problem+json"
 STILL_ACCEPTING = "https://scadbuddy.dev/problems/command-still-accepting"
@@ -224,12 +223,12 @@ def outward_activities(
 async def outward_worker(
     temporal_address: str, jobs: JobProjection, api: httpx.AsyncClient | None
 ) -> AsyncIterator[Outward]:
-    client = await connect_flows(temporal_address, "default", Keys())
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
-    # The worker's store is the CRUD routes', as the projects worker's (#5298).
+    # The worker's store and payload keys are the CRUD routes', as the projects worker's
+    # (#5298).
     async with (
-        served_flow_store(store, client=client) as remote,
-        projects_worker(client, queue, outward_activities(remote, api)),
+        served_projects(store, temporal_address) as (client, remote, worker_client),
+        projects_worker(worker_client, queue, outward_activities(remote, api)),
     ):
         yield Outward(client, queue, store, remote)
