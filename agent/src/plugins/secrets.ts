@@ -1,16 +1,25 @@
 import type { CredentialRepo } from '../credentials.js'
 import { type Kek, SECRET_MIN_CHARS } from '../secrets.js'
 import type { PluginOAuth } from './oauthStore.js'
-import type { PackagesForRun } from './packages/install.js'
-import { packageHeaderSecrets } from './packages/mcp.js'
+import type { PackageInstaller } from './packages/install.js'
+import type { PackageRepo } from './packages/store.js'
 import { headerSecretVariants, type PluginStore } from './registry.js'
 
+/** Where the enabled packages' header secrets are read from: their pins, and the installer's verified copies. */
+export type PackageSecretSource = {
+  store: Pick<PackageRepo, 'enabledPins'>
+  installer: Pick<PackageInstaller, 'headerSecrets'>
+}
+
 /**
- * Every plugin secret the agent holds, read from its own stores alone: no address check,
- * no forwarder route, no plugin or token endpoint contacted.
+ * Every plugin secret the agent holds, read from its own stores and its packages' pinned
+ * files (fetched again from the pin when no verified copy is cached): no address check, no
+ * forwarder route, no plugin or token endpoint contacted.
  *
  * - each enabled remote plugin's header value (`ai_plugins`, opened under the KEK);
- * - each package http server's header values (`ai_plugin_packages`);
+ * - each enabled package's http server header values: literals in its pinned files, read from
+ *   the copy that hashes to its pin (`ai_plugin_packages`, install.ts `headerSecrets`), never
+ *   from what a turn loaded, so a package that fails to load keeps them in the list (#5485);
  * - every OAuth sign-in's access and refresh tokens and client secret (`ai_plugin_oauth`,
  *   opened under the KEK).
  *
@@ -21,13 +30,14 @@ import { headerSecretVariants, type PluginStore } from './registry.js'
  *
  * It includes every sign-in's tokens, a plugin that is not enabled too: a token stays a
  * secret while it is stored. A value shorter than SECRET_MIN_CHARS is left out, so it
- * cannot redact ordinary text in a turn's tool output.
+ * cannot redact ordinary text in a turn's tool output. A package whose files cannot be had
+ * (its fetch fails and no verified copy is cached) fails the read: the list fails closed.
  */
 export async function readPluginSecrets(deps: {
   kek: Kek | undefined
   plugins?: Pick<PluginStore, 'enabled'> | undefined
   oauth?: Pick<PluginOAuth, 'storedSecrets'> | undefined
-  packages?: (() => Promise<PackagesForRun>) | undefined
+  packages?: PackageSecretSource | undefined
 }): Promise<string[]> {
   const out: string[] = []
   if (deps.plugins) {
@@ -36,12 +46,8 @@ export async function readPluginSecrets(deps: {
   }
   if (deps.oauth) out.push(...(await deps.oauth.storedSecrets(deps.kek)))
   if (deps.packages) {
-    const loaded = await deps.packages()
-    try {
-      out.push(...packageHeaderSecrets(loaded.loaded))
-    } finally {
-      loaded.release()
-    }
+    const { store, installer } = deps.packages
+    for (const values of await Promise.all((await store.enabledPins()).map((pin) => installer.headerSecrets(pin)))) out.push(...values)
   }
   return [...new Set(out)].filter((value) => value.length >= SECRET_MIN_CHARS)
 }
@@ -65,7 +71,7 @@ export function toolSecrets(deps: {
   credentials?: Pick<CredentialRepo, 'revealAll'> | undefined
   plugins?: Pick<PluginStore, 'enabled'> | undefined
   oauth?: Pick<PluginOAuth, 'storedSecrets'> | undefined
-  packages?: (() => Promise<PackagesForRun>) | undefined
+  packages?: PackageSecretSource | undefined
 }): { secrets: () => Promise<string[]>; fresh: () => Promise<string[]> } {
   const { kek, credentials } = deps
   // None without the KEK, which opens them.

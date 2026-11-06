@@ -714,6 +714,33 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
   })
 
+  it("gives a package's header secrets when it fails to load, cached or fetched again, and fails when it cannot be had (#5485)", async () => {
+    const HEADER = 'Bearer pkg-header-token-77'
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', headers: { Authorization: HEADER } } } }),
+    })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    // The endpoint fails the egress check at load, so the package is left out of the turn.
+    const refusing = resolver({ 'mcp.example': ['169.254.169.254'] })
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: refusing })
+    const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, later)
+    expect(loaded.loaded).toEqual([])
+    expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
+    // Its header is still read, from the cached copy.
+    expect(await later.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-77'])
+    // And from a copy fetched again, never vetted, when none is cached.
+    const emptyCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
+    temps.push(emptyCache)
+    const fresh = new PackageInstaller({ fetcher, cacheRoot: emptyCache, resolve: refusing })
+    expect(await fresh.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-77'])
+    // A copy that cannot be had fails the read (fail-closed).
+    const goneCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
+    temps.push(goneCache)
+    const gone = new PackageInstaller({ fetcher: localFetcher({}), cacheRoot: goneCache, resolve: resolver() })
+    await expect(gone.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+  })
+
   it('puts the source and every declared endpoint through the egress check', async () => {
     repos.greeter = gitRepo(GREETER)
     const metadata = new PackageInstaller({
