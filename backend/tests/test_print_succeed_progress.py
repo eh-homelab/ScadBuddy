@@ -17,8 +17,9 @@ import pytest
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.models import QueueItem
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
-from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, from_plates, from_queue
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -26,6 +27,7 @@ from scadbuddy.core.events import Event, InProcessEventBus
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers.lan_models import LanStarted
+from scadbuddy.printers.progress import _ended, _waiting
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import PrintRunInput, SourceSpec, SucceedInput
 
@@ -41,6 +43,31 @@ PREVIOUS = PrintProgress(
 #: The new LAN print, read once its run's end is recorded.
 LAN = PrintProgress(route="lan", stage="running", run_id="run-1", bambuddy_url="")
 LAN_DONE = LAN.model_copy(update={"stage": "done", "settled": True})
+
+
+def _lan_plates(run_id: str) -> PrintProgress:
+    """A LAN run of two plates, as `LanProgress.read` builds it: the first plate ended,
+    the second waits; merged by `from_plates`, then stamped with the run's id. No copy
+    names a queue item, so only the run's id says which print it is."""
+    first = LanStarted(
+        subtask_name=f"scadbuddy-{run_id}-p1", started_at=AT, plate_id=1, ended="done"
+    )
+    plates = [_ended(first, "H2C"), _waiting("H2C", None)]
+    merged = from_plates(plates, [1, 2], slice_job_id=None, queue_item_id=None, bambuddy_url="")
+    return merged.model_copy(update={"route": "lan", "run_id": run_id})
+
+
+def _queued_plates(*items: int) -> PrintProgress:
+    """A queued print of one plate per queue item, as `progress_for` reads it: each item
+    by `from_queue`, merged by `from_plates`, which names the last item."""
+    plates = [from_queue(QueueItem(id=item, status="pending"), bambuddy_url="") for item in items]
+    return from_plates(
+        plates,
+        list(range(1, len(items) + 1)),
+        slice_job_id=None,
+        queue_item_id=items[-1],
+        bambuddy_url="",
+    )
 
 
 class Outputs:
@@ -195,3 +222,76 @@ async def test_a_retried_end_marks_the_print_new_once() -> None:
 
     assert [event.kind for event in seen] == ["print.progress"] * 2
     assert not observer.observe_subject(OUTPUT, "demo", QUEUED)
+
+
+@pytest.mark.parametrize(("kind", "key"), [("output", OUTPUT), ("library", "library:7")])
+async def test_a_multi_plate_lan_read_of_the_run_is_kept(kind: str, key: str) -> None:
+    """A LAN read of several plates names no queue item: its run's id keeps it."""
+    read = _lan_plates("run-1")
+    assert {copy.queue_entry_id for copy in read.copies_detail} == {None}
+    activities, observer, seen = _setup(key, read)
+    result = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan=[LanStarted(subtask_name="scadbuddy-run-1-p1", started_at=AT, plate_id=1)],
+        lan_waiting=[2],
+    )
+
+    await ActivityEnvironment().run(activities.succeed, _input(kind, result))
+
+    assert [event.kind for event in seen] == ["print.progress"] * 2
+    assert not observer.observe_subject(key, "demo", read)
+
+
+async def test_a_multi_plate_lan_read_of_another_run_is_forgotten() -> None:
+    read = _lan_plates("run-0")
+    activities, observer, seen = _setup(OUTPUT, read)
+    result = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan=[LanStarted(subtask_name="scadbuddy-run-1-p1", started_at=AT, plate_id=1)],
+        lan_waiting=[2],
+    )
+
+    await ActivityEnvironment().run(activities.succeed, _input("output", result))
+
+    # Forgotten: the same read, made again, is published as new.
+    assert observer.observe_subject(OUTPUT, "demo", read)
+    assert [event.kind for event in seen] == ["print.progress"] * 3
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        pytest.param((51, 52, 53), id="every plate"),
+        pytest.param((51, 52), id="some plates"),
+        pytest.param((53,), id="one plate"),
+    ],
+)
+async def test_a_read_naming_only_queue_items_of_the_run_is_kept(items: tuple[int, ...]) -> None:
+    """A run queued three plates; a read that names a subset of them (the others not
+    read yet) is of this print, and is kept."""
+    read = _queued_plates(*items)
+    activities, observer, seen = _setup(OUTPUT, read)
+    result = PrintRunResult(library_file_id=41, copies=3, queue_item_ids=[51, 52, 53])
+
+    await ActivityEnvironment().run(activities.succeed, _input("output", result))
+
+    assert [event.kind for event in seen] == ["print.progress"] * 2
+    assert not observer.observe_subject(OUTPUT, "demo", read)
+
+
+async def test_a_read_naming_a_queue_item_outside_the_run_is_forgotten() -> None:
+    """One item of the read is not the run's (the previous print's): the read is not of
+    this print, so it is forgotten and read again as new."""
+    read = _queued_plates(50, 51)
+    activities, observer, seen = _setup(OUTPUT, read)
+    result = PrintRunResult(library_file_id=41, copies=3, queue_item_ids=[51, 52, 53])
+
+    await ActivityEnvironment().run(activities.succeed, _input("output", result))
+
+    # Forgotten: the same read, made again, is published as new.
+    assert observer.observe_subject(OUTPUT, "demo", read)
+    assert [event.kind for event in seen] == ["print.progress"] * 3
