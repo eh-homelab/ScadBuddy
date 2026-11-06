@@ -327,8 +327,8 @@ export const orderTools: Tool[] = [
       'Record time spent on an order, or on one of its items with `order_item_id`: `design`, `setup`, ' +
       "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
       "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
-      'a second call with the same kind and source returns the first entry as it was recorded and writes ' +
-      'nothing. Allowed in every order status, closed, cancelled and on hold included.',
+      'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),

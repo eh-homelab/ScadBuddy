@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 from psycopg.types.json import Jsonb
 
-from scadbuddy.orders.costs import CostRates, order_costs
+from scadbuddy.orders.costs import CostRates, Margin, _margin, order_costs
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError
 from scadbuddy.orders.lifecycle import QUOTE_HOLDER, FulfilmentInput, OrderEdit, ShipmentInput
 from scadbuddy.orders.models import (
@@ -469,6 +469,13 @@ async def test_charged_cost_and_margin(shop: Shop) -> None:
     assert (costs.margin_minor, costs.margin_percent) == (500, 35.7)
 
 
+def test_thin_is_judged_on_the_unrounded_percent() -> None:
+    """14.96% reads 15.0, and is still thin under 15 (#5338's review)."""
+    view = Margin(revenue_minor=2500, cost_minor=2126)
+    _margin(view, Decimal("15"))
+    assert (view.margin_percent, view.margin_state) == (15.0, "thin")
+
+
 async def test_thin_and_loss(shop: Shop) -> None:
     order, item = shop.accepted(quantity=1)  # charged 1000
     shop.lifecycle.add_cost_entry(
@@ -611,4 +618,6 @@ async def test_another_currency_leaves_todays_rates_unknown(shop: Shop) -> None:
     line = costs.items[0]
     # The entry still counts; today's labour (in USD) does not.
     assert (line.cost_minor, line.labour_minor, line.unknown) == (100, 0, ["labour"])
+    # A default with no source is unknown, never also estimated (#5338's review).
+    assert line.estimated == []
     assert line.margin_state == "unknown"

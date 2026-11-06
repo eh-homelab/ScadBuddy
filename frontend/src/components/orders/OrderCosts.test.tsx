@@ -81,6 +81,7 @@ describe('OrderCosts', () => {
     // 45 minutes at 600 an hour is 450.00, over the 30.00 charged.
     await waitFor(() => expect(screen.getByRole('row', { name: /Name Keychain/ })).toHaveAttribute('data-state', 'loss'))
     expect(state.timeEntries.map((e) => [e.order_item_id, e.minutes, e.rate_minor_per_hour])).toEqual([[ITEM_APPROVED, 45, 60000]])
+    expect(state.timeEntries[0]!.source).toMatch(/^manual:/)
     expect(await screen.findByText(/Setup, 45 min · \$450.00/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Remove Setup time, 45 min' }))
@@ -95,6 +96,8 @@ describe('OrderCosts', () => {
     await user.click(within(form).getByRole('button', { name: 'Add cost' }))
 
     await waitFor(() => expect(state.costEntries.map((e) => [e.order_item_id, e.kind, e.amount_minor, e.note])).toEqual([[null, 'material', 125, 'magnets']]))
+    // A form's own key, so a resubmit after a lost reply writes once.
+    expect(state.costEntries[0]!.source).toMatch(/^manual:[0-9a-f-]{36}$/)
     expect(await screen.findByText('Materials, $1.25 · magnets')).toBeInTheDocument()
   })
 

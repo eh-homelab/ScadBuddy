@@ -802,8 +802,9 @@ async def get_order_costs(
         "change never rewrites it; for an order in a currency other than the shop's, no "
         "rate can be copied and it is null. With a `source` (a timer's "
         "`timer:<item or order>:<started_at>`), "
-        "a second write of the same order, kind and source returns the first entry as it "
-        "was recorded and writes nothing (200). On the audit line as `time.added`."
+        "a second write of the same order and source returns the first entry as it was "
+        "recorded, whatever its kind, and writes nothing (200). On the audit line as "
+        "`time.added`."
     ),
     responses={status.HTTP_200_OK: {"model": TimeEntry, "description": "Already recorded"}},
 )

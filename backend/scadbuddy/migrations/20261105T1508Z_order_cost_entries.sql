@@ -15,15 +15,16 @@ CREATE TABLE order_time_entries (
   rate_minor_per_hour bigint CHECK (rate_minor_per_hour >= 0),
   note text NOT NULL DEFAULT '',
   started_at timestamptz,
-  -- What wrote it (`timer:<item or order>:<started_at>`); null for an entry typed by hand.
+  -- What wrote it (`timer:<item or order>:<started_at>`, a form's `manual:<uuid>`); null
+  -- when the writer named nothing.
   source text,
   created_by jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX order_time_entries_order ON order_time_entries (order_id, created_at);
--- A retry whose first reply was lost writes once.
+-- A retry whose first reply was lost writes once, even with another kind picked by then.
 CREATE UNIQUE INDEX order_time_entries_source
-  ON order_time_entries (order_id, kind, source) WHERE source IS NOT NULL;
+  ON order_time_entries (order_id, source) WHERE source IS NOT NULL;
 
 CREATE TABLE order_cost_entries (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -33,7 +34,8 @@ CREATE TABLE order_cost_entries (
   kind text NOT NULL CHECK (kind IN ('assistant', 'payment_fee', 'material', 'other')),
   amount_minor bigint NOT NULL CHECK (amount_minor > 0),
   note text NOT NULL DEFAULT '',
-  -- What wrote it (`ai_session:<id>`, `payment:<id>`); null for an entry by hand.
+  -- What wrote it (`ai_session:<id>`, `payment:<id>`, a form's `manual:<uuid>`); null when
+  -- the writer named nothing.
   source text,
   created_by jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()

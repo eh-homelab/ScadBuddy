@@ -402,6 +402,7 @@ def _margin(view: Margin, thin: Decimal) -> None:
     if view.revenue_minor is None:
         return
     view.margin_minor = view.revenue_minor - view.cost_minor
+    percent: Decimal | None = None
     if view.revenue_minor > 0:
         percent = Decimal(view.margin_minor) * 100 / view.revenue_minor
         view.margin_percent = float(percent.quantize(PERCENT, rounding=ROUND_HALF_UP))
@@ -409,10 +410,11 @@ def _margin(view: Margin, thin: Decimal) -> None:
         view.margin_state = "loss"
     elif view.unknown:
         view.margin_state = "unknown"
-    elif view.margin_percent is None:
+    elif percent is None:
         view.margin_state = None
     else:
-        view.margin_state = "thin" if Decimal(str(view.margin_percent)) < thin else "ok"
+        # The unrounded percent: 14.96 is thin under 15, though it reads 15.0.
+        view.margin_state = "thin" if percent < thin else "ok"
 
 
 def _item_cost(
@@ -442,11 +444,11 @@ def _item_cost(
     if not time and item.kind != "custom" and item.status != "cancelled":
         default = reader.default_labour()
         labour_default = True
-        estimated.append("labour")
         if default is None:
             labour_unknown = True
         else:
             labour = default
+            estimated.append("labour")
     if labour_unknown:
         unknown.append("labour")
 

@@ -111,8 +111,9 @@ def test_a_timer_entry_retried_is_written_once(shop: Shop) -> None:
     body = TimeEntryInput(kind="setup", minutes=12, source="timer:2026-11-05T10:00:00Z")
 
     first, written = shop.lifecycle.add_time_entry(order.id, body, BY, labour_rate=usd_rate("0"))
+    # The retry with another kind picked by then is still the same timer.
     again, again_written = shop.lifecycle.add_time_entry(
-        order.id, body, BY, labour_rate=usd_rate("0")
+        order.id, body.model_copy(update={"kind": "design"}), BY, labour_rate=usd_rate("0")
     )
 
     assert again == first

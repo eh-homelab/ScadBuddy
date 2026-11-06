@@ -69,8 +69,9 @@ const round = (value: number | null) => (value === null ? null : Math.round(valu
 function margin<T extends { revenue_minor?: number | null; cost_minor?: number; unknown?: Part[] }>(view: T, thin: number): T {
   if (view.revenue_minor == null) return { ...view, margin_minor: null, margin_percent: null, margin_state: null }
   const minor = view.revenue_minor - (view.cost_minor ?? 0)
-  const percent = view.revenue_minor > 0 ? Math.round((minor * 1000) / view.revenue_minor) / 10 : null
-  const state = minor < 0 ? 'loss' : (view.unknown ?? []).length ? 'unknown' : percent === null ? null : percent < thin ? 'thin' : 'ok'
+  const exact = view.revenue_minor > 0 ? (minor * 100) / view.revenue_minor : null
+  const percent = exact === null ? null : Math.round(exact * 10) / 10
+  const state = minor < 0 ? 'loss' : (view.unknown ?? []).length ? 'unknown' : exact === null ? null : exact < thin ? 'thin' : 'ok'
   return { ...view, margin_minor: minor, margin_percent: percent, margin_state: state }
 }
 
@@ -165,11 +166,11 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
   let labourDefault = false
   if (!time.length && item.kind !== 'custom' && item.status !== 'cancelled') {
     labourDefault = true
-    estimated.push('labour')
     const lines = accepted?.lines.filter((l) => l.kind === 'labour') ?? []
     if (lines.length) labour = lines.reduce((s, l) => s + l.amount_minor, 0) * item.quantity
     else if (today) labour = Math.round(Number(settings.pricing_labour_per_item) * exp * item.quantity)
     else labourUnknown = true
+    if (!labourUnknown) estimated.push('labour')
   }
   if (labourUnknown) unknown.push('labour')
   const prints = attempts.reduce((s, a) => s + (a.cost_minor ?? 0), 0)
@@ -307,7 +308,7 @@ export const handlers = [
     return created(request, () => {
       const order = lock(String(params.id))
       if (body.order_item_id) itemOf(order, body.order_item_id)
-      const same = body.source && state.timeEntries.find((e) => e.order_id === order.id && e.kind === body.kind && e.source === body.source)
+      const same = body.source && state.timeEntries.find((e) => e.order_id === order.id && e.source === body.source)
       if (same) return [same, 200]
       const settings = mockSettings()
       const rate =

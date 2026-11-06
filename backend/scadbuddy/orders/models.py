@@ -466,9 +466,9 @@ class TimeEntryInput(BaseModel):
     note: str = Field(default="", max_length=1000)
     #: When the timer started, when a timer wrote it.
     started_at: datetime | None = None
-    #: What wrote it (``timer:<item or order>:<started_at>``): one entry per order, kind
-    #: and source, so a retry whose first reply was lost writes once. None for one typed
-    #: by hand.
+    #: What wrote it (``timer:<item or order>:<started_at>``, ``manual:<uuid>``): one entry
+    #: per order and source, whatever its kind, so a retry whose first reply was lost
+    #: writes once.
     source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
 
 
@@ -491,8 +491,8 @@ class CostEntryInput(BaseModel):
     kind: CostKind
     amount_minor: Money = Field(ge=1, le=MAX_ENTRY_MINOR)
     note: str = Field(default="", max_length=1000)
-    #: What wrote it (``ai_session:<id>``, ``payment:<id>``): one entry per order, kind
-    #: and source, so a writer that runs twice writes once. None for one by hand.
+    #: What wrote it (``ai_session:<id>``, ``payment:<id>``, a form's ``manual:<uuid>``):
+    #: one entry per order, kind and source, so a writer that runs twice writes once.
     source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
 
 

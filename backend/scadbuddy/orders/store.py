@@ -1854,13 +1854,13 @@ class OrderStore:
         rate_minor_per_hour: int | None,
         created_by: Actor,
     ) -> tuple[TimeEntry, bool]:
-        """The entry, and whether this call wrote it: an entry with the same order, kind
-        and ``source`` already there is returned as it is."""
+        """The entry, and whether this call wrote it: an entry with the same order and
+        ``source`` already there is returned as it is, whatever its kind."""
         row = conn.execute(
             "INSERT INTO order_time_entries (order_id, order_item_id, kind, minutes,"
             " rate_minor_per_hour, note, started_at, source, created_by)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            " ON CONFLICT (order_id, kind, source) WHERE source IS NOT NULL DO NOTHING"
+            " ON CONFLICT (order_id, source) WHERE source IS NOT NULL DO NOTHING"
             f" RETURNING {_TIME_ENTRY}",
             (
                 order_id,
@@ -1876,9 +1876,8 @@ class OrderStore:
         ).fetchone()
         if row is None:
             existing = conn.execute(
-                f"SELECT {_TIME_ENTRY} FROM order_time_entries"
-                " WHERE order_id = %s AND kind = %s AND source = %s",
-                (order_id, body.kind, body.source),
+                f"SELECT {_TIME_ENTRY} FROM order_time_entries WHERE order_id = %s AND source = %s",
+                (order_id, body.source),
             ).fetchone()
             assert existing is not None
             return TimeEntry.model_validate(existing), False

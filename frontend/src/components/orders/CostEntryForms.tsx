@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { CostEntry, TimeEntry } from '../../api/types'
 import { Button } from '@/components/ui/button'
@@ -56,6 +56,24 @@ export function isStale(startedAt: string, at: number = Date.now()): boolean {
   return at - new Date(startedAt).getTime() > STALE_TIMER_MS
 }
 
+/**
+ * A form's submission key, `manual:<uuid>`: the same for a resubmit of the same fields, so
+ * a retry after a lost reply writes once; new once a field changes or the entry is saved.
+ */
+function useSubmission() {
+  const last = useRef<{ fields: string; key: string } | null>(null)
+  return {
+    source(...fields: unknown[]): string {
+      const text = JSON.stringify(fields)
+      if (last.current?.fields !== text) last.current = { fields: text, key: `manual:${crypto.randomUUID()}` }
+      return last.current.key
+    },
+    done() {
+      last.current = null
+    },
+  }
+}
+
 type Scope = { orderId: string; itemId: string | null; onDone: () => void }
 
 /**
@@ -79,20 +97,23 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
     return () => window.clearInterval(timer)
   }, [started])
 
-  async function save(count: number, startedAt: string | null) {
+  const submission = useSubmission()
+
+  async function save(count: number, startedAt: string | null, source: string) {
     setBusy(true)
     setError(null)
     try {
-      // A timer's entry names its scope and start, so a retry after a lost reply writes
-      // once, whatever kind is picked by then.
+      // One entry per order and source, whatever its kind (the index), so a retry after a
+      // lost reply writes once even with another kind picked by then.
       await api.addTimeEntry(orderId, {
         order_item_id: itemId,
         kind,
         minutes: count,
         note: note.trim(),
         started_at: startedAt,
-        source: startedAt ? `timer:${scope}:${startedAt}` : null,
+        source,
       })
+      submission.done()
       setMinutes('')
       setNote('')
       onDone()
@@ -108,7 +129,7 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
   function stop() {
     if (!started) return
     const startedAt = started
-    void save(elapsedMinutes(startedAt), startedAt).then((saved) => {
+    void save(elapsedMinutes(startedAt), startedAt, `timer:${scope}:${startedAt}`).then((saved) => {
       if (!saved) return
       writeTimer(scope, null)
       setStarted(null)
@@ -128,7 +149,7 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
           setError('Enter whole minutes, such as 15.')
           return
         }
-        void save(count, null)
+        void save(count, null, submission.source(kind, count, note.trim()))
       }}
     >
       <div className="flex flex-col gap-1">
@@ -218,6 +239,7 @@ export function AddCost({ orderId, itemId, exponent, currency, onDone }: Scope &
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const submission = useSubmission()
   return (
     <form
       className="flex flex-wrap items-end gap-2"
@@ -232,8 +254,15 @@ export function AddCost({ orderId, itemId, exponent, currency, onDone }: Scope &
         setBusy(true)
         setError(null)
         api
-          .addCostEntry(orderId, { order_item_id: itemId, kind, amount_minor: minor, note: note.trim() })
+          .addCostEntry(orderId, {
+            order_item_id: itemId,
+            kind,
+            amount_minor: minor,
+            note: note.trim(),
+            source: submission.source(kind, minor, note.trim()),
+          })
           .then(() => {
+            submission.done()
             setAmount('')
             setNote('')
             onDone()
