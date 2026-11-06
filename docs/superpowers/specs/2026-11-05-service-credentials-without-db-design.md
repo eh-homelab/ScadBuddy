@@ -312,7 +312,7 @@ CRUD service compares its hash and issues the short-lived credential.
 | Rolling deploy | ok | ok | ok | ok | ok |
 | Stolen pod gets | 30 d token | ≤ credential life after pod deleted | ≤ JWT life + credential life | KEK, until rotated | mint until rotated |
 | Outside Kubernetes | shared file | needs D or E2 | needs D or E2 | file | works |
-| Cluster grants | Secrets RBAC in a shared namespace | per-caller SAs, `system:auth-delegator` | per-caller SAs | none new | one item per caller |
+| Cluster grants | Secrets RBAC in a shared namespace | per-caller SAs, `system:auth-delegator`, `system:service-account-issuer-discovery` (already default) | per-caller SAs | none new | one item per caller |
 | KEK in callers | no | no | no | yes | no |
 
 ## 6. Recommendation
