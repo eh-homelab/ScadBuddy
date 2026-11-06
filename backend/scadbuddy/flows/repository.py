@@ -71,8 +71,18 @@ _GITIGNORE = f"# Written by ScadBuddy.\n{LOCK_NAME}\n"
 
 
 def _umask() -> int:
-    """The process umask. os.umask can only be read by setting it, so read it once at
-    import, before any thread writes a file."""
+    """The process umask, read once at import. Linux (4.7+) shows it in
+    ``/proc/self/status``, which changes nothing. Elsewhere os.umask can only read it by
+    setting it, which gives the whole process a umask of 0 for a moment; that fallback
+    is safe only because this module is imported at start, before any thread writes a
+    file."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as status:
+            for line in status:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except OSError:
+        pass
     mask = os.umask(0)
     os.umask(mask)
     return mask
