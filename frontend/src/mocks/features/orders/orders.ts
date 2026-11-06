@@ -10,6 +10,7 @@ import type {
   OrderItemCreate,
   OrderItemPatch,
   OrderPatch,
+  OrderRow,
   OrderStatus,
   PaymentCreate,
   Quote,
@@ -34,6 +35,9 @@ import { orderRow } from './costs'
 
 const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'margin_state', 'cursor', 'limit'])
 const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
+/** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
+export const SCAN_PAGE_SIZE = 100
+export const MAX_SCAN_PAGES = 10
 const STATUSES = new Set<OrderStatus>(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled'])
 export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
@@ -370,11 +374,28 @@ export const handlers = [
         return o.number.toLowerCase().includes(q) || o.notes.toLowerCase().includes(q) || (owner?.display_name ?? '').toLowerCase().includes(q) || (owner?.company ?? '').toLowerCase().includes(q)
       })
       .filter((o) => !after || o.created_at < after[0] || (o.created_at === after[0] && o.id < after[1]))
-      .map(orderRow)
-      .filter((o) => margins.length === 0 || (o.margin_state != null && margins.includes(o.margin_state)))
-    const page = rows.slice(0, limit)
-    const last = page.at(-1)
-    return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })
+    if (margins.length === 0) {
+      const page = rows.slice(0, limit).map(orderRow)
+      const last = page.at(-1)
+      return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })
+    }
+    // `_order_page`'s margin scan (#5515): read SCAN_PAGE_SIZE rows at a time, at most
+    // MAX_SCAN_PAGES times. At the cap the page can be short or empty, and its cursor is
+    // the last row read, not the last match.
+    const found: OrderRow[] = []
+    let stopped: Order | undefined
+    for (let start = 0; start < MAX_SCAN_PAGES * SCAN_PAGE_SIZE; start += SCAN_PAGE_SIZE) {
+      const read = rows.slice(start, start + SCAN_PAGE_SIZE)
+      for (const order of read.map(orderRow)) {
+        if (order.margin_state == null || !margins.includes(order.margin_state)) continue
+        const last = found.at(-1)
+        if (last && found.length === limit) return HttpResponse.json({ items: found, next_cursor: encodeCursor(last) })
+        found.push(order)
+      }
+      if (rows.length <= start + SCAN_PAGE_SIZE) return HttpResponse.json({ items: found, next_cursor: null })
+      stopped = read.at(-1)
+    }
+    return HttpResponse.json({ items: found, next_cursor: stopped ? encodeCursor(stopped) : null })
   }),
 
   http.post('/api/v1/orders', async ({ request }) => {

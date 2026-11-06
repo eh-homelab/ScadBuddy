@@ -170,3 +170,28 @@ def test_the_margin_filter_scans_a_bounded_number_of_orders(
         found += [row["id"] for row in page["items"]]
     assert page["next_cursor"] is None
     assert found == [thin, loss]
+
+
+def test_a_short_page_at_the_scan_cap_carries_the_cursor_where_the_scan_stopped(
+    client: TestClient, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5519: the cap is reached after a match. The page is short but not empty, and its
+    ``next_cursor`` is the store's cursor at the last order read (``ok``), not at the last
+    match (``thin``). Following it finds the later match once."""
+    loss, ok, thin, uncharged = margin_orders(client, pg_conninfo)
+    newest = client.get("/api/v1/orders?limit=3").json()
+    assert [r["id"] for r in newest["items"]] == [uncharged, thin, ok]
+    at_ok = newest["next_cursor"]
+    at_thin = client.get("/api/v1/orders?limit=2").json()["next_cursor"]
+    assert at_ok != at_thin
+    monkeypatch.setattr(orders_api, "SCAN_PAGE_SIZE", 1)
+    monkeypatch.setattr(orders_api, "MAX_SCAN_PAGES", 3)
+    query = "/api/v1/orders?margin_state=loss&margin_state=thin"
+
+    first = client.get(query).json()  # reads uncharged, thin and ok
+    assert [r["id"] for r in first["items"]] == [thin]
+    assert first["next_cursor"] == at_ok
+
+    second = client.get(f"{query}&cursor={first['next_cursor']}").json()
+    assert [r["id"] for r in second["items"]] == [loss]
+    assert second["next_cursor"] is None
