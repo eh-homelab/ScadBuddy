@@ -135,7 +135,11 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.component import PRINT_LIBRARY
-from scadbuddy.print_library.copies import open_runs_on_copies, trash_copies
+from scadbuddy.print_library.copies import (
+    open_runs_on_copies,
+    open_runs_on_outputs_copies,
+    trash_copies,
+)
 from scadbuddy.print_library.filing import trash_filed
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
@@ -1555,10 +1559,9 @@ async def model_open_runs(slug: str, state: AppState) -> list[str]:
     output delete's check asks (#5117, #4312 re-review I-a). None on Bambuddy's library."""
     if await state.components.get(PRINT_LIBRARY).serving_native() is None:
         return []
-    running: list[str] = []
-    for output_id in await asyncio.to_thread(state.outputs.ids_for, slug):
-        running += await open_runs_on_copies(state.uploads, state.print_runs.store, output_id)
-    return running
+    output_ids = await asyncio.to_thread(state.outputs.ids_for, slug)
+    running = await open_runs_on_outputs_copies(state.uploads, state.print_runs.store, output_ids)
+    return [run_id for output_id in output_ids for run_id in running[output_id]]
 
 
 async def _forget_native_copies(
@@ -1581,13 +1584,20 @@ async def _forget_native_copies(
     if native is None:
         return
     for output_id in output_ids:
-        try:
-            if trash:
+        if trash:
+            try:
                 await trash_filed(native, output_id)
                 open_runs = await open_runs_on_copies(
                     state.uploads, state.print_runs.store, output_id
                 )
                 await trash_copies(native, state.uploads, output_id, keep_slices=bool(open_runs))
+            except psycopg.Error:
+                logger.exception(
+                    "could not trash a deleted model's library copies",
+                    extra={"slug": slug, "id": output_id},
+                )
+        # On its own, so a failed trash still leaves no row naming the output (#5403).
+        try:
             await asyncio.to_thread(native.rows.forget_output, output_id)
         except psycopg.Error:
             logger.exception(
