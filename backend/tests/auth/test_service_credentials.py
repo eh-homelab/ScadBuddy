@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -78,6 +80,34 @@ def test_revoked_or_expired_is_refused(store: ServiceCredentialStore, pg_conninf
     assert store.resolve(token) is None
     assert store.revoke(agent.id) is None
     assert not store.has_live("agent")
+
+
+def _after(start: threading.Barrier, run: Callable[[], object]) -> None:
+    start.wait()
+    run()
+
+
+def test_a_revoke_and_the_rotation_replace_once(store: ServiceCredentialStore) -> None:
+    """#5393: the prune Schedule's rotation and a revoke's replacement, at once, leave
+    one live credential, not one each."""
+    store.rotate_due(KEK)
+    for _ in range(20):
+        for credential in store.list():
+            if credential.caller == "agent":
+                store.revoke(credential.id)
+        start = threading.Barrier(2)
+        threads = [
+            threading.Thread(target=_after, args=(start, lambda: store.rotate_due(KEK))),
+            threading.Thread(
+                target=_after, args=(start, lambda: store.replace_if_none(KEK, "agent"))
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        live = [c for c in store.list() if c.caller == "agent" and c.revoked_at is None]
+        assert len(live) == 1
 
 
 def test_last_used_is_recorded(store: ServiceCredentialStore, pg_conninfo: str) -> None:

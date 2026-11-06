@@ -94,53 +94,89 @@ def _now(now: datetime | None) -> datetime:
     return now or datetime.now(UTC)
 
 
+def _lock(conn: Connection[Any], caller: ServiceCaller) -> None:
+    """Serialises every mint of ``caller``'s credentials until the transaction ends."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:service_credentials:' || %s, 0))",
+        (caller,),
+    )
+
+
+def _has_live(conn: Connection[Any], caller: ServiceCaller, at: datetime) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM service_credentials WHERE caller = %s AND revoked_at IS NULL"
+        " AND expires_at > %s LIMIT 1",
+        (caller, at),
+    ).fetchone()
+    return row is not None
+
+
+def _insert(conn: Connection[Any], kek: Kek, caller: ServiceCaller, at: datetime) -> str:
+    credential_id = secrets.token_hex(8)
+    token = f"{PREFIX}{credential_id}.{secrets.token_urlsafe(32)}"
+    scopes = sorted(SCOPES[caller])
+    envelope = seal_secret(kek, token, aad(credential_id, caller, scopes))
+    conn.execute(
+        "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
+        " secret_sealed, dek_sealed, kek_id, created_at, expires_at)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            credential_id,
+            caller,
+            scopes,
+            token_hash(token),
+            envelope.secret_sealed,
+            envelope.dek_sealed,
+            envelope.kek_id,
+            at,
+            at + LIFETIME,
+        ),
+    )
+    return credential_id
+
+
 class ServiceCredentialStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
 
     def mint(self, kek: Kek, caller: ServiceCaller, *, now: datetime | None = None) -> str:
-        at = _now(now)
-        credential_id = secrets.token_hex(8)
-        token = f"{PREFIX}{credential_id}.{secrets.token_urlsafe(32)}"
-        scopes = sorted(SCOPES[caller])
-        envelope = seal_secret(kek, token, aad(credential_id, caller, scopes))
-        with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
-                " secret_sealed, dek_sealed, kek_id, created_at, expires_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    credential_id,
-                    caller,
-                    scopes,
-                    token_hash(token),
-                    envelope.secret_sealed,
-                    envelope.dek_sealed,
-                    envelope.kek_id,
-                    at,
-                    at + LIFETIME,
-                ),
-            )
-        return credential_id
+        """A new credential for ``caller`` whatever it holds ("rotate now")."""
+        with self._pool.connection() as conn, conn.transaction():
+            _lock(conn, caller)
+            return _insert(conn, kek, caller, _now(now))
 
     def rotate_due(self, kek: Kek, *, now: datetime | None = None) -> list[str]:
         """Mints the next credential of every caller whose newest live one has fewer
         than :data:`ROTATE_BEFORE` left, is sealed under another KEK (a rotated key the
-        caller can no longer open), or is missing; the ids minted."""
+        caller can no longer open), or is missing; the ids minted. Each caller is
+        checked and minted under its lock, so a replica's start, the prune Schedule
+        and a revoke's replacement never mint two at once (#5393)."""
         at = _now(now)
         minted = []
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT ON (caller) caller, expires_at, kek_id FROM service_credentials"
-                " WHERE revoked_at IS NULL AND expires_at > %s ORDER BY caller, expires_at DESC",
-                (at,),
-            ).fetchall()
-        newest = {row["caller"]: row for row in rows}
         for caller in CALLERS:
-            row = newest.get(caller)
-            if row is None or row["expires_at"] - at < ROTATE_BEFORE or row["kek_id"] != kek.id:
-                minted.append(self.mint(kek, caller, now=at))
+            with self._pool.connection() as conn, conn.transaction():
+                _lock(conn, caller)
+                row = conn.execute(
+                    "SELECT expires_at, kek_id FROM service_credentials"
+                    " WHERE caller = %s AND revoked_at IS NULL AND expires_at > %s"
+                    " ORDER BY expires_at DESC LIMIT 1",
+                    (caller, at),
+                ).fetchone()
+                if row is None or row["expires_at"] - at < ROTATE_BEFORE or row["kek_id"] != kek.id:
+                    minted.append(_insert(conn, kek, caller, at))
         return minted
+
+    def replace_if_none(
+        self, kek: Kek, caller: ServiceCaller, *, now: datetime | None = None
+    ) -> str | None:
+        """Mints one for ``caller`` when it has none live, under its lock (#5393); the
+        id minted, or None when one was live."""
+        at = _now(now)
+        with self._pool.connection() as conn, conn.transaction():
+            _lock(conn, caller)
+            if _has_live(conn, caller, at):
+                return None
+            return _insert(conn, kek, caller, at)
 
     def resolve(self, token: str, *, now: datetime | None = None) -> Service | None:
         credential_hash = token_hash(token)
@@ -183,12 +219,7 @@ class ServiceCredentialStore:
 
     def has_live(self, caller: ServiceCaller, *, now: datetime | None = None) -> bool:
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM service_credentials WHERE caller = %s AND revoked_at IS NULL"
-                " AND expires_at > %s LIMIT 1",
-                (caller, _now(now)),
-            ).fetchone()
-        return row is not None
+            return _has_live(conn, caller, _now(now))
 
     def delete_expired(
         self, *, older_than: timedelta = LIFETIME, now: datetime | None = None
