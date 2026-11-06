@@ -15,6 +15,7 @@ import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { mswFetch } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
@@ -103,7 +104,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt inje
     await ensureStateDirs(paths)
     audit = new AuditLog({ sql: db.sql, hashKey: HASH_KEY, onError: (err) => console.error(err) })
     const services = {
-      backend: createBackendClient(BACKEND, (request) => fetch(request)),
+      backend: createBackendClient(BACKEND, mswFetch),
       pending: new PendingActionStore(),
       pollIntervalMs: 5,
       renderWaitMs: 1000,

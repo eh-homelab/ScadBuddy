@@ -22,6 +22,7 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { mswFetch } from './helpers/mcp.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { browser } from './support/sessions.js'
 import { turnRunnerForTest } from './support/turnRunner.js'
@@ -51,7 +52,7 @@ afterAll(() => server.close())
 
 function services(): ToolServices {
   return {
-    backend: createBackendClient(BACKEND, (request) => fetch(request)),
+    backend: createBackendClient(BACKEND, mswFetch),
     pending: new PendingActionStore(),
     pollIntervalMs: 5,
     renderWaitMs: 5000,
