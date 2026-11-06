@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -197,6 +198,8 @@ class FakeApiserver:
         self.jwks_fetches = 0
         self.status = 201
         self.jwks_status = 200
+        #: A TokenReview answer in place of the real one, as JSON.
+        self.review_body: Any = None
 
     def revoke(self, token: str) -> None:
         self.revoked.add(token)
@@ -233,6 +236,8 @@ class FakeApiserver:
         self.requests.append(request)
         if self.status != 201:
             return httpx.Response(self.status)
+        if self.review_body is not None:
+            return httpx.Response(201, json=self.review_body)
         body = json.loads(request.content)
         assert body["kind"] == "TokenReview"
         token = body["spec"]["token"]
@@ -344,18 +349,41 @@ async def test_an_unknown_kid_refetches_the_jwks_at_most_every_30_s(tmp_path: Pa
     verifier = _verifier(apiserver, tmp_path, clock)
     assert await verifier.verify(signed("scadbuddy-print")) is not None
     assert apiserver.jwks_fetches == 1
+    # Every fetch starts the 30 s floor, the first one too.
     rotated = RSAKey.generate_key(2048, parameters={"kid": "rsa-2"})
     for i in range(5):
         assert await verifier.verify(signed("scadbuddy-print", key=rotated, nonce=str(i))) is None
-    assert apiserver.jwks_fetches == 2
+    assert apiserver.jwks_fetches == 1
     # The cluster rotates its key; within 30 s it is still not asked again.
     apiserver.keys.append(rotated)
     clock.now += 29
     assert await verifier.verify(signed("scadbuddy-print", key=rotated)) is None
-    assert apiserver.jwks_fetches == 2
+    assert apiserver.jwks_fetches == 1
     clock.now += 1
     assert await verifier.verify(signed("scadbuddy-print", key=rotated)) is not None
+    assert apiserver.jwks_fetches == 2
+    other = RSAKey.generate_key(2048, parameters={"kid": "rsa-4"})
+    assert await verifier.verify(signed("scadbuddy-print", key=other)) is None
+    assert apiserver.jwks_fetches == 2
+    # Review of #5498: the hourly refresh is a fetch too, so the first unknown `kid`
+    # after it does not ask again.
+    clock.now += 3600
+    assert await verifier.verify(signed("scadbuddy-print", nonce="hourly")) is not None
     assert apiserver.jwks_fetches == 3
+    assert await verifier.verify(signed("scadbuddy-print", key=other, nonce="h")) is None
+    assert apiserver.jwks_fetches == 3
+
+
+@pytest.mark.parametrize("body", [[], "status", 7, {"status": "yes"}, {"status": []}])
+async def test_a_tokenreview_answer_that_is_no_object_is_unavailable(
+    tmp_path: Path, body: Any
+) -> None:
+    """Review of #5498: JSON that is not an object is a 503, never a 500."""
+    apiserver = FakeApiserver()
+    apiserver.review_body = body
+    verifier = _verifier(apiserver, tmp_path)
+    with pytest.raises(VerifierUnavailableError):
+        await verifier.verify(signed("scadbuddy-print"))
 
 
 async def test_a_failed_refresh_serves_the_last_jwks_for_a_day(tmp_path: Path) -> None:
@@ -644,12 +672,18 @@ class FakeBackend:
         self.calls: list[dict[str, list[str]]] = []
         self.issued = 0
         self.retry_after = "7"
+        #: Set: each exchange signals ``entered`` and then waits for the gate.
+        self.gate: threading.Event | None = None
+        self.entered = threading.Event()
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         from urllib.parse import parse_qs
 
         assert request.url.path == "/api/v1/auth/service-token"
         self.calls.append(parse_qs(request.content.decode()))
+        if self.gate is not None:
+            self.entered.set()
+            assert self.gate.wait(10)
         if self.status == 200:
             self.issued += 1
             token = f"sbsvc_{self.issued:016x}." + "a" * 43
@@ -707,6 +741,51 @@ def _reader(
         clock=clock,
         transport=httpx.MockTransport(backend.handler),
     )
+
+
+def test_a_renewal_in_flight_does_not_hold_back_a_valid_token(tmp_path: Path) -> None:
+    """Review of #5498: while one thread renews, the others get the still-valid token at
+    once; only a caller with no valid token waits for the exchange."""
+    backend, clock = FakeBackend(), Clock()
+    reader = _reader(tmp_path, backend, clock)
+    first = reader.token()
+    assert first is not None
+    clock.now += 450
+    backend.gate = threading.Event()
+    renewed: list[str | None] = []
+    renewer = threading.Thread(target=lambda: renewed.append(reader.token()))
+    renewer.start()
+    assert backend.entered.wait(10)
+    others: list[str | None] = []
+    other = threading.Thread(target=lambda: others.append(reader.token()))
+    other.start()
+    other.join(5)
+    stuck = other.is_alive()
+    backend.gate.set()
+    renewer.join(10)
+    other.join(10)
+    assert not stuck, "a caller with a valid token waited for the renewal"
+    assert others == [first]
+    assert len(backend.calls) == 2
+    assert renewed[0] is not None and renewed[0] != first
+    # Past expiry, a caller waits for the exchange in flight, and none starts a second.
+    backend.entered.clear()
+    backend.gate = threading.Event()
+    clock.now += 900
+    renewed.clear()
+    renewer = threading.Thread(target=lambda: renewed.append(reader.token()))
+    renewer.start()
+    assert backend.entered.wait(10)
+    others.clear()
+    other = threading.Thread(target=lambda: others.append(reader.token()))
+    other.start()
+    other.join(0.5)
+    assert other.is_alive()
+    backend.gate.set()
+    renewer.join(10)
+    other.join(10)
+    assert renewed[0] is not None and others == renewed
+    assert len(backend.calls) == 3
 
 
 def test_the_reader_exchanges_and_renews_at_half_life(tmp_path: Path) -> None:
