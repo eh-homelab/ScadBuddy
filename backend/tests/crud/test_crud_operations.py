@@ -2,7 +2,7 @@
 `Operation` record a worker writes through `RemoteOperationStore` answers as
 `OperationStore` does, an insert or a finish sent twice answers once (D5), each write's
 event commits with it (D7), the API prunes past its own retention setting, and only the
-write that ended a row counts it (#2295)."""
+write that ended a row counts it (#2295). A caller writes only its own kinds' records."""
 
 from __future__ import annotations
 
@@ -19,9 +19,11 @@ from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.crud.operations import RemoteOperationStore
+from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.crud.operations import OTHER_CALLERS_KIND, RemoteOperationStore
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.operation_activities import operation_activities
@@ -33,11 +35,24 @@ pytestmark = pytest.mark.requires_postgres
 FAILED = PrintRunError(status=502, title="Bad Gateway", detail="Bambuddy said no")
 
 
+async def _never(*args: Any) -> dict[str, Any]:
+    raise AssertionError("a kind's check or run is the worker's, never the route's")
+
+
+#: A kind the projects worker runs, and one the print worker runs.
+FLOW = "flow.test"
+PRINT = "reprint"
+KINDS = {
+    FLOW: OperationKind(FLOW, _never, _never, queue="projects"),
+    PRINT: OperationKind(PRINT, _never, _never, queue="bambuddy"),
+}
+
+
 class _Settings:
     """The API's `SettingsStore`, as far as the insert route reads it."""
 
     def __init__(self) -> None:
-        self.retention: float | None = None
+        self.retention: int | None = None
         self.loads = 0
 
     def load(self) -> SimpleNamespace:
@@ -58,7 +73,7 @@ def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
 @pytest.fixture
 def metrics() -> Metrics:
     metrics = Metrics()
-    metrics.operation_kinds(["reprint"])
+    metrics.operation_kinds([FLOW])
     return metrics
 
 
@@ -81,6 +96,7 @@ async def remote(
     async with served_crud(
         FlowStore(jobs.pool),
         operations=operations,
+        kinds=KINDS,
         settings_store=cast(SettingsStore, settings),
     ) as crud:
         yield RemoteOperationStore(crud, "projects")
@@ -102,16 +118,22 @@ def _rows(jobs: JobProjection) -> list[str]:
 
 
 async def _insert(
-    store: RemoteOperationStore, op_id: str, *, key: str = "k", run: str = "r1"
+    store: RemoteOperationStore | OperationStore,
+    op_id: str,
+    *,
+    key: str = "k",
+    run: str = "r1",
+    kind: str = FLOW,
 ) -> Operation:
     return await store.insert(
         op_id,
-        kind="reprint",
+        kind=kind,
         subject="archive:5",
         operation_key=key,
         request={"archive_id": 5},
-        workflow_id=f"op-reprint-{key}",
+        workflow_id=f"op-{kind}-{key}",
         workflow_run_id=run,
+        retention=None,
     )
 
 
@@ -140,7 +162,7 @@ async def test_the_api_prunes_past_its_own_retention(
     # No retention keeps every finished row.
     await _insert(remote, "kept", key="kept")
     assert _rows(jobs) == ["kept", "old"]
-    settings.retention = timedelta(hours=1).total_seconds()
+    settings.retention = int(timedelta(hours=1).total_seconds())
     await _insert(remote, "new", key="new")
     assert _rows(jobs) == ["kept", "new"]
     assert settings.loads == 3
@@ -155,7 +177,7 @@ async def test_a_finish_sent_twice_ends_and_counts_once(
     assert done.status == again.status == "succeeded"
     assert again.result == {"queue_item_id": 7} and again.error is None
     finished = metrics.registry.get_sample_value(
-        "scadbuddy_operations_finished_total", {"kind": "reprint", "outcome": "succeeded"}
+        "scadbuddy_operations_finished_total", {"kind": FLOW, "outcome": "succeeded"}
     )
     assert finished == 1
     assert _events(jobs) == ["a", "a"]
@@ -178,10 +200,42 @@ async def test_the_workers_activities_load_no_settings(
     """The projects worker's `op_insert` and `op_finish`, with no settings store."""
     insert, finish = operation_activities(remote, None, {})
     env = ActivityEnvironment()
-    request = OperationInput(kind="reprint", subject="archive:5", key="k", request={})
+    request = OperationInput(kind=FLOW, subject="archive:5", key="k", request={})
     op: Any = await env.run(insert, InsertOp(input=request))
     assert isinstance(op, Operation) and op.status == "running"
     ended: Any = await env.run(finish, FinishOp(operation_id=op.id, result={"ok": True}))
     assert ended.status == "succeeded" and _rows(jobs) == [op.id]
     # The route read the retention, in the API.
     assert settings.loads == 1
+
+
+async def test_another_callers_kind_is_refused_at_once(
+    remote: RemoteOperationStore, jobs: JobProjection
+) -> None:
+    """A final refusal, not a retry: the client raises it on the first answer."""
+    with pytest.raises(CrudRefusedError) as refused:
+        await _insert(remote, "a", kind=PRINT)
+    assert refused.value.status == 403
+    assert refused.value.problem["reason"] == OTHER_CALLERS_KIND
+    assert _rows(jobs) == [] and _events(jobs) == []
+
+
+async def test_an_unknown_kind_is_refused_at_once(
+    remote: RemoteOperationStore, jobs: JobProjection
+) -> None:
+    with pytest.raises(CrudRefusedError) as refused:
+        await _insert(remote, "a", kind="no.such.kind")
+    assert refused.value.status == 422
+    assert _rows(jobs) == []
+
+
+async def test_another_callers_row_is_missing_and_unchanged(
+    remote: RemoteOperationStore, operations: OperationStore, jobs: JobProjection
+) -> None:
+    """The same answer as a row that does not exist, and the row stays running."""
+    await _insert(operations, "printed", kind=PRINT)
+    with pytest.raises(LookupError, match="there is no operation printed"):
+        await remote.finish("printed", result={})
+    held = await operations.get("printed")
+    assert held is not None and held.status == "running" and held.finished_at is None
+    assert _events(jobs) == ["printed"]
