@@ -29,6 +29,17 @@ class BlobRefs:
                 (key, holder_kind, holder_id),
             )
 
+    def hold(self, key: str, holder_kind: str, holder_id: str) -> None:
+        """``add``, except that a row the holder already has gets a fresh ``created_at``,
+        so a reaper's grace counts from this hold (#5353: a quote's next attempt takes
+        its holds again). Needs ``UPDATE`` on the table, which ``add`` does not."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
+                (key, holder_kind, holder_id),
+            )
+
     def drop_holder(self, holder_kind: str, holder_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(

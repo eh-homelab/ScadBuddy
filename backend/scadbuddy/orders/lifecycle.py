@@ -1460,10 +1460,18 @@ class Lifecycle:
         it, with the plates it read and the sliced file it read them from, under the id
         its ref was taken with (``quote_id``, Ruling 3). As a manual quote: the order
         open for items, the item not settled, allowed on hold (it advances nothing). It names
-        the revision the run sliced; one since superseded is `revision_not_newest`."""
+        the revision the run sliced; one since superseded is `revision_not_newest`.
+        A ``quote_id`` already recorded (by an earlier attempt of the same operation,
+        #5353) is answered with, under the order's lock, and nothing is written. The
+        quote's holds are taken again in its own transaction, so a row never commits
+        without them, whatever another attempt dropped before it."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            if quote_id is not None:
+                recorded = self.store.quote(quote_id, conn=conn)
+                if recorded is not None and recorded.order_item_id == item_id:
+                    return recorded
             self._not_ended(order)
             self._open_for_items(order, "an item's price")
             item = self._item_of(conn, order, item_id)
@@ -1490,9 +1498,22 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
             )
+            self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
         return quote
+
+    def drop_unrecorded_quote_holds(self, order_id: str, quote_id: str) -> bool:
+        """A failed quote run's holds (Ruling 3), unless its quote was recorded (#5353:
+        another attempt of the same operation may have recorded it). Under the order's
+        lock, which :meth:`record_slice_quote` takes too, so a drop never lands between
+        that record's check and its commit. Whether it dropped them."""
+        with self.store.transaction() as conn:
+            self._lock(conn, order_id)
+            if self.store.quote(quote_id, conn=conn) is not None:
+                return False
+            self.store.drop_holds(conn, QUOTE_HOLDER, quote_id)
+        return True
 
     def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every

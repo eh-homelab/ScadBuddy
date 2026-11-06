@@ -8,10 +8,12 @@ in the Rust worker's place."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import itertools
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +22,15 @@ import pytest
 import respx
 import trimesh
 from fastapi.testclient import TestClient
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.orders import operations as order_operations
 from scadbuddy.orders.lifecycle import QUOTE_HOLDER
+from scadbuddy.orders.models import Quote
+from scadbuddy.orders.quote import quote_run
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
@@ -353,6 +359,126 @@ def test_a_resent_quote_request_joins_the_run(bambuddy: TestClient) -> None:
     assert op["status"] == "succeeded", op
     assert slices.posted.call_count == 1
     assert len(shop.get_item()["quotes"]) == 1
+
+
+def worker_stopped() -> ApplicationError:
+    """What an attempt's worker reports when its pod stops mid-run (a rollout): the SDK
+    cancels the run, and core reports the cancel as a retryable ``WorkerShutdown``
+    failure (`workflows/slicing.py` ``SLICE_RETRY``)."""
+    return ApplicationError("Worker is shutting down", type="WorkerShutdown")
+
+
+def first_attempt_dies(
+    monkeypatch: pytest.MonkeyPatch,
+    dying: Callable[[Callable[..., Awaitable[Quote]], tuple[Any, ...], dict[str, Any]], Any],
+) -> list[str]:
+    """The quote's run, its first attempt replaced by ``dying`` (which gets the real run
+    and its arguments): the pod that held it stopped. The quote ids each attempt ran
+    with."""
+    real = quote_run
+    ids: list[str] = []
+
+    async def run(*args: Any, **kwargs: Any) -> Quote:
+        ids.append(kwargs["quote_id"])
+        if len(ids) == 1:
+            await dying(real, args, kwargs)
+            raise worker_stopped()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(order_operations, "quote_run", run)
+    return ids
+
+
+def test_a_quote_whose_pod_stopped_mid_slice_finishes_on_the_next_attempt(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5353: a rollout stops the API pod, and the ``library`` worker in it, while the
+    quote slices. The operation is left running with no worker; the next attempt runs
+    it to the end, and a re-send with the same key answers with the quote."""
+    shop = Shop(bambuddy)
+    slices = BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+
+    async def mid_slice(
+        real: Callable[..., Awaitable[Quote]], args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
+        slices.running = True
+        task = asyncio.ensure_future(real(*args, **kwargs))
+        while slices.posted.call_count == 0 and not task.done():
+            await asyncio.sleep(0.05)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        slices.running = False
+
+    ids = first_attempt_dies(monkeypatch, mid_slice)
+    started = shop.post("quote-rollout")
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120)
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert len(ids) == 2 and ids[0] == ids[1] == quote["id"]
+    # The next attempt follows the background slice the first one started
+    # (`bambuddy/preview.py` reuses a recorded job of the same copy and presets).
+    assert slices.posted.call_count == 1
+    assert [q["id"] for q in shop.get_item()["quotes"]] == [quote["id"]]
+    assert shop.holders() == {quote["id"]: quote["sliced_blob_key"]}
+
+    again = shop.post("quote-rollout")
+    assert again.status_code == 200, again.text
+    assert again.json() == quote
+
+
+def test_a_quote_whose_pod_stopped_after_recording_answers_with_that_quote(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5353: the pod stops after the quote's row committed, before its attempt
+    reported. The next attempt finds the quote by the operation's id and answers with
+    it: nothing is sliced or recorded twice, and its sliced file stays held."""
+    shop = Shop(bambuddy)
+    slices = BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    recorded: list[Quote] = []
+
+    async def after_recording(
+        real: Callable[..., Awaitable[Quote]], args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
+        recorded.append(await real(*args, **kwargs))
+
+    ids = first_attempt_dies(monkeypatch, after_recording)
+    started = shop.post("quote-rollout")
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120)
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert len(ids) == 2 and [r.id for r in recorded] == [quote["id"]]
+    assert slices.posted.call_count == 1
+    assert [q["id"] for q in shop.get_item()["quotes"]] == [quote["id"]]
+    assert shop.holders() == {quote["id"]: quote["sliced_blob_key"]}
+
+    again = shop.post("quote-rollout")
+    assert again.status_code == 200, again.text
+    assert again.json() == quote
+
+
+def test_a_bug_in_the_quotes_run_is_not_tried_again(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5353 review: a failure that another attempt would only repeat (here a
+    ``TypeError``) fails the operation on its first attempt, as the unexpected failure,
+    instead of rendering and slicing three times."""
+    shop = Shop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    calls: list[str] = []
+
+    async def buggy(*args: Any, **kwargs: Any) -> Quote:
+        calls.append(kwargs["quote_id"])
+        raise TypeError("a bug")
+
+    monkeypatch.setattr(order_operations, "quote_run", buggy)
+    op = shop.quote()
+    assert op["status"] == "failed", op
+    assert op["error"]["status"] == 500
+    assert len(calls) == 1
+    assert shop.get_item()["quotes"] == []
 
 
 def test_a_quote_renders_when_the_item_has_no_output(bambuddy: TestClient) -> None:
