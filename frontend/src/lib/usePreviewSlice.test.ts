@@ -177,6 +177,53 @@ describe('usePreviewSlice: Reslice (#4433)', () => {
     expect(result.current.error).toBeNull()
   })
 
+  it('keeps the shown slice stale after a failed native Reslice of the same job, until a slice completes', async () => {
+    // #4433 review: the fresh start answers the same job_id the shown slice has, and that
+    // job then fails. The old figures stay, marked stale, with the error under them.
+    const start = vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    vi.spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce(completed('native'))
+      .mockResolvedValueOnce({ ...running(null, 'native'), status: 'failed', failure: 'The slicer failed: x' })
+      .mockResolvedValueOnce({ ...completed('native'), print_time_seconds: 90 })
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    expect(result.current.stale).toBe(false)
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(start).toHaveBeenLastCalledWith('out-1', request, true)
+    expect(result.current.error).toBe('The slicer failed: x')
+    expect(result.current.reslicing).toBe(false)
+    expect(result.current.slicing).toBe(false)
+    expect(result.current.result?.print_time_seconds).toBe(60)
+    expect(result.current.result?.job_id).toBe(5)
+    expect(result.current.stale).toBe(true)
+    expect(result.current.canReslice).toBe(true)
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(result.current.stale).toBe(false)
+    expect(result.current.error).toBeNull()
+    expect(result.current.result?.print_time_seconds).toBe(90)
+  })
+
+  it('keeps the shown slice stale after a Reslice whose start failed', async () => {
+    vi.spyOn(api, 'previewSlice')
+      .mockResolvedValueOnce(started('native'))
+      .mockRejectedValueOnce(new ApiError(502, 'no slicer'))
+    vi.spyOn(api, 'getPreviewSlice').mockResolvedValue(completed('native'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(result.current.error).toBe('no slicer')
+    expect(result.current.stale).toBe(true)
+  })
+
   it('cannot reslice before the choices have settled', () => {
     vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
     const { result } = renderHook(() => usePreviewSlice(source, request))

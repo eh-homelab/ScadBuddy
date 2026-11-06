@@ -50,6 +50,11 @@ interface Shown {
   plan: NozzlePlan | null
   /** The slicer its start answered with, which every read of it names. */
   slicer: Slicer
+  /**
+   * #4433 review — a Reslice of it failed. It stays on screen, marked stale, until a later
+   * slice completes: the person asked for new figures and has none.
+   */
+  superseded?: boolean
 }
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
@@ -83,6 +88,9 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     const token = ++attempt.current
     let timer: ReturnType<typeof setTimeout> | undefined
     const live = () => token === attempt.current
+    const supersede = () => {
+      if (fresh) setShown((old) => (old ? { ...old, superseded: true } : old))
+    }
     setSlicing(true)
     setReslicing(fresh)
     setProgress(null)
@@ -99,13 +107,17 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
       setReslicing(false)
       setProgress(null)
       if (read.status === 'completed') setShown({ source: own, request: key, result: read, plan, slicer })
-      else setError(read.failure ?? 'The slice failed.')
+      else {
+        supersede()
+        setError(read.failure ?? 'The slice failed.')
+      }
     }
     const fail = (cause: unknown) => {
       if (!live()) return
       setSlicing(false)
       setReslicing(false)
       setProgress(null)
+      supersede()
       setError(cause instanceof ApiError ? cause.detail : 'The background slice could not run.')
     }
     sourceApi(current)
@@ -127,8 +139,9 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     result: mine?.result ?? null,
     plateId: mine ? ((JSON.parse(mine.request) as PrintRunRequest).plate_id ?? 1) : null,
     plan: mine?.plan ?? null,
-    // A Reslice marks the shown slice stale until the new one lands (#4433).
-    stale: mine !== null && (mine.request !== wanted || (reslicing && slicing)),
+    // A Reslice marks the shown slice stale until the new one lands, and a failed one
+    // until a later slice completes (#4433).
+    stale: mine !== null && (mine.request !== wanted || (reslicing && slicing) || mine.superseded === true),
     slicing: slicing && wanted !== null,
     // Only the slice of the choices on screen: while new ones wait out the debounce, the
     // old slice's percentage would say how far the wrong slice got (review M5).
