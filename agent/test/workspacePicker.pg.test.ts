@@ -169,10 +169,30 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     await db.sql`
       UPDATE ai_session_files SET data = NULL, blob_key = ${`workspace-${'a'.repeat(64)}`}, key_sealed = ${Buffer.from([0])}
       WHERE session_id = ${s.id}`
+    // A file of another kind that can be read does not keep the session from being greyed.
+    await put(s.id, 'notes.txt', 'readable')
     const { body } = await pick('?accept=image/png')
     const [listed] = body.sessions
-    expect(listed!.unavailable).toMatch(/cannot be read now: .*no blob store/)
+    expect(listed!.unavailable).toMatch(/files of this kind cannot be read now: .*no blob store/)
     expect(listed!.files[0]!.unavailable).toMatch(/no blob store/)
+    expect(listed!.other_files).toBe(1)
+    // For a target that takes the readable file, the session is not greyed.
+    expect((await pick('?accept=text/plain')).body.sessions[0]!.unavailable).toBeNull()
+  })
+
+  it('finds an older session that holds the only file the target takes, past the newest `limit` ones', async () => {
+    const old = (await m.start(browser, { origin: 'chat', title: 'mesh work' })).session
+    await put(old.id, 'out/bracket.STL', 'solid', 'model/stl')
+    for (const n of [1, 2, 3]) {
+      const s = (await m.start(browser, { origin: 'chat', title: `pictures ${n}` })).session
+      await put(s.id, `bracket-${n}.png`, `n${n}`, 'image/png')
+    }
+    const found = await pick('?accept=.3mf,.stl&limit=2')
+    expect(found.body.sessions.map((s) => [s.id, s.files.map((f) => f.path)])).toEqual([[old.id, ['out/bracket.STL']]])
+    // A path match on a file the target does not take uses no place either.
+    expect((await pick('?accept=.3mf,.stl&limit=1&q=bracket')).body.sessions.map((s) => s.id)).toEqual([old.id])
+    // By media type and type wildcard too.
+    expect((await pick('?accept=model/*&limit=1')).body.sessions.map((s) => s.id)).toEqual([old.id])
   })
 
   it('refuses a bad query', async () => {

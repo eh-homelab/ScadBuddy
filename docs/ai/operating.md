@@ -1797,7 +1797,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `GET /api/v1/ai/workspace-files[?resource_type=&resource_id=&q=&accept=&limit=]` lists
   the sessions that touched the resource (archived ones left out), or with no resource
   every session the browser user may see, archived ones too, with the files the target's
-  `accept` takes, searched by title and file name. It reads as the session routes do
+  `accept` takes, searched by title and file name. `accept` and the search are matched in
+  the session list's own query, before its limit, so an older session that holds the
+  only file the target takes is found. It reads as the session routes do
   (`uiReadProblem`, `SessionManager.list` as the browser user). A file whose bytes are a
   sealed blob this agent cannot open is listed with `unavailable` and the reason. The
   pick is the download above with `expected_sha256`; the browser then sends the bytes

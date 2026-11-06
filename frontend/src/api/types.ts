@@ -745,7 +745,7 @@ export interface PickerSession {
   status: SessionStatus
   archived: boolean
   updated_at: string
-  /** Why none of its files can be read now; null when they can, or it has none. */
+  /** Why none of its files the target takes can be read now; null when they can, or it has none. */
   unavailable: string | null
   /** Its files the target does not take. */
   other_files: number

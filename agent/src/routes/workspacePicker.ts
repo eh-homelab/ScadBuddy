@@ -21,9 +21,10 @@ import { LIST_LIMIT_MAX } from './sessions.js'
 // each listed even when it holds no file the target takes. Without them ("Advanced"):
 // every session the browser user may see, archived ones too, but only those that
 // hold a file the target takes (or whose title matches `q`). Newest first, at most
-// `limit` sessions (100; at most 500). `q` is matched in the session list's own query
-// (SessionManager.list `search`: titles, and the paths in ai_session_files) before the
-// limit, so an older session that matches is found.
+// `limit` sessions (100; at most 500). `accept` and `q` are matched in the session
+// list's own query (SessionManager.list `accept`, `withFile` and `search`: titles, and
+// the paths and media types in ai_session_files) before the limit, so an older session
+// that holds the only file the target takes, or that matches `q`, is found.
 //
 // `accept` is the target's own file input `accept` (a comma list of `.ext`,
 // `type/subtype` and `type/*`); only files it takes are listed, and `other_files`
@@ -49,7 +50,7 @@ export type PickerSession = {
   status: SessionRecord['status']
   archived: boolean
   updated_at: string
-  /** Why none of its files can be read now, when it has files and none can. */
+  /** Why none of its files the target takes can be read now, when it has such files and none can. */
   unavailable: string | null
   /** Its files the target does not take. */
   other_files: number
@@ -133,6 +134,9 @@ export function registerWorkspacePickerRoutes(app: Hono, deps: WorkspacePickerDe
     const listed = await deps.sessions.list(browserUser(c), {
       ...(resource ? { resource } : { archived: 'include' as const }),
       ...(q ? { search: q } : {}),
+      ...(accept?.length ? { accept } : {}),
+      // Advanced lists only sessions with a file the target takes (or a title `q` matches, which `search` keeps).
+      ...(!resource && !q ? { withFile: true } : {}),
       limit,
     })
     const byId = await deps.workspace.listSessions(listed.map((s) => s.id))
@@ -157,7 +161,9 @@ export function registerWorkspacePickerRoutes(app: Hono, deps: WorkspacePickerDe
         status: s.status,
         archived: s.archivedAt !== null,
         updated_at: s.updatedAt,
-        unavailable: all.length > 0 && unreadable && all.every((f) => f.sealed) ? `its workspace files cannot be read now: ${unreadable}` : null,
+        // Greyed when no file the target takes can be read now; its other files do not count.
+        unavailable:
+          taken.length > 0 && unreadable && taken.every((f) => f.sealed) ? `its workspace files of this kind cannot be read now: ${unreadable}` : null,
         other_files: all.length - taken.length,
         files,
       })

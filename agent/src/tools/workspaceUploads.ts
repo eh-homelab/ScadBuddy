@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import { decodeText, type WorkspaceFileInfo, WorkspaceError, workspaceOf, workspacePath } from '../workspace/store.js'
+import { SECRET_MIN_CHARS } from '../secrets.js'
 import { ToolError, type ToolContext } from './registry.js'
 
 // Uploads from the assistant's workspace (#2329 part 2): every tool that sends a
@@ -104,9 +105,9 @@ async function secretBytes(ctx: ToolContext): Promise<Buffer[]> {
   return asSecretBytes((await ctx.secrets?.()) ?? [])
 }
 
-/** `secrets` as the bytes a search looks for; shorter than four characters is not a secret. */
+/** `secrets` as the bytes a search looks for; shorter than SECRET_MIN_CHARS is not a secret. */
 export function asSecretBytes(secrets: readonly string[]): Buffer[] {
-  return [...new Set(secrets)].filter((s) => s.length >= 4).map((s) => Buffer.from(s, 'utf8'))
+  return [...new Set(secrets)].filter((s) => s.length >= SECRET_MIN_CHARS).map((s) => Buffer.from(s, 'utf8'))
 }
 
 export function holdsSecret(bytes: Uint8Array, secrets: readonly Buffer[]): boolean {
