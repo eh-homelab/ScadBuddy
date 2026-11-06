@@ -457,6 +457,14 @@ def test_a_details_write_swaps_flow_json_in_whole(
     assert sorted(p.name for p in (history.root / "swap").iterdir()) == ["flow.json", "flow.py"]
 
 
+def test_a_details_write_leaves_flow_json_readable_by_others(history: FlowHistory) -> None:
+    """The swapped-in ``flow.json`` is 0644, as a plain write left it, not mkstemp's
+    0600 (#5372)."""
+    register(history, "swap", ONE)
+    history.set_details("swap", display_name="Name")
+    assert (history.root / "swap" / "flow.json").stat().st_mode & 0o777 == 0o644
+
+
 def test_a_failed_details_swap_leaves_flow_json_and_no_temp_file(
     history: FlowHistory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
