@@ -1,5 +1,5 @@
 import { TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { hostTabs, type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
 import type { TabOwnerStore } from '../src/bridge/tabOwners.js'
 
@@ -119,11 +119,15 @@ describe('TemporalTabRelay', () => {
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
     relay.serve(owner(['tab-0']))
     // The host worker already polls, as main.ts finds it once the worker runs.
-    hostTabs(relay, { sealing: refusingClient().sealing, worker: { state: () => 'ok' } })
+    const stop = hostTabs(relay, { sealing: refusingClient().sealing, worker: { state: () => 'ok' } })
+    // Cleaned up even when an assertion fails, so no poll outlives the test (#5439).
+    onTestFinished(() => {
+      stop()
+      relay.close()
+    })
     relay.attached('tab-1')
     await settle()
     expect(owners.rows).toEqual(new Map([['tab-0', 'agent-tools.a'], ['tab-1', 'agent-tools.a']]))
-    relay.close()
   })
 
   it('hostTabs waits for the host worker to poll, and without a sealing client claims nothing and logs once (#5421)', async () => {
@@ -133,6 +137,10 @@ describe('TemporalTabRelay', () => {
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: (m) => logged.push(m) })
     relay.serve(owner(['tab-0']))
     const stop = hostTabs(relay, { sealing: undefined, worker: { state: () => state }, pollMs: 5 })
+    onTestFinished(() => {
+      stop()
+      relay.close()
+    })
     await settle()
     expect(logged).toEqual([])
     state = 'ok'
@@ -141,8 +149,6 @@ describe('TemporalTabRelay', () => {
     expect(logged).toHaveLength(1)
     expect(logged[0]).toMatch(/no sealing client .* no tab is claimed here/)
     expect(owners.rows.size).toBe(0)
-    stop()
-    relay.close()
   })
 
   it('hostTabs with a client and a worker still connecting claims nothing until the worker is ok (#4806, #5432)', async () => {
@@ -151,13 +157,15 @@ describe('TemporalTabRelay', () => {
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
     relay.serve(owner(['tab-0']))
     const stop = hostTabs(relay, { sealing: refusingClient().sealing, worker: { state: () => state }, pollMs: 5 })
+    onTestFinished(() => {
+      stop()
+      relay.close()
+    })
     // Several polls while the worker connects: none claims.
     await new Promise((r) => setTimeout(r, 30))
     expect(owners.rows.size).toBe(0)
     state = 'ok'
     await vi.waitFor(() => expect(owners.rows).toEqual(new Map([['tab-0', 'agent-tools.a']])))
-    stop()
-    relay.close()
   })
 
   it('answers no_answer, and logs, when Temporal refuses the start: the tool never throws', async () => {
