@@ -31,6 +31,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE, BambuddyClient, client_for
+from scadbuddy.bambuddy.errors import is_transient
 from scadbuddy.bambuddy.models import Folder, FolderCreate, LibraryFile, LibraryListRow
 from scadbuddy.bambuddy.send import Sink, upload_raw
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -409,14 +410,14 @@ async def copy_batch(
 ) -> LibraryCopyBatch:
     """Up to ``input.limit`` of the job's pending files, each recorded as it ends. One
     file's failure (gone from the source, refused by the target, the store full) is its
-    row's ``reason`` and never stops the others. A 5xx raises, and the activity is
-    retried, since it is as likely the library as the file; on the `FILE_ATTEMPTS`th
-    ``attempt`` it is the file's own failure, recorded as its reason, and the batch
-    ends there, so one file a library always 500s on (a 3MF its upload refuses, bytes
-    gone from its disk) cannot hold the job on that file forever, while the rows after
-    it wait for the next batch, which starts at attempt 1 again: a library still down
-    is retried, never written off twenty files at a time. ``attempt`` is the
-    activity's, so it counts the batch's tries, and only that first row can spend it."""
+    row's ``reason`` and never stops the others. A library that does not answer
+    (`is_transient`) always raises, and the activity is retried until it does. A 5xx
+    the library answered for the file raises too, since it may still be the library;
+    on the `FILE_ATTEMPTS`th ``attempt`` it is the file's own failure, recorded as its
+    reason, and the batch ends there, so one file a library always 500s on (a 3MF its
+    upload refuses, bytes gone from its disk) cannot hold the job on that file forever,
+    while the rows after it wait for the next batch, which starts at attempt 1 again.
+    ``attempt`` is the activity's, so only that first row can spend it."""
     request = input.request
     rows = await asyncio.to_thread(store.pending, input.copy_id, limit=input.limit)
     target: _NativeTarget | _BambuddyTarget = (
@@ -437,8 +438,10 @@ async def copy_batch(
             # A 404 here is the target's (the source's own are answered above): a
             # folder deleted since the plan, say. The row says which.
             if error.status >= 500 and error.status != status.HTTP_507_INSUFFICIENT_STORAGE:
-                if attempt < FILE_ATTEMPTS:
-                    raise  # the library is down, not this file: the batch is retried
+                # A library not answering at all (a restart, a gateway's 502/503/504) is
+                # never this file's failure: the batch is retried until it answers.
+                if is_transient(error) or attempt < FILE_ATTEMPTS:
+                    raise
                 ended_early = True  # this file spent the batch's tries; the rest wait
             outcome = ("failed", None, None, _reason(error))
         except (StoreFullError, ValueError, OSError) as error:

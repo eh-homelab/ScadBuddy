@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
@@ -180,7 +181,12 @@ async def test_a_file_the_library_always_500s_on_fails_alone_once_the_retries_ra
 
     def failing(self: BambuddyClient, file_id: int) -> Any:
         if file_id == bad.id:
-            raise ApiError(502, "Bambuddy answered 500 for the download")
+            raise ApiError(
+                502,
+                "Bambuddy answered 500 for the download",
+                type_=UNAVAILABLE_PROBLEM,
+                bambuddy_status=500,
+            )
         return download(self, file_id)
 
     monkeypatch.setattr(BambuddyClient, "download_library_file", failing)
@@ -215,34 +221,35 @@ async def test_a_file_the_library_always_500s_on_fails_alone_once_the_retries_ra
     assert bad_reason is not None and "500" in bad_reason
 
 
-async def test_the_last_attempt_fails_only_the_first_file_so_a_library_still_down_is_retried(
+async def test_a_library_that_does_not_answer_is_retried_and_no_file_is_written_off(
     pool: Pool, native: NativeLibrary, bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The attempt is the batch's: on its last one, the first file that 5xxs is failed
-    and the batch ends, so the rows after it get a fresh batch, at attempt 1 again."""
+    """A Bambuddy that cannot be reached (a restart, a gateway's 503) is never a file's
+    failure, on any attempt: batch after batch raises, and every row stays pending."""
     one = await bambuddy.upload_library_file("one.3mf", b"one")
     two = await bambuddy.upload_library_file("two.3mf", b"two")
 
     def down(self: BambuddyClient, file_id: int) -> Any:
-        raise ApiError(503, "could not connect to Bambuddy")
+        raise ApiError(502, "could not reach Bambuddy: ConnectError", type_=UNAVAILABLE_PROBLEM)
 
     monkeypatch.setattr(BambuddyClient, "download_library_file", down)
     request = LibraryCopyRequest(direction="bb_to_sb", file_ids=[one.id, two.id])
     store = LibraryCopyStore(pool)
     store.start("library-copy-test", request)
     store.plan("library-copy-test", await plan_copy(request, bambuddy, native))
-    batch = await copy_batch(
-        store,
-        LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
-        client=bambuddy,
-        native=native,
-        uploads=_uploads(),
-        heartbeat=lambda _: None,
-        attempt=FILE_ATTEMPTS,
-    )
-    assert (batch.copied, batch.failed, batch.remaining) == (0, 1, 1)
-    results = {f.source_id: f.status for f in store.files("library-copy-test")}
-    assert results == {one.id: "failed", two.id: "pending"}
+    for attempt in (1, FILE_ATTEMPTS, FILE_ATTEMPTS + 1, 1, FILE_ATTEMPTS):
+        with pytest.raises(ApiError) as raised:
+            await copy_batch(
+                store,
+                LibraryCopyBatchInput(copy_id="library-copy-test", request=request, limit=10),
+                client=bambuddy,
+                native=native,
+                uploads=_uploads(),
+                heartbeat=lambda _: None,
+                attempt=attempt,
+            )
+        assert raised.value.status == 502
+    assert {f.status for f in store.files("library-copy-test")} == {"pending"}
 
 
 async def test_a_full_store_is_a_failed_row_with_the_507(
