@@ -4,16 +4,18 @@ one commit per version, numbered by its position among its flow's commits."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from scadbuddy.core.authorship import AGENT_AUTHOR_NAME, AgentAuthor, authored_as
 from scadbuddy.core.gitrepo import LOCK_NAME, GitError, RevisionNotFoundError, git_env
+from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.flows.repository import (
     DETAILS_TRAILER,
     DetailsNotSavedError,
@@ -425,3 +427,115 @@ def test_a_damaged_flow_json_reads_as_no_details(history: FlowHistory) -> None:
     register(history, "swap", ONE)
     (history.root / "swap" / "flow.json").write_text("not json")
     assert history.details("swap").display_name is None
+
+
+def test_a_details_write_swaps_flow_json_in_whole(
+    history: FlowHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read without the write lock sees the old ``flow.json`` or the new one, never a
+    part of one (#5357): the new file is written in full under ``.git/``, then renamed
+    into place."""
+    register(history, "swap", ONE)
+    history.set_details("swap", display_name="Old name")
+    path = history.root / "swap" / "flow.json"
+    seen: list[tuple[Path, str, str]] = []
+    real = os.replace
+
+    def replace(source: str, target: Path) -> None:
+        staged = Path(source)
+        seen.append((staged.parent, staged.read_text(), path.read_text()))
+        real(source, target)
+
+    monkeypatch.setattr("scadbuddy.flows.repository.os.replace", replace)
+    history.set_details("swap", display_name="New name")
+    assert len(seen) == 1
+    where, staged, visible = seen[0]
+    assert where == history.root / ".git"
+    assert json.loads(staged) == {"display_name": "New name"}
+    assert json.loads(visible) == {"display_name": "Old name"}
+    assert history.details("swap").display_name == "New name"
+    assert sorted(p.name for p in (history.root / "swap").iterdir()) == ["flow.json", "flow.py"]
+
+
+def test_a_failed_details_swap_leaves_flow_json_and_no_temp_file(
+    history: FlowHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register(history, "swap", ONE)
+    history.set_details("swap", display_name="Old name")
+    before = set((history.root / ".git").iterdir())
+
+    def replace(source: str, target: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("scadbuddy.flows.repository.os.replace", replace)
+    with pytest.raises(OSError):
+        history.set_details("swap", display_name="New name")
+    assert history.details("swap").display_name == "Old name"
+    assert set((history.root / ".git").iterdir()) == before
+
+
+def test_a_restore_never_checks_out_or_rewrites_flow_json(
+    history: FlowHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restore of a flow in the tree checks out only its script and inputs (#5357):
+    ``flow.json`` is the same file, untouched, with the details it had."""
+    register(history, "swap", ONE)
+    history.set_details("swap", display_name="Old name")
+    # A version whose tree has a flow.json with other details.
+    _, first, _ = register(history, "swap", ONE)
+    register(history, "swap", TWO)
+    history.set_details("swap", display_name="New name")
+    path = history.root / "swap" / "flow.json"
+    stat = path.stat()
+    checkouts: list[tuple[str, ...]] = []
+    real = history._run
+
+    def run(*args: str, **kwargs: Any) -> Any:
+        if args and args[0] == "checkout":
+            checkouts.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(history, "_run", run)
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    assert checkouts == [("checkout", first, "--", "swap/flow.py")]
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (stat.st_ino, stat.st_mtime_ns)
+    assert history.details("swap").display_name == "New name"
+    assert history.script_at("swap", restored) == ONE
+
+
+def _definitions(history: FlowHistory) -> FlowDefinitions:
+    # The display names read git only: no store or states.
+    return FlowDefinitions(history, cast(Any, None), cast(Any, None))
+
+
+def test_display_names_are_read_at_head_and_cached_until_it_moves(
+    history: FlowHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register(history, "swap", ONE)
+    register(history, "gone", ONE)
+    history.set_details("swap", display_name="Nightly swap")
+    history.set_details("gone", display_name="Gone flow")
+    history.delete("gone", lambda _c: None)
+    definitions = _definitions(history)
+    reads: list[str] = []
+    real = history.details_at
+
+    def details_at(name: str, commit: str) -> Any:
+        reads.append(name)
+        return real(name, commit)
+
+    monkeypatch.setattr(history, "details_at", details_at)
+    names = {"swap", "gone", "never"}
+    want = {"swap": "Nightly swap", "gone": "Gone flow", "never": None}
+    assert definitions._display_names(names) == want
+    assert sorted(reads) == ["gone", "never", "swap"]
+    reads.clear()
+    assert definitions._display_names(names) == want
+    assert reads == []
+    # A details write not yet committed is never read, so never cached.
+    (history.root / "swap" / "flow.json").write_text('{"display_name": "Uncommitted"}\n')
+    assert definitions._display_names({"swap"}) == {"swap": "Nightly swap"}
+    history.set_details("swap", display_name="Renamed")
+    assert definitions._display_names({"swap"}) == {"swap": "Renamed"}
+    assert reads == ["swap"]

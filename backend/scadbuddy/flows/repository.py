@@ -31,7 +31,9 @@ registrations of one name, in one process or two, never interleave.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -138,11 +140,28 @@ class DetailsNotSavedError(GitError):
 
 
 @dataclass(frozen=True)
-class FlowDetails:
+class StoredDetails:
     """A flow's display name and description (#3186), from ``<name>/flow.json``."""
 
     display_name: str | None = None
     description: str | None = None
+
+
+def _parse_details(raw: bytes) -> StoredDetails:
+    """``flow.json``'s bytes as details; none for a file that is not an object of
+    strings."""
+    try:
+        found = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return StoredDetails()
+    if not isinstance(found, dict):
+        return StoredDetails()
+
+    def field(key: str) -> str | None:
+        value = found.get(key)
+        return value if isinstance(value, str) and value.strip() else None
+
+    return StoredDetails(display_name=field("display_name"), description=field("description"))
 
 
 @dataclass(frozen=True)
@@ -281,18 +300,16 @@ class FlowHistory(GitRepo):
         present = set(self._files_at(target, name))
         if not present:
             raise RevisionNotFoundError(f"{name!r} does not exist at {target}")
-        was_present = self.present(name)
-        details = self.root / details_path(name)
-        kept = details.read_bytes() if details.is_file() else None
-        self._run("checkout", target, "--", name)
+        # A flow in the tree keeps its details: they are never checked out or removed.
+        if self.present(name):
+            present.discard(details_path(name))
+            keep = {details_path(name)}
+        else:
+            keep = set()
+        self._run("checkout", target, "--", *sorted(present))
         for tracked in self._tracked(name):
-            if tracked not in present:
+            if tracked not in present and tracked not in keep:
                 (self.root / tracked).unlink(missing_ok=True)
-        if was_present:
-            if kept is None:
-                details.unlink(missing_ok=True)
-            else:
-                details.write_bytes(kept)
         return self._commit_locked(message, name, trailers=trailers, allow_empty=True, body=body)
 
     def set_details(
@@ -327,7 +344,7 @@ class FlowHistory(GitRepo):
         if display_name is None and description is None:
             return None
         was = self.details(name)
-        now = FlowDetails(
+        now = StoredDetails(
             display_name=was.display_name if display_name is None else _display_name(display_name),
             description=was.description if description is None else _description(description),
         )
@@ -335,12 +352,12 @@ class FlowHistory(GitRepo):
             return None
         path = self.root / details_path(name)
         before = path.read_bytes() if path.is_file() else None
-        if now == FlowDetails():
+        if now == StoredDetails():
             path.unlink(missing_ok=True)
         else:
             fields = {"display_name": now.display_name, "description": now.description}
             kept = {key: value for key, value in fields.items() if value is not None}
-            path.write_text(json.dumps(kept, indent=2, ensure_ascii=False) + "\n", "utf-8")
+            self._write_atomic(path, (json.dumps(kept, indent=2, ensure_ascii=False) + "\n"))
         if now.display_name != was.display_name:
             default = (
                 f"Rename {name} to {now.display_name}"
@@ -364,6 +381,20 @@ class FlowHistory(GitRepo):
                 path.unlink(missing_ok=True)
             else:
                 path.write_bytes(before)
+            raise
+
+    def _write_atomic(self, path: Path, text: str) -> None:
+        """Swap ``text`` in at ``path``, so a read without the write lock sees the old
+        file or the new one, never a part of one. The temp file is in ``.git/``, on the
+        same filesystem, where no ``git add`` of a flow's directory can pick up one a
+        crash left behind."""
+        handle, staged = tempfile.mkstemp(dir=self.root / ".git", prefix="flow-json-")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as writer:
+                writer.write(text)
+            os.replace(staged, path)
+        except BaseException:
+            Path(staged).unlink(missing_ok=True)
             raise
 
     def delete(
@@ -452,7 +483,7 @@ class FlowHistory(GitRepo):
         """Whether ``<name>/`` is in the tree: not deleted, as git has it."""
         return bool(self._tracked(name))
 
-    def details(self, name: str) -> FlowDetails:
+    def details(self, name: str) -> StoredDetails:
         """The flow's display name and description (#3186), from ``<name>/flow.json`` in
         the tree, or for a deleted flow as the file was when it was deleted; none for a
         flow without one, or one whose file is not an object of strings (named by its
@@ -462,17 +493,22 @@ class FlowHistory(GitRepo):
                 raw = (self.root / details_path(name)).read_bytes()
             else:
                 raw = self._details_when_deleted(name)
-            found = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError, GitError, RevisionNotFoundError):
-            return FlowDetails()
-        if not isinstance(found, dict):
-            return FlowDetails()
+        except (OSError, GitError, RevisionNotFoundError):
+            return StoredDetails()
+        return _parse_details(raw)
 
-        def field(key: str) -> str | None:
-            value = found.get(key)
-            return value if isinstance(value, str) and value.strip() else None
-
-        return FlowDetails(display_name=field("display_name"), description=field("description"))
+    def details_at(self, name: str, commit: str) -> StoredDetails:
+        """:meth:`details` as committed at ``commit``, which must be HEAD for a deleted
+        flow: never the working tree, which a details write changes before its
+        commit."""
+        try:
+            if self._files_at(commit, name):
+                raw = self.show(commit, details_path(name))
+            else:
+                raw = self._details_when_deleted(name)
+        except (GitError, RevisionNotFoundError):
+            return StoredDetails()
+        return _parse_details(raw)
 
     def _details_when_deleted(self, name: str) -> bytes:
         """``flow.json`` at the parent of the commit that deleted ``<name>/``;
