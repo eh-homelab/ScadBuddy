@@ -11,6 +11,7 @@ import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { printersState } from '../mocks/features/printers'
 import { HOT_PRINTER, NO_BAMBUDDY, UNLINKED_RECORD, hotFilaments, setHotPath } from '../mocks/features/hotPath'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
+import { startedFresh } from '../mocks/features/printPreview'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState, setMockSettings } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
@@ -1935,6 +1936,41 @@ describe('PrintPicker · grams from the background slice (#2365)', () => {
     )
     expect(screen.queryByText(/3\.3 g for 1 copy/)).toBeNull()
     plateTwoSlice.release()
+  }, 20000)
+})
+
+describe('PrintPicker · Reslice (#4433)', () => {
+  it('slices the choices again with fresh through the real hook, busy until the new slice lands', async () => {
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const starts = watch('POST', '/preview-slice')
+    server.use(
+      // The fresh slice is held, so the button is seen busy while it runs.
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', async ({ params }) => {
+        if (startedFresh(Number(params['job']))) await gate
+        return undefined // on to the feature mock
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    // The first slice of the settled choices has landed.
+    await screen.findByTestId('slice-time', {}, { timeout: 8000 })
+    const button = screen.getByRole('button', { name: 'Reslice' })
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(starts.urls).toHaveLength(1)
+    expect(new URL(starts.urls[0] ?? '').searchParams.get('fresh')).toBeNull()
+
+    try {
+      await user.click(button)
+      await waitFor(() => expect(starts.urls).toHaveLength(2))
+      expect(new URL(starts.urls[1] ?? '').searchParams.get('fresh')).toBe('true')
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Reslice' })).toBeDisabled())
+      expect(screen.getByRole('button', { name: 'Reslice' })).toHaveAttribute('aria-busy', 'true')
+    } finally {
+      release()
+    }
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reslice' })).toBeEnabled(), { timeout: 8000 })
+    expect(screen.getByRole('button', { name: 'Reslice' })).toHaveAttribute('aria-busy', 'false')
   }, 20000)
 })
 
@@ -4887,6 +4923,8 @@ describe('PrintPicker · a sliced library file (#2671)', () => {
     expect(await screen.findByTestId('slice-time')).toHaveTextContent('45')
     expect(screen.getByTestId('run-print')).toBeEnabled()
     expect(previews.urls).toEqual([])
+    // #4433: a sliced file is never sliced again, so the pane offers no Reslice.
+    expect(screen.queryByRole('button', { name: 'Reslice' })).toBeNull()
   })
 
   it('never sends a remembered print sequence it does not show (#4970)', async () => {

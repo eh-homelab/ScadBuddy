@@ -1,10 +1,12 @@
 import { useCallback, useMemo, useState } from 'react'
+import { RefreshCwIcon } from 'lucide-react'
 import type { NozzlePlan, SlicePreview, SlotChoice, SlotNeed, SpoolOption } from '../../api/types'
 import { formatDuration, normalizeHex } from '../../lib/format'
 import { spoolLabel } from '../../lib/filaments'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { PlateScene } from './PlateScene'
 import { Swatch } from './Swatch'
@@ -154,6 +156,41 @@ type Props = {
   /** The native slicer's percent while it slices (plan 2026-10-16 Task 14). */
   progress?: number | null
   sliceError: string | null
+  /**
+   * #4433 — slice the choices on screen again, with no finished slice reused. No button
+   * without it (a file sliced already has nothing to slice).
+   */
+  onReslice?: (() => void) | null
+  /** Whether a Reslice can start now: the choices have settled and nothing slices. */
+  canReslice?: boolean
+  /** A slice that Reslice started is under way. */
+  reslicing?: boolean
+}
+
+/** #4433 — the Reslice button: a refresh icon, a spinner while its slice runs. */
+function ResliceButton({ onReslice, disabled, busy }: { onReslice: () => void; disabled: boolean; busy: boolean }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* A disabled button gets no pointer events, so the tooltip hangs on a span. */}
+        <span className="inline-flex">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Reslice"
+            aria-busy={busy}
+            disabled={disabled}
+            onClick={onReslice}
+            data-testid="reslice"
+          >
+            {busy ? <Spinner /> : <RefreshCwIcon aria-hidden="true" />}
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>Slice again with these choices. Nothing is queued.</TooltipContent>
+    </Tooltip>
+  )
 }
 
 /**
@@ -179,6 +216,9 @@ export function PreviewPane({
   slicing,
   progress = null,
   sliceError,
+  onReslice = null,
+  canReslice = false,
+  reslicing = false,
 }: Props) {
   /** Colours tried in the pane, by slot id: the preview only, never sent. */
   const [tried, setTried] = useState<Record<number, string>>({})
@@ -276,10 +316,13 @@ export function PreviewPane({
       <Card size="sm" className="gap-0 text-[12.5px]" data-testid="slice-summary" aria-live="polite">
         <CardContent>
         <div className="flex items-center justify-between gap-2">
-          <span className="font-medium text-foreground">Slice</span>
+          <span className="flex items-center gap-1 font-medium text-foreground">
+            Slice
+            {onReslice && <ResliceButton onReslice={onReslice} disabled={!canReslice} busy={reslicing} />}
+          </span>
           {slicing ? (
             <span className="flex items-center gap-2 text-[12px] text-subtle" data-testid="slice-status">
-              {slice ? 'Reslicing for your changes…' : 'Slicing…'}
+              {reslicing ? 'Reslicing…' : slice ? 'Reslicing for your changes…' : 'Slicing…'}
               {progress != null && (
                 <>
                   {/* Out of the summary's live region: each poll's percentage is not
@@ -301,6 +344,12 @@ export function PreviewPane({
             </span>
           ) : null}
         </div>
+        {/* #4433: beside the Reslice button, which stays enabled for a retry. */}
+        {sliceError && (
+          <p role="alert" className="mt-1 text-[12px] text-warn" data-testid="slice-error">
+            {sliceError}
+          </p>
+        )}
         {slice ? (
           <dl className={`mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 ${stale ? 'opacity-60' : ''}`} data-stale={stale}>
             {slice.print_time_seconds != null && (
@@ -339,11 +388,6 @@ export function PreviewPane({
               <li key={note}>{note}</li>
             ))}
           </ul>
-        )}
-        {sliceError && (
-          <p role="alert" className="mt-1 text-[12px] text-warn" data-testid="slice-error">
-            {sliceError}
-          </p>
         )}
         </CardContent>
       </Card>

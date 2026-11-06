@@ -185,7 +185,9 @@ class SliceActivities:
                 raise _refused(COPY_CHANGED, status=AGAIN)
             await self._hold(content, key, input.slice_id)
             await self.slicing.store.prepared(input.slice_id, sha)
-            reused = await self.slicing.store.reusable(sha, input.preset_key)
+            reused = (
+                None if input.fresh else await self.slicing.store.reusable(sha, input.preset_key)
+            )
             if (
                 reused is not None
                 and reused.sliced_blob_key is not None

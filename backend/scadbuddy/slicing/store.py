@@ -77,42 +77,96 @@ class NativeSliceStore:
         library_file_id: int,
         plate_id: int,
         preset_key: str,
+        fresh: bool = False,
     ) -> NativeSlice:
-        """The row of ``workflow_id``, inserted if there is none. A failed or cancelled
-        row reads running at once, its failure cleared and ``started_at`` now (Task 12
+        """The row a start of ``workflow_id`` (`native_workflow_id`, the key) follows.
+
+        A key can have more than one row: its first row, whose own id is the key, and
+        one row for each fresh slice (the dialog's Reslice, #4433), whose id is the key
+        plus ``-r`` and its row id, with ``reslice_of`` the key. A fresh slice never
+        moves a completed row back to running, so the old figures and the old toolpath
+        stay readable until the new slice completes, and stay so when it fails.
+
+        A start that is not fresh answers the key's newest row that is running or
+        completed, so a run of the same choices joins a fresh slice that is running, or
+        uses the newest completed one. A completed row's ``finished_at`` is refreshed,
+        so the TTL runs from its last use (review M5); a running row is left as it is
+        (a start joining its execution keeps the ``started_at`` the lost-row stop
+        compares). With neither, the first row is inserted, or a failed or cancelled
+        one reads running at once, its failure cleared and ``started_at`` now (Task 12
         review I1): the dialog reads it the moment this answers, before the new
-        execution's `running`. A start that no execution follows (one that joined an
-        execution as it closed) is the lost-row stop's, which compares that
-        ``started_at``. A completed row's ``finished_at`` is refreshed, so the TTL runs
-        from its last use (review M5); a running row is left as it is. A copy belongs to
-        one subject: the row of another's is refused (`SliceSubjectError`)."""
+        execution's `running`.
+
+        A fresh start answers the key's running row too, and joins its execution. Else,
+        when the key has a completed row, it inserts a new row; with none, it acts as a
+        start that is not fresh. The key's starts take one lock, so two fresh starts
+        make one row.
+
+        A start that no execution follows is the lost-row stop's, which compares that
+        ``started_at``: a start that joins an execution as it closes (`start_workflow`'s
+        ``USE_EXISTING``, on a row that the execution has not yet finished) leaves a
+        running row that no execution writes, and the sweep fails it after
+        `LOST_AFTER`. That is accepted: it needs a start in the moment between the
+        execution's last activity and its close. A copy belongs to one subject: the row
+        of another's is refused (`SliceSubjectError`)."""
+        params = {
+            "workflow_id": workflow_id,
+            "subject": subject,
+            "library_file_id": library_file_id,
+            "plate_id": plate_id,
+            "preset_key": preset_key,
+        }
 
         def run() -> NativeSlice:
-            with self._pool.connection() as conn:
-                row = conn.execute(
-                    "INSERT INTO native_slices"
-                    " (workflow_id, subject, library_file_id, plate_id, preset_key)"
-                    " VALUES (%s, %s, %s, %s, %s)"
-                    # Only the same subject's row is touched: another's is refused below.
-                    " ON CONFLICT (workflow_id) DO UPDATE SET"
-                    " status = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " THEN native_slices.status"
-                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN 'running'"
-                    " ELSE native_slices.status END,"
-                    " failure = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " OR native_slices.status NOT IN ('failed', 'cancelled')"
-                    " THEN native_slices.failure END,"
-                    " started_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " OR native_slices.status NOT IN ('failed', 'cancelled')"
-                    " THEN native_slices.started_at ELSE clock_timestamp() END,"
-                    " finished_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
-                    " THEN native_slices.finished_at"
-                    " WHEN native_slices.status = 'completed' THEN now()"
-                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN NULL"
-                    " ELSE native_slices.finished_at END"
-                    f" RETURNING {_COLUMNS}",
-                    (workflow_id, subject, library_file_id, plate_id, preset_key),
+            with self._pool.connection() as conn, conn.transaction():
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (workflow_id,)
+                )
+                newest = conn.execute(
+                    f"SELECT {_COLUMNS} FROM native_slices"
+                    " WHERE (workflow_id = %s OR reslice_of = %s)"
+                    " AND status IN ('running', 'completed') ORDER BY id DESC LIMIT 1",
+                    (workflow_id, workflow_id),
                 ).fetchone()
+                if newest is not None and newest["subject"] == subject:
+                    if newest["status"] == "completed" and fresh:
+                        row = conn.execute(
+                            "INSERT INTO native_slices (id, workflow_id, reslice_of, subject,"
+                            " library_file_id, plate_id, preset_key)"
+                            " SELECT n, %(workflow_id)s || '-r' || n, %(workflow_id)s,"
+                            " %(subject)s, %(library_file_id)s, %(plate_id)s, %(preset_key)s"
+                            " FROM (SELECT nextval('native_slices_id_seq') AS n) AS next"
+                            f" RETURNING {_COLUMNS}",
+                            params,
+                        ).fetchone()
+                    elif newest["status"] == "completed":
+                        row = conn.execute(
+                            "UPDATE native_slices SET finished_at = now() WHERE id = %s"
+                            f" RETURNING {_COLUMNS}",
+                            (newest["id"],),
+                        ).fetchone()
+                    else:
+                        row = newest
+                else:
+                    row = conn.execute(
+                        "INSERT INTO native_slices"
+                        " (workflow_id, subject, library_file_id, plate_id, preset_key)"
+                        " VALUES (%(workflow_id)s, %(subject)s, %(library_file_id)s,"
+                        " %(plate_id)s, %(preset_key)s)"
+                        # Only the same subject's row is touched: another's is refused
+                        # below. A running or completed row was answered above.
+                        " ON CONFLICT (workflow_id) DO UPDATE SET"
+                        " status = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                        " THEN native_slices.status ELSE 'running' END,"
+                        " failure = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                        " THEN native_slices.failure END,"
+                        " started_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                        " THEN native_slices.started_at ELSE clock_timestamp() END,"
+                        " finished_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                        " THEN native_slices.finished_at END"
+                        f" RETURNING {_COLUMNS}",
+                        params,
+                    ).fetchone()
             assert row is not None
             return NativeSlice.model_validate(row)
 

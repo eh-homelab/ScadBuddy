@@ -12,8 +12,11 @@ import { acceptOperation } from './operations'
 
 const base = '/api/v1'
 
-/** Each started slice, with what it was asked for and how often it has been read. */
-const jobs = new Map<number, { request: PrintRunRequest; reads: number; h2c: boolean }>()
+/**
+ * Each started slice, with what it was asked for, how often it has been read and whether
+ * it was a Reslice (`?fresh=true`, #4433). Every start here slices anew, fresh or not.
+ */
+const jobs = new Map<number, { request: PrintRunRequest; reads: number; h2c: boolean; fresh: boolean }>()
 let nextJob = 9000
 
 /** Who slices, as Settings say: a native start is read with `?slicer=native` (Task 14). */
@@ -21,9 +24,18 @@ function slicer(): PreviewStarted['slicer'] {
   return mockSettings().slicer_backend === 'native' ? 'native' : 'bambuddy'
 }
 
-function start(request: PrintRunRequest, h2c: boolean): PreviewStarted {
+/** Whether background slice `jobId` was started as a Reslice (#4433). */
+export function startedFresh(jobId: number): boolean {
+  return jobs.get(jobId)?.fresh ?? false
+}
+
+function isFresh(request: Request): boolean {
+  return new URL(request.url).searchParams.get('fresh') === 'true'
+}
+
+function start(request: PrintRunRequest, h2c: boolean, fresh: boolean): PreviewStarted {
   const jobId = ++nextJob
-  jobs.set(jobId, { request, reads: 0, h2c })
+  jobs.set(jobId, { request, reads: 0, h2c, fresh })
   return {
     job_id: jobId,
     plate_id: request.plate_id ?? 1,
@@ -39,13 +51,13 @@ export const handlers = [
   // `PreviewStarted`.
   http.post(`${base}/print/outputs/:id/preview-slice`, async ({ params, request }) =>
     acceptOperation('preview_slice', `output:${String(params['id'])}`, {
-      ...start((await request.json()) as PrintRunRequest, false),
+      ...start((await request.json()) as PrintRunRequest, false, isFresh(request)),
     }),
   ),
 
   http.post(`${base}/print/library/:id/preview-slice`, async ({ params, request }) =>
     acceptOperation('preview_slice', `library:${String(params['id'])}`, {
-      ...start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE),
+      ...start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE, isFresh(request)),
     }),
   ),
 
