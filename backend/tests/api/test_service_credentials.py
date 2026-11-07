@@ -13,10 +13,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.auth.service_credentials import TokenReader, _insert
 from scadbuddy.core.settings import Settings
-from scadbuddy.main import _rotate_service_credentials
+from scadbuddy.main import _grant_and_rotate_at_start, _rotate_service_credentials
 
 PUBLIC = "https://scadbuddy.test"
 
@@ -90,6 +91,35 @@ def test_the_start_revokes_a_sealed_projects_credential(client: TestClient, app:
         _insert(conn, state.settings_store.kek, "projects", datetime.now(UTC))
     _rotate_service_credentials(state)
     _rotate_service_credentials(state)
+    rows = client.get("/api/v1/auth/service-credentials").json()
+    projects = [row for row in rows if row["caller"] == "projects"]
+    assert len(projects) == 1 and not projects[0]["live"] and projects[0]["revoked_at"]
+
+
+def test_the_start_revokes_the_retired_roles(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5298 Task 11: the start's grants are followed by `revoke_retired`."""
+    calls: list[object] = []
+    monkeypatch.setattr(main, "revoke_retired", lambda conn: calls.append(conn) or [])
+    _grant_and_rotate_at_start(getattr(app.state, STATE_ATTR))
+    assert len(calls) == 1
+
+
+def test_a_failed_revoke_still_rotates_the_credentials(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoke that raises must not cost the start its rotation: the sealed projects
+    credential is still revoked."""
+
+    def refuse(conn: object) -> list[str]:
+        raise RuntimeError("revoke failed")
+
+    monkeypatch.setattr(main, "revoke_retired", refuse)
+    state = getattr(app.state, STATE_ATTR)
+    with state.settings_store.pool.connection() as conn:
+        _insert(conn, state.settings_store.kek, "projects", datetime.now(UTC))
+    _grant_and_rotate_at_start(state)
     rows = client.get("/api/v1/auth/service-credentials").json()
     projects = [row for row in rows if row["caller"] == "projects"]
     assert len(projects) == 1 and not projects[0]["live"] and projects[0]["revoked_at"]
