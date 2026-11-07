@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { addItem, afterAcceptanceWarning, type AddMode } from './afterAcceptance'
 import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
@@ -68,8 +69,9 @@ function revisionBody(current: Pinned | null, choice: string, note: string): Rev
  * "Add item" on the order page (spec 2026-10-18 §3.3, §9): pick a template from the
  * catalogue, then what to make of it, either its current version with default settings or
  * one of its saved outputs (exact settings and colours), how many, and an optional title.
- * The order page shows it only while the order is `draft` or `quoted`
- * (`Lifecycle._open_for_items`). It also takes a "Design request" (#5280): a title and the
+ * The order page shows it while the order takes items: `draft` or `quoted`, or, with
+ * `mode` `after_acceptance` (#5349), `accepted`, `in_production` or `ready`, where the add
+ * asks the person to confirm that it changes an accepted order first. It also takes a "Design request" (#5280): a title and the
  * customer's words, whose design a revision supplies later. With `revise` it is the
  * design picker of an item's new revision instead (`slug`: the item's template, if any).
  */
@@ -79,12 +81,17 @@ export function AddItemDialog({
   onAdded,
   onClose,
   revise,
+  mode = 'open',
+  orderNumber = 'This order',
 }: {
   open: boolean
   orderId: string
   onAdded: () => void
   onClose: () => void
   revise?: { itemId: string; slug: string | null }
+  /** #5349 — `after_acceptance` adds on that route, after a confirm. */
+  mode?: AddMode
+  orderNumber?: string
 }) {
   const models = useAsync(() => (open ? api.listModels() : Promise.resolve([] as ModelSummary[])), [open])
   const [query, setQuery] = useState('')
@@ -99,6 +106,9 @@ export function AddItemDialog({
   const [title, setTitle] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // #5349: the add to an accepted order waits for a second click on the confirm.
+  const [confirming, setConfirming] = useState(false)
+  const confirm = mode === 'after_acceptance' && !revise
 
   const found = useMemo(() => (models.data ?? []).filter((m) => matches(m, query)), [models.data, query])
   const saved = useMemo(() => [...(outputs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)), [outputs.data])
@@ -117,12 +127,20 @@ export function AddItemDialog({
       setTitle('')
       setError(null)
       setBusy(false)
+      setConfirming(false)
     }
   }, [open, revise?.slug])
   /** Another template, or none, starting from its own default pick in the same render. */
   function pickTemplate(next: string | null) {
     setSlug(next)
     setPicked('')
+  }
+
+  /** Asks first on an accepted order; true when the add may go now. */
+  function confirmed(): boolean {
+    if (!confirm || confirming) return true
+    setConfirming(true)
+    return false
   }
 
   async function add() {
@@ -136,10 +154,11 @@ export function AddItemDialog({
         setError(QUANTITY_HINT)
         return
       }
+      if (!confirmed()) return
       setBusy(true)
       setError(null)
       try {
-        await api.addOrderItem(orderId, { kind: 'request', title: title.trim(), quantity: count, notes: note })
+        await addItem(orderId, { kind: 'request', title: title.trim(), quantity: count, notes: note }, mode)
         onAdded()
         onClose()
       } catch (err) {
@@ -161,11 +180,12 @@ export function AddItemDialog({
       setError(QUANTITY_HINT)
       return
     }
+    if (!confirmed()) return
     setBusy(true)
     setError(null)
     try {
       if (revise) await api.addOrderItemRevision(orderId, revise.itemId, revisionBody(pinned, choice, note))
-      else await api.addOrderItem(orderId, itemBody(pinned, choice, count, title))
+      else await addItem(orderId, itemBody(pinned, choice, count, title), mode)
       onAdded()
       onClose()
     } catch (err) {
@@ -311,6 +331,11 @@ export function AddItemDialog({
 
           {!request && model && choice && choice !== CURRENT && !revise && <RoughEstimate outputId={choice} idPrefix="add-item-estimate" />}
 
+          {confirm && confirming && (
+            <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
+              {afterAcceptanceWarning(orderNumber)}
+            </p>
+          )}
           {(error ?? models.error?.message) && (
             <p role="alert" className="text-[13px] text-warn">
               {error ?? `Could not load the catalogue: ${models.error?.message}`}
@@ -318,11 +343,11 @@ export function AddItemDialog({
           )}
         </div>
         <DialogFooter>
-          <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
-            Cancel
+          <Button type="button" variant="outline" disabled={busy} onClick={confirming ? () => setConfirming(false) : onClose}>
+            {confirming ? 'Back' : 'Cancel'}
           </Button>
           <Button type="button" disabled={busy || (request ? !title.trim() : !model || !choice)} onClick={() => void add()}>
-            {revise ? 'Add revision' : 'Add item'}
+            {revise ? 'Add revision' : confirming ? 'Change the accepted order' : 'Add item'}
           </Button>
         </DialogFooter>
       </DialogContent>

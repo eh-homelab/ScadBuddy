@@ -571,6 +571,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  An item added after acceptance (#5349, spec §3.5 "As built"): `POST
+  …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
+  with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or
+  `ready` order not on hold (`TAKES_ITEMS`); refused `order_not_accepted` before that,
+  `item_locked` once shipped. The item starts unpriced (a custom one `quoted`, `accept:
+  true` 422), its audit row is `item.added_after_acceptance`, and `derive` sets the status
+  (`ready` goes back to `in_production`). Past `quoted` the lock is per item (`item_open`,
+  `_open_for_item`, `quote.py` `quote_check`): an item with no accepted quote takes
+  revisions, edits, quotes and an accept; an accepted one stays pinned. Agent
+  `order_item_add_after_acceptance` (outward; `order_item_add` stays write); frontend
+  `components/orders/afterAcceptance.ts` (the rules, the confirm text) in `AddItemDialog`,
+  `AddToOrderDialog` and the order page.
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`

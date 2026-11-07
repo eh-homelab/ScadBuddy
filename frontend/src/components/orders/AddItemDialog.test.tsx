@@ -92,6 +92,42 @@ describe('AddItemDialog (#4251)', () => {
     expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeEnabled()
   })
 
+  it('asks before it changes an accepted order, then adds on the after-acceptance route (#5349)', async () => {
+    const plain = vi.spyOn(api, 'addOrderItem')
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const onAdded = vi.fn()
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <AddItemDialog open orderId={ORDER_ACCEPTED} mode="after_acceptance" orderNumber="ORD-2026-2" onAdded={onAdded} onClose={onClose} />,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'maze')
+    await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
+    await waitFor(() => expect(within(dialog).getByRole('radio', { name: 'Current version, default settings' })).toBeChecked())
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    // The first click only asks.
+    const warning = within(dialog).getByRole('alert', { name: 'Confirm the change' })
+    expect(warning).toHaveTextContent(/ORD-2026-2 is already accepted\. Adding an item changes what the customer gets/)
+    expect(after).not.toHaveBeenCalled()
+    // Back leaves the order alone.
+    await user.click(within(dialog).getByRole('button', { name: 'Back' }))
+    expect(within(dialog).queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(onAdded).toHaveBeenCalled()
+    expect(plain).not.toHaveBeenCalled()
+    const model = await api.getModel(MAZE_SLUG)
+    expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, { slug: MAZE_SLUG, commit: model.version, inputs: { params: {}, v: 0 }, quantity: 1 })
+    const order = await api.order(ORDER_ACCEPTED)
+    expect(order.order.status).toBe('accepted')
+    const added = order.items.find((i) => i.reference?.slug === MAZE_SLUG)
+    expect(added?.status).toBe('draft')
+    expect(order.totals.unpriced_items).toContain(added?.id)
+    const events = await api.orderEvents(ORDER_ACCEPTED)
+    expect(events.filter((e) => e.kind === 'item.added_after_acceptance')).toMatchObject([{ detail: { item_id: added?.id, order_status: 'accepted' } }])
+  })
+
   it.each(['0', '1e9', '2.5'])('refuses the quantity %s before sending anything (#4727)', async (typed) => {
     const add = vi.spyOn(api, 'addOrderItem')
     const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)

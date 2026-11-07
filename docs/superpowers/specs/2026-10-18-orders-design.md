@@ -301,6 +301,37 @@ the body.
 - A file the sweep took while a quote was released stays gone. The hold taken again
   keeps nothing, and the item needs a new quote before it prints.
 
+**As built: an item added after acceptance (#5349).** Before #5349, an order took no new
+item once accepted. Adding one missing name then needed a second order (ORD-2026-9 beside
+ORD-2026-3).
+- `POST /orders/{id}/items/after-acceptance` takes the body of `POST /orders/{id}/items`
+  (a model, custom or request item). It works on an `accepted`, `in_production` or
+  `ready` order only (`orders/lifecycle.py` `TAKES_ITEMS`).
+- It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use the
+  plain route), once it is `shipped` (`item_locked`), once it has ended
+  (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). The plain route on
+  an accepted order answers `item_locked` and names the new route.
+- The add changes what the customer gets, so it is a route of its own. The agent's tool
+  for it, `order_item_add_after_acceptance`, is `outward`. `order_item_add` stays
+  `write` for a `draft` or `quoted` order.
+- The new item starts as on a draft order: `draft` with no quote. A custom item is
+  `quoted`: its price is recorded and not accepted (`accept: true` is 422). The item
+  needs its own quote and that quote's acceptance before it is printed or fulfilled.
+- The accepted prices and the charges do not change. `OrderTotals` counts the new item
+  as pending (`pending_minor`) or unpriced (`unpriced_items`), as any item without an
+  accepted quote.
+- Past `quoted`, the item lock is now per item (`item_open`). An item with no accepted
+  quote takes a revision, a quantity, a quote and a quote's acceptance. An item with an
+  accepted quote stays pinned.
+- The order's status follows `derive`. An `accepted` order stays `accepted`, and
+  `in_production` stays `in_production`. A `ready` order goes back to `in_production`,
+  since its fulfilled item has an attempt and the new item is not settled.
+- One `item.added_after_acceptance` audit row, in the add's transaction, names the item,
+  its title, its quantity and the order's status. The bus hears the item and the order
+  after the commit, as for every item write.
+- The order page offers "Add item" on such an order, and "Add to order…" lists it. Both
+  ask the person to confirm first that the add changes an accepted order.
+
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed
 from the items and shipments, in the same transaction as the item change, under the

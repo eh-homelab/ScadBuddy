@@ -303,6 +303,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_create: () => [],
   order_update: () => [],
   order_item_add: () => [],
+  order_item_add_after_acceptance: () => [],
   order_item_update: () => [],
   order_item_revision_add: () => [],
   order_item_revision_send: () => [],

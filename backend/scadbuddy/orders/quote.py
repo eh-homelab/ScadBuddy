@@ -43,12 +43,12 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
-    OPEN_FOR_EDITS,
     QUOTE_HOLDER,
     QUOTE_TIMEOUT,
     SETTLED,
     Lifecycle,
     LifecycleError,
+    item_open,
 )
 from scadbuddy.orders.models import (
     Actor,
@@ -178,7 +178,8 @@ def quote_check(
     request: SliceQuoteRequest,
 ) -> dict[int, str | None]:
     """Ruling 8's refusals, from the rows: 404 for an unknown order or item, 409
-    ``order_not_open`` unless the order is `draft` or `quoted`, 409 ``item_not_open``
+    ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
+    accepted quote on an order that takes items after acceptance, #5349), 409 ``item_not_open``
     for a settled item, 422 ``filaments`` for a slot the item lacks, a slot with no
     filament once the body's are applied, or one unknown or archived, and 422
     ``price_book`` when nothing would price the item. Blocking; writes nothing. The
@@ -189,11 +190,11 @@ def quote_check(
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
-    if order.status not in OPEN_FOR_EDITS:
+    if not item_open(order, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            f"order {order.number} is {order.status}: an item is quoted while it is draft"
-            " or quoted",
+            f"order {order.number} is {order.status}: an item is quoted while the order is"
+            " draft or quoted, or, past that, while the item has no accepted quote",
             type_=PROBLEMS + "order_not_open",
         )
     if item.status in SETTLED:

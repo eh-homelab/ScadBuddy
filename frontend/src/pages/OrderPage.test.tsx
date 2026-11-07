@@ -131,9 +131,31 @@ describe('OrderPage (#4249)', () => {
     expect(screen.queryByText(/Add one with Add item above/)).not.toBeInTheDocument()
   })
 
-  it('offers no Add item once the order is accepted', async () => {
+  it('offers Add item on an accepted order, which asks first and quotes the new item (#5349)', async () => {
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Design request' }))
+    await user.type(within(dialog).getByLabelText('Title'), 'Tag 49')
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is already accepted/)
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, { kind: 'request', title: 'Tag 49', quantity: 1, notes: '' }))
+    const added = (await api.order(ORDER_ACCEPTED)).items.find((i) => i.title === 'Tag 49')
+    expect(added?.status).toBe('draft')
+    // The new item has no accepted price: it still takes a revision, as on a draft order.
+    await user.click(within(await screen.findByTestId(`order-item-${added?.id}`)).getByRole('button', { name: 'Tag 49' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Tag 49' })
+    expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeInTheDocument()
+  })
+
+  it('offers no Add item on an accepted order on hold', async () => {
+    await api.holdOrder(ORDER_ACCEPTED)
     render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(await screen.findByRole('button', { name: 'Release hold' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Add item' })).not.toBeInTheDocument()
   })
 

@@ -15,6 +15,34 @@ const failure = (promise: Promise<unknown>) => promise.then(() => undefined, (e:
 describe('orders mock (#4249)', () => {
   beforeEach(() => resetMockState())
 
+  it('adds an item after acceptance as the backend does (#5349)', async () => {
+    const custom = { kind: 'custom' as const, title: 'Tag 49', quantity: 2, unit_price_minor: 300 }
+    const plain = await failure(api.addOrderItem(ORDER_ACCEPTED, custom))
+    expect(plain?.problem.type).toBe(`${PROBLEMS}item_locked`)
+    expect(plain?.problem.detail).toMatch(/items\/after-acceptance/)
+    const early = await failure(api.addOrderItemAfterAcceptance(ORDER_DRAFT, custom))
+    expect(early?.problem.type).toBe(`${PROBLEMS}order_not_accepted`)
+    const accepted = await failure(api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { ...custom, accept: true }))
+    expect(accepted?.status).toBe(422)
+    const added = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, custom)
+    // Its price is recorded, not accepted: pending in the totals, the accepted prices kept.
+    expect(added.status).toBe('quoted')
+    const detail = await api.order(ORDER_ACCEPTED)
+    expect(detail.order.status).toBe('accepted')
+    expect(detail.totals.pending_minor).toBe(600)
+    const events = await api.orderEvents(ORDER_ACCEPTED)
+    expect(events.filter((e) => e.kind === 'item.added_after_acceptance').map((e) => e.detail)).toEqual([
+      { item_id: added.id, title: 'Tag 49', quantity: 2, order_status: 'accepted', item_kind: 'custom' },
+    ])
+    // The new item's quantity still changes; the accepted item's stays pinned.
+    await api.updateOrderItem(ORDER_ACCEPTED, added.id, { quantity: 3, accept: false })
+    const locked = await failure(api.updateOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 3 }))
+    expect(locked?.problem.type).toBe(`${PROBLEMS}item_locked`)
+    await api.holdOrder(ORDER_ACCEPTED)
+    const held = await failure(api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, custom))
+    expect(held?.problem.type).toBe(`${PROBLEMS}order_on_hold`)
+  })
+
   it('lists newest first, pages by cursor, filters, and refuses an unknown parameter', async () => {
     const first = await api.orders(DEFAULT_ORDERS_QUERY, { limit: 2 })
     expect(first.items.map((o) => o.number)).toEqual(['ORD-2026-3', 'ORD-2026-2'])

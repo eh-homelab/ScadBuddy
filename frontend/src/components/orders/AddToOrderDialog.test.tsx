@@ -4,7 +4,7 @@ import { useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
-import { ORDER_DRAFT, OUTPUT_REAGAN } from '../../mocks/features/orders/state'
+import { ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN } from '../../mocks/features/orders/state'
 import { orderNumberMatcher } from '../../test/orderNumber'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -51,6 +51,28 @@ describe('AddToOrderDialog (#4249)', () => {
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${ORDER_DRAFT}`))
     expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { output_id: OUTPUT_REAGAN, quantity: 3 })
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('offers an accepted order and asks before it changes it (#5349)', async () => {
+    const plain = vi.spyOn(api, 'addOrderItem')
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const { user } = renderPage(
+      <>
+        <AddToOrderDialog open outputId={OUTPUT_REAGAN} outputName="Reagan" onClose={() => {}} />
+        <Location />
+      </>,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), orderNumberMatcher('ORD-2026-2'))
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is already accepted/)
+    expect(after).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${ORDER_ACCEPTED}`))
+    expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, { output_id: OUTPUT_REAGAN, quantity: 1 })
+    expect(plain).not.toHaveBeenCalled()
   })
 
   it('makes a new customer and a new order when asked', async () => {

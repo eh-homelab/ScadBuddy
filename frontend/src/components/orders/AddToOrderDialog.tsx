@@ -11,6 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { CustomerPicker } from './CustomerPicker'
 import { useCustomerPicker } from './useCustomerPicker'
+import { addItem, addMode, afterAcceptanceWarning } from './afterAcceptance'
 import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
@@ -19,8 +20,10 @@ const NEW = '__new__'
 
 /**
  * "Add to order…" (spec 2026-10-18 §3.3, §9): an output becomes a line item of an
- * order. Pick or make the customer, pick one of their open (draft or quoted) orders or
- * make one, say how many, and the page moves to the order. Picking a price-book filament
+ * order. Pick or make the customer, pick one of their orders that takes items (draft or
+ * quoted, or accepted, in production or ready and not on hold, #5349) or make one, say how
+ * many, and the page moves to the order. An order past `quoted` asks the person to confirm
+ * first: the add changes an accepted order. Picking a price-book filament
  * shows a rough estimate of the output's filament (§5.3, #4250): never a quote, and
  * nothing is recorded.
  */
@@ -33,6 +36,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   const [quantity, setQuantity] = useState('1')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
   const chosen = picker.chosen
   const orders = useAsync(
     () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as OrderRow[], next_cursor: null })),
@@ -43,13 +47,14 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   const [made, setMade] = useState<Order | null>(null)
   const openOrders = useMemo(() => {
     const all = orders.data?.items ?? []
-    const listed = all.filter((o) => o.status === 'draft' || o.status === 'quoted')
+    const listed = all.filter((o) => addMode(o) !== null)
     return made && made.customer_id === chosen && !all.some((o) => o.id === made.id) ? [made, ...listed] : listed
   }, [orders.data, made, chosen])
   useEffect(() => {
     if (!open) {
       setError(null)
       setBusy(false)
+      setConfirming(false)
       // Opened again, it starts empty, as New order does, and offers no order made before.
       setMade(null)
       resetPicker()
@@ -61,11 +66,19 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     // their orders load, or an order is made here, and each of those should land on the newest.
     setOrderId((was) => (was !== NEW && openOrders.some((o) => o.id === was) ? was : (openOrders[0]?.id ?? NEW)))
   }, [chosen, openOrders])
+  const picked = openOrders.find((o) => o.id === orderId)
+  const mode = (picked && addMode(picked)) || 'open'
+  // Another order picked asks again.
+  useEffect(() => setConfirming(false), [orderId])
 
   async function add() {
     const count = parseQuantity(quantity)
     if (count === null) {
       setError(QUANTITY_HINT)
+      return
+    }
+    if (mode === 'after_acceptance' && !confirming) {
+      setConfirming(true)
       return
     }
     setBusy(true)
@@ -81,7 +94,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
         setOrderId(created.id)
         order = created.id
       }
-      await api.addOrderItem(order, { output_id: outputId, quantity: count })
+      await addItem(order, { output_id: outputId, quantity: count }, order === orderId ? mode : 'open')
       onClose()
       void navigate(`/orders/${order}`)
     } catch (err) {
@@ -122,6 +135,11 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
             <Input id="order-quantity" inputMode="numeric" className="w-24" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
           </div>
           {open && <RoughEstimate outputId={outputId} />}
+          {confirming && picked && (
+            <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
+              {afterAcceptanceWarning(picked.number)}
+            </p>
+          )}
           {(error ?? customers.error?.message) && (
             <p role="alert" className="text-[13px] text-warn">
               {error ?? customers.error?.message}
@@ -133,7 +151,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
             Cancel
           </Button>
           <Button type="button" disabled={busy} onClick={() => void add()}>
-            Add to order
+            {confirming ? 'Change the accepted order' : 'Add to order'}
           </Button>
         </DialogFooter>
       </DialogContent>

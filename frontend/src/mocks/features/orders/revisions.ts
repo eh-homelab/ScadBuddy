@@ -5,7 +5,7 @@ import { mockModels, setMockMedia } from '../../handlers'
 import { printersState } from '../printers'
 import { upload } from './attachments'
 import type { Resolved } from './orders'
-import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, openForItems, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
+import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, openForItem, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
 import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revisionsOf, state } from './state'
 
 /**
@@ -93,7 +93,7 @@ export const handlers = [
       const found = itemOf(order, String(params.item))
       if (found.kind === 'custom') throw new Refused('item_custom', `item ${found.id} is a custom item`)
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
-      openForItems(order, "an item's design")
+      openForItem(order, found, "an item's design")
       let reference = found.reference
       let colours = found.colours
       if (resolved) ({ reference, colours } = resolved)
@@ -149,7 +149,7 @@ export const handlers = [
       if (body.answer === 'accepted' && found.approval === 'together') {
         quote = quoteOf(found, revision)
         if (!quote) throw new Refused('revision_not_quoted', `revision ${revision.number} has no quote: this item is approved together`)
-        openForItems(order, "an item's price")
+        openForItem(order, found, "an item's price")
         notOnHold(order)
       }
       // Every check that can throw comes first (acceptQuote's too); the stamp follows.
