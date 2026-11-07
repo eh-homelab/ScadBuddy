@@ -1,14 +1,15 @@
 """A Postgres pool with every migration applied, and a store over a directory or S3.
 
 The ``pool``, ``s3`` and ``content`` fixtures are shared: a conftest takes them with
-``from tests.support.store import content, pool, s3  # noqa: F401``."""
+``from tests.support.store import content, pool, s3  # noqa: F401``. ``content`` is also
+the render worker's: a directory under the index of the API's CRUD routes (#5298)."""
 
 from __future__ import annotations
 
 import hashlib
 import socket
 from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import httpx
@@ -125,18 +126,27 @@ def moto_s3() -> Iterator[S3Settings]:
         server.stop()
 
 
-@pytest.fixture(params=["local", "s3"], ids=["local", "s3"])
+@pytest.fixture(params=["local", "s3", "worker"], ids=["local", "s3", "worker"])
 async def content(
     request: pytest.FixtureRequest, tmp_path: Path, pool: Pool
 ) -> AsyncIterator[ContentStore]:
-    """A content store over a directory, then over moto's S3."""
-    if request.param == "local":
-        store = local_content(tmp_path / "remote", pool)
-    else:
-        store = s3_content(request.getfixturevalue("s3"), pool)
-    try:
-        yield store
-    finally:
-        await store.aclose()
-        if isinstance(store.backend, S3ContentBackend):
-            await store.backend.aclose()
+    """A content store over a directory, then over moto's S3, then the render worker's:
+    over a directory, its index the API's CRUD routes (`RemoteBlobIndex`, #5298)."""
+    with ExitStack() as stack:
+        if request.param == "local":
+            store = local_content(tmp_path / "remote", pool)
+        elif request.param == "s3":
+            store = s3_content(request.getfixturevalue("s3"), pool)
+        else:
+            from tests.crud.crud_support import threaded_render_index
+
+            store = ContentStore(
+                LocalContentBackend(tmp_path / "remote"),
+                stack.enter_context(threaded_render_index(pool)),
+            )
+        try:
+            yield store
+        finally:
+            await store.aclose()
+            if isinstance(store.backend, S3ContentBackend):
+                await store.backend.aclose()

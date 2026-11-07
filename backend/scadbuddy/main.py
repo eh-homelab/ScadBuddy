@@ -1789,6 +1789,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             config=state.config,
             paths=state.paths,
             pool=pool,
+            index=BlobIndex(pool),
             source=source,
             history=state.history,
             fonts=state.fonts,

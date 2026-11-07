@@ -20,7 +20,7 @@ from scadbuddy.store.backends import build_backend
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import RECOVER_LOCAL_SQL, build_store, store_health, store_usage
-from scadbuddy.store.index import Pool
+from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.s3 import S3ContentBackend
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
@@ -62,6 +62,7 @@ def _build(  # type: ignore[no-untyped-def]
         config=config,
         paths=DataPaths(tmp_path),
         pool=pool,
+        index=BlobIndex(pool),
         source=source,
         history=None,
         fonts=FontService(tmp_path),

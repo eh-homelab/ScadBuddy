@@ -34,13 +34,10 @@ RENDER_ROLE = "scadbuddy_render"
 RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # No `render_jobs`, `events` or `activity`: the job's row, its job.* events and its
     # activity row go through the API's CRUD routes (#5298, `crud/render.py`
-    # `RemoteJobProjection`). Nor `blob_refs` or `piece_geometry`: a finished job's
-    # blob refs and a finished piece's geometry go through them too (`RemoteBlobRefs`,
-    # `RemoteGeometryIndex`). A role granted them before keeps them until #5298 Task 22
-    # revokes them.
-    # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
-    # object is gone.
-    "store_blobs": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    # `RemoteJobProjection`). Nor `blob_refs`, `piece_geometry` or `store_blobs`: a
+    # finished job's blob refs, a finished piece's geometry and the blob index go through
+    # them too (`RemoteBlobRefs`, `RemoteGeometryIndex`, `RemoteBlobIndex`). A role
+    # granted them before keeps them until #5298 Task 22 revokes them.
     # The Bambuddy store's folders (`store/bambuddy.py`): found, recorded, forgotten.
     "store_folders": ("SELECT", "INSERT", "DELETE"),
     # `// file` uploads a render reads (`library/assets.py` `use`, `adopt`,
