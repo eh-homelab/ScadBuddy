@@ -282,6 +282,38 @@ async def test_each_row_sums_its_items_per_order_reads(shop: Shop, pool: PgPool)
     assert total.margin_minor == total.revenue_minor - total.cost_minor
 
 
+def test_the_order_row_counts_only_orders_with_figures_of_their_own(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#5546: the ``order`` row's gate. An order whose own revenue is ``None`` (an item not
+    charged yet, while another is) has no figures of its own; one whose own revenue is
+    negative (a discount, no cost of its own) has."""
+    # An item charged 1000 beside one with no quote: the order's revenue is None. Its
+    # ``accepted_at`` is set by hand, as accepting needs every item quoted.
+    open_ = shop.order()
+    shop.quoted(open_, shop.item(open_), 1000)
+    shop.item(open_)
+    accepted_at(pool, open_, NOW - timedelta(days=1))
+    discounted = shop.order()
+    shop.quoted(discounted, shop.item(discounted), 1000)
+    shop.lifecycle.edit_order(
+        discounted.id,
+        BY,
+        OrderEdit(charges=[ChargeInput(kind="discount", label="Loyal", amount_minor=-100)]),
+    )
+    discounted = shop.lifecycle.accept_order(discounted.id, BY)
+    accepted_at(pool, discounted, NOW - timedelta(days=2))
+
+    answer = report(shop)
+
+    own = row(answer, "order")
+    assert (own.orders, own.revenue_minor, own.cost_minor) == (1, -100, 0)
+    demo = row(answer, "model", "demo")
+    assert (demo.orders, demo.revenue_minor, demo.uncharged_items) == (2, 2000, 1)
+    # The open order's revenue is None, so it is in no sum of the total's.
+    assert row(answer, "total").revenue_minor == 900
+
+
 def test_the_report_reads_in_batches_and_says_where_it_stopped(shop: Shop, pool: PgPool) -> None:
     for day in range(1, 6):
         model_order(shop, pool, day, price=100)

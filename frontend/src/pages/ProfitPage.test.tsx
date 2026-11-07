@@ -21,9 +21,8 @@ const PERIOD = periodOf('2026-10-01', '2026-10-31')
 describe('ProfitPage (#5329)', () => {
   beforeEach(() => resetMockState())
 
-  it('asks for the period picked, the last day included', () => {
-    expect(PERIOD).toEqual({ from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00.000Z' })
-    expect(periodOf('', '')).toEqual({ from: undefined, to: undefined })
+  it('asks for the period picked, the last day included, from local midnight', () => {
+    expect(PERIOD).toEqual({ from: new Date(2026, 9, 1).toISOString(), to: new Date(2026, 10, 1).toISOString() })
   })
 
   it('shows a row per product and currency, with a total, and tints a loss', async () => {
@@ -67,6 +66,56 @@ describe('ProfitPage (#5329)', () => {
     const row = await screen.findByTestId(`profit-row-USD-model-${model.key}`)
     await user.click(within(row).getByRole('link'))
     expect(screen.getByTestId('location')).toHaveTextContent(href)
+  })
+
+  it('links the total row to every order in its currency, and says so', async () => {
+    const report = await api.profitReport(PERIOD)
+    const total = report.rows.find((r) => r.group === 'total' && r.currency === 'USD')
+    if (!total) throw new Error('the mocks hold no total row')
+    const href = rowLink(report, total)
+    const params = new URL(href, 'http://x').searchParams
+    expect(params.get('product')).toBeNull()
+    expect(params.get('currency')).toBe('USD')
+
+    const { user } = renderPage(
+      <>
+        <ProfitPage />
+        <Location />
+      </>,
+      { route: ROUTE },
+    )
+    const row = await screen.findByTestId('profit-row-USD-total')
+    const link = within(row).getByRole('link', { name: `Every order in USD in this period (${total.orders})` })
+    await user.click(link)
+    expect(screen.getByTestId('location')).toHaveTextContent(href)
+  })
+
+  it('lists every order of the total row, and says it means every order in the currency', async () => {
+    const report = await api.profitReport(PERIOD)
+    const total = report.rows.find((r) => r.group === 'total' && r.currency === 'USD')
+    if (!total) throw new Error('the mocks hold no total row')
+    renderPage(<OrdersPage />, { route: rowLink(report, total) })
+
+    const notice = await screen.findByTestId('orders-report-filter')
+    expect(notice).toHaveTextContent('every order')
+    expect(notice).toHaveTextContent(`accepted ${new Date(2026, 9, 1).toLocaleDateString()} to ${new Date(2026, 9, 31).toLocaleDateString()}`)
+    expect(notice).toHaveTextContent('in USD')
+    await screen.findByRole('table', { name: 'Orders' })
+    const shown = [ORDER_ACCEPTED, ORDER_CLOSED].filter((id) => screen.queryByTestId(`order-row-${id}`))
+    expect(shown.length).toBe(total.orders)
+    expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull()
+  })
+
+  it('shows the default period in the inputs before the report arrives (#5546)', async () => {
+    const spy = vi.spyOn(api, 'profitReport').mockReturnValue(new Promise(() => {}))
+    renderPage(<ProfitPage />, { route: '/orders/profit?to=2026-03-31' })
+    // A `to` long past with no `from`: the period is the DEFAULT_DAYS days to it, shown at once.
+    expect(screen.getByLabelText('Accepted from')).toHaveValue('2026-01-01')
+    expect(screen.getByLabelText('to')).toHaveValue('2026-03-31')
+    expect(screen.getByRole('status', { name: 'Loading the report' })).toBeInTheDocument()
+    expect(spy).toHaveBeenLastCalledWith(periodOf('', '2026-03-31'))
+    expect(spy.mock.lastCall?.[0]).toEqual({ from: new Date(2026, 0, 1).toISOString(), to: new Date(2026, 3, 1).toISOString() })
+    spy.mockRestore()
   })
 
   it('lists only the row’s orders, and Show every order clears the row’s filters', async () => {

@@ -111,6 +111,10 @@ class ProfitReport(BaseModel):
     #: orders accepted from then to ``period_to``.
     read_from: datetime | None = None
     max_orders: int = MAX_REPORT_ORDERS
+    #: The period's default length: with no ``from``, the period is the ``default_days``
+    #: days to ``to``. The browser's ``components/orders/profit.ts`` ``DEFAULT_DAYS`` is
+    #: checked against this field's default in the spec (#5546).
+    default_days: int = DEFAULT_DAYS
 
 
 def product_of(item: OrderItem) -> Product:
