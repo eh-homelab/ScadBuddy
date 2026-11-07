@@ -2,8 +2,9 @@
 # Put a ScadBuddy sliced library file into Bambuddy's queue on the H2C with every
 # calibration forced on.
 #   queue_sliced.sh SLICED_ID NAME 'FLAT_MAPPING_JSON' [--cali on|auto|off] [--timelapse] [--printer 1] [--plate 1]
-# --timelapse has the printer record one (Bambuddy pulls it into the archive after the
-# print); without it an order attempt linked to this archive shows "no timelapse".
+# --timelapse has the printer record one. After the print, pull it onto the archive
+# (the print's page, or POST /prints/{archive_id}/timelapse/pull) before an order attempt
+# copies it. Without the flag there is nothing to pull.
 # SLICED_ID is the ScadBuddy native library id of the SLICED file (a run's
 # sliced_library_file_id, or the print_sliced_upload result in its Temporal history).
 set -euo pipefail

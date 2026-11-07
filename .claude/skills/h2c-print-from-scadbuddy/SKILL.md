@@ -126,6 +126,6 @@ Bambuddy; do not fight the state.
 - `scripts/printer_report.py [out.json]`: one MQTT `pushall`, prints state, job, error, mapping and stage list. Needs `paho-mqtt`: `uv run --with paho-mqtt scripts/printer_report.py`.
 - `scripts/ams_mapping.py encode|decode|check`: tray id to flat mapping, firmware mapping to tray names, unmapped check on a saved report.
 - `scripts/watch_printer.sh [previous job name]`: waits through a hold for a new job, reads its mapping, polls to the end. Run in the background.
-- `scripts/queue_sliced.sh <sliced id> <name> '<mapping>' [--cali auto] [--timelapse]`: ScadBuddy sliced file into Bambuddy's queue with calibrations forced on. Pass `--timelapse` for a print that will be an order attempt: the attempt's timelapse comes from the archive, and an archive of a print queued without it has none to pull.
+- `scripts/queue_sliced.sh <sliced id> <name> '<mapping>' [--cali auto] [--timelapse]`: ScadBuddy sliced file into Bambuddy's queue with calibrations forced on. Pass `--timelapse` for a print that will be an order attempt. It makes the printer record a video; after the print, pull it onto the archive (the print's page, or `POST /prints/{archive_id}/timelapse/pull`) before the attempt copies it. A print queued without it has nothing to pull.
 
 Related skills: `h2c-plate-layout` (where things go on the bed), `scadbuddy-run-forensics` (what a run did).
