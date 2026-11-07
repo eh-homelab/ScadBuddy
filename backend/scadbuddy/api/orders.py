@@ -136,6 +136,8 @@ from scadbuddy.orders.store import (
     encode_cursor,
 )
 from scadbuddy.orders.totals import OrderTotals, order_totals
+from scadbuddy.payments.models import PaymentRequestView
+from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 
@@ -383,6 +385,8 @@ class PaymentCreate(BaseModel):
     reference: str | None = None
     received_at: datetime | None = None
     notes: str = ""
+    #: The open payment request this payment settles (#4957): it closes as `paid`.
+    payment_request_id: str | None = None
 
 
 class CancelBody(BaseModel):
@@ -434,6 +438,8 @@ class OrderDetail(BaseModel):
     #: The Bambuddy projects mirroring the order and its items (§8.1), the order's first;
     #: empty without Bambuddy, or before the order is accepted.
     projects: list[OrderProject] = Field(default_factory=list)
+    #: The order's payment requests, oldest first (#4957).
+    payment_requests: list[PaymentRequestView] = Field(default_factory=list)
 
 
 class OrderRow(Order):
@@ -968,6 +974,8 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
         items = [item_detail(store, item) for item in store.items(order.id)]
         charges = store.charges(order.id)
         payments = store.payments(order.id)
+        with store.transaction() as conn:
+            requests = requests_for_order(conn, order.id)
         return OrderDetail(
             order=order,
             items=items,
@@ -977,6 +985,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             totals=order_totals([(item, item.quotes) for item in items], charges, payments),
             attachments=store.attachments(order.id),
             projects=store.projects(order.id),
+            payment_requests=requests,
         )
 
     detail = await asyncio.to_thread(read)
@@ -1259,6 +1268,7 @@ async def add_payment(order_id: str, body: PaymentCreate, orders: OrdersDep) -> 
             reference=body.reference,
             received_at=body.received_at,
             notes=body.notes,
+            payment_request_id=body.payment_request_id,
         )
     )
 

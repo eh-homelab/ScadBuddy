@@ -806,7 +806,8 @@ class Lifecycle:
         """The provider's answer to a request's link, under the request's order lock: its
         hosted page, or why it failed (the link it had stays). A request no longer open
         (cancelled or expired while the provider answered) keeps no new link, so no one
-        pays it. No audit row: the link is the provider's, not a person's decision."""
+        pays it. A paid request is returned as it is: it needs no link and no error. No
+        audit row: the link is the provider's, not a person's decision."""
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
             if found is None:
@@ -815,6 +816,8 @@ class Lifecycle:
                 )
             order = self._lock(conn, found.order_id)
             found = payments.request(conn, request_id) or found
+            if found.status == "paid":
+                return found
             if found.status != "open":
                 hosted, error = None, f"the payment request is {found.status}"
             linked = payments.set_request_link(

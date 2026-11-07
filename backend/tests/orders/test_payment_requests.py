@@ -440,3 +440,40 @@ def test_a_paid_event_after_the_cancel_is_still_recorded(shop: PayShop) -> None:
     assert shop.lifecycle.record_provider_event("fake", EVENT) == "recorded"
     assert shop.rows_request(req.id).status == "paid"
     assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+def test_a_link_for_a_paid_request_leaves_the_request_as_it_is(shop: PayShop) -> None:
+    _, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", EVENT)
+    paid = shop.rows_request(req.id)
+    late = shop.lifecycle.set_request_link(
+        req.id,
+        hosted=HostedRequest.model_validate({"provider_ref": "fake_late", "hosted_url": LINK}),
+        error=None,
+    )
+    assert late == paid
+    assert late.link_error is None
+    failed = shop.lifecycle.set_request_link(req.id, hosted=None, error="down")
+    assert failed == paid
+
+
+def test_a_paid_event_on_a_cancelled_request_records_the_payment(shop: PayShop) -> None:
+    order, req = shop.linked()
+    shop.lifecycle.cancel_payment_request(order.id, req.id, BY)
+    assert shop.lifecycle.record_provider_event("fake", EVENT) == "recorded"
+    [pay] = [p for p in shop.rows.payments(order.id) if p.provider == "fake"]
+    found = shop.rows_request(req.id)
+    assert (found.status, found.payment_id, pay.amount_minor) == ("paid", pay.id, 700)
+    assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+def test_a_paid_event_on_an_expired_request_records_the_payment(shop: PayShop) -> None:
+    order, req = shop.linked()
+    expired = ProviderEvent(event_id="e8", kind="expired", provider_ref="fake_r")
+    shop.lifecycle.record_provider_event("fake", expired)
+    assert shop.rows_request(req.id).status == "expired"
+    assert shop.lifecycle.record_provider_event("fake", EVENT) == "recorded"
+    [pay] = [p for p in shop.rows.payments(order.id) if p.provider == "fake"]
+    found = shop.rows_request(req.id)
+    assert (found.status, found.payment_id, pay.amount_minor) == ("paid", pay.id, 700)
+    assert len(shop.rows.cost_entries(order.id)) == 1

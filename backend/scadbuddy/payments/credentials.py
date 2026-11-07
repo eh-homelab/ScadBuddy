@@ -68,6 +68,11 @@ class PaymentCredentials:
         self._store = store
         self._kek = kek
 
+    @property
+    def can_seal(self) -> bool:
+        """Whether a KEK is loaded, so ``connect`` can seal a secret."""
+        return self._kek is not None
+
     def _lock(self, conn: Conn) -> None:
         # The table holds a handful of rows; one writer at a time keeps "at most one
         # default" and "the first row is the default" true under concurrent calls.
