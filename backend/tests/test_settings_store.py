@@ -962,3 +962,28 @@ def test_a_missing_or_refused_solid_concurrency_is_the_environments(
             assert load_render_store_settings(store.pool, seeded).solid_concurrency == read, stored
     finally:
         store.close()
+
+
+def test_the_storefront_settings_have_their_defaults(settings: Settings) -> None:
+    store = _store_over(settings)
+    try:
+        s = store.snapshot().runtime
+    finally:
+        store.close()
+    assert (
+        s.storefront_renders_per_minute,
+        s.storefront_renders_per_day,
+        s.storefront_render_concurrency,
+        s.storefront_draft_ttl_days,
+        s.storefront_requests_enabled,
+    ) == (3, 30, 2, 30, False)
+
+
+def test_the_storefront_settings_are_stored(settings: Settings) -> None:
+    store = _store_over(settings)
+    try:
+        store.save(SettingsPatch(storefront_renders_per_minute=5, storefront_requests_enabled=True))
+        s = store.snapshot().runtime
+    finally:
+        store.close()
+    assert (s.storefront_renders_per_minute, s.storefront_requests_enabled) == (5, True)

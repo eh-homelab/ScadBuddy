@@ -199,6 +199,17 @@ class Settings(BaseSettings):
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
+    # The public storefront's limits and switch (#5282), read by the CRUD side only; the
+    # edge never reads them. Per visitor: renders a minute and a day. Shop-wide: renders
+    # at once. A draft with no change for the TTL is swept. Off, a design request is
+    # refused.
+    # SCADBUDDY_STOREFRONT_RENDERS_PER_MINUTE, _RENDERS_PER_DAY, _RENDER_CONCURRENCY,
+    # _DRAFT_TTL_DAYS and _REQUESTS_ENABLED.
+    storefront_renders_per_minute: int = Field(default=3, ge=1, le=60)
+    storefront_renders_per_day: int = Field(default=30, ge=1, le=10000)
+    storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
+    storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
+    storefront_requests_enabled: bool = False
     # #4953: whether a fulfilled line item may be unfulfilled (#4952). Off, the shop
     # treats a fulfilment as final: `POST …/unfulfil` answers 409 `unfulfil_disabled`,
     # for a person and the agent alike. A change writes nothing to existing orders.
@@ -921,6 +932,12 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "pricing_markup_percent": "live",
         "pricing_rounding": "live",
         "rough_estimate_factor": "live",
+        # Read from the store by each storefront request (#5282).
+        "storefront_renders_per_minute": "live",
+        "storefront_renders_per_day": "live",
+        "storefront_render_concurrency": "live",
+        "storefront_draft_ttl_days": "live",
+        "storefront_requests_enabled": "live",
         # Read by each time entry and each costs read (#5326).
         "pricing_labour_rate_per_hour": "live",
         "pricing_usd_rate": "live",
