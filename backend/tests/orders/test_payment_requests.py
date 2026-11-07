@@ -339,15 +339,89 @@ def test_another_kind_is_ignored(shop: PayShop) -> None:
     assert shop.rows_request(req.id).status == "open"
 
 
-def test_a_second_paid_event_keeps_the_first_payment_on_the_request(shop: PayShop) -> None:
+def test_a_second_paid_event_for_a_request_the_provider_paid_is_ignored(shop: PayShop) -> None:
     order, req = shop.linked()
     shop.lifecycle.record_provider_event("fake", EVENT)
     first = shop.rows_request(req.id)
     again = EVENT.model_copy(update={"event_id": "e5"})
-    assert shop.lifecycle.record_provider_event("fake", again) == "recorded"
+    assert shop.lifecycle.record_provider_event("fake", again) == "ignored"
     after = shop.rows_request(req.id)
     assert (after.payment_id, after.paid_at) == (first.payment_id, first.paid_at)
-    assert len([p for p in shop.rows.payments(order.id) if p.provider]) == 2
+    assert len([p for p in shop.rows.payments(order.id) if p.provider]) == 1
+    assert len(shop.rows.cost_entries(order.id)) == 1
+    with shop.rows.transaction() as conn:
+        outcomes = conn.execute("SELECT outcome FROM payment_events ORDER BY id").fetchall()
+    assert [r["outcome"] for r in outcomes] == ["recorded", "ignored"]
+
+
+def test_a_paid_event_for_a_request_paid_by_hand_is_recorded(shop: PayShop) -> None:
+    order, req = shop.linked()
+    cash = shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
+    assert shop.lifecycle.record_provider_event("fake", EVENT) == "recorded"
+    assert [p.amount_minor for p in shop.rows.payments(order.id)] == [300, 700, 700]
+    assert shop.rows_request(req.id).payment_id == cash.id
+    assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+def test_a_refund_with_no_amount_is_ignored(shop: PayShop) -> None:
+    order, _ = shop.linked()
+    shop.lifecycle.record_provider_event("fake", EVENT)
+    refund = ProviderEvent(event_id="e6", kind="refunded", provider_ref="fake_r", currency="USD")
+    assert shop.lifecycle.record_provider_event("fake", refund) == "ignored"
+    assert [p.amount_minor for p in shop.rows.payments(order.id) if p.provider] == [700]
+
+
+def test_a_paid_event_with_no_currency_is_a_mismatch(shop: PayShop) -> None:
+    order, req = shop.linked()
+    bare = EVENT.model_copy(update={"currency": None})
+    assert shop.lifecycle.record_provider_event("fake", bare) == "currency_mismatch"
+    assert [p for p in shop.rows.payments(order.id) if p.provider] == []
+    assert shop.rows_request(req.id).status == "open"
+
+
+def test_a_provider_payment_that_clears_the_balance_closes_the_balance_request(
+    shop: PayShop,
+) -> None:
+    order, _ = shop.accepted()
+    deposit = shop.lifecycle.open_payment_request(
+        order.id, BY, kind="deposit", amount_minor=400, provider="fake"
+    )
+    shop.lifecycle.set_request_link(
+        deposit.id,
+        hosted=HostedRequest.model_validate({"provider_ref": "fake_d", "hosted_url": LINK}),
+        error=None,
+    )
+    balance = shop.lifecycle.open_payment_request(order.id, BY, provider=None)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=600)
+    assert shop.rows_request(balance.id).status == "open"
+    paid = ProviderEvent(
+        event_id="e7", kind="paid", provider_ref="fake_d", amount_minor=400, currency="USD"
+    )
+    assert shop.lifecycle.record_provider_event("fake", paid) == "recorded"
+    [pay] = [p for p in shop.rows.payments(order.id) if p.provider == "fake"]
+    closed = shop.rows_request(balance.id)
+    assert (closed.status, closed.payment_id) == ("paid", pay.id)
+
+
+def test_a_refund_never_closes_a_request(shop: PayShop) -> None:
+    order, _ = shop.accepted()
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=1200)
+    req = shop.lifecycle.open_payment_request(order.id, BY, amount_minor=100)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=-50)
+    assert shop.rows_request(req.id).status == "open"
+
+
+def test_a_link_for_a_request_no_longer_open_is_not_written(shop: PayShop) -> None:
+    order, _ = shop.accepted()
+    req = shop.lifecycle.open_payment_request(order.id, BY, provider="fake")
+    shop.lifecycle.cancel_order(order.id, BY)
+    late = shop.lifecycle.set_request_link(
+        req.id,
+        hosted=HostedRequest.model_validate({"provider_ref": "fake_late", "hosted_url": LINK}),
+        error=None,
+    )
+    assert (late.status, late.provider_ref, late.hosted_url) == ("cancelled", None, None)
+    assert late.link_error == "the payment request is cancelled"
 
 
 # -- cancel (Review Focus 1 and 2) -----------------------------------------------------------

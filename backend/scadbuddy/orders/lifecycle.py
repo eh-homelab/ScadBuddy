@@ -676,7 +676,8 @@ class Lifecycle:
         """Money the shop already received: a record, allowed on hold (Ruling 14). A
         payment that names an open request of this order closes it. Named or not, a
         payment that brings the balance to zero or below closes the open ``balance``
-        requests. It writes no fee entry: only a provider's event does."""
+        requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
+        provider's event does."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if order.status == "cancelled":
@@ -702,12 +703,8 @@ class Lifecycle:
             )
             if named is not None:
                 payments.set_request_status(conn, named.id, "paid", payment_id=payment.id)
-            if totals_of(self.store, conn, order.id).balance_minor <= 0:
-                for open_request in payments.open_requests_for_order(conn, order.id):
-                    if open_request.kind == "balance":
-                        payments.set_request_status(
-                            conn, open_request.id, "paid", payment_id=payment.id
-                        )
+            if payment.amount_minor > 0:
+                self._close_balance(conn, order, payment)
             self._event(
                 conn,
                 order,
@@ -722,6 +719,14 @@ class Lifecycle:
     # -- payment requests (#4957) ---------------------------------------------------------
     # A request asks the customer for money, through a provider's hosted page or by hand.
     # Its amount is fixed once opened. Its link is made after commit (``set_request_link``).
+
+    def _close_balance(self, conn: Conn, order: Order, payment: Payment) -> None:
+        """Once the balance is zero or below, ``payment`` closes the open balance requests."""
+        if totals_of(self.store, conn, order.id).balance_minor > 0:
+            return
+        for open_request in payments.open_requests_for_order(conn, order.id):
+            if open_request.kind == "balance":
+                payments.set_request_status(conn, open_request.id, "paid", payment_id=payment.id)
 
     def _request_of(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
         found = payments.request(conn, request_id)
@@ -799,8 +804,9 @@ class Lifecycle:
         self, request_id: str, *, hosted: HostedRequest | None, error: str | None
     ) -> PaymentRequestView:
         """The provider's answer to a request's link, under the request's order lock: its
-        hosted page, or why it failed (the link it had stays). No audit row: the link is
-        the provider's, not a person's decision."""
+        hosted page, or why it failed (the link it had stays). A request no longer open
+        (cancelled or expired while the provider answered) keeps no new link, so no one
+        pays it. No audit row: the link is the provider's, not a person's decision."""
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
             if found is None:
@@ -808,6 +814,9 @@ class Lifecycle:
                     "payment_request_not_found", f"no payment request {request_id}", not_found=True
                 )
             order = self._lock(conn, found.order_id)
+            found = payments.request(conn, request_id) or found
+            if found.status != "open":
+                hosted, error = None, f"the payment request is {found.status}"
             linked = payments.set_request_link(
                 conn,
                 request_id,
@@ -853,6 +862,19 @@ class Lifecycle:
             self._told(change)
         return outcome
 
+    def _paid_by(self, conn: Conn, order: Order, found: PaymentRequestView, provider: str) -> bool:
+        """Whether this provider's own payment already paid the request. A request paid
+        by hand, cancelled or expired takes a provider's payment: that money is real."""
+        if found.status != "paid" or found.payment_id is None:
+            return False
+        paid = next(
+            (p for p in self.store.payments(order.id, conn=conn) if p.id == found.payment_id),
+            None,
+        )
+        return (
+            paid is not None and paid.provider == provider and paid.reference == found.provider_ref
+        )
+
     def _apply_event(
         self,
         conn: Conn,
@@ -871,6 +893,12 @@ class Lifecycle:
             return "ignored", None
         if event.currency != order.currency:
             return "currency_mismatch", None
+        if event.kind == "refunded" and event.amount_minor is None:
+            # No amount: a guess at a full refund could be wrong, so nothing is written.
+            return "ignored", None
+        if event.kind == "paid" and self._paid_by(conn, order, found, provider):
+            # A hosted page is paid once: this is the same money told again.
+            return "ignored", None
         amount = found.amount_minor if event.amount_minor is None else event.amount_minor
         payment = self.store.insert_payment(
             conn,
@@ -897,6 +925,7 @@ class Lifecycle:
         # A request already paid keeps the payment that paid it first.
         if found.status != "paid":
             payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
+        self._close_balance(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             fee, _ = self.store.insert_cost_entry(
