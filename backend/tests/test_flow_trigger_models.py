@@ -19,6 +19,11 @@ def test_a_slug_reads_as_a_template_subject() -> None:
 def test_a_stored_slug_of_none_reads_as_no_subject() -> None:
     timing = EventTiming.model_validate({"kind": "render.finished", "slug": None})
     assert timing.subject is None
+    # A null slug names nothing, so it never clashes with a subject.
+    both = EventTiming.model_validate(
+        {"kind": "order.changed", "slug": None, "subject": {"kind": "order", "id": "o1"}}
+    )
+    assert both.subject == Subject(kind="order", id="o1")
 
 
 @pytest.mark.parametrize(

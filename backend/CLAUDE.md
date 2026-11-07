@@ -251,15 +251,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_item_print` with the call's key and follows the attempt's run; a refusal before
   it starts is the outcome `refused` with `problem` (`requote_needed`), and
   `RouteRefusedError.problem` carries a route's problem `type`.
-  Order events (#4252, orders spec §7.1): the kinds `order.changed` (key
-  `order:<id>:<status>:<change>`) and `order_item.changed`
-  (`order_item:<id>:<status>:<attempt>:<change>`, `-` for no attempt), `<change>` the newest
-  `order_status_changes` row (kept by a trigger on `orders` and `order_items`) for that
-  status, so an edit in a status fires once and a return to it fires again; `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
+  Order events (#4252, orders spec §7.1): the kinds `order.changed` and
+  `order_item.changed` fire once per row of `order_status_changes` (kept by a trigger on
+  `orders` and `order_items`; keys `order:<id>:<status>:<change>` and
+  `order_item:<id>:<status>:<change>`), never per event: an event reads the newest
+  `CHANGES_HEARD` rows of its order or item (`events.py` `_change_fires`), so a plain edit,
+  a hold or a release fires nothing, a return to a status fires again, and a change before
+  the trigger's `live_since` (made, or last resumed) or already fired is skipped. An item
+  attempt recorded with no status change fires nothing. `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
   or sent `slug` reads as a template subject; no migration) and `match` (`status` only,
   values checked against `OrderStatus`/`ItemStatus`), both applied in
   `TriggerStore.event_triggers` before a fire starts; an order fire's `customer_id` is
-  read from the order's row (`order_facts`). `trigger()` returns `OrderChanged` /
+  read from the order's row (`order_facts`), and an item event for an item gone since
+  fires nothing. `trigger()` returns `OrderChanged` /
   `OrderItemChanged`.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its

@@ -1450,13 +1450,13 @@ class OrderChanged(BaseModel):
 
 
 class OrderItemChanged(BaseModel):
-    """A line item's status changed, or an attempt of it was recorded (#4252)."""
+    """A line item's status changed (#4252)."""
 
     kind: Literal["order_item.changed"]
     order_id: str
     item_id: str
     status: str
-    #: The attempt just recorded or accepted, else None.
+    #: The attempt recorded or accepted with this change, else None.
     attempt: int | None = None
 
 

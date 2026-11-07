@@ -16,9 +16,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 import psycopg
 from psycopg import Connection
@@ -42,6 +42,19 @@ from scadbuddy.flows.models import TERMINAL
 from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+#: How many of an order's (or an item's) newest status changes an event fires for: more
+#: than any burst of changes before the first of their events is heard.
+CHANGES_HEARD = 8
+
+
+class StatusChange(NamedTuple):
+    """One row of `order_status_changes` (#4252)."""
+
+    id: int
+    status: str
+    at: datetime
+
 
 _TRIGGER = (
     "id, name, definition_id, kind, schedule, event, overlap, inputs, approval_timeout_s,"
@@ -155,12 +168,25 @@ class TriggerStore:
         spec §7.1): its customer. None when the order is gone."""
         return await self._call(self._order_facts, order_id)
 
-    async def transition(self, order_id: str, item_id: str | None, status: str) -> int:
-        """The newest change of the order (or its item `item_id`) to `status`
-        (`order_status_changes`), which an order event's fire key names (§7.1): a plain
-        edit keys as the change before it, a return to the status keys anew. 0 when none
-        is recorded (a status set before the table was kept)."""
-        return await self._call(self._transition, order_id, item_id, status)
+    async def item_exists(self, order_id: str, item_id: str) -> bool:
+        """Whether the order still has line item `item_id` (§7.1: facts from the row)."""
+        return await self._call(self._item_exists, order_id, item_id)
+
+    async def status_changes(
+        self, order_id: str, item_id: str | None, limit: int = CHANGES_HEARD
+    ) -> list[StatusChange]:
+        """The order's (or its item `item_id`'s) newest `limit` status changes
+        (`order_status_changes`), oldest first: what an order event fires for (§7.1)."""
+        return await self._call(self._status_changes, order_id, item_id, limit)
+
+    async def live_since(self, trigger_ids: Collection[str]) -> dict[str, datetime]:
+        """When each trigger began to listen (made, or last resumed): it never fires for
+        a status change before then."""
+        return await self._call(self._live_since, list(trigger_ids))
+
+    async def fired(self, fires: Collection[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `fires` (trigger id, fire key) are recorded already."""
+        return await self._call(self._fired, list(fires))
 
     # -- standing grants --------------------------------------------------------
 
@@ -332,13 +358,16 @@ class TriggerStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "UPDATE flow_triggers SET paused = %s,"
-                " paused_at = CASE WHEN %s THEN now() END, paused_by = %s, paused_reason = %s"
+                " paused_at = CASE WHEN %s THEN now() END, paused_by = %s, paused_reason = %s,"
+                # Resumed: it listens from now, never for what changed while it was paused.
+                " live_since = CASE WHEN paused AND NOT %s THEN now() ELSE live_since END"
                 f" WHERE id = %s RETURNING {_TRIGGER}",
                 (
                     paused,
                     paused,
                     _json(by) if paused else None,
                     reason if paused else None,
+                    paused,
                     trigger_id,
                 ),
             ).fetchone()
@@ -400,14 +429,37 @@ class TriggerStore:
             ).fetchone()
         return None if row is None else {"customer_id": row["customer_id"]}
 
-    def _transition(self, order_id: str, item_id: str | None, status: str) -> int:
+    def _item_exists(self, order_id: str, item_id: str) -> bool:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT max(id) AS id FROM order_status_changes WHERE order_id = %s"
-                " AND item_id IS NOT DISTINCT FROM %s AND status = %s",
-                (order_id, item_id, status),
+                "SELECT 1 FROM order_items WHERE id = %s AND order_id = %s", (item_id, order_id)
             ).fetchone()
-        return int(row["id"]) if row is not None and row["id"] is not None else 0
+        return row is not None
+
+    def _status_changes(self, order_id: str, item_id: str | None, limit: int) -> list[StatusChange]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, status, at FROM order_status_changes WHERE order_id = %s"
+                " AND item_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT %s",
+                (order_id, item_id, limit),
+            ).fetchall()
+        return [StatusChange(row["id"], row["status"], row["at"]) for row in reversed(rows)]
+
+    def _live_since(self, trigger_ids: list[str]) -> dict[str, datetime]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, live_since FROM flow_triggers WHERE id = ANY(%s)", (trigger_ids,)
+            ).fetchall()
+        return {row["id"]: row["live_since"] for row in rows}
+
+    def _fired(self, fires: list[tuple[str, str]]) -> set[tuple[str, str]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT trigger_id, fire_key FROM flow_trigger_fires"
+                " WHERE (trigger_id, fire_key) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+                ([t for t, _ in fires], [k for _, k in fires]),
+            ).fetchall()
+        return {(row["trigger_id"], row["fire_key"]) for row in rows}
 
     def _attach_grant(
         self,

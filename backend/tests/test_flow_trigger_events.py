@@ -16,28 +16,28 @@ from scadbuddy.flow_triggers.events import fire_event, trigger_event
 from scadbuddy.flow_triggers.models import EventTiming, Trigger
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows.flow_triggers import SCHEDULE_PREFIX
 
 
-def test_an_order_event_is_keyed_by_its_order_and_status() -> None:
+def test_an_order_event_is_keyed_by_its_order() -> None:
+    """Each fire adds the status change it is for (`_change_fires`)."""
     found = trigger_event(OrderChanged(order_id="o1", status="accepted"))
     assert found is not None
     assert found.kind == "order.changed"
-    assert found.key == "order:o1:accepted"
+    assert found.key == "order:o1"
     assert found.subjects == {"order": "o1"}
     assert found.facts == {"kind": "order.changed", "order_id": "o1", "status": "accepted"}
 
 
-def test_an_item_event_is_keyed_by_its_item_status_and_attempt() -> None:
+def test_an_item_event_is_keyed_by_its_item() -> None:
     found = trigger_event(
         OrderItemChanged(order_id="o1", item_id="i1", status="printed", attempt=2)
     )
     assert found is not None
     assert found.kind == "order_item.changed"
-    assert found.key == "order_item:i1:printed:2"
+    assert found.key == "order_item:i1"
     assert found.subjects == {"order": "o1", "order_item": "i1"}
     assert found.facts["attempt"] == 2
-    bare = trigger_event(OrderItemChanged(order_id="o1", item_id="i1", status="approved"))
-    assert bare is not None and bare.key == "order_item:i1:approved:-"
 
 
 def test_an_unrelated_event_fires_nothing() -> None:
@@ -165,17 +165,32 @@ class _Client:
         self.started.append((id, args))
 
 
-@pg
-async def test_a_fire_takes_the_customer_from_the_order_row(
-    triggers: TriggerStore, jobs: JobProjection
-) -> None:
+def new_order(jobs: JobProjection, item: bool = False) -> None:
     with jobs.pool.connection() as conn:
         conn.execute("INSERT INTO customers (id, display_name) VALUES ('c1', 'C')")
         conn.execute(
             "INSERT INTO orders (id, number, customer_id, currency, created_by)"
             " VALUES ('o1', 'ORD-2026-1', 'c1', 'USD', '{}')"
         )
-    trigger_id = await on(triggers, {"kind": "order.changed"})
+        if item:
+            conn.execute(
+                "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+                " VALUES ('i1', 'o1', 0, 1, 'Bracket', 'custom')"
+            )
+
+
+def set_status(jobs: JobProjection, status: str, table: str = "orders", id_: str = "o1") -> None:
+    with jobs.pool.connection() as conn:
+        conn.execute(f"UPDATE {table} SET status = %s WHERE id = %s", (status, id_))
+
+
+@pg
+async def test_a_fire_takes_the_customer_from_the_order_row(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    trigger_id = await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
+    new_order(jobs)
+    set_status(jobs, "accepted")
     client = _Client()
     started = await fire_event(
         client,  # type: ignore[arg-type]
@@ -205,47 +220,96 @@ async def test_a_fire_takes_the_customer_from_the_order_row(
 async def test_a_return_to_a_status_fires_again_and_an_edit_in_it_does_not(
     triggers: TriggerStore, jobs: JobProjection
 ) -> None:
-    """The key names the transition (§7.1, review of #5644): `ready`, an edit while
+    """One fire per status change (§7.1, review of #5644): `ready`, an edit while
     `ready`, `in_production`, `ready` again is two fires on `ready`, not one, nor three."""
-    with jobs.pool.connection() as conn:
-        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c1', 'C')")
-        conn.execute(
-            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
-            " VALUES ('o1', 'ORD-2026-1', 'c1', 'USD', '{}')"
-        )
-        conn.execute(
-            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
-            " VALUES ('i1', 'o1', 0, 1, 'Bracket', 'custom')"
-        )
     await on(triggers, {"kind": "order.changed", "match": {"status": ["ready"]}})
     await on(triggers, {"kind": "order_item.changed", "match": {"status": ["approved"]}})
+    new_order(jobs, item=True)
     client = _Client()
 
-    async def moved(status: str) -> list[str]:
-        with jobs.pool.connection() as conn:
-            conn.execute("UPDATE orders SET status = %s WHERE id = 'o1'", (status,))
-        event = OrderChanged(order_id="o1", status=status)
+    async def heard_order() -> list[str]:
+        event = OrderChanged(order_id="o1", status="x")
         return await fire_event(client, "library", triggers, event)  # type: ignore[arg-type]
 
-    first = await moved("ready")
-    again = await fire_event(
-        client,  # type: ignore[arg-type]
-        "library",
-        triggers,
-        OrderChanged(order_id="o1", status="ready"),
-    )
-    assert await moved("in_production") == []
-    second = await moved("ready")
-    assert len(first) == len(again) == len(second) == 1
-    assert first == again  # the edit keys as the change before it: Temporal starts it once
-    assert second != first
+    set_status(jobs, "ready")
+    first = await heard_order()
+    assert len(first) == 1
+    claim(triggers, first)
+    assert await heard_order() == []  # an edit while ready: no change, no fire
+    set_status(jobs, "in_production")
+    assert await heard_order() == []
+    set_status(jobs, "ready")
+    second = await heard_order()
+    assert len(second) == 1 and second != first
 
-    async def item(status: str) -> list[str]:
-        with jobs.pool.connection() as conn:
-            conn.execute("UPDATE order_items SET status = %s WHERE id = 'i1'", (status,))
-        event = OrderItemChanged(order_id="o1", item_id="i1", status=status)
+    async def heard_item() -> list[str]:
+        event = OrderItemChanged(order_id="o1", item_id="i1", status="x")
         return await fire_event(client, "library", triggers, event)  # type: ignore[arg-type]
 
-    approved = await item("approved")
-    assert await item("failed") == []
-    assert (await item("approved")) != approved
+    set_status(jobs, "approved", "order_items", "i1")
+    approved = await heard_item()
+    claim(triggers, approved)
+    set_status(jobs, "failed", "order_items", "i1")
+    assert await heard_item() == []
+    set_status(jobs, "approved", "order_items", "i1")
+    again = await heard_item()
+    assert len(again) == 1 and again != approved
+
+
+def claim(triggers: TriggerStore, workflow_ids: list[str]) -> None:
+    """What the fire's activity records first (`claim_fire`), so a fire is known."""
+    with triggers._pool.connection() as conn:
+        for workflow_id in workflow_ids:
+            conn.execute(
+                "INSERT INTO flow_trigger_fires (trigger_id, fire_key, run_id, outcome)"
+                " SELECT id, %s, %s, 'started' FROM flow_triggers"
+                " WHERE starts_with(%s, %s || id) LIMIT 1",
+                (workflow_id, str(uuid.uuid4()), workflow_id, SCHEDULE_PREFIX),
+            )
+
+
+@pg
+async def test_a_status_reached_before_the_trigger_listened_never_fires(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """Review of #5644: a trigger made (or resumed) after the order reached its status
+    fires nothing on the next edit or hold; only a change after it fires."""
+    new_order(jobs)
+    set_status(jobs, "accepted")
+    trigger_id = await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
+    client = _Client()
+    event = OrderChanged(order_id="o1", status="accepted")
+    assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
+    # Paused, then resumed: what changed while it was paused is not heard either.
+    await triggers.set_paused(trigger_id, True, {"kind": "browser"}, "a while")
+    set_status(jobs, "ready")
+    set_status(jobs, "accepted")
+    await triggers.set_paused(trigger_id, False, None, None)
+    assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
+
+
+@pg
+async def test_changes_made_before_their_events_are_heard_each_fire(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """X, Y, X before the first event is handled: two fires on X, each its own change."""
+    await on(triggers, {"kind": "order.changed", "match": {"status": ["ready"]}})
+    new_order(jobs)
+    for status in ("ready", "in_production", "ready"):
+        set_status(jobs, status)
+    client = _Client()
+    event = OrderChanged(order_id="o1", status="ready")
+    assert len(await fire_event(client, "library", triggers, event)) == 2  # type: ignore[arg-type]
+
+
+@pg
+async def test_an_item_gone_since_fires_nothing(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    await on(triggers, {"kind": "order_item.changed"})
+    new_order(jobs, item=True)
+    with jobs.pool.connection() as conn:
+        conn.execute("DELETE FROM order_items WHERE id = 'i1'")
+    client = _Client()
+    event = OrderItemChanged(order_id="o1", item_id="i1", status="draft")
+    assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]

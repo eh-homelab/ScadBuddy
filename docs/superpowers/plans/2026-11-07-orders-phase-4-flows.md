@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - A trigger kind is a bus event's name; narrowing is a `match` on the event's fields (Ruling 13).
-- Event keys: `order:<id>:<status>` and `order_item:<id>:<status>:<attempt>`, each followed by the change that set the status (`order_status_changes`), so a return to a status fires again.
+- Event keys: `order:<id>:<status>:<change>` and `order_item:<id>:<status>:<change>`, one fire per row of `order_status_changes` since the trigger began to listen (`live_since`), never per event: a plain edit, a hold or a release fires nothing, and a return to a status fires again.
 - The facts come from the order's row at fire time, never from a request body (§7.1, 10-11 §12.1).
 - The grant vocabulary stays closed and never reads inputs (Ruling 10); narrow, never widen (10-11 §4.3).
 - A linked run is a record, not a Temporal child workflow (Ruling 9).

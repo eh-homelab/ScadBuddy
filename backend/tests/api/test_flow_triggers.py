@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -705,10 +706,11 @@ def test_a_run_reads_the_event_that_started_it(
 
 @pytest.mark.usefixtures("triggers")
 def test_an_order_trigger_runs_on_the_status_it_matches_with_the_customer_from_the_row(
-    client: TestClient, bus: EventBus
+    client: TestClient, bus: EventBus, pg_conninfo: str
 ) -> None:
     """#4252 (orders spec §7.1): `order.changed` narrowed by `match`; one fire per
-    status, however often the order is edited in it; the customer read from the row."""
+    status change, however often the order is edited in it; the customer read from the
+    row."""
     customer = create_customer(client)
     order = create_order(client, customer["id"])
     definition = register(client, READS_EVENT)
@@ -727,9 +729,10 @@ def test_an_order_trigger_runs_on_the_status_it_matches_with_the_customer_from_t
         "subject": {"kind": "order", "id": order["id"]},
         "match": {"status": ["accepted"]},
     }
-    bus.publish(OrderChanged(order_id=order["id"], status="quoted"))
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("UPDATE orders SET status = 'accepted' WHERE id = %s", (order["id"],))
     bus.publish(OrderChanged(order_id=order["id"], status="accepted"))
-    bus.publish(OrderChanged(order_id=order["id"], status="accepted"))
+    bus.publish(OrderChanged(order_id=order["id"], status="accepted"))  # an edit in it
     fired = decided(client, accepted["id"], 1)
     assert fired["outcome"] == "started", fired
     run = until(client, fired["run_id"], lambda v: v["status"] == "succeeded")

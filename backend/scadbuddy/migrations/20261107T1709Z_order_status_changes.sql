@@ -1,8 +1,7 @@
 -- Each status an order or a line item moves to (#4252, orders spec §7.1), one row per
--- change, so an order trigger's fire key names the transition: a plain edit in the same
--- status keys as the change before it (one fire), and a return to a status it had keys
--- anew (another fire). Kept by the table's own trigger, so no writer can forget it; only
--- the API writes these tables.
+-- change, kept by the tables' own trigger, so no writer can forget it; only the API
+-- writes these tables. An order trigger fires once per row (its fire key names the row):
+-- a plain edit, a hold or a release writes none, so it fires nothing.
 CREATE TABLE order_status_changes (
   id bigserial PRIMARY KEY,
   order_id text NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
@@ -11,7 +10,7 @@ CREATE TABLE order_status_changes (
   status text NOT NULL,
   at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX order_status_changes_subject ON order_status_changes (order_id, item_id, status, id);
+CREATE INDEX order_status_changes_subject ON order_status_changes (order_id, item_id, id);
 
 CREATE FUNCTION order_status_changed() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -30,3 +29,7 @@ CREATE TRIGGER orders_status_changed AFTER INSERT OR UPDATE OF status ON orders
   FOR EACH ROW EXECUTE FUNCTION order_status_changed();
 CREATE TRIGGER order_items_status_changed AFTER INSERT OR UPDATE OF status ON order_items
   FOR EACH ROW EXECUTE FUNCTION order_status_changed();
+
+-- Since when a trigger has listened (made, or last resumed): a change before it is not
+-- one it heard, so it never fires for it. Both clocks are this database's.
+ALTER TABLE flow_triggers ADD COLUMN live_since timestamptz NOT NULL DEFAULT now();

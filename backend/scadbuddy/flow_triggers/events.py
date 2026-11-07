@@ -29,7 +29,7 @@ from scadbuddy.core.events import (
     VersionCommitted,
 )
 from scadbuddy.flow_triggers.models import EventKind
-from scadbuddy.flow_triggers.store import TriggerStore
+from scadbuddy.flow_triggers.store import StatusChange, TriggerStore
 from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT, FIRE_WORKFLOW, schedule_id
 
 logger = logging.getLogger(__name__)
@@ -72,13 +72,13 @@ def trigger_event(event: Event) -> TriggerEvent | None:
         }
         return TriggerEvent(kind, {"template": event.slug}, f"print:{event.run_id}", print_facts)
     if isinstance(event, OrderChanged):
-        # The key carries the status; `fire_event` adds the change that set it (§7.1).
+        # The key names the order; `fire_event` adds each status change it fires for.
         order_facts: dict[str, Any] = {
             "kind": "order.changed",
             "order_id": event.order_id,
             "status": event.status,
         }
-        key = f"order:{event.order_id}:{event.status}"
+        key = f"order:{event.order_id}"
         return TriggerEvent("order.changed", {"order": event.order_id}, key, order_facts)
     if isinstance(event, OrderItemChanged):
         item_facts: dict[str, Any] = {
@@ -88,11 +88,54 @@ def trigger_event(event: Event) -> TriggerEvent | None:
             "status": event.status,
             "attempt": event.attempt,
         }
-        attempt = "-" if event.attempt is None else str(event.attempt)
-        key = f"order_item:{event.item_id}:{event.status}:{attempt}"
+        key = f"order_item:{event.item_id}"
         subjects = {"order": event.order_id, "order_item": event.item_id}
         return TriggerEvent("order_item.changed", subjects, key, item_facts)
     return None
+
+
+async def _change_fires(
+    store: TriggerStore, found: TriggerEvent
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """An order event's fires (§7.1): one per trigger and status change recorded
+    (`order_status_changes`), keyed by the change, never by the event. A plain edit, a
+    hold or a release records none, so it fires nothing new; a return to a status is a
+    change of its own; changes made before a trigger listened (`live_since`) and fires
+    recorded already are skipped. The facts are the row's now: none when it is gone."""
+    kind, subjects, key, facts = found
+    order_id, item_id = facts["order_id"], facts.get("item_id")
+    if kind == "order.changed":
+        row = await store.order_facts(order_id)
+        if row is None:
+            return []  # the order is gone
+        facts = {**facts, **row}
+    elif not await store.item_exists(order_id, str(item_id)):
+        return []  # the item is gone
+    changes = await store.status_changes(order_id, item_id)
+    heard: dict[str, list[str]] = {}
+    planned: list[tuple[str, str, dict[str, Any], StatusChange]] = []
+    for change in changes:
+        change_facts = {**facts, "status": change.status}
+        if kind == "order_item.changed" and (
+            change is not changes[-1] or change.status != facts["status"]
+        ):
+            change_facts["attempt"] = None  # the event's attempt is its own change's
+        if change.status not in heard:
+            heard[change.status] = await store.event_triggers(kind, subjects, change_facts)
+        for trigger_id in heard[change.status]:
+            fire_key = fire_workflow_id(trigger_id, f"{key}:{change.status}:{change.id}")
+            planned.append((trigger_id, fire_key, change_facts, change))
+    if not planned:
+        return []
+    since = await store.live_since({p[0] for p in planned})
+    fired = await store.fired({(p[0], p[1]) for p in planned})
+    return [
+        (trigger_id, fire_key, change_facts)
+        for trigger_id, fire_key, change_facts, change in planned
+        if trigger_id in since
+        and change.at >= since[trigger_id]
+        and (trigger_id, fire_key) not in fired
+    ]
 
 
 def fire_workflow_id(trigger_id: str, key: str) -> str:
@@ -107,27 +150,17 @@ async def fire_event(
     if found is None:
         return []
     kind, subjects, key, facts = found
-    trigger_ids = await store.event_triggers(kind, subjects, facts)
-    if not trigger_ids:
-        return []
-    if kind == "order.changed":
-        # The order's own facts, from its row now, never from the event (§7.1, §12.1).
-        row = await store.order_facts(facts["order_id"])
-        if row is None:
-            return []  # the order is gone
-        facts = {**facts, **row}
     if kind in ("order.changed", "order_item.changed"):
-        # The transition, not only the status (§7.1): one fire per change to a status, a
-        # plain edit in it firing nothing more, a return to it firing again.
-        change = await store.transition(facts["order_id"], facts.get("item_id"), facts["status"])
-        key = f"{key}:{change}"
+        fires = await _change_fires(store, found)
+    else:
+        ids = await store.event_triggers(kind, subjects, facts)
+        fires = [(t, fire_workflow_id(t, key), facts) for t in ids]
     started: list[str] = []
-    for trigger_id in trigger_ids:
-        workflow_id = fire_workflow_id(trigger_id, key)
+    for trigger_id, workflow_id, fire_facts in fires:
         try:
             await client.start_workflow(
                 FIRE_WORKFLOW,
-                args=[trigger_id, facts],
+                args=[trigger_id, fire_facts],
                 id=workflow_id,
                 task_queue=task_queue,
                 execution_timeout=FIRE_TIMEOUT,

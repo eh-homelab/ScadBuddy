@@ -154,7 +154,7 @@ class EventTiming(BaseModel):
         if isinstance(value, dict) and "slug" in value:
             value = dict(value)
             slug = value.pop("slug")
-            if "subject" in value:
+            if slug is not None and value.get("subject") is not None:
                 raise ValueError("give subject or slug, not both")
             if slug is not None:
                 if not isinstance(slug, str) or not re.match(_SLUG, slug):
