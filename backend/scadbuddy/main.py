@@ -67,6 +67,7 @@ from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
+from scadbuddy.auth.revoke import revoke_retired
 from scadbuddy.auth.service_credentials import grant_caller_views
 from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
@@ -1089,16 +1090,20 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
-    """At start, after the migrations: each caller's role its own view, and the
-    credentials due. A failure is logged, never fatal, as `grant_at_start`."""
+    """At start, after the migrations: each caller's role its own view, a retired
+    caller's role nothing (#5298 Task 11), and the credentials due. A failure is logged,
+    never fatal, as `grant_at_start`."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
             tables = grant_callers(conn)
+            revoked = revoke_retired(conn)
         if granted:
             logger.info("granted the callers' credential views", extra={"roles": granted})
         if tables:
             logger.info("granted the callers' tables", extra={"roles": tables})
+        if revoked:
+            logger.info("revoked the retired callers' roles", extra={"roles": revoked})
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")

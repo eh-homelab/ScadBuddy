@@ -125,7 +125,7 @@ def grant_role(
 def owns_schema(conn: Connection[Any]) -> bool:
     """Whether this connection's role may migrate: the ledger is missing (a new schema,
     which whoever connects first creates) or its owner is a role this one belongs to.
-    A role of the deployment's own making (`scadbuddy_print`, `scadbuddy_projects`) is
+    A role of the deployment's own making (`scadbuddy_print`, `scadbuddy_render`) is
     neither, and waits for the API instead."""
     cur = conn.cursor(row_factory=tuple_row)
     schema = cur.execute("SELECT current_schema()").fetchone()
@@ -143,7 +143,7 @@ def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> No
     """Hold ``role`` to ``rows`` of ``table``. Enabling row security takes effect because
     the API's role owns the table (it migrates) and so bypasses it; `everyone`, the
     permissive policy, keeps every other non-owner role (a separately credentialed print
-    or projects worker) unrestricted, since with row security on and no policy a role
+    worker) unrestricted, since with row security on and no policy a role
     sees no row. The role's policy is named by its predicate, so a changed predicate
     replaces the old one rather than leaving it in force (and so does af75581's
     unsuffixed ``only_<role>``)."""

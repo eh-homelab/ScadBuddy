@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { API_AI_GRANTS, grantBackendRoles, PROJECTS_AI_GRANTS } from '../src/db/grants.js'
+import { API_AI_GRANTS, grantBackendRoles, revokeRole } from '../src/db/grants.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // #5210: the agent owns its ai_* tables and grants the backend's roles what they use of them.
@@ -37,32 +37,55 @@ describe.skipIf(skip !== '')(`the backend roles' ai_* grants${skip}`, () => {
     return row!.ok
   }
 
-  it('grants the API its list and the projects role its own, and nothing more', async () => {
+  const asAgent = async <T>(run: (sql: postgres.ReservedSql) => Promise<T>): Promise<T> => {
     const reserved = await t.db.sql.reserve()
     try {
       await reserved.unsafe(`SET ROLE "${roles.agent}"`)
-      expect(await grantBackendRoles(reserved, roles.projects)).toEqual([roles.api, roles.projects])
+      return await run(reserved)
     } finally {
       await reserved.unsafe('RESET ROLE')
       reserved.release()
     }
+  }
+
+  // What the agent granted `scadbuddy_projects` before ScadBuddy#5298.
+  const OLD_PROJECTS_AI_GRANTS = ['ai_payload_keys', 'ai_forgotten_subjects', 'ai_sessions', 'ai_mcp_tokens', 'ai_settings']
+
+  it('grants the API its list and the projects role nothing', async () => {
+    expect(await asAgent(sql => grantBackendRoles(sql, roles.projects))).toEqual([roles.api])
     for (const [table, privileges] of Object.entries(API_AI_GRANTS)) {
       for (const p of privileges) expect(await can(roles.api, table, p), `${roles.api} ${p} ${table}`).toBe(true)
     }
-    for (const [table, privileges] of Object.entries(PROJECTS_AI_GRANTS)) {
-      for (const p of privileges) expect(await can(roles.projects, table, p), `${roles.projects} ${p} ${table}`).toBe(true)
+    for (const table of Object.keys(API_AI_GRANTS)) {
+      for (const p of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+        expect(await can(roles.projects, table, p), `${roles.projects} ${p} ${table}`).toBe(false)
+      }
     }
-    // ScadBuddy#5298: a run's payload keys come through the API, sealed.
-    for (const p of ['SELECT', 'INSERT', 'DELETE']) {
-      expect(await can(roles.projects, 'ai_payload_keys', p), `${roles.projects} ${p} ai_payload_keys`).toBe(false)
+  })
+
+  it('takes back what it granted the projects role, once, and leaves the API\'s grants', async () => {
+    await asAgent(async sql => {
+      for (const table of OLD_PROJECTS_AI_GRANTS) await sql.unsafe(`GRANT SELECT, INSERT ON "${table}" TO "${roles.projects}"`)
+    })
+    // A backend table the API's role owns and granted (a superuser's grant is recorded as
+    // the owner's): the API takes that back itself.
+    await t.db.sql.unsafe(`CREATE TABLE settings_like (id int)`)
+    await t.db.sql.unsafe(`ALTER TABLE settings_like OWNER TO "${roles.api}"`)
+    await t.db.sql.unsafe(`GRANT SELECT ON settings_like TO "${roles.projects}"`)
+    for (const table of OLD_PROJECTS_AI_GRANTS) expect(await can(roles.projects, table, 'SELECT')).toBe(true)
+
+    expect(await asAgent(sql => grantBackendRoles(sql, roles.projects))).toEqual([roles.api])
+
+    for (const table of OLD_PROJECTS_AI_GRANTS) {
+      for (const p of ['SELECT', 'INSERT']) expect(await can(roles.projects, table, p), `${roles.projects} ${p} ${table}`).toBe(false)
     }
-    expect(await can(roles.projects, 'ai_forgotten_subjects', 'SELECT')).toBe(false)
-    expect(await can(roles.projects, 'ai_operations', 'SELECT')).toBe(false)
-    // ScadBuddy#5298: a session's tiers and the approval timeout come through the API.
-    for (const table of ['ai_sessions', 'ai_mcp_tokens', 'ai_settings']) {
-      expect(await can(roles.api, table, 'SELECT'), `${roles.api} SELECT ${table}`).toBe(true)
-      expect(await can(roles.projects, table, 'SELECT'), `${roles.projects} SELECT ${table}`).toBe(false)
-    }
+    expect(await can(roles.projects, 'settings_like', 'SELECT')).toBe(true)
+    expect(await asAgent(sql => revokeRole(sql, roles.projects))).toEqual([])
+  })
+
+  it('revokes nothing from a missing role or its own', async () => {
+    expect(await asAgent(sql => revokeRole(sql, `absent_${randomUUID().replaceAll('-', '').slice(0, 8)}`))).toEqual([])
+    expect(await asAgent(sql => revokeRole(sql, roles.agent))).toEqual([])
   })
 
   it('grants nobody on one shared role', async () => {

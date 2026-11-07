@@ -76,7 +76,6 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
 ROLES: Mapping[ServiceCaller, str] = {
     "agent": "scadbuddy_agent",
     "print": "scadbuddy_print",
-    "projects": "scadbuddy_projects",
 }
 
 #: The views a caller reads besides its own credentials': the agent checks a person's
@@ -84,7 +83,6 @@ ROLES: Mapping[ServiceCaller, str] = {
 VIEWS: Mapping[ServiceCaller, tuple[str, ...]] = {
     "agent": ("service_credentials_agent", "auth_sessions_agent"),
     "print": ("service_credentials_print",),
-    "projects": ("service_credentials_projects",),
 }
 
 PREFIX = "sbsvc_"

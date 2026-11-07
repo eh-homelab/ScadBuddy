@@ -14,7 +14,9 @@ database owner and runs SQL on the agent's `ai_*` tables. The render and print w
 each connect as a role of their own, with the grant lists in `render/worker_role.py`
 (`RENDER_GRANTS`) and `auth/caller_grants.py` (`PRINT_GRANTS`, and `AGENT_GRANTS` for
 the agent). The projects worker has no database client (#5298): it reaches flows,
-operations and payload keys through CRUD routes, and `PROJECTS_GRANTS` is empty. Template `pipeline/` Python runs in
+operations and payload keys through CRUD routes, and has no grant list; the API and the
+agent revoke what its old role `scadbuddy_projects` held at every start (`auth/revoke.py`,
+`agent/src/db/grants.ts` `revokeRole`). Template `pipeline/` Python runs in
 the render worker's pod, and openscad and `openscad-lsp` run in the API's pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
