@@ -345,6 +345,32 @@ def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
 REQUOTED: frozenset[ItemStatus] = frozenset({"quoted", "approved", "printed", "failed"})
 
 
+def stale_attempt(
+    attempt: Fulfilment, quotes: Iterable[Quote], revisions: Iterable[Revision]
+) -> bool:
+    """Whether a production attempt was made before the revision the accepted quote
+    prices: it printed an earlier design (#5350), so it is never accepted
+    (`fulfilment_stale`). A test print's attempt, a quote that names no revision and an
+    item with no accepted quote say nothing. The order detail marks such an attempt
+    ``stale`` by this same rule (#5592).
+
+    The two ``created_at`` values come from two transactions: the attempt's is ``now()``,
+    its transaction's start, and the revision's is ``clock_timestamp()``. Their order holds
+    because every writer of an item takes the order's row lock and reads the item after it:
+    a revision after acceptance is refused while a print of the item is open
+    (``print_in_flight``) and puts the item back to `draft`, and no attempt is recorded or
+    claimed on a `draft` item. So an attempt whose transaction began before the revision and
+    waited on the lock finds the item `draft` and is refused, and every attempt made after
+    the revision starts after the new quote's acceptance, later than the revision."""
+    if attempt.purpose != "production":
+        return False
+    accepted = next((q for q in quotes if q.accepted), None)
+    if accepted is None or accepted.revision_id is None:
+        return False
+    priced = next((r for r in revisions if r.id == accepted.revision_id), None)
+    return priced is not None and attempt.created_at < priced.created_at
+
+
 def requote_open(order: Order, item: OrderItem, quotes: Iterable[Quote]) -> bool:
     """Whether the item takes a new design revision, a quote and a quote's acceptance:
     while :func:`item_open`, and past `quoted` while it was revised after acceptance
@@ -1270,7 +1296,8 @@ class Lifecycle:
         With ``after_acceptance`` (#5350) the item is an accepted one, on an `accepted`,
         `in_production` or `ready` order not on hold: `order_not_accepted` before that,
         `item_locked` once shipped, `item_not_priced` for an item with no accepted quote
-        (use the plain route), `print_in_flight` while a print of it runs. Its accepted
+        (use the plain route), `print_in_flight` while a print of it runs,
+        `item_partly_fulfilled` once an attempt of it is accepted (#5592). Its accepted
         quote stays accepted until a quote of the new revision is (`_revise`)."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
@@ -1342,6 +1369,17 @@ class Lifecycle:
                 items=[item.id],
             )
         self._none_in_flight(conn, item)
+        accepted = [f for f in self.store.fulfilments(item.id, conn=conn) if f.accepted_at]
+        if accepted:
+            # #5592: the accepted units are real goods of the agreed design. A new design
+            # would count them as made of it, or leave them uncounted; neither is true.
+            made = sum(f.quantity for f in accepted)
+            raise LifecycleError(
+                "item_partly_fulfilled",
+                f"item {item.id} has accepted attempts ({made} of {item.quantity} made of the"
+                " agreed design): cancel the item and add one with the new design",
+                items=[item.id],
+            )
 
     def add_item(
         self,
@@ -2242,12 +2280,14 @@ class Lifecycle:
 
     def _before_priced_design(self, conn: Conn, item: OrderItem, attempt: Fulfilment) -> bool:
         """Whether the attempt was made before the revision the accepted quote prices: it
-        printed an earlier design (#5350). A quote that names no revision says nothing."""
-        accepted = next((q for q in self.store.quotes(item.id, conn=conn) if q.accepted), None)
+        printed an earlier design (#5350). The rule, and why the order of the two
+        ``created_at`` values holds across their transactions, is :func:`stale_attempt`."""
+        quotes = self.store.quotes(item.id, conn=conn)
+        accepted = next((q for q in quotes if q.accepted), None)
         if accepted is None or accepted.revision_id is None:
             return False
         priced = self.store.revision(accepted.revision_id, conn=conn)
-        return priced is not None and attempt.created_at < priced.created_at
+        return stale_attempt(attempt, quotes, [] if priced is None else [priced])
 
     def update_fulfilment(
         self, order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, by: Actor

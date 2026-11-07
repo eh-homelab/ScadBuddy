@@ -769,8 +769,9 @@ export const orderTools: Tool[] = [
       '`order_not_accepted` on a draft or quoted order (use order_item_revision_add), `order_closed`/' +
       '`order_cancelled`, `order_on_hold`, `item_not_open` for a fulfilled or cancelled item (every item of a ' +
       'ready or shipped order is one, so the tool never works there and `item_locked` is not reached), ' +
-      '`item_not_priced` for an item with no accepted quote (use order_item_revision_add), `item_custom`, and ' +
-      '`print_in_flight` while a print of it runs.',
+      '`item_not_priced` for an item with no accepted quote (use order_item_revision_add), `item_custom`, ' +
+      '`print_in_flight` while a print of it runs, and `item_partly_fulfilled` once an attempt of it is accepted ' +
+      '(those units are the agreed design: cancel the item and add one with the new design).',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -963,7 +964,8 @@ export const orderTools: Tool[] = [
       'item, the next returns it to approved), edit one not yet accepted (`fulfilment_id` with `attempt`), or accept ' +
       'one (`fulfilment_id` with `accept: true`): its quantity counts as made, and the item is fulfilled once its ' +
       'accepted attempts reach its quantity. An attempt made before the design the accepted quote prices (an item ' +
-      'revised after acceptance) is refused `fulfilment_stale`. Needs an accepted order.',
+      'revised after acceptance) is refused `fulfilment_stale`; order_get marks such an attempt `stale: true`. ' +
+      'Needs an accepted order.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,

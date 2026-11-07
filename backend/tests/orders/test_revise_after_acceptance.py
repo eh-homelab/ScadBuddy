@@ -1,12 +1,13 @@
 """An accepted item revised after acceptance (#5350, spec 2026-10-18 §3.5 "As built"): the
 new design waits for its own quote and that quote's acceptance, and the old accepted price
 stands until then. Refused before acceptance, once shipped, ended or on hold, on a settled
-item, on an item with no accepted quote, and while a print runs. The lock stays per item:
+item, on an item with no accepted quote, while a print runs, and once an attempt is
+accepted (#5592). The lock stays per item:
 the quantity stays pinned, the old quote is never accepted again."""
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -15,6 +16,7 @@ from scadbuddy.orders.lifecycle import (
     LifecycleError,
     ManualQuoteInput,
     requote_open,
+    stale_attempt,
 )
 from scadbuddy.orders.models import Fulfilment, Order, OrderItem, Quote
 from scadbuddy.orders.store import OrderStore
@@ -310,3 +312,74 @@ def test_the_old_designs_attempt_is_never_accepted(shop: Shop, pool: PgPool, how
     )
     shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
     assert shop.get_item(item).status == "fulfilled"
+
+
+def test_an_item_with_an_accepted_attempt_refuses_it(shop: Shop) -> None:
+    """#5592: units accepted of the agreed design are real goods. A new design would count
+    them as made of it, so the revision is refused, and nothing changes."""
+    order, item = shop.accepted(quantity=3)
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    before = shop.get_item(item)
+    assert before.status == "approved"
+
+    with pytest.raises(LifecycleError) as refused:
+        revise(shop, order, item)
+    assert refused.value.slug == "item_partly_fulfilled"
+    assert refused.value.items == [item.id]
+    assert "1 of 3" in str(refused.value)
+    assert shop.get_item(item) == before
+    assert len(shop.rows.revisions(item.id)) == 1
+
+
+def test_attempts_not_accepted_let_it_through(shop: Shop) -> None:
+    """Only an accepted attempt refuses the revision: one not accepted stays, stale."""
+    order, item = shop.accepted(quantity=3)
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=0, outcome="failed"), BY
+    )
+    revise(shop, order, item)
+    assert shop.get_item(item).status == "draft"
+
+
+def _pin(pool: PgPool, attempt: Fulfilment, at: datetime) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET created_at = %s WHERE id = %s", (at, attempt.id)
+        )
+
+
+def test_stale_attempt_follows_the_accepted_quotes_revision(shop: Shop, pool: PgPool) -> None:
+    """`stale_attempt` is the one rule for the refusal and the order detail (#5592)."""
+    order, item = shop.accepted()
+    first = shop.rows.revisions(item.id)[0]
+    old = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    # Pinned just after the first revision, so before any revision made later.
+    _pin(pool, old, first.created_at + timedelta(microseconds=1))
+
+    def stale(attempt_id: str) -> bool:
+        attempt = next(f for f in shop.rows.fulfilments(item.id) if f.id == attempt_id)
+        return stale_attempt(attempt, shop.rows.quotes(item.id), shop.rows.revisions(item.id))
+
+    assert stale(old.id) is False
+    revise(shop, order, item)
+    # The old quote still stands, and it prices the first revision.
+    assert stale(old.id) is False
+    new = requote(shop, order, item, 1200)
+    shop.lifecycle.accept_quote(order.id, item.id, new.id, BY)
+    assert stale(old.id) is True
+    fresh = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    assert stale(fresh.id) is False
+    # A test print's attempt is never stale: it is never accepted.
+    attempt = next(f for f in shop.rows.fulfilments(item.id) if f.id == old.id)
+    test = attempt.model_copy(update={"purpose": "test"})
+    assert stale_attempt(test, shop.rows.quotes(item.id), shop.rows.revisions(item.id)) is False

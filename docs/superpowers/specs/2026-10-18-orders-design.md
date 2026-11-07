@@ -385,8 +385,13 @@ its old price (seen on ORD-2026-3).
   `TAKES_ITEMS` lists it), once it has ended
   (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). It is refused for a
   fulfilled or cancelled item (`item_not_open`), a custom item (`item_custom`), an item
-  with no accepted quote (`item_not_priced`: use the plain route, #5349), and while a
-  print of the item is queued or running (`print_in_flight`).
+  with no accepted quote (`item_not_priced`: use the plain route, #5349), while a
+  print of the item is queued or running (`print_in_flight`), and once an attempt of the
+  item is accepted (`item_partly_fulfilled`, #5592). Accepted units are real goods of
+  the agreed design. A new design would count them as made of it, or leave them out of
+  the count, and both are false. To change the design of the rest, the shop cancels the
+  item and adds one with the new design. So an accepted attempt never predates the
+  revision the accepted quote prices, and the `made` sum counts the priced design only.
 - The accepted quote stays accepted. The order's totals keep the price the customer
   agreed. The item is marked `revised_after_acceptance` (a new column on `order_items`).
   An item in `quoted`, `approved`, `printed` or `failed` goes back to `draft`, so it is
@@ -395,7 +400,17 @@ its old price (seen on ORD-2026-3).
   on the item, not accepted. Once a quote of the new design is accepted, the item is
   `approved` again, and accepting that old attempt is refused (`fulfilment_stale`): an
   attempt made before the revision the accepted quote prices printed an earlier design
-  (#5582, `Lifecycle.accept_fulfilment`).
+  (#5582, `Lifecycle.accept_fulfilment`). The rule is `lifecycle.py` `stale_attempt`.
+  `GET /orders/{id}` marks such an attempt `stale: true` by the same rule (#5592), and
+  the drawer shows it as "Old design" with no Accept (`FulfilmentForm`).
+- The rule compares the attempt's `created_at` (`now()`, the start of its transaction)
+  with the revision's (`clock_timestamp()`). The two come from separate transactions.
+  Their order holds because every writer of an item takes the order's row lock and reads
+  the item after it. The revision is refused while a print of the item is open
+  (`print_in_flight`), and it puts the item back to `draft`. No attempt is recorded or
+  claimed on a `draft` item (`_fulfillable`, `claim_print`). So an attempt whose
+  transaction started before the revision and waited on the lock is refused. Every
+  attempt made after the revision starts after the new quote's acceptance.
 - While the mark stands, the lock is `requote_open` (`orders/lifecycle.py`), not
   `item_open`. The item takes a quote (manual or slice), a quote's acceptance, a
   customer's answer, and more revisions on either route. Its quantity stays pinned.

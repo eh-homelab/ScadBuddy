@@ -265,6 +265,21 @@ describe('revisions after acceptance mock (#5350)', () => {
     const stale = await failure(api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, old.id))
     expect(stale?.problem.type).toBe(type('fulfilment_stale'))
     expect(state.fulfilments.find((f) => f.id === old.id)!.accepted_at).toBeNull()
+    // #5592: the detail marks it `stale` by the same rule; a new attempt is not.
+    const fresh = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    const flags = Object.fromEntries((await itemOf()).fulfilments.map((f) => [f.id, f.stale]))
+    expect(flags).toEqual({ [old.id]: true, [fresh.id]: false })
+  })
+
+  it('refuses a new design once an attempt is accepted (#5592)', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.quantity = 3
+    const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
+    expect((await itemOf()).status).toBe('approved')
+    const refused = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' }))
+    expect(refused?.problem.type).toBe(type('item_partly_fulfilled'))
+    expect(refused?.problem.detail).toContain('1 of 3')
+    expect(await itemOf()).toMatchObject({ status: 'approved', revised_after_acceptance: false })
   })
 
   it('refuses as the backend does', async () => {

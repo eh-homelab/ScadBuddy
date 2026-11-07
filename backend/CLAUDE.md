@@ -601,8 +601,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   …/items/{item}/revisions/after-acceptance` (`Lifecycle.add_revision` with
   `after_acceptance`, checked by `_revisable_after_acceptance`), the plain revision body,
   for an item with an accepted quote on a `TAKES_ITEMS` order not on hold; refused
-  `order_not_accepted`, `item_locked`, `item_not_open`, `item_not_priced`, `item_custom`
-  and `print_in_flight`. `_revise` keeps the accepted quote (the old price stands in the
+  `order_not_accepted`, `item_locked`, `item_not_open`, `item_not_priced`, `item_custom`,
+  `print_in_flight` and, once an attempt is accepted, `item_partly_fulfilled` (#5592). `_revise` keeps the accepted quote (the old price stands in the
   totals), sets `order_items.revised_after_acceptance`, puts a `REQUOTED` item back to
   `draft` (no print or fulfilment at the old quote) and writes
   `revision.added_after_acceptance` (with `accepted_quote_id`). While the mark stands the
@@ -610,7 +610,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   acceptance, a customer's answer and more revisions, never the quantity. `_accept_quote`
   clears the mark; `_reopened_status` gives such an item `quoted` or `draft`.
   `accept_fulfilment` refuses an attempt made before the accepted quote's revision
-  (`fulfilment_stale`, `_before_priced_design`, #5582). Agent
+  (`fulfilment_stale`, `_before_priced_design`, #5582); the rule is `stale_attempt`,
+  which `GET /orders/{id}` also gives each attempt as `stale` (`ItemAttempt`, #5592;
+  the drawer's "Old design", `FulfilmentForm`). Agent
   `order_item_revision_add_after_acceptance` (outward; `order_item_revision_add` stays
   write); frontend `afterAcceptance.ts` `reviseMode`, `priceOpen`, `reviseWarning` in
   `RevisionsPanel` and `AddItemDialog` (`revise` with `mode`).

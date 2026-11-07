@@ -75,6 +75,7 @@ from scadbuddy.orders.lifecycle import (
     OrderEdit,
     ShipmentEdit,
     ShipmentInput,
+    stale_attempt,
 )
 from scadbuddy.orders.models import (
     Approval,
@@ -355,10 +356,32 @@ class CancelBody(BaseModel):
 # -- views -------------------------------------------------------------------------------------
 
 
+class ItemAttempt(Fulfilment):
+    """An attempt as the order detail shows it. ``stale``: it printed a design earlier
+    than the one the accepted quote prices (#5592), so its acceptance is refused
+    (`fulfilment_stale`); the rule is `lifecycle.py` `stale_attempt`."""
+
+    stale: bool
+
+
 class ItemDetail(OrderItem):
     quotes: list[Quote]
-    fulfilments: list[Fulfilment]
+    fulfilments: list[ItemAttempt]
     revisions: list[Revision]
+
+
+def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
+    quotes = store.quotes(item.id)
+    revisions = store.revisions(item.id)
+    return ItemDetail(
+        **item.model_dump(),
+        quotes=quotes,
+        fulfilments=[
+            ItemAttempt(**f.model_dump(), stale=stale_attempt(f, quotes, revisions))
+            for f in store.fulfilments(item.id, purpose=None)
+        ],
+        revisions=revisions,
+    )
 
 
 class OrderTotals(BaseModel):
@@ -962,15 +985,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
         order = store.order(order_id)
         if order is None:
             return None
-        items = [
-            ItemDetail(
-                **item.model_dump(),
-                quotes=store.quotes(item.id),
-                fulfilments=store.fulfilments(item.id, purpose=None),
-                revisions=store.revisions(item.id),
-            )
-            for item in store.items(order.id)
-        ]
+        items = [item_detail(store, item) for item in store.items(order.id)]
         charges = store.charges(order.id)
         payments = store.payments(order.id)
         return OrderDetail(
