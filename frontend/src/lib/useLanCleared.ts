@@ -26,6 +26,10 @@ export function useLanCleared(
   const held = Object.keys(cleared).length > 0
   useEffect(() => {
     if (!native) {
+      // This rule needs `native` and `printer` to change in the same render. They do
+      // today: `PrintPicker` derives both from `registryPrinter`. If `native` turned
+      // false a render before `printer` changed, the old printer would match
+      // `clearedOn` here and the values would stay dropped (#5625).
       if (!held || printer === clearedOn) return
       setOptions((current) => ({ ...cleared, ...current }))
       setCleared({})
