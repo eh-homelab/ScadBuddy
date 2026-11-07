@@ -13,13 +13,21 @@ import contextlib
 import hashlib
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, NamedTuple
 
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from scadbuddy.core.events import Event, EventBus, JobEvent, PrintOutcome, VersionCommitted
+from scadbuddy.core.events import (
+    Event,
+    EventBus,
+    JobEvent,
+    OrderChanged,
+    OrderItemChanged,
+    PrintOutcome,
+    VersionCommitted,
+)
 from scadbuddy.flow_triggers.models import EventKind
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT, FIRE_WORKFLOW, schedule_id
@@ -32,14 +40,27 @@ logger = logging.getLogger(__name__)
 PRINT_KINDS: dict[str, EventKind] = {"finished": "print.finished", "failed": "print.failed"}
 
 
-def trigger_event(event: Event) -> tuple[EventKind, str, str, dict[str, Any]] | None:
-    """The trigger event a bus event is: its kind, its template, its key and its facts."""
+class TriggerEvent(NamedTuple):
+    """A bus event as triggers see it: its kind, the subjects it is about (by subject
+    kind, `flow_triggers/models.py` `SUBJECTS`), its fire key and its facts."""
+
+    kind: EventKind
+    subjects: dict[str, str]
+    key: str
+    facts: dict[str, Any]
+
+
+def trigger_event(event: Event) -> TriggerEvent | None:
+    """The trigger event a bus event is, or None for one no trigger fires on."""
     if isinstance(event, JobEvent) and event.kind == "job.done":
         facts = {"kind": "render.finished", "slug": event.slug, "job_id": event.job_id}
-        return "render.finished", event.slug, f"job:{event.job_id}", facts
+        return TriggerEvent(
+            "render.finished", {"template": event.slug}, f"job:{event.job_id}", facts
+        )
     if isinstance(event, VersionCommitted):
         facts = {"kind": "model.changed", "slug": event.slug, "commit": event.commit}
-        return "model.changed", event.slug, f"commit:{event.slug}:{event.commit}", facts
+        key = f"commit:{event.slug}:{event.commit}"
+        return TriggerEvent("model.changed", {"template": event.slug}, key, facts)
     if isinstance(event, PrintOutcome) and (kind := PRINT_KINDS.get(event.outcome)) is not None:
         print_facts: dict[str, Any] = {
             "kind": kind,
@@ -48,7 +69,28 @@ def trigger_event(event: Event) -> tuple[EventKind, str, str, dict[str, Any]] | 
             "output_id": event.output_id,
             "printer": event.printer,
         }
-        return kind, event.slug, f"print:{event.run_id}", print_facts
+        return TriggerEvent(kind, {"template": event.slug}, f"print:{event.run_id}", print_facts)
+    if isinstance(event, OrderChanged):
+        # The key carries the status: one fire per transition, not one per edit (§7.1).
+        order_facts: dict[str, Any] = {
+            "kind": "order.changed",
+            "order_id": event.order_id,
+            "status": event.status,
+        }
+        key = f"order:{event.order_id}:{event.status}"
+        return TriggerEvent("order.changed", {"order": event.order_id}, key, order_facts)
+    if isinstance(event, OrderItemChanged):
+        item_facts: dict[str, Any] = {
+            "kind": "order_item.changed",
+            "order_id": event.order_id,
+            "item_id": event.item_id,
+            "status": event.status,
+            "attempt": event.attempt,
+        }
+        attempt = "-" if event.attempt is None else str(event.attempt)
+        key = f"order_item:{event.item_id}:{event.status}:{attempt}"
+        subjects = {"order": event.order_id, "order_item": event.item_id}
+        return TriggerEvent("order_item.changed", subjects, key, item_facts)
     return None
 
 
@@ -63,9 +105,18 @@ async def fire_event(
     found = trigger_event(event)
     if found is None:
         return []
-    kind, slug, key, facts = found
+    kind, subjects, key, facts = found
+    trigger_ids = await store.event_triggers(kind, subjects, facts)
+    if not trigger_ids:
+        return []
+    if kind == "order.changed":
+        # The order's own facts, from its row now, never from the event (§7.1, §12.1).
+        row = await store.order_facts(facts["order_id"])
+        if row is None:
+            return []  # the order is gone
+        facts = {**facts, **row}
     started: list[str] = []
-    for trigger_id in await store.event_triggers(kind, slug):
+    for trigger_id in trigger_ids:
         workflow_id = fire_workflow_id(trigger_id, key)
         try:
             await client.start_workflow(

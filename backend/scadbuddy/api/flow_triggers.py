@@ -372,7 +372,7 @@ async def update_flow_trigger(
     if body.schedule is not None:
         fields.update(kind="schedule", schedule=body.schedule.model_dump(), event=None)
     elif body.event is not None:
-        fields.update(kind="event", event=body.event.model_dump(), schedule=None)
+        fields.update(kind="event", event=body.event.model_dump(exclude_none=True), schedule=None)
     elif "schedule" in sent or "event" in sent:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "A trigger needs its schedule or event."

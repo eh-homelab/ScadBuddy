@@ -27,10 +27,12 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.flow_triggers.models import (
     EventKind,
+    EventTiming,
     Fire,
     FireOutcome,
     StandingGrant,
     Trigger,
+    matches,
     state_hash,
 )
 from scadbuddy.flows.grants import MAX_EXPIRY, GrantSpec, GrantStatus, narrowed_to_order
@@ -138,9 +140,16 @@ class TriggerStore:
     async def delete(self, trigger_id: str, revoked_by: str) -> bool:
         return await self._call(self._delete, trigger_id, revoked_by)
 
-    async def event_triggers(self, kind: EventKind, slug: str) -> list[str]:
+    async def event_triggers(
+        self, kind: EventKind, subjects: dict[str, str], facts: dict[str, Any]
+    ) -> list[str]:
         """The unpaused event triggers this event fires."""
-        return await self._call(self._event_triggers, kind, slug)
+        return await self._call(self._event_triggers, kind, subjects, facts)
+
+    async def order_facts(self, order_id: str) -> dict[str, Any] | None:
+        """What an order event's facts take from the order's row at fire time (orders
+        spec §7.1): its customer. None when the order is gone."""
+        return await self._call(self._order_facts, order_id)
 
     # -- standing grants --------------------------------------------------------
 
@@ -249,7 +258,7 @@ class TriggerStore:
                     trigger.definition_id,
                     trigger.kind,
                     _json(trigger.schedule and trigger.schedule.model_dump()),
-                    _json(trigger.event and trigger.event.model_dump()),
+                    _json(trigger.event and trigger.event.model_dump(exclude_none=True)),
                     trigger.overlap,
                     _json(trigger.inputs),
                     trigger.approval_timeout_s,
@@ -343,15 +352,37 @@ class TriggerStore:
             deleted = conn.execute("DELETE FROM flow_triggers WHERE id = %s", (trigger_id,))
         return deleted.rowcount > 0
 
-    def _event_triggers(self, kind: EventKind, slug: str) -> list[str]:
+    def _event_triggers(
+        self, kind: EventKind, subjects: dict[str, str], facts: dict[str, Any]
+    ) -> list[str]:
+        """The live event triggers of `kind` whose subject is one of `subjects` (by its
+        kind) or unset, and whose `match` the event's `facts` pass (orders spec §7.1)."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id FROM flow_triggers WHERE kind = 'event' AND NOT paused"
-                " AND event ->> 'kind' = %s"
-                " AND (event ->> 'slug' IS NULL OR event ->> 'slug' = %s)",
-                (kind, slug),
+                "SELECT id, event FROM flow_triggers WHERE kind = 'event' AND NOT paused"
+                " AND event ->> 'kind' = %s",
+                (kind,),
             ).fetchall()
-        return [row["id"] for row in rows]
+        found: list[str] = []
+        for row in rows:
+            timing = EventTiming.model_validate(row["event"])
+            subject = timing.subject
+            if (
+                subject is not None
+                and subject.id is not None
+                and (subjects.get(subject.kind) != subject.id)
+            ):
+                continue
+            if matches(timing, facts):
+                found.append(row["id"])
+        return found
+
+    def _order_facts(self, order_id: str) -> dict[str, Any] | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT customer_id FROM orders WHERE id = %s", (order_id,)
+            ).fetchone()
+        return None if row is None else {"customer_id": row["customer_id"]}
 
     def _attach_grant(
         self,

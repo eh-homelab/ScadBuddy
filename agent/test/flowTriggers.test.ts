@@ -92,6 +92,22 @@ describe('flow trigger tools (#2484)', () => {
     })
   })
 
+  it('sends an order event with its subject and match (#4252)', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/flow-triggers`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: TRIGGER }, { status: 201 })
+      }),
+    )
+    const event = { kind: 'order.changed', subject: { kind: 'order', id: 'o1' }, match: { status: ['accepted'] } }
+    await tool('create_flow_trigger').execute({ definition_id: DEFINITION, event }, ctx())
+    expect(sent).toEqual({ definition_id: DEFINITION, event, overlap: 'skip' })
+    expect(() =>
+      tool('create_flow_trigger').parse({ definition_id: DEFINITION, event: { kind: 'order.changed', match: { colour: ['red'] } } }),
+    ).toThrow()
+  })
+
   it('refuses fields the routes do not take', () => {
     // An author the model makes up is dropped: the backend names the author from the request.
     const parsed = tool('create_flow_trigger').parse({
