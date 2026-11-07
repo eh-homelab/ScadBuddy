@@ -37,12 +37,13 @@ QUEUE_FULL = "queue-full"
 #: `PROJECT_POOL_TIMEOUT` (5 s), as the SQL store's pool wait does; a credential exchange
 #: is outside these bounds.
 PROJECT_BUDGET = 4.0
-#: An accept's bounds. Each wait of a try lasts at most `ACCEPT_TIMEOUT` (accepts took
-#: 0.03-0.4 s on prod) and no try starts past `ACCEPT_BUDGET`, so each of `ACCEPT_RETRY`'s
-#: three attempts ends within 2 s (3 s when a quick failure is retried once first), and
-#: with their backoff (1 s, 2 s) the request is answered within the route's 10 s deadline,
-#: as a failing SQL accept was. An API that stays slower than that fails the three
-#: attempts, and the request is answered render-unstartable.
+#: An accept's bounds. Each wait of a try (connect, send, read) lasts at most
+#: `ACCEPT_TIMEOUT` (accepts took 0.03-0.4 s on prod) and no try starts past
+#: `ACCEPT_BUDGET`, so `ACCEPT_RETRY`'s three attempts with their backoff (1 s, 2 s)
+#: usually end within the route's 10 s deadline. A slow connect followed by a slow read
+#: can take a try past that; the request is then answered still-accepting at the
+#: deadline, and the run's last attempt decides. A read timeout on the last attempt
+#: passes (`pipelines.ACCEPT_RETRY`), so a slow API is never answered render-unstartable.
 ACCEPT_TIMEOUT = 2.0
 ACCEPT_BUDGET = 1.0
 

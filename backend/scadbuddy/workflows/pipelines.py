@@ -152,7 +152,8 @@ LOOKUP_RETRY = RetryPolicy(
 #: accepted: a row the API committed after the client stopped waiting on that last
 #: attempt stays pending under this run, which completes, until the unsettled sweep
 #: (`RenderService.settle_closed`, every housekeeping prune) fails it as closed; until
-#: then it counts against `max_pending`.
+#: then it counts against `max_pending`, and watchers see its `job.pending` event with
+#: no progress after it.
 ACCEPT_RETRY = RetryPolicy(
     maximum_attempts=ACCEPT_ATTEMPTS,
     initial_interval=timedelta(seconds=1),
