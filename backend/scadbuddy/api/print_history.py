@@ -27,6 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
+import psycopg
 from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
@@ -480,8 +481,9 @@ class PrintDetail(PrintSummary):
     #: Bambuddy's bookkeeping of the print (#1860); None once it no longer has it.
     record: PrintRecord | None = None
     #: The slicer settings per filament slot the print was laid out with (#5627), from
-    #: the ScadBuddy run that queued it (``PrintRunResult.part_settings``): a reprint
-    #: sends them again. None for none, or for a print no recorded run queued.
+    #: the ScadBuddy run that queued it (``PrintRunResult.part_settings``): only the
+    #: request's, which a reprint sends again; a template's ``part_print_settings`` (#5626)
+    #: apply again on their own. None for none, or for a print no recorded run queued.
     part_settings: PartSettingsMap | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
@@ -494,7 +496,20 @@ async def _part_settings(
 ) -> PartSettingsMap | None:
     """``link``'s print's settings per slot (#5627): its queue item's send names the run
     that queued it, and that run's result holds them. None when no send names a run (one
-    recorded before #1751, or a print queued outside ScadBuddy) or the run is pruned."""
+    recorded before #1751, or a print queued outside ScadBuddy) or the run is pruned.
+    A failed read is logged and gives None, so the print record still loads."""
+    try:
+        return await _read_part_settings(links, runs, link)
+    except (psycopg.Error, ValueError):
+        logger.warning(
+            "could not read a print's part settings", extra={"archive_id": link.archive_id}
+        )
+        return None
+
+
+async def _read_part_settings(
+    links: PrintLinkStore, runs: PrintRunStore, link: LinkedPrint
+) -> PartSettingsMap | None:
     if link.queue_item_id is None:
         return None
     sends = await links.sends_for(PrintSubject.parse(link.subject))

@@ -11,7 +11,8 @@ from pydantic import ValidationError
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest, run_path
+from scadbuddy.bambuddy.part_settings import PartSettings
+from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest, PrintRunResult, run_path
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import run_key
 from scadbuddy.printers.models import PrinterRow
@@ -99,6 +100,21 @@ def test_a_part_settings_requests_key_is_what_it_was_before_5627() -> None:
         run_key("o" * 32, sent)
         == "3c3db79c76bb5c29227a3696c3354f884f20e88d2bfb1f2eff8650493bc81d56"
     )
+
+
+def test_a_run_result_with_part_settings_crosses_the_converter_whole() -> None:
+    """#5627 review: ``PrintRunResult`` leaves unset part settings out of its dump; through
+    Temporal's pydantic converter it still comes back equal."""
+    result = PrintRunResult(
+        library_file_id=1,
+        copies=1,
+        part_settings={2: PartSettings(top_shell_layers=8)},
+    )
+    converter = pydantic_data_converter.payload_converter
+    payload = converter.to_payloads([result])
+    assert b'"bottom_shell_layers"' not in payload[0].data
+    (back,) = converter.from_payloads(payload, [PrintRunResult])
+    assert back == result
 
 
 def test_a_printer_that_is_not_a_registry_id_is_refused() -> None:

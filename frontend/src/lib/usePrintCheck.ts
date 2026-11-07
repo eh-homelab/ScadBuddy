@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { PrintCheck, PrintRunRequest } from '../api/types'
+import type { PartSettings, PrintCheck, PrintRunRequest } from '../api/types'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { ANALYSIS_DEBOUNCE_MS } from './useAnalysis'
 import { useAsync } from './useAsync'
@@ -24,8 +24,21 @@ export interface PrintCheckState {
   error: Error | undefined
   /** Read the verdict again, as after a failed read. */
   reload: () => void
-  /** #5627 — `verdict` came from a check that read the process's part settings. */
+  /**
+   * #5627 — `verdict` came from a check that read the process's part settings, for the
+   * choices as they stand now. Only the request's own `part_settings` may differ: they do
+   * not change the process's values, and a field typed in must stay enabled.
+   */
   processValuesRead: boolean
+  /** #5627 — the process's part settings, only while `processValuesRead`; else `null`. */
+  processPartSettings: PartSettings | null
+}
+
+/** The request without its `part_settings`: what decides the process's values. */
+function processKey(request: string | null): string | null {
+  if (request === null) return null
+  const { part_settings: _ignored, ...rest } = JSON.parse(request) as PrintRunRequest
+  return JSON.stringify(rest)
 }
 
 /**
@@ -56,6 +69,8 @@ export function usePrintCheck(
   const [kept, setKept] = useState<Answer | null>(null)
   if (state.data && state.data !== kept) setKept(state.data)
   const answer = kept?.source === own && wanted !== null ? kept : null
+  const processRead =
+    !state.error && answer?.processValues === true && processKey(answer.request) === processKey(wanted)
 
   return {
     verdict: state.error ? null : (answer?.verdict ?? null),
@@ -63,6 +78,7 @@ export function usePrintCheck(
     request: wanted,
     error: state.error,
     reload: state.reload,
-    processValuesRead: !state.error && answer?.processValues === true,
+    processValuesRead: processRead,
+    processPartSettings: processRead ? (answer?.verdict.process_part_settings ?? null) : null,
   }
 }

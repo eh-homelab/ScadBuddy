@@ -528,7 +528,16 @@ export function PrintPicker({
    * reads the process's part settings, which a dialog that never opens one does not pay for.
    */
   const [partsOpened, setPartsOpened] = useState(false)
-  const sentParts = takesParts ? sentPartSettings(picker.partSettings) : null
+  /**
+   * #5627 — what the check, the background slice and the run send. An item's print sends
+   * its accepted quote's, as they were quoted: other settings hold Print, and the same body
+   * lets the print reuse the background slice.
+   */
+  const sentParts = !takesParts
+    ? null
+    : itemPrint
+      ? sentPartSettings(itemPrint.quoted)
+      : sentPartSettings(picker.partSettings)
   const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
@@ -1139,7 +1148,7 @@ export function PrintPicker({
         }
       : null
   const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
-  const processParts = check.verdict?.process_part_settings ?? null
+  const processParts = check.processPartSettings
   /**
    * #5627 — an item's print with settings other than its accepted quote's. A setting equal
    * to the process's changes nothing, so it is left out on both sides.
@@ -1463,6 +1472,8 @@ export function PrintPicker({
         printer_id: sentPrinterId,
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
+        // #5627: the quote's, as the background slice was made with them.
+        ...(sentParts === null ? {} : { part_settings: sentParts }),
       })
       close()
     } catch (cause) {
@@ -1842,7 +1853,7 @@ export function PrintPicker({
                               <PartSettingsDisclosure
                                 slotId={slotId}
                                 value={picker.partSettings[String(slotId)]}
-                                process={check.verdict?.process_part_settings ?? null}
+                                process={check.processPartSettings}
                                 // Until a check has read the process's values, a value typed
                                 // could not be told from the process's own.
                                 disabled={!check.processValuesRead}

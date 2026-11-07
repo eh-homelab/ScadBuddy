@@ -301,7 +301,7 @@ class ModelPrintChoices(BaseModel):
 
     # `part_settings` only when some are remembered (#5627): an entry with none reads as
     # it did before the field existed. A lambda with no return annotation, so the schema
-    # stays the model's (`part_settings.PartSettings._set_only` says why).
+    # stays the model's (`part_settings.parts_set_only` says why).
     _parts_when_set = model_serializer(mode="wrap")(
         lambda self, handler: _parts_only_when_set(handler(self))
     )

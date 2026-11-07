@@ -1036,6 +1036,30 @@ def test_a_print_no_run_names_has_no_part_settings(client: TestClient, model: st
 
 
 @respx.mock
+def test_a_failed_part_settings_read_still_gives_the_print(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5627 review: the run's settings are an extra; a failed read of them is logged and
+    the print record loads without them."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1, queue_item_id=7)
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
+    respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
+    mock_bambuddy_lists()
+
+    async def broken(subject: PrintSubject) -> list[PrintSend]:
+        raise psycopg.OperationalError("the database went away")
+
+    monkeypatch.setattr(state(client).print_links, "sends_for", broken)
+
+    response = client.get("/api/v1/prints/35")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["part_settings"] is None
+
+
+@respx.mock
 def test_the_detail_names_a_running_print_s_printer_as_the_list_does(
     client: TestClient, model: str
 ) -> None:

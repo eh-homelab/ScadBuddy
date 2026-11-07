@@ -178,8 +178,9 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     expect(screen.getByTestId('part-settings-toggle-1')).not.toHaveTextContent('changed')
   })
 
-  it('an item print opens on the quote’s settings, sends none while unchanged, and holds Print when changed', async () => {
+  it('an item print opens on the quote’s settings, sends them as the background slice does, and holds Print when changed', async () => {
     const start = vi.fn(async () => undefined)
+    const checked = vi.spyOn(api, 'checkPrint')
     renderPage(
       <PrintPicker
         open
@@ -201,6 +202,11 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     await waitFor(() => expect(screen.getByTestId('run-item-print')).toBeEnabled())
     fireEvent.click(screen.getByTestId('run-item-print'))
     await waitFor(() => expect(start).toHaveBeenCalled())
-    expect((start.mock.calls[0] as unknown[])[0]).not.toHaveProperty('part_settings')
+    const sent = (start.mock.calls[0] as unknown[])[0] as { part_settings?: unknown }
+    expect(sent.part_settings).toEqual({ '1': { top_shell_layers: 8 } })
+    // The same settings as the check's body, which the background slice is made from
+    // (`previewRequest`), so the print reuses that slice.
+    expect(checked).toHaveBeenCalled()
+    for (const call of checked.mock.calls) expect(call[1].part_settings).toEqual(sent.part_settings)
   })
 })

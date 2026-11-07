@@ -511,7 +511,9 @@ class PrintRunResult(BaseModel):
     lan_awaiting_clear: bool = False
     #: The slicer settings per filament slot this print was laid out with (#5571,
     #: #5627), as the request set them (``part_settings.normalised``); ``None`` for none.
-    #: The print record (``GET /prints/{archive_id}``) lists them, so a reprint is exact.
+    #: Only the request's: a template's ``part_print_settings`` (#5626) are not recorded,
+    #: and apply again, as the template has them then, when the print is sent again. The
+    #: print record (``GET /prints/{archive_id}``) lists them.
     part_settings: PartSettingsMap | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
