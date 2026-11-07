@@ -15,6 +15,7 @@ from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
 from scadbuddy.bambuddy.filaments import FilamentPlan, SpoolOption
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.models import DEFAULT_ALGORITHM, RackAlgorithm
+from scadbuddy.bambuddy.part_settings import PartSettingsMap
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PlatePlan,
@@ -77,6 +78,9 @@ class SourceSpec(BaseModel):
     #: them refuses the run (#770).
     stem: str | None = None
     print_settings: dict[str, str] = Field(default_factory=dict)
+    #: The template's settings per slot (#5626, ``OutputNaming.part_settings``),
+    #: computed there too; the request's ``part_settings`` are laid over them.
+    part_settings: PartSettingsMap | None = None
     #: A library file's filament slots, read from the file itself by the route that
     #: starts the run (#2550): every activity reads them from here, since the print
     #: worker mounts no cache, and Bambuddy's filament-requirements outlasts a large

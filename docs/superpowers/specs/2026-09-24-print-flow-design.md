@@ -359,8 +359,43 @@ the block 8 and left the base at 5. The process's `top_shell_thickness` (1.0 mm,
 at 0.2 mm) sets a minimum, so a `top_shell_layers` below it changes nothing, from the
 object, a part or a request.
 
-Not yet: a template's own settings per part (#5626) and the print dialog's controls for
-them (#5627).
+A template declares its own (#5626) in `model.json` as `part_print_settings`, beside
+`print_settings`, with the same keys and limits (`PartSettings`). An unknown key or a
+value out of range fails the load (`InvalidModelMetaError`), as `PRINT_SETTING_VALUES`
+does, and a print of the template is then refused (409), as for a bad `print_settings`.
+A template names the part by its `// color` parameter, never by slot:
+`{"letter_color": {"top_shell_layers": 8}}`. The decision: a slot is a position in the
+colours a render used (`layout.colours`, slot N is colour N-1). It moves when two colour
+parameters take one value (they become one slot) or when a colour's parts are not drawn.
+A colour parameter keeps naming the same parts whatever colours are chosen. The key must
+be an OpenSCAD identifier (`COLOUR_PARAMETER_PATTERN`). `Catalogue.part_print_settings`
+also refuses a key that is not a `// color` parameter of `model.scad`
+(`render/schema.py` `find_annotations`), naming it, so a typo never sets nothing in
+silence. A template with a pipeline (its params need not be `model.scad`'s) or with no
+`model.scad` only logs a warning.
+
+They are read as `model.json` has them now, as `print_settings` are (#770):
+`Catalogue.part_print_settings`, from `LocalOutputs.naming`, which the print worker
+reaches through the internal naming route. The naming turns them into the output's slots
+(`OutputNaming.part_settings`, `part_settings.by_colour`): each parameter's value in the
+output's `params.json` (else the template's default from its cached schema, for an
+output from before #4774) is matched, by `colour_hex`, to the slot of that colour in the
+output's `colors`. A parameter with no value, or whose colour no slot is, sets nothing.
+Two parameters of one colour share its slot; for a key both set, the first declared
+wins. An arranged output (`OutputStore.arranged_from` not empty) takes none: its parts
+come from other outputs or library files, it has no params, and it may be filed under
+any template, so a default colour's slot could be another file's part. The run (`SourceSpec.part_settings`, from the check activity), the background
+slice and the quote (`OutputSource.part_settings`) all reach `plan_run`, where
+`run_part_settings` lays the request's `part_settings` over them, per key
+(`part_settings.laid_under`). The template's go only where a copy can carry them: not on
+an `as_is` 3MF, and only on slots a printed part is made in. So a template's settings
+never refuse a run; only the request's are refused (`part_settings_refusal`). They are
+not in `run_key`, as `print_settings` are not; the copy's `Target.key` digests what the
+copy carries, so a change to them makes a new copy. A slice quote records only the
+request's settings (`order_item_quotes.part_settings`); a print reads the template's as
+they are at that time, as with `print_settings`.
+
+Not yet: the print dialog's controls for them (#5627).
 
 ### The two warnings
 
