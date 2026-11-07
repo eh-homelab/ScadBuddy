@@ -470,14 +470,14 @@ class Settings(BaseSettings):
     # API process (#1060), as SCADBUDDY_TEMPORAL_WORKER_INPROCESS does with every queue,
     # for a deployment without the `scadbuddy-print` worker.
     temporal_print_worker_inprocess: bool = False
+    # SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS: serve the `projects` queue (flow
+    # runs, #1057) inside the API process, as the print flag does for `bambuddy`.
+    temporal_projects_worker_inprocess: bool = False
 
     # SCADBUDDY_PAYMENTS_FAKE_PROVIDER (#4957): offer the fake payment provider, which
     # needs no network, for dev runs and tests. Not a stored setting, so prod cannot pick it.
     payments_fake_provider: bool = False
 
-    # SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS: serve the `projects` queue (flow
-    # runs, #1057) inside the API process, as the print flag does for `bambuddy`.
-    temporal_projects_worker_inprocess: bool = False
     # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
     # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5), and the
     # projects worker calls for a flow's render, print and arrange (#1057), and the render

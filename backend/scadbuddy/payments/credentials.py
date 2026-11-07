@@ -160,6 +160,11 @@ class PaymentCredentials:
         except (SealError, ValueError):
             logger.warning("the stored credential for %s cannot be opened", provider)
             raise CredentialUnreadableError(provider) from None
+        if not isinstance(secrets, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in secrets.items()
+        ):
+            logger.warning("the stored credential for %s is not a map of strings", provider)
+            raise CredentialUnreadableError(provider)
         return Credential(settings=dict(row["settings"]), secrets=secrets)
 
     def rows(self) -> list[ProviderRow]:

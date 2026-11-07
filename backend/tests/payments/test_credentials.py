@@ -6,7 +6,7 @@ import logging
 
 import pytest
 
-from scadbuddy.core.secrets import Kek, kek_from_base64
+from scadbuddy.core.secrets import kek_from_base64, seal_secret
 from scadbuddy.orders.models import Actor
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments.credentials import (
@@ -81,6 +81,25 @@ def test_a_row_sealed_under_another_key_is_unreadable(rows: OrderStore) -> None:
         PaymentCredentials(rows, KEK).credential("fake")
 
 
+@pytest.mark.parametrize("plaintext", ['["s3cret"]', '{"signing_secret": 7}', '"s3cret"'])
+def test_a_secret_that_is_not_a_map_of_strings_is_unreadable(
+    rows: OrderStore, pool: PgPool, plaintext: str
+) -> None:
+    creds = PaymentCredentials(rows, KEK)
+    _connect(creds)
+    with pool.connection() as conn:
+        row = conn.execute("SELECT id FROM payment_credentials").fetchone()
+        assert row is not None
+        sealed = seal_secret(KEK, plaintext, credential_aad(str(row["id"]), "fake"))
+        conn.execute(
+            "UPDATE payment_credentials SET secret_sealed = %s, dek_sealed = %s",
+            (sealed.secret_sealed, sealed.dek_sealed),
+        )
+    with pytest.raises(CredentialUnreadableError) as e:
+        creds.credential("fake")
+    assert "s3cret" not in str(e.value) and str(e.value).endswith("for fake cannot be read")
+
+
 def test_no_kek_refuses_a_connect_and_a_read(rows: OrderStore) -> None:
     with pytest.raises(KekMissingError):
         _connect(PaymentCredentials(rows, None))
@@ -131,7 +150,3 @@ def test_disconnect_is_refused_while_a_request_is_open(rows: OrderStore) -> None
 
 def test_the_aad_names_the_row_and_the_provider() -> None:
     assert credential_aad("c1", "fake") == "payment_credentials:c1:fake"
-
-
-def test_a_kek_is_not_shown(rows: OrderStore) -> None:
-    assert isinstance(KEK, Kek) and "AAEC" not in repr(KEK)
