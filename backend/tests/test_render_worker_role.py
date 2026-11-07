@@ -36,14 +36,16 @@ from scadbuddy.crud.render import (
     RemoteAssetRows,
     RemoteBlobIndex,
     RemoteBlobRefs,
+    RemoteCheckoutLeases,
     RemoteGeometryIndex,
+    RemoteInstallSlots,
     RemoteJobProjection,
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
 from scadbuddy.library.assets import AssetMeta, RemoteAssetStore
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import CheckoutLeases, InstallPermits
+from scadbuddy.library.libraries import InstallPermits
 from scadbuddy.library.settings_store import (
     RENDER_FIELDS,
     load_render_store_settings,
@@ -171,8 +173,8 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
         # The job rows, their events and activity rows, the blob refs, the piece
-        # geometry, the blob index, the store's folders and the uploads' rows go through
-        # the API too (#5298).
+        # geometry, the blob index, the store's folders, the uploads' rows and the
+        # library leases, pin holds and install slots go through the API too (#5298).
         for table in (
             "render_jobs",
             "events",
@@ -182,6 +184,9 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
             "store_blobs",
             "store_folders",
             "assets",
+            "library_leases",
+            "library_pin_holds",
+            "library_install_slots",
             "operations",
             "print_runs",
             "saved_presets",
@@ -393,6 +398,8 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
             index=RemoteBlobIndex(remote),
             folders=RemoteStoreFolders(crud),
             assets=RemoteAssetRows(remote),
+            leases=RemoteCheckoutLeases(remote),
+            slots=RemoteInstallSlots(remote),
         )
         try:
             await _the_slots_follow_the_settings(owner, deps)
@@ -472,16 +479,14 @@ def test_the_worker_waits_for_migrations_then_grants(
             wait_until_ready(pool, stopping=lambda: True, poll=0.01)
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             migrate(conn)
-            conn.execute(
-                sql.SQL("GRANT SELECT ON scadbuddy_migrations TO {}").format(sql.Identifier(role))
-            )
         with pool.connection() as conn:
-            assert pending_migrations(conn) == []
-            assert "library_leases: INSERT" in missing_privileges(conn)
-        with pytest.raises(WorkerStoppedError):
-            wait_until_ready(pool, stopping=lambda: True, poll=0.01)
+            # Migrated, not yet granted: the ledger is the one relation the role reads
+            # (#5298; everything else goes through the API's CRUD routes).
+            assert missing_privileges(conn) == ["scadbuddy_migrations: SELECT"]
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             grant_render_role(conn, role)
+        with pool.connection() as conn:
+            assert pending_migrations(conn) == []
         wait_until_ready(pool, stopping=lambda: True, poll=0.01)
     finally:
         pool.close()
@@ -490,17 +495,20 @@ def test_the_worker_waits_for_migrations_then_grants(
 # ── what a render does, as the role ───────────────────────────────────────────
 
 
-def test_leases_pins_and_install_slots_work_as_the_role(granted: Pool, tmp_path: Path) -> None:
-    leases = CheckoutLeases(granted, tmp_path)
-    token = leases.take("job-1", [tmp_path / "BOSL2" / "abc"])
-    leases.renew(token)
-    leases.drop(token)
-    pin = leases.take_pin()
-    leases.renew_pin(pin)
-    leases.drop_pin(pin)
-    permits = InstallPermits(2, granted)
-    claimed = permits.claim()
-    assert claimed is not None
+def test_leases_pins_and_install_slots_go_through_the_api(owner: Pool, tmp_path: Path) -> None:
+    """The role holds nothing on the three ``library_*`` tables (#5298): the worker's
+    leases, pin holds and install slots go through the API's CRUD routes."""
+    with threaded_render_crud(owner) as client:
+        leases = RemoteCheckoutLeases(client)
+        token = leases.take("job-1", [tmp_path / "BOSL2" / ("c" * 40)])
+        leases.renew(token)
+        leases.drop(token)
+        pin = leases.take_pin()
+        leases.renew_pin(pin)
+        leases.drop_pin(pin)
+        permits = InstallPermits(2, slots=RemoteInstallSlots(client))
+        claimed = permits.claim()
+        assert claimed is not None
 
 
 def test_uploads_are_adopted_used_and_pruned_through_the_api(

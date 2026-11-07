@@ -38,12 +38,11 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # `store_folders` or `assets`: a finished job's blob refs, a finished piece's
     # geometry, the blob index, the Bambuddy store's folders and the uploads' rows go
     # through them too (`RemoteBlobRefs`, `RemoteGeometryIndex`, `RemoteBlobIndex`,
-    # `RemoteStoreFolders`, `RemoteAssetRows`; the API finds a folder itself). A role
-    # granted them before keeps them until #5298 Task 22 revokes them.
-    # Render leases, pins in flight and install slots (`library/libraries.py`).
-    "library_leases": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "library_pin_holds": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "library_install_slots": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    # `RemoteStoreFolders`, `RemoteAssetRows`; the API finds a folder itself). Nor
+    # `library_leases`, `library_pin_holds` or `library_install_slots`: the render
+    # leases, pins in flight and install slots go through them as well
+    # (`RemoteCheckoutLeases`, `RemoteInstallSlots`). A role granted them before keeps
+    # them until #5298 Task 22 revokes them.
     # No `render_settings`: the store settings come from the API's CRUD route (#5298,
     # `crud/render.py`). A role granted it before keeps it until the role is revoked.
     # Whether the API has migrated to this build's schema (`wait_until_ready`).

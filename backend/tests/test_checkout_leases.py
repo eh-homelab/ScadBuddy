@@ -305,7 +305,7 @@ async def _enter_removal(gate: CheckoutGate) -> None:
 
 def _removal_entered(gate: CheckoutGate, monkeypatch: pytest.MonkeyPatch) -> threading.Event:
     """Set once ``gate``'s removal is in its thread, waiting on Postgres."""
-    assert gate.shared is not None
+    assert isinstance(gate.shared, CheckoutLeases)
     entered, removing = threading.Event(), gate.shared.removing
 
     @contextlib.contextmanager
