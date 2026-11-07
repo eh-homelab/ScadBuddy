@@ -79,6 +79,10 @@ API_OWNED_KEY = "api-owned-key"
 #: (`store/snapshots.py` `snapshot_key`). The render worker reads them, and deletes or
 #: forgets a copy it cannot read, but never stores one.
 API_OWNED_PREFIXES = ("asset-", "font-", "src-")
+#: An adopt's own refusals, `crud/render.py` `RemoteAssetRows.adopt`: no copy of the upload
+#: in the blob store (a 404), or a copy of another kind or size (a 422).
+NO_COPY = "no-copy"
+COPY_MISMATCH = "copy-mismatch"
 #: A folder find for a Bambuddy or inbox that is not the API's render target:
 #: `crud/render.py` `RemoteStoreFolders`.
 TARGET_MOVED = "target-moved"
@@ -703,8 +707,9 @@ async def use_asset(asset_id: str, state: StateDep) -> AssetMeta:
 @router.post("/assets/{asset_id}/adopt", name="crud_render_adopt_asset")
 async def adopt_asset(asset_id: str, body: AssetMeta, state: StateDep) -> None:
     """R20: record an upload the worker fetched from the blob store, the row written from
-    the API's own copy's meta. A 422 for an id that is not one, a body of another id, or
-    a copy of another kind or size; a 404 when the blob store holds no copy of it."""
+    the API's own copy's meta. A 422 for an id that is not one or a body of another id;
+    a 422 ``copy-mismatch`` for a copy of another kind or size; a 404 ``no-copy`` when the
+    blob store holds no copy of it."""
     if not ASSET_ID_RE.fullmatch(asset_id) or body.id != asset_id:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not this route's upload id.")
     stat = await asyncio.to_thread(_index(state).get, asset_key(asset_id))
@@ -713,11 +718,16 @@ async def adopt_asset(asset_id: str, body: AssetMeta, state: StateDep) -> None:
     except ValidationError:
         held = None
     if held is None or held.id != asset_id:
-        raise ApiError(status.HTTP_404_NOT_FOUND, "The blob store holds no copy of this upload.")
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            "The blob store holds no copy of this upload.",
+            reason=NO_COPY,
+        )
     if (held.kind, held.size) != (body.kind, body.size):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "The blob store's copy of this upload is not the file named.",
+            reason=COPY_MISMATCH,
         )
     await asyncio.to_thread(state.assets.adopt_row, held)
 

@@ -786,8 +786,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   only the API writes), and finds a template's Bambuddy folder for it, through
   `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
   render key in Settings, under the folder's lock, and refuses a worker whose URL or
-  library folder is not that one yet (it tries again). It reads, marks used and records
-  the uploads it fetched for it, through `…/render/assets`; their files stay on the
+  library folder is not that one yet (it tries again). The API reads, marks used and
+  records, for the worker, the uploads it fetched, through `…/render/assets`; their files stay on the
   worker's volume, and the API writes a fetched upload's row from its own copy's metadata
   in the store. A role granted the older
   `render_settings` view or those tables keeps them until #5298 revokes the role. A role created after the API started is granted
