@@ -14,6 +14,7 @@ rate cap.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -24,6 +25,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from pydantic import ValidationError
 
 from scadbuddy.flow_triggers.models import (
     EventKind,
@@ -38,6 +40,8 @@ from scadbuddy.flow_triggers.models import (
 from scadbuddy.flows.grants import MAX_EXPIRY, GrantSpec, GrantStatus, narrowed_to_order
 from scadbuddy.flows.models import TERMINAL
 from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT
+
+logger = logging.getLogger(__name__)
 
 _TRIGGER = (
     "id, name, definition_id, kind, schedule, event, overlap, inputs, approval_timeout_s,"
@@ -150,6 +154,13 @@ class TriggerStore:
         """What an order event's facts take from the order's row at fire time (orders
         spec §7.1): its customer. None when the order is gone."""
         return await self._call(self._order_facts, order_id)
+
+    async def transition(self, order_id: str, item_id: str | None, status: str) -> int:
+        """The newest change of the order (or its item `item_id`) to `status`
+        (`order_status_changes`), which an order event's fire key names (§7.1): a plain
+        edit keys as the change before it, a return to the status keys anew. 0 when none
+        is recorded (a status set before the table was kept)."""
+        return await self._call(self._transition, order_id, item_id, status)
 
     # -- standing grants --------------------------------------------------------
 
@@ -365,7 +376,12 @@ class TriggerStore:
             ).fetchall()
         found: list[str] = []
         for row in rows:
-            timing = EventTiming.model_validate(row["event"])
+            try:
+                timing = EventTiming.model_validate(row["event"])
+            except ValidationError:
+                # One row that no longer reads (a status since removed) stops only itself.
+                logger.warning("a trigger's event does not read", extra={"trigger": row["id"]})
+                continue
             subject = timing.subject
             if (
                 subject is not None
@@ -383,6 +399,15 @@ class TriggerStore:
                 "SELECT customer_id FROM orders WHERE id = %s", (order_id,)
             ).fetchone()
         return None if row is None else {"customer_id": row["customer_id"]}
+
+    def _transition(self, order_id: str, item_id: str | None, status: str) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT max(id) AS id FROM order_status_changes WHERE order_id = %s"
+                " AND item_id IS NOT DISTINCT FROM %s AND status = %s",
+                (order_id, item_id, status),
+            ).fetchone()
+        return int(row["id"]) if row is not None and row["id"] is not None else 0
 
     def _attach_grant(
         self,

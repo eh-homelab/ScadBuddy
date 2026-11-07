@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - A trigger kind is a bus event's name; narrowing is a `match` on the event's fields (Ruling 13).
-- Event keys: `order:<id>:<status>` and `order_item:<id>:<status>:<attempt>`.
+- Event keys: `order:<id>:<status>` and `order_item:<id>:<status>:<attempt>`, each followed by the change that set the status (`order_status_changes`), so a return to a status fires again.
 - The facts come from the order's row at fire time, never from a request body (§7.1, 10-11 §12.1).
 - The grant vocabulary stays closed and never reads inputs (Ruling 10); narrow, never widen (10-11 §4.3).
 - A linked run is a record, not a Temporal child workflow (Ruling 9).
@@ -36,7 +36,7 @@
 
 **Files:** Modify `backend/scadbuddy/flow_triggers/models.py`; Test `backend/tests/test_flow_trigger_models.py` (new).
 
-**Produces:** `EventKind` adds `"order.changed"`, `"order_item.changed"`; `Subject{kind: Literal["template","order","order_item"], id: str | None}`; `EventTiming{kind, subject: Subject | None, match: dict[str, list[str]] | None}`; a `slug` input becomes `subject={kind:"template", id:slug}`; `matches(timing: EventTiming, facts: dict) -> bool`; `subject_ids(facts) -> dict[str, str]`.
+**Produces:** `EventKind` adds `"order.changed"`, `"order_item.changed"`; `Subject{kind: Literal["template","order","order_item"], id: str | None}`; `EventTiming{kind, subject: Subject | None, match: dict[str, list[str]] | None}`; a `slug` input becomes `subject={kind:"template", id:slug}`; `matches(timing: EventTiming, facts: dict) -> bool`. The subjects an event is about come from `TriggerEvent.subjects` (Task 2).
 
 - [ ] Tests: slug input reads as a template subject; a template subject on `order.changed` is refused; `order_item.changed` takes an `order` or `order_item` subject; `match` with an unknown field (`{"colour": [...]}`) or an unknown status (`{"status": ["acepted"]}`) is refused; `match` on `render.finished` is refused; `matches()` true for a listed status, false otherwise, true when `match` is None.
 - [ ] Implement; run `uv run --frozen pytest tests/test_flow_trigger_models.py`.

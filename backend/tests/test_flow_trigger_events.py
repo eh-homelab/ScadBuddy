@@ -143,6 +143,20 @@ async def test_a_trigger_stored_with_a_slug_still_fires_on_its_template(
     assert await triggers.event_triggers(other.kind, other.subjects, other.facts) == []
 
 
+@pg
+async def test_a_stored_event_that_no_longer_reads_stops_only_its_own_trigger(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    broken = await on(triggers, {"kind": "order.changed"})
+    fine = await on(triggers, {"kind": "order.changed"})
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE flow_triggers SET event = %s WHERE id = %s",
+            (Jsonb({"kind": "order.changed", "match": {"status": ["gone"]}}), broken),
+        )
+    assert await heard(triggers, OrderChanged(order_id="o1", status="quoted")) == [fine]
+
+
 class _Client:
     def __init__(self) -> None:
         self.started: list[tuple[str, list[Any]]] = []
@@ -185,3 +199,53 @@ async def test_a_fire_takes_the_customer_from_the_order_row(
         )
         == []
     )
+
+
+@pg
+async def test_a_return_to_a_status_fires_again_and_an_edit_in_it_does_not(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """The key names the transition (§7.1, review of #5644): `ready`, an edit while
+    `ready`, `in_production`, `ready` again is two fires on `ready`, not one, nor three."""
+    with jobs.pool.connection() as conn:
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c1', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o1', 'ORD-2026-1', 'c1', 'USD', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('i1', 'o1', 0, 1, 'Bracket', 'custom')"
+        )
+    await on(triggers, {"kind": "order.changed", "match": {"status": ["ready"]}})
+    await on(triggers, {"kind": "order_item.changed", "match": {"status": ["approved"]}})
+    client = _Client()
+
+    async def moved(status: str) -> list[str]:
+        with jobs.pool.connection() as conn:
+            conn.execute("UPDATE orders SET status = %s WHERE id = 'o1'", (status,))
+        event = OrderChanged(order_id="o1", status=status)
+        return await fire_event(client, "library", triggers, event)  # type: ignore[arg-type]
+
+    first = await moved("ready")
+    again = await fire_event(
+        client,  # type: ignore[arg-type]
+        "library",
+        triggers,
+        OrderChanged(order_id="o1", status="ready"),
+    )
+    assert await moved("in_production") == []
+    second = await moved("ready")
+    assert len(first) == len(again) == len(second) == 1
+    assert first == again  # the edit keys as the change before it: Temporal starts it once
+    assert second != first
+
+    async def item(status: str) -> list[str]:
+        with jobs.pool.connection() as conn:
+            conn.execute("UPDATE order_items SET status = %s WHERE id = 'i1'", (status,))
+        event = OrderItemChanged(order_id="o1", item_id="i1", status=status)
+        return await fire_event(client, "library", triggers, event)  # type: ignore[arg-type]
+
+    approved = await item("approved")
+    assert await item("failed") == []
+    assert (await item("approved")) != approved

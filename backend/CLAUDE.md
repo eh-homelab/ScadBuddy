@@ -252,8 +252,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   it starts is the outcome `refused` with `problem` (`requote_needed`), and
   `RouteRefusedError.problem` carries a route's problem `type`.
   Order events (#4252, orders spec §7.1): the kinds `order.changed` (key
-  `order:<id>:<status>`) and `order_item.changed` (`order_item:<id>:<status>:<attempt>`,
-  `-` for none); `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
+  `order:<id>:<status>:<change>`) and `order_item.changed`
+  (`order_item:<id>:<status>:<attempt>:<change>`, `-` for no attempt), `<change>` the newest
+  `order_status_changes` row (kept by a trigger on `orders` and `order_items`) for that
+  status, so an edit in a status fires once and a return to it fires again; `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
   or sent `slug` reads as a template subject; no migration) and `match` (`status` only,
   values checked against `OrderStatus`/`ItemStatus`), both applied in
   `TriggerStore.event_triggers` before a fire starts; an order fire's `customer_id` is

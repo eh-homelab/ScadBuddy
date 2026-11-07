@@ -414,6 +414,8 @@ function NewTrigger({
   }
 
   function chooseEvent(next: string) {
+    // A subject typed for one kind of event (a model, an order) is not the other's.
+    if (isOrderEvent(next) !== isOrderEvent(event)) setSlug('')
     setEvent(next)
     setStatuses([])
   }

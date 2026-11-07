@@ -42,7 +42,8 @@ PRINT_KINDS: dict[str, EventKind] = {"finished": "print.finished", "failed": "pr
 
 class TriggerEvent(NamedTuple):
     """A bus event as triggers see it: its kind, the subjects it is about (by subject
-    kind, `flow_triggers/models.py` `SUBJECTS`), its fire key and its facts."""
+    kind, `flow_triggers/models.py` `SUBJECTS`), its fire key and its facts. An order
+    event's key is completed by `fire_event` with the change that set its status."""
 
     kind: EventKind
     subjects: dict[str, str]
@@ -71,7 +72,7 @@ def trigger_event(event: Event) -> TriggerEvent | None:
         }
         return TriggerEvent(kind, {"template": event.slug}, f"print:{event.run_id}", print_facts)
     if isinstance(event, OrderChanged):
-        # The key carries the status: one fire per transition, not one per edit (§7.1).
+        # The key carries the status; `fire_event` adds the change that set it (§7.1).
         order_facts: dict[str, Any] = {
             "kind": "order.changed",
             "order_id": event.order_id,
@@ -115,6 +116,11 @@ async def fire_event(
         if row is None:
             return []  # the order is gone
         facts = {**facts, **row}
+    if kind in ("order.changed", "order_item.changed"):
+        # The transition, not only the status (§7.1): one fire per change to a status, a
+        # plain edit in it firing nothing more, a return to it firing again.
+        change = await store.transition(facts["order_id"], facts.get("item_id"), facts["status"])
+        key = f"{key}:{change}"
     started: list[str] = []
     for trigger_id in trigger_ids:
         workflow_id = fire_workflow_id(trigger_id, key)
