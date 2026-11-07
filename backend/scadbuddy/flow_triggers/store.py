@@ -416,8 +416,11 @@ class TriggerStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, event FROM flow_triggers WHERE kind = 'event' AND NOT paused"
-                " AND event ->> 'kind' = %s",
-                (kind,),
+                " AND event ->> 'kind' = %s"
+                # A trigger on another order or item is skipped here; the rest is checked below.
+                " AND (event -> 'subject' ->> 'id' IS NULL"
+                " OR event -> 'subject' ->> 'id' = ANY(%s))",
+                (kind, list(subjects.values())),
             ).fetchall()
         timings: list[tuple[str, EventTiming]] = []
         for row in rows:

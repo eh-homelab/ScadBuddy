@@ -912,7 +912,7 @@ return to a status is a row of its own.
 
 `EventTiming.slug` becomes `subject: {kind, id?}` with `kind` one of `template`,
 `order`, `order_item` (the slug form stays accepted and is read as
-`{kind: "template", id: slug}`), and `_event_triggers`' SQL matches on it. `trigger()`
+`{kind: "template", id: slug}`), and `_event_triggers` matches on it (in Python, after the SQL selects by kind; a stored `slug` reads as a template subject). `trigger()`
 returns the event as it is, `OrderChanged{order_id, status, customer_id}` or
 `OrderItemChanged{order_id, item_id, status, attempt}`, and the fall-through at
 `flow_tools.py:1188` becomes a dispatch on `kind`. The facts come from the order's row

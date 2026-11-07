@@ -3,8 +3,10 @@
 Every replica hears each event and starts ``FlowTriggerFire`` for each matching trigger
 under one workflow id per trigger and event (an order event: one per trigger and status
 change, `_change_fires`), with ``REJECT_DUPLICATE``, so one fire runs;
-the fire's own row holds it to one beyond Temporal's retention. An event lost while the
-bus was disconnected (``bus.resync``) fires nothing.
+the fire's own row holds it to one beyond Temporal's retention. A template or print event
+lost while the bus was disconnected (``bus.resync``) fires nothing. An order or item status
+change heard late fires on the next event for its order or item, while it is still among
+the newest ``CHANGES_HEARD`` rows.
 """
 
 from __future__ import annotations
@@ -121,6 +123,9 @@ async def _change_fires(
             change is not changes[-1] or change.status != facts["status"]
         ):
             change_facts["attempt"] = None  # the event's attempt is its own change's
+        # This gives the event's attempt to the newest change of the event's status. It
+        # assumes an attempt event with no change of its own never arrives while an older
+        # change to that status is still unfired.
         each.append(change_facts)
     attempt = facts.get("attempt") if kind == "order_item.changed" else None
     # One read of the triggers for every change.
