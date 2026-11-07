@@ -77,9 +77,11 @@ logger = logging.getLogger(__name__)
 
 CALLERS: tuple[ServiceCaller, ...] = get_args(ServiceCaller)
 #: The callers the API mints sealed 30-day credentials for, read through their views.
-#: The render worker is a caller of the exchange only (spec 2026-11-05 §11 D8), as is the
-#: storefront edge (#5282).
-LegacyCaller = Literal["agent", "print", "projects"]
+#: The render worker is a caller of the exchange only (spec 2026-11-05 §11 D8), as are
+#: the storefront edge (#5282) and the projects worker (#5298): it holds no database, so a
+#: sealed one would be a live secret nothing reads, and the API revokes any left
+#: (`revoke_retired_legacy`).
+LegacyCaller = Literal["agent", "print"]
 LEGACY_CALLERS: tuple[LegacyCaller, ...] = get_args(LegacyCaller)
 
 #: How a credential's caller proved itself: ``legacy`` is a sealed row read through a
@@ -419,6 +421,17 @@ class ServiceCredentialStore:
                 (_now(now), credential_id),
             ).fetchone()
         return None if row is None else row["caller"]
+
+    def revoke_retired_legacy(self, *, now: datetime | None = None) -> int:
+        """Revokes every live sealed credential of a caller no longer in
+        :data:`LEGACY_CALLERS` (the projects worker's, #5298); how many. Idempotent."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_credentials SET revoked_at = %s WHERE proof = 'legacy'"
+                " AND revoked_at IS NULL AND NOT (caller = ANY(%s))",
+                (_now(now), list(LEGACY_CALLERS)),
+            )
+        return cur.rowcount
 
     def revoke_pod(self, pod_uid: str, *, now: datetime | None = None) -> int:
         """§6.5: revokes every live credential bound to that pod; how many."""

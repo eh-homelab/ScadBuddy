@@ -23,6 +23,7 @@ from scadbuddy.auth.service_credentials import (
     SCOPES,
     ServiceCredentialStore,
     TokenReader,
+    _insert,
     aad,
     grant_caller_views,
 )
@@ -49,11 +50,12 @@ def test_rotation_issues_one_per_caller_and_again_only_when_due(
     store: ServiceCredentialStore,
 ) -> None:
     now = datetime.now(UTC)
-    assert len(store.rotate_due(KEK, now=now)) == 3
+    assert len(store.rotate_due(KEK, now=now)) == 2
     assert store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE - timedelta(hours=1)) == []
-    assert len(store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE + timedelta(hours=1))) == 3
+    assert len(store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE + timedelta(hours=1))) == 2
     # A new KEK: the callers could not open the old ones, so new ones at once.
-    assert len(store.rotate_due(Kek("k2", os.urandom(32)), now=now)) == 3
+    assert len(store.rotate_due(Kek("k2", os.urandom(32)), now=now)) == 2
+    assert {c.caller for c in store.list()} == {"agent", "print"}
 
 
 def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
@@ -64,19 +66,19 @@ def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
     of the roll, and a reader refused with the old one reads the new one."""
     now = datetime.now(UTC)
     with monkeypatch.context() as patched:
-        patched.setitem(SCOPES, "projects", frozenset({"api"}))
+        patched.setitem(SCOPES, "print", frozenset({"api"}))
         store.rotate_due(KEK, now=now)
     clock = [0.0]
-    reader = TokenReader("projects", pg_conninfo, KEK, clock=lambda: clock[0])
+    reader = TokenReader("print", pg_conninfo, KEK, clock=lambda: clock[0])
     old = reader.token()
     assert old is not None
-    assert store.resolve(old) == Service("projects", frozenset({"api"}))
+    assert store.resolve(old) == Service("print", frozenset({"api"}))
 
     # Minted at the same instant, so it expires with the old one: the later-created wins.
     (minted,) = store.rotate_due(KEK, now=now)
-    assert [c.caller for c in store.list() if c.id == minted] == ["projects"]
+    assert [c.caller for c in store.list() if c.id == minted] == ["print"]
     assert store.rotate_due(KEK, now=now) == []
-    assert store.resolve(old) == Service("projects", frozenset({"api"}))
+    assert store.resolve(old) == Service("print", frozenset({"api"}))
 
     reader.invalidate(old)
     clock[0] = REREAD_MIN_SECONDS - 0.1
@@ -84,7 +86,7 @@ def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
     clock[0] = REREAD_MIN_SECONDS
     new = reader.token()
     assert new is not None and new != old
-    assert store.resolve(new) == Service("projects", SCOPES["projects"])
+    assert store.resolve(new) == Service("print", SCOPES["print"])
 
 
 def test_a_caller_reads_its_token_and_the_api_verifies_it(
@@ -154,9 +156,9 @@ def test_a_revoke_and_the_rotation_replace_once(store: ServiceCredentialStore) -
 
 def test_last_used_is_recorded(store: ServiceCredentialStore, pg_conninfo: str) -> None:
     store.rotate_due(KEK)
-    store.resolve(_token(pg_conninfo, "projects"))
-    (projects,) = [c for c in store.list() if c.caller == "projects"]
-    assert projects.last_used_at is not None
+    store.resolve(_token(pg_conninfo, "print"))
+    (printer,) = [c for c in store.list() if c.caller == "print"]
+    assert printer.last_used_at is not None
 
 
 def test_each_role_is_granted_its_own_view_only(pg_pool: PgPool, pg_conninfo: str) -> None:
@@ -189,3 +191,22 @@ async def test_the_gate_resolves_a_bearer_credential(
         scope = {"type": "http", "headers": [(b"authorization", header.encode())]}
         await gate(scope, None, None)  # type: ignore[arg-type]
     assert seen == [Service("print", SCOPES["print"]), ANONYMOUS]
+
+
+def test_a_retired_callers_sealed_credential_is_revoked_and_never_minted(
+    store: ServiceCredentialStore, pg_pool: PgPool
+) -> None:
+    """#5298: the projects worker exchanges its credential and reads no view, so a sealed
+    `projects` credential is a live secret nothing needs: the API revokes it at start and
+    mints none; its exchanged ones still work."""
+    with pg_pool.connection() as conn:
+        _insert(conn, KEK, "projects", datetime.now(UTC))
+    assert store.revoke_retired_legacy() == 1
+    assert store.revoke_retired_legacy() == 0
+    store.rotate_due(KEK)
+    assert [c for c in store.list() if c.caller == "projects" and c.revoked_at is None] == []
+    assert store.replace_if_none(KEK, "projects") is None
+    issued = store.issue("projects", "inprocess", rate_limited=False)
+    assert store.resolve(issued.token) == Service(
+        "projects", SCOPES["projects"], credential_id=issued.credential_id
+    )

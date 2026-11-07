@@ -581,17 +581,13 @@ def test_an_exchanged_row_is_never_handed_out_through_a_view(
 
 
 @pg
-def test_the_rotation_never_mints_for_render_or_counts_an_exchanged_row(
+def test_the_rotation_never_mints_for_render_or_projects_or_counts_an_exchanged_row(
     store: ServiceCredentialStore,
 ) -> None:
     store.issue("print", "k8s", pod_name="p", pod_uid="u")
     minted = store.rotate_due(KEK)
-    assert len(minted) == 3
-    assert sorted(c.caller for c in store.list() if c.proof == "legacy") == [
-        "agent",
-        "print",
-        "projects",
-    ]
+    assert len(minted) == 2
+    assert sorted(c.caller for c in store.list() if c.proof == "legacy") == ["agent", "print"]
 
 
 @pg

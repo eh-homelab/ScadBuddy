@@ -1,19 +1,19 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
-import type { ServiceCaller, ServiceCredentialView } from '../../api/types'
+import type { LegacyCaller, ServiceCredentialView } from '../../api/types'
 import { Button } from '@/components/ui/button'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 
 // #4975 phase 4 — Settings → System → Service credentials (spec 2026-11-01 §7.2): the bearer
-// credentials the API issues the agent and the print and projects workers, rotated on their
-// own. Never a secret: created, expires, last used, with revoke and "Rotate now".
+// credentials the API issues the agent and the print worker, rotated on their own. Never a
+// secret: created, expires, last used, with revoke and "Rotate now". The projects and render
+// workers exchange theirs (#5298) and get none of these.
 
-const CALLERS: { caller: ServiceCaller; label: string }[] = [
+const CALLERS: { caller: LegacyCaller; label: string }[] = [
   { caller: 'agent', label: 'Agent' },
   { caller: 'print', label: 'Print worker' },
-  { caller: 'projects', label: 'Projects worker' },
 ]
 
 const day = (iso: string) => new Date(iso).toLocaleDateString()
