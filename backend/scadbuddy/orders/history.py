@@ -19,6 +19,11 @@ its failed prints, test prints and other costs can be its reason. Its price is n
 across parts. The **suggested unit price** is the unit cost marked up by
 ``pricing_markup_percent``; with no markup, the lowest price whose margin is not thin.
 
+**Parts** (§11, #5543). Given ``parts_unit_minor`` (the quoted item's parts at today's unit
+costs), each job's own ``part:`` cost entries leave its cost and ``parts_unit_minor`` per unit
+takes their place, in the unit cost, the ``other`` part and the suggestion, so the suggestion
+carries this item's parts once, at today's prices.
+
 Advice only: nothing is stored and nothing is refused. With no history ``jobs`` and
 ``units`` are 0, every money figure is None and nothing warns.
 """
@@ -82,6 +87,9 @@ class UnitCostHistory(BaseModel):
     main_reason: CostReason | None = None
     #: How much it exceeded them by, per unit.
     main_reason_minor: Money | None = None
+    #: This item's parts per unit at today's unit costs, in the unit cost; None when not
+    #: asked about an item.
+    parts_unit_minor: Money | None = None
     #: The settings the figures use.
     markup_percent: str
     thin_margin_percent: str
@@ -131,7 +139,19 @@ def _parts(item: ItemCost) -> dict[CostReason, int]:
     return parts
 
 
-def _per_unit(total: int, units: int) -> Money:
+#: The ``source`` prefix of a cost entry a fulfilment's parts wrote (``lifecycle._use_parts``).
+PART_SOURCE = "part:"
+
+
+def _part_entries(item: ItemCost) -> int:
+    return sum(
+        e.amount_minor
+        for e in item.cost_entries
+        if e.source is not None and e.source.startswith(PART_SOURCE)
+    )
+
+
+def _per_unit(total: int | Decimal, units: int) -> Money:
     return int((Decimal(total) / units).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
@@ -181,6 +201,7 @@ def unit_cost_history(
     now: datetime,
     currency: str | None = None,
     unit_price_minor: Money | None = None,
+    parts_unit_minor: Decimal | None = None,
 ) -> UnitCostHistory:
     """The model's history in ``currency`` (the shop's by default), and the warning for
     ``unit_price_minor`` when one is given. Blocking: run it off the event loop. Postgres
@@ -198,16 +219,22 @@ def unit_cost_history(
         return answer
     history = _history(_Rows(store, [order for order, _ in jobs]), jobs, rates)
     units = sum(item.quantity for item, _ in history)
-    cost = sum(item.cost_minor for item, _ in history)
-    over: dict[CostReason, int] = dict.fromkeys(REASONS, 0)
+    cost = Decimal(sum(item.cost_minor for item, _ in history))
+    over: dict[CostReason, Decimal] = dict.fromkeys(REASONS, Decimal(0))
     for item, quote in history:
         priced = _per_part(quote)
         for part, amount in _parts(item).items():
             if part in _PRICED_BY and not priced:
                 continue
             over[part] += amount - _quoted(quote, part, item.quantity)
+        if parts_unit_minor is not None:
+            swap = parts_unit_minor * item.quantity - _part_entries(item)
+            cost += swap
+            over["other"] += swap
     reason = max(REASONS, key=lambda part: over[part])
 
+    if parts_unit_minor is not None:
+        answer.parts_unit_minor = _per_unit(parts_unit_minor, 1)
     answer.jobs = len(history)
     answer.units = units
     answer.unit_cost_minor = _per_unit(cost, units)
