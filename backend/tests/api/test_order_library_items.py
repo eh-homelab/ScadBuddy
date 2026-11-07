@@ -6,8 +6,11 @@ tests use."""
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,16 +20,18 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import library_print
 from scadbuddy.core.problems import ApiError
+from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME
 from tests.api.conftest import follow_operation
 from tests.api.test_customers import create as create_customer
 from tests.api.test_order_print import Projects, answered
-from tests.api.test_order_quote import price_book
+from tests.api.test_order_quote import BambuddySlices, price_book, sliced_plate
 from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item, problem, quote_and_accept
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import flow_copy_routes, library_file, one_color
 from tests.api.test_print_run_choices import body, follow_run, run_routes
-from tests.api.test_send import API, configure
+from tests.api.test_send import API, _uploaded_3mf, configure
+from tests.bambuddy.test_part_settings import author_two_colours
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -218,3 +223,35 @@ def test_a_library_file_items_print_is_worded_for_a_caller_of_the_api(
         else:
             assert started.status_code == 422, started.text
     assert asked == [True, None]
+
+
+def test_a_library_file_items_slice_quote_writes_its_part_settings(
+    bambuddy: TestClient, tmp_path: Path
+) -> None:
+    """#5646: a library file item's slice quote with ``part_settings`` goes through
+    ``_library_quote`` and ``start_library_quote_preview`` to the writer: the copy it
+    uploads and slices carries slot 2's setting on slot 2's part alone, and the quote
+    records the settings it sliced with."""
+    library_file(FILE_ID, content=author_two_colours(tmp_path))
+    upload = flow_copy_routes()
+    slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])}, copy=141)
+    pla, petg = price_book(bambuddy)
+    order = an_order(bambuddy)
+    item = add_item(bambuddy, order["id"], library_file_id=FILE_ID, quantity=1)
+    dialog = {name: value for name, value in body().items() if name != "copies"}
+    settings = {"2": {"top_shell_layers": 8}}
+
+    started = bambuddy.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/quote",
+        json={**dialog, "filaments": {"0": pla, "1": petg}, "part_settings": settings},
+        headers=press(),
+    )
+
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120)
+    assert op["status"] == "succeeded", op
+    assert op["result"]["part_settings"] == settings
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        written = archive.read(MODEL_SETTINGS_NAME).decode()
+    assert written.count('<metadata key="top_shell_layers" value="8"/>') == 1
+    assert "/library/files/141/slice" in str(slices.posted.calls.last.request.url)

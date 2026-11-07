@@ -277,21 +277,26 @@ for the layout and the parts (`render/bambu3mf.py` `part_settings_slots`, #5637)
 A library file's `model_settings.config` is untrusted, so it is read in chunks up to
 `MAX_MODEL_SETTINGS_BYTES` (4 MiB; the largest MakerWorld fixture's is 231,209 bytes,
 `2178-find-100-mini-frogs-spot-search-game.3mf`) and its slots are read with
-ElementTree. One past the cap, not well-formed, or with a DOCTYPE takes no settings per
-part (422, `send.PART_SETTINGS_AS_IS`). The writer rewrites the text in place with
-patterns that stay linear in the file: a tag is `[^<>]*`, and a body is a possessive run
-that stops at the next `<part`, `<object` or `</object>`. The patterns of #5571 scanned to
-the end of the file from each unclosed `<part`: 20,000 of them took 63 s, measured on the
-dev machine on 2026-11-07. After the write the result is read back with ElementTree. A
-printed part of a slot that lacks its settings (a file written in a way the patterns do
-not read) is the same 422, so the copy's key never names settings its bytes lack.
+ElementTree. One past the cap, not UTF-8, not well-formed, or with a DOCTYPE takes no
+settings per part. Its refusal names that file (422, `send.PART_SETTINGS_UNWRITABLE`,
+#5646): the file is laid out, but its parts' settings file cannot be read or written. The
+writer rewrites the text in place with patterns that stay linear in the file: a tag is
+`[^<>]*`, and a body is a possessive run that stops at the next `<part`, `<object` or
+`</object>`. The patterns of #5571 scanned to the end of the file from each unclosed
+`<part`: 20,000 of them took 63 s, measured on the dev machine on 2026-11-07. After the
+write the result is read back with ElementTree and compared with the file before it,
+part by part (`_check_written`). A printed part of a slot that lacks its settings, or a
+part that took another slot's (a file written in a way the patterns do not read, such as
+an `extruder` tag in a comment), is the same 422, so the copy's key never names settings
+its bytes lack and no part is sliced with another slot's settings.
 
 They are written into the laid-out copy, not the process. `send._laid_out_for` adds
 each slot's settings to every printed `<part>` of that slot in
 `Metadata/model_settings.config` (`render/bambu3mf.py` `set_part_settings`), as
 `<metadata key="top_shell_layers" value="8"/>`, after the layout. A part's slot is its
 `extruder` metadata, else its object's: in a library file, the filament its author gave
-the part. A key the part states already (a Bambu Studio file can) is replaced by the
+the part. The writer reads an object's `extruder` from its own metadata outside its
+parts, before them or after, as ElementTree reads the object's children (#5646). A key the part states already (a Bambu Studio file can) is replaced by the
 request's; the part's other keys stay. A negative part or a modifier gets none. A
 self-closing `<part …/>` becomes an open and a close tag around them. A painted part
 takes the settings of the slot it is made in, not those of its painted faces. In an

@@ -13,7 +13,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.print_run import PART_SETTINGS_SLICED, PrintRunRequest
-from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS
+from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, PART_SETTINGS_UNWRITABLE
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, layout_of
@@ -178,6 +178,28 @@ def test_a_library_file_that_prints_as_it_is_refuses_part_settings(client: TestC
 
     assert response.status_code == 422, response.text
     assert response.json()["detail"] == PART_SETTINGS_AS_IS
+    assert not upload.called
+
+
+@respx.mock
+def test_a_library_file_whose_parts_settings_cannot_be_read_says_so(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """#5646: an author's file whose ``model_settings.config`` is not XML is laid out,
+    but its parts cannot take settings: the refusal names that file, not ``as_is``."""
+    configure(client)
+    upload = flow_copy_routes()
+    library_file(89, content=author_two_colours(tmp_path, "<config><object>"))
+    run_routes()
+    plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+    request = {**body(), "filament_plan": plan, "part_settings": {"1": {"wall_loops": 3}}}
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+    response = run_library(client, 89, json=request)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == PART_SETTINGS_UNWRITABLE
+    assert PART_SETTINGS_UNWRITABLE in check.json()["errors"]
     assert not upload.called
 
 
