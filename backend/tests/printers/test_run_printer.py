@@ -16,12 +16,21 @@ from typing import Any, cast
 import httpx
 import pytest
 import respx
+from starlette.requests import Request
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.api import printing as printing_api
+from scadbuddy.api.printing import asked_by_api
 from scadbuddy.bambuddy import operations as bambuddy_operations
+from scadbuddy.bambuddy import preview
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.options import lan_calibration_refusal
+from scadbuddy.bambuddy.options import (
+    LAN_CALIBRATION_API_HINT,
+    LAN_CALIBRATION_PROBLEM,
+    PrintOptions,
+    lan_calibration_refusal,
+)
 from scadbuddy.bambuddy.print_run import (
     LAN_NEEDS_KEK,
     LAN_PATH_REFUSAL,
@@ -36,7 +45,8 @@ from scadbuddy.bambuddy.print_run import (
     slice_route,
 )
 from scadbuddy.bambuddy.print_source import PrintSource
-from scadbuddy.bambuddy.runs import run_key
+from scadbuddy.bambuddy.runs import PrintRunError, run_key
+from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders import operations as order_operations
@@ -47,7 +57,7 @@ from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.workflows import print_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
-from scadbuddy.workflows.print_models import CheckInput, SourceSpec
+from scadbuddy.workflows.print_models import AcceptAnswer, CheckInput, SourceSpec
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
 from tests.test_print_workflow import run_input
@@ -789,7 +799,99 @@ async def test_a_calibration_over_the_lan_is_refused_not_dropped(
     # Timelapse is the LAN start's own field, and Bambuddy's path takes them all.
     assert asked_path_refusal(run_request(options={"timelapse": True}), True) is None
     assert asked_path_refusal(request, False) is None
+    assert refused.value.type == LAN_CALIBRATION_PROBLEM
+    assert refused.value.extensions == {"bambuddy_linked": True}
     assert not status.called
+
+
+class NativePlate(OnePlate):
+    """What the background slice reads of a source on a native route: its native copy."""
+
+    native = object()
+
+
+@respx.mock
+@pytest.mark.parametrize("start", [preview.start_preview, preview.start_preview_plates])
+async def test_a_preview_slice_over_the_lan_refuses_a_calibration(
+    start: Any, printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """#5602: the dialog's background slice and a quote's slice judge the request as the
+    run does: on a native route, `flow_cali: "on"` is refused before anything is laid out,
+    uploaded or sliced."""
+    status = bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports)
+    settings = StoredSettings(**HOT_PATH)
+    route = await run_route(settings, printers_with_kek, reports, printer=pid, printer_id=None)
+    assert route.native
+    request = run_request(printer=pid, options={"flow_cali": "on"})
+    unused: Any = None
+    with pytest.raises(ApiError) as refused:
+        await start(
+            None,
+            cast(PrintSource, NativePlate()),
+            settings,
+            unused,
+            request,
+            subject="o1",
+            native=cast(Any, SimpleNamespace(profiles=unused)),
+            route=route,
+        )
+    assert (refused.value.status, refused.value.detail) == (
+        422,
+        lan_calibration_refusal(request.options),
+    )
+    assert refused.value.type == LAN_CALIBRATION_PROBLEM
+    assert not status.called
+
+
+def _http(*headers: tuple[bytes, bytes]) -> Request:
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": list(headers)})
+
+
+def test_the_page_and_the_agent_are_told_apart() -> None:
+    """#5602: only a refusal's wording reads it. The page sends ``X-ScadBuddy-Request:
+    1`` on every request; an agent's call names its author, with or without a request."""
+    page = _http((b"x-scadbuddy-request", b"1"))
+    assert not asked_by_api(page)
+    assert asked_by_api(_http())
+    assert not asked_by_api(None)
+    with authored_as(AgentAuthor("agent:test", None)):
+        assert asked_by_api(page)
+        assert asked_by_api(None)
+
+
+def test_a_lan_calibration_refusal_names_path_only_for_a_caller_of_the_api() -> None:
+    refusal = lan_calibration_refusal(PrintOptions.model_validate({"flow_cali": "on"}))
+    assert refusal is not None
+    problem = PrintRunError(
+        type=LAN_CALIBRATION_PROBLEM,
+        status=422,
+        title="Unprocessable Content",
+        detail=refusal,
+        extensions={"bambuddy_linked": True},
+    )
+    answer = AcceptAnswer(refusal=problem)
+
+    with pytest.raises(ApiError) as page:
+        printing_api._answered(answer, api=False)
+    assert page.value.detail == refusal
+    assert "path" not in refusal
+    with pytest.raises(ApiError) as api:
+        printing_api._answered(answer, api=True)
+    assert api.value.detail == refusal + LAN_CALIBRATION_API_HINT
+    assert 'path "bambuddy"' in api.value.detail
+    assert api.value.type == LAN_CALIBRATION_PROBLEM
+
+    # A row that links no Bambuddy printer would refuse `path: "bambuddy"` too.
+    unlinked = AcceptAnswer(refusal=problem.model_copy(update={"extensions": {}}))
+    with pytest.raises(ApiError) as lan_only:
+        printing_api._answered(unlinked, api=True)
+    assert lan_only.value.detail == refusal
+    # Every other refusal reads the same for both.
+    other = AcceptAnswer(refusal=problem.model_copy(update={"type": "about:blank"}))
+    with pytest.raises(ApiError) as plain:
+        printing_api._answered(other, api=True)
+    assert plain.value.detail == refusal
 
 
 async def test_the_check_activity_refuses_a_calibration_over_the_lan(
@@ -834,6 +936,9 @@ async def test_the_check_activity_refuses_a_calibration_over_the_lan(
 
     assert raised.value.details[0].status == 422, raised.value
     assert "cannot set bed_levelling" in raised.value.details[0].detail
+    # #5602: typed, so the print route words it for its caller.
+    assert raised.value.details[0].type == LAN_CALIBRATION_PROBLEM
+    assert raised.value.details[0].extensions == {"bambuddy_linked": True}
 
 
 def test_the_path_keys_the_run_only_when_sent() -> None:

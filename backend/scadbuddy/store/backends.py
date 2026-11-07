@@ -8,7 +8,7 @@ from typing import Protocol, runtime_checkable
 
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
-from scadbuddy.store.bambuddy import BambuddyContentBackend, StoreSettingsSource
+from scadbuddy.store.bambuddy import BambuddyContentBackend, KeepsFolders, StoreSettingsSource
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.index import IndexesBlobs, Pool
 from scadbuddy.store.s3 import S3ContentBackend
@@ -37,10 +37,11 @@ def build_backend(
     source: StoreSettingsSource,
     pool: Pool,
     index: IndexesBlobs | None = None,
+    folders: KeepsFolders | None = None,
 ) -> RemoteBackend:
     """``backend`` by name, not ``current.store_backend``: a migration builds its target
-    while the stored backend still names the old one. ``index``: the Bambuddy backend's
-    (`BambuddyContentBackend`)."""
+    while the stored backend still names the old one. ``index`` and ``folders``: the
+    Bambuddy backend's (`BambuddyContentBackend`)."""
     if backend == "local":
         raise ValueError("the local store has no content backend")
     if backend == "bambuddy":
@@ -55,7 +56,7 @@ def build_backend(
                 " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
                 ' See README, "Recovering an unready blob store".'
             )
-        return BambuddyContentBackend(source.target, pool, index=index)
+        return BambuddyContentBackend(source.target, pool, index=index, folders=folders)
     if current.s3 is None or not current.s3.prefix:
         raise StoreNotReadyError(
             "store_backend is s3, but the S3 store needs an endpoint, a bucket, a prefix,"

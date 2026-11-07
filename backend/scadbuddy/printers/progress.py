@@ -238,7 +238,15 @@ class LanProgress:
 
     async def read(self, run_subject: str) -> PrintProgress | None:
         run = await read_latest(self.latest, run_subject)
-        if run is None or run.status != "succeeded" or run.result is None:
+        if run is None:
+            return None
+        return await self.read_run(run)
+
+    async def read_run(self, run: PrintRun) -> PrintProgress | None:
+        """``run``'s LAN print, whichever run of its subject is the newest (#5613: an
+        older run the follow settles on its own); ``None`` when it did not print over the
+        LAN."""
+        if run.status != "succeeded" or run.result is None:
             return None
         started = run.result.lan
         printer = run.printer

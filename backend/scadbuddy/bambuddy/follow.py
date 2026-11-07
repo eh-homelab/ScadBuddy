@@ -36,7 +36,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from prometheus_client import Gauge
 from pydantic import BaseModel
@@ -52,7 +52,7 @@ from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 
 if TYPE_CHECKING:
     # Annotations only: runs imports print_run, which reaches rack.usage, which imports this.
-    from scadbuddy.bambuddy.runs import NewestFailed
+    from scadbuddy.bambuddy.runs import NewestFailed, PrintRun
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,18 @@ ReadHook = Callable[[str, PrintProgress], Awaitable[None]]
 #: Records a settled print's outcome once (#2665, `outcomes.PrintOutcomeStore.record`):
 #: given the run subject, its slug and the settled read.
 OutcomeRecorder = Callable[[str, str, PrintProgress], Awaitable[object]]
+#: One run's print, read by that run, not by its subject (#5613): an older run of a
+#: subject a newer run printed again. ``None`` when that run's print cannot be read so.
+RunReader = Callable[[PrintSubject, "PrintRun"], Awaitable[PrintProgress | None]]
+
+
+class OlderRuns(Protocol):
+    """A subject's older runs still open, and their outcomes (#5613,
+    `outcomes.PrintOutcomeStore`)."""
+
+    async def older_open(self, run_subject: str) -> list[PrintRun]: ...
+
+    async def record_run(self, run: PrintRun, slug: str, progress: PrintProgress) -> object: ...
 
 
 def _now() -> datetime:
@@ -131,6 +143,8 @@ class Follower:
         newest_failed: NewestFailed | None = None,
         record_outcome: OutcomeRecorder | None = None,
         on_read: Sequence[ReadHook] = (),
+        older_runs: OlderRuns | None = None,
+        read_run: RunReader | None = None,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -164,6 +178,14 @@ class Follower:
         #: hooks run (#2665): what flow triggers fire ``print.finished`` and
         #: ``print.failed`` on. A core service, not a hook, so every follow has it.
         self.record_outcome = record_outcome
+        #: Each run is settled on its own (#5613): two prints of one subject at once
+        #: (two order items of one library file) are both followed. On each pass the
+        #: subject's older runs still open are read by their own run (``read_run``) and
+        #: each settled one is recorded against its run (``older_runs.record_run``). The
+        #: follow ends only once none is open. Without both, only the subject's newest
+        #: run is read, as before.
+        self.older_runs = older_runs
+        self.read_run = read_run
 
     async def follow(
         self,
@@ -176,13 +198,22 @@ class Follower:
         """Read ``run_subject``'s print until it ends; ``active`` is when it last moved.
         It waits first, unless ``read_now`` (a poke: a new print, read at once); either
         way the waits after that back off from `min_interval`. ``run_subject`` is an output's
-        id, or ``library:<file id>`` for a library file's print (#1073)."""
+        id, or ``library:<file id>`` for a library file's print (#1073). With
+        ``older_runs``, it ends only once each older open run of the subject has settled
+        too (#5613)."""
         subject = PrintSubject.from_run_subject(run_subject)
         if subject.kind == "library" and self.read_library is None:
             return "gone"
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
         last_read: PrintProgress | None = None
+        #: Whether the newest run's settled read is recorded. A failed record is retried
+        #: on each pass that reads it settled, as an older run's is (#5621).
+        recorded = False
+        #: Each older open run's last read, by run id (#5613).
+        older_reads: dict[str, PrintProgress | None] = {}
+        #: The older runs whose settled hooks have run, by run id (#5621).
+        older_hooked: set[str] = set()
         while True:
             if read_now:
                 read_now = False
@@ -227,18 +258,102 @@ class Follower:
             changed = published if failed is None else progress != last_read
             moved = progress != last_read
             last_read = progress
+            if moved:
+                recorded = False
             if progress is not None and moved:
                 await self._read_hooks(key, progress, active, heartbeat)
-            if progress is not None and progress.settled:
+            if progress is not None and progress.settled and (moved or not recorded):
                 # After observe, so print.settled is already published (#836). Not on
-                # progress None: a print never queued has no picks.
-                await self._record(key, slug, progress, active, heartbeat)
+                # progress None: a print never queued has no picks. A follow kept open by
+                # an older run (#5613) reads the settle again unmoved: it records it
+                # again only while the record has failed (#5621).
+                recorded = await self._record(key, slug, progress, active, heartbeat)
+            if progress is not None and progress.settled and moved:
+                # Once per settle.
                 await self._settled(subject, active, heartbeat)
-            if progress is None or progress.settled:
+            older_open, older_moved = await self._older(
+                subject, key, slug, older_reads, older_hooked, active, heartbeat
+            )
+            if (progress is None or progress.settled) and not older_open:
                 return "settled"
-            if changed:
+            if changed or older_moved:
                 active = self.now()
-            interval = self.min_interval if changed else min(self.max_interval, interval * 2)
+            interval = (
+                self.min_interval
+                if changed or older_moved
+                else min(self.max_interval, interval * 2)
+            )
+
+    async def _older(
+        self,
+        subject: PrintSubject,
+        key: str,
+        slug: str,
+        reads: dict[str, PrintProgress | None],
+        hooked: set[str],
+        active: datetime,
+        heartbeat: Callable[[datetime], None],
+    ) -> tuple[bool, bool]:
+        """Read each of the subject's older runs still open by its own run (#5613), run
+        the read hooks on each that moved, and record each settled one against its run.
+        On the pass its record succeeds, moved or not, run the settled hooks once per
+        follow for that run (``hooked``, by run id, #5621): ``hooked`` lives for one
+        activity attempt, so a retried attempt runs them again, which is safe because
+        each hook is idempotent.
+        Whether one is still open (a read that failed counts as open: it is read again),
+        and whether one moved. Nothing is published: the subject's topic shows its newest
+        print, as before."""
+        if self.older_runs is None or self.read_run is None:
+            return False, False
+        try:
+            async with asyncio.timeout(self.settle_timeout):
+                runs = await self._heartbeating(self.older_runs.older_open(key), active, heartbeat)
+        except Exception as exc:
+            # The database: follow the newest run alone this pass, as before #5613.
+            logger.warning(
+                "the older open runs could not be read",
+                extra={"subject": key, "error": type(exc).__name__},
+            )
+            return False, False
+        still_open = moved_any = False
+        for run in runs:
+            try:
+                progress = await self._heartbeating(self.read_run(subject, run), active, heartbeat)
+            except Exception as exc:
+                # Bambuddy down, a key without the scope: read it again next pass.
+                logger.warning(
+                    "an older run's print could not be read",
+                    extra={"subject": key, "run_id": run.id, "error": type(exc).__name__},
+                )
+                still_open = True
+                continue
+            moved = run.id not in reads or progress != reads[run.id]
+            reads[run.id] = progress
+            if progress is None:
+                # Nothing to read it by (no sends, no LAN start): not followed.
+                continue
+            if moved:
+                moved_any = True
+                await self._read_hooks(key, progress, active, heartbeat)
+            if not progress.settled:
+                still_open = True
+                continue
+            try:
+                await self._bounded(
+                    self.older_runs.record_run(run, slug, progress), active, heartbeat
+                )
+            except Exception as exc:
+                logger.warning(
+                    "an older run's outcome could not be recorded",
+                    extra={"subject": key, "run_id": run.id, "error": type(exc).__name__},
+                )
+                still_open = True
+                continue
+            if run.id not in hooked:
+                # The subject's own hooks (the rack's archives), idempotent as they are.
+                hooked.add(run.id)
+                await self._settled(subject, active, heartbeat)
+        return still_open, moved_any
 
     async def _newest_failed(self, key: str) -> PrintProgress | None:
         if self.newest_failed is None:
@@ -271,18 +386,23 @@ class Follower:
         progress: PrintProgress,
         active: datetime,
         heartbeat: Callable[[datetime], None],
-    ) -> None:
+    ) -> bool:
+        """Record the newest run's settled read. Whether it is recorded (True also when
+        there is nothing to record it with)."""
         if self.record_outcome is None:
-            return
+            return True
         try:
             await self._bounded(self.record_outcome(key, slug, progress), active, heartbeat)
         except Exception as exc:
-            # Type only, as the hooks (#836). Not retried now: the next settled read of
+            # Type only, as the hooks (#836). The follow records it again on its next
+            # pass while it stays open (#5621); after it ends, the next settled read of
             # this print (the progress route's follow, a retried attempt) records it.
             logger.warning(
                 "a settled print's outcome could not be recorded",
                 extra={"subject": key, "error": type(exc).__name__},
             )
+            return False
+        return True
 
     async def _read_hooks(
         self,

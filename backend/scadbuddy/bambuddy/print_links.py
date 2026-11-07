@@ -205,6 +205,11 @@ class PrintLinkStore:
         its own run's plates: an earlier run, settled or not, is not among them."""
         return _last_run(await self.sends_for(subject))
 
+    async def run_sends(self, subject: PrintSubject, run_id: str) -> list[PrintSend]:
+        """The sends of one run of the subject (#5613), in the order recorded: an older
+        run the follow settles on its own."""
+        return await asyncio.to_thread(self._sends_for, subject, run_id)
+
     async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
         """The library files' queue items whose archive is not known yet and that are
         not gone, newest first, at most ``limit``. An item recorded more than
@@ -315,13 +320,14 @@ class PrintLinkStore:
                 ],
             )
 
-    def _sends_for(self, subject: PrintSubject) -> list[PrintSend]:
+    def _sends_for(self, subject: PrintSubject, run_id: str | None = None) -> list[PrintSend]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT queue_item_id, plate_id, printer_id, project_id, slice_job_id,"
                 " run_id, first_seen FROM print_sends WHERE subject = %s"
+                " AND (%s::text IS NULL OR run_id = %s)"
                 " ORDER BY first_seen, queue_item_id",
-                (subject.key,),
+                (subject.key, run_id, run_id),
             ).fetchall()
         return [PrintSend.model_validate(dict(row)) for row in rows]
 

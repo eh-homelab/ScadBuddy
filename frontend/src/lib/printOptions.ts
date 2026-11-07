@@ -101,6 +101,21 @@ export function lanHonours(name: OptionName, value: OptionValue | string): boole
   return LAN_CALIBRATIONS[name] === value
 }
 
+/**
+ * #5602 — the dialog's notice for the values a native route cleared, e.g. "Flow
+ * calibration On was cleared: the LAN cannot set it."; `null` when none was.
+ */
+export function lanClearedNotice(cleared: PrintOptions): string | null {
+  const named = PRINT_OPTIONS.filter((spec) => isSet(optionValue(cleared, spec.name))).map(
+    (spec) => `${spec.label} ${formatOption(spec.kind, optionValue(cleared, spec.name))}`,
+  )
+  if (named.length === 0) return null
+  const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`
+  return named.length === 1
+    ? `${list} was cleared: the LAN cannot set it.`
+    : `${list} were cleared: the LAN cannot set them.`
+}
+
 /** One layer of the merge, most general first. */
 export interface OptionLayer {
   scope: OptionScope | 'request'

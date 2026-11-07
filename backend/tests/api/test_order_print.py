@@ -21,11 +21,13 @@ from fastapi.testclient import TestClient
 
 import scadbuddy.orders.projects as projects_module
 from scadbuddy.activity.component import ACTIVITY
+from scadbuddy.api import orders as orders_api
 from scadbuddy.api.printing import accept_run
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.core.events import PrintOutcome
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.operations.component import OPERATIONS
@@ -689,3 +691,24 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
             assert slicer.calls == 2
             (queued,) = library.queue_bodies
             assert {name: queued[name] for name in CALIBRATIONS} == CALIBRATIONS
+
+
+@pytest.mark.parametrize("path", ["print", "revisions/r1/test-print"])
+def test_a_print_records_whether_a_caller_of_the_api_asked(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """#5602 review: the operation's run has no request of its own, so the route records
+    a caller that is not the page (`asked_by_api`), and the print's refusal is worded
+    for it. The page's request (``X-ScadBuddy-Request: 1``) records nothing."""
+    sent: list[dict[str, Any]] = []
+
+    async def recorded(*args: Any, request: dict[str, Any], **kwargs: Any) -> Any:
+        sent.append(request)
+        raise ApiError(418, "recorded")
+
+    monkeypatch.setattr(orders_api, "run_operation", recorded)
+    url = f"/api/v1/orders/o1/items/i1/{path}"
+    assert client.post(url, json=body(), headers=press()).status_code == 418
+    page = {**press(), "X-ScadBuddy-Request": "1"}
+    assert client.post(url, json=body(), headers=page).status_code == 418
+    assert [request.get("api") for request in sent] == [True, None]

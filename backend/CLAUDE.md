@@ -147,7 +147,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   render worker's own role `scadbuddy_render` may touch, granted by the API at start;
   a change to what the worker reads or writes changes it, and
   `tests/test_render_worker_role.py` renders as that role; the worker never migrates
-  and reads the store settings and writes its job rows, their events and activity rows, their blob refs, the piece geometry and the blob index only through the API's CRUD routes, `crud/render.py`; that role is today's state,
+  and reads the store settings and writes its job rows, their events and activity rows, their blob refs, the piece geometry and the blob index only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it; that role is today's state,
   superseded by #5295, which moves the worker's SQL behind CRUD routes, #5298). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
@@ -324,7 +324,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   native run refuses a request whose own `options` ask a calibration value the LAN start
   cannot honour (`options.lan_calibration_refusal`, 422): it sends `flow_cali` false and no
   field for the other three, so `flow_cali` `"off"` and `bed_levelling`/`nozzle_offset_cali`
-  `"auto"` pass (`LAN_CALIBRATIONS`), and any `vibration_cali` is refused. An order print
+  `"auto"` pass (`LAN_CALIBRATIONS`), and any `vibration_cali` is refused. Its type is
+  `LAN_CALIBRATION_PROBLEM`, with `bambuddy_linked`; for a caller that is not the page
+  (`api/printing.py` `asked_by_api`; an order print's operation records it as `api`), on
+  a row that links a Bambuddy printer, the print route adds `LAN_CALIBRATION_API_HINT`,
+  which names `path` (#5602). An order print
   with `path` `bambuddy` of a quote sliced over the LAN slices again (orders spec §5.4). A
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
@@ -439,7 +443,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`outcomes.py`, #2665): the follow's settled read (`Follower.record_outcome`, every
   path) records it once against the run that queued or started it and publishes
   `print.outcome` in that transaction; `print.finished`/`print.failed` triggers fire on
-  it, never on the per-process `print.settled`.
+  it, never on the per-process `print.settled`. Each run is settled on its own (#5613,
+  orders spec §3.3): the subject's one follow also reads each older open run of the
+  subject by that run (`Follower.read_run`, `progress.py` `run_reader`: a library file's
+  run by its own sends, a LAN run by its printer's report; `PrintOutcomeStore.older_open`,
+  within `OPEN_RUN_WINDOW`) and records it with `record_run`, and ends only once none is
+  open. This lives in the activity: `FollowPrint`'s commands are unchanged, and its
+  histories replay from `tests/fixtures/follow_print_histories/`, so a change to them
+  goes behind `workflow.patched`.
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per

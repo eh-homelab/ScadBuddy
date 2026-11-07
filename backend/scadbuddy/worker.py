@@ -55,6 +55,7 @@ from scadbuddy.bambuddy.progress import (
     lan_first,
     library_progress,
     progress_for,
+    run_reader,
 )
 from scadbuddy.bambuddy.runs import PrintRunStore, RecentRuns, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -78,6 +79,7 @@ from scadbuddy.crud.render import (
     RemoteGeometryIndex,
     RemoteJobProjection,
     RemoteRenderSettingsSource,
+    RemoteStoreFolders,
 )
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
@@ -224,12 +226,14 @@ def build_worker_deps(
     refs: RemoteBlobRefs,
     geometry: RemoteGeometryIndex,
     index: RemoteBlobIndex,
+    folders: RemoteStoreFolders,
     metrics: Metrics | None = None,
     stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``current`` is ``source``'s first read, which the store is built from. ``jobs``
     writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry,
-    ``index`` the blob index; its caller closes their client. ``stopping`` ends the wait
+    ``index`` the blob index, ``folders`` the Bambuddy store's folders; its caller closes
+    their clients. ``stopping`` ends the wait
     for the API's schema and grants (`WorkerStoppedError`)."""
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
@@ -245,9 +249,10 @@ def build_worker_deps(
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = metrics or worker_metrics(settings, "render")
-    # For the stores still on SQL, until #5298 Tasks 17-20 move them to CRUD routes: the
+    # For the stores still on SQL, until #5298 Tasks 18-20 move them to CRUD routes: the
     # job rows, their events and activity rows (``jobs``), the blob refs (``refs``), the
-    # piece geometry (``geometry``) and the blob index (``index``) already go through them.
+    # piece geometry (``geometry``), the blob index (``index``) and the Bambuddy store's
+    # folders (``folders``) already go through them.
     pool: Pool = ConnectionPool(
         settings.database_url,
         min_size=1,
@@ -280,6 +285,7 @@ def build_worker_deps(
             paths=paths,
             pool=pool,
             index=index,
+            folders=folders,
             source=source,
             # On bambuddy a worker has no git: the API makes the snapshots it renders from.
             history=None,
@@ -1057,7 +1063,7 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
 
 
 #: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs", "blob-index"})
+RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs", "blob-index", "store-folders"})
 
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
@@ -1124,6 +1130,8 @@ async def run_worker(
                     refs=RemoteBlobRefs(remote),
                     geometry=RemoteGeometryIndex(remote),
                     index=RemoteBlobIndex(remote),
+                    # On the loop, as the store calls it: the async client.
+                    folders=RemoteStoreFolders(crud, source=source),
                     metrics=metrics,
                     stopping=stop.is_set,
                 )
@@ -1314,6 +1322,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         store=SpoolStore(pool),
         providers=discover_providers(SettingsOnly(settings_store), None),
     )
+    outcomes = PrintOutcomeStore(pool, events)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1330,7 +1339,10 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         newest_failed=newest_failed_from(
             print_runs, settings_store.load, latest=recent_runs.latest
         ),
-        record_outcome=PrintOutcomeStore(pool, events).record,
+        record_outcome=outcomes.record,
+        # Each older run of a subject is settled on its own (#5613).
+        older_runs=outcomes,
+        read_run=run_reader(lan, lambda: client_for(settings_store.load()), links, uploads=uploads),
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys,
     # with the kept copy of Bambuddy's local presets (#4645).

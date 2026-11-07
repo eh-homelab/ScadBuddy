@@ -17,7 +17,8 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Literal, Protocol
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import psycopg
 from pydantic import BaseModel, Field
@@ -33,6 +34,10 @@ from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
 from scadbuddy.library.settings_store import StoredSettings
+
+if TYPE_CHECKING:
+    # Annotations only: runs imports this module.
+    from scadbuddy.bambuddy.runs import PrintRun
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +439,42 @@ async def lan_first(
     if native is not None:
         return native
     return await bambuddy()
+
+
+class LanRunReads(Protocol):
+    """One run's LAN print (`printers/progress.py` `LanProgress.read_run`)."""
+
+    async def read_run(self, run: PrintRun) -> PrintProgress | None: ...
+
+
+def run_reader(
+    lan: LanRunReads,
+    client: Callable[[], AbstractAsyncContextManager[BambuddyClient]],
+    links: PrintLinkStore,
+    *,
+    uploads: BambuddyUploadStore | None = None,
+) -> Callable[[PrintSubject, PrintRun], Awaitable[PrintProgress | None]]:
+    """The follow's read of one run (#5613, ``Follower.read_run``): an older run of a
+    subject printed again before it settled. A LAN run is read from its printer's report;
+    a library file's run on Bambuddy's queue by that run's own sends, as
+    :func:`library_progress` reads the newest run's. An output's older run on Bambuddy's
+    queue reads as ``None``: an output's queue items are its last print's
+    (``output_last_prints``), not kept per run. ``client`` builds a Bambuddy client only
+    when a queue item is read."""
+
+    async def read(subject: PrintSubject, run: PrintRun) -> PrintProgress | None:
+        native = await lan.read_run(run)
+        if native is not None:
+            return native
+        if subject.kind != "library":
+            return None
+        sends = await links.run_sends(subject, run.id)
+        if not sends:
+            return None
+        async with client() as bambuddy:
+            return await library_progress(bambuddy, subject, links, uploads=uploads, sends=sends)
+
+    return read
 
 
 async def progress_for(

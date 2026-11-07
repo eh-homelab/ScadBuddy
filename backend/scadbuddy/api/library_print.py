@@ -1408,6 +1408,7 @@ async def start_library_run(
     http: Request | None = None,
     native: LibraryReads | None = None,
     amend: Amend | None = None,
+    api: bool | None = None,
 ) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
@@ -1416,7 +1417,8 @@ async def start_library_run(
     ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
     calls it, the answer is always the run. ``native`` is the native library that serves,
     if one does (#3827), and a file of the library that does not serve is its 404, before
-    anything is accepted."""
+    anything is accepted. ``api`` is `accept_run`'s (#5602): a caller that is not the
+    page, when no ``http`` tells it."""
     check_served(file_id, native)
 
     async def prepare(source: SourceSpec) -> SourceSpec:
@@ -1434,6 +1436,7 @@ async def start_library_run(
         activity=activity,
         prepare=prepare,
         amend=amend,
+        api=api,
     )
 
 

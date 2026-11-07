@@ -4,6 +4,7 @@ import {
   effectiveScope,
   formatOption,
   isNonDefault,
+  lanClearedNotice,
   PRINT_OPTIONS,
   resolveOptions,
   type OptionLayer,
@@ -97,5 +98,15 @@ describe('formatOption', () => {
     expect(formatOption('calibration', 'auto')).toBe('Auto')
     expect(formatOption('number', 3)).toBe('3')
     expect(formatOption('number', null)).toBe('not set')
+  })
+})
+
+describe('lanClearedNotice (#5602)', () => {
+  it('names each cleared value by its label', () => {
+    expect(lanClearedNotice({})).toBeNull()
+    expect(lanClearedNotice({ flow_cali: 'on' })).toBe('Flow calibration On was cleared: the LAN cannot set it.')
+    expect(lanClearedNotice({ vibration_cali: false, flow_cali: 'auto', bed_levelling: 'on' })).toBe(
+      'Bed levelling On, Flow calibration Auto and Vibration calibration Off were cleared: the LAN cannot set them.',
+    )
   })
 })

@@ -442,7 +442,7 @@ async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_
         except ApiError as error:
             refusal = problem(error)
             refused.append(refusal)
-            _answered(AcceptAnswer(refusal=refusal))
+            _answered(AcceptAnswer(refusal=refusal), api=False)
         raise AssertionError("the named printer was not refused")
 
     monkeypatch.setattr(print_batches, "start_library_run", answers)

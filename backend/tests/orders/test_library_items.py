@@ -5,12 +5,21 @@ prints the file, and a file gone since it was added is refused, never a 500."""
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 
+from scadbuddy.bambuddy.follow import Follower
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.output_reader import LocalOutputs
+from scadbuddy.bambuddy.print_run import PrintRunResult
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
+from scadbuddy.bambuddy.subject import PrintSubject, library_slug
+from scadbuddy.core.events import InProcessEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.lifecycle import LifecycleError, ManualQuoteInput
 from scadbuddy.orders.models import LibraryFileRef, Order, OrderItem
@@ -250,9 +259,92 @@ def test_a_file_gone_refuses_the_quote_and_the_print(
     )
     assert check(Library(89)) == {
         "library_file_id": 89,
-        "slug": "library-89",
         "copies": 2,
         "quote_id": quote.id,
         "sliced_sha256": None,
         "sliced_blob_key": None,
     }
+
+
+def test_two_items_of_one_file_printing_at_once_both_settle(shop: Shop, pool: PgPool) -> None:
+    """#5613: both items print on the run subject ``library:89``. The follow reads the
+    subject's newest run, and the older run by its own run (``Follower.read_run``), and
+    records each outcome against its run, so both attempts settle by themselves."""
+    order = shop.order()
+    older, newer = library_item(shop, order), library_item(shop, order)
+    shop.quoted(order, older)
+    shop.quoted(order, newer)
+    shop.lifecycle.accept_order(order.id, BY)
+    subject = PrintSubject.library(FILE.id)
+    runs = PrintRunStore(pool)
+
+    async def run(run_id: str, queue_item: int) -> None:
+        await runs.insert_accepted(
+            run_id,
+            subject=subject,
+            key=f"k-{run_id}",
+            slug=library_slug(subject),
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w1",
+            retention=None,
+        )
+        result = PrintRunResult(library_file_id=FILE.id, copies=2, queue_item_ids=[queue_item])
+        await runs.succeed(run_id, library_slug(subject), result)
+
+    def started(item: OrderItem, run_id: str, queue_item: int) -> str:
+        asyncio.run(run(run_id, queue_item))
+        claim = shop.lifecycle.claim_print(
+            order.id,
+            item.id,
+            BY,
+            request_id=f"req-{run_id}",
+            sliced_sha256=None,
+            sliced_blob_key=None,
+        )
+        return shop.lifecycle.attach_print(claim, run_id, None).id
+
+    started(older, "r-older", 51)
+    started(newer, "r-newer", 52)
+
+    def done(queue_item: int) -> PrintProgress:
+        return PrintProgress(
+            route="slice_queue",
+            stage="done",
+            settled=True,
+            queue_item_id=queue_item,
+            bambuddy_url="http://bambuddy.test/queue",
+        )
+
+    outcomes = PrintOutcomeStore(pool, None)
+
+    async def read_library(subject: PrintSubject) -> PrintProgress:
+        # The subject's own read is of its newest run's print.
+        return done(52)
+
+    async def read_run(subject: PrintSubject, run: PrintRun) -> PrintProgress:
+        # An older run is read by its own run: the older item's queue item.
+        assert run.id == "r-older"
+        return done(51)
+
+    async def unused(meta: Any) -> None:
+        raise AssertionError("an output read")
+
+    follower = Follower(
+        outputs=LocalOutputs(None, None),  # type: ignore[arg-type]
+        observer=ProgressObserver(InProcessEventBus()),
+        read=unused,
+        read_library=read_library,
+        events=None,
+        record_outcome=outcomes.record,
+        older_runs=outcomes,
+        read_run=read_run,
+        min_interval=0.01,
+    )
+    ended = asyncio.run(
+        asyncio.wait_for(follower.follow(subject.run_subject, datetime.now(UTC)), 10)
+    )
+    assert ended == "settled"
+    for item, run_id in ((newer, "r-newer"), (older, "r-older")):
+        settled = shop.lifecycle.follow_print(run_id)
+        assert settled is not None and (settled.outcome, settled.quantity) == ("succeeded", 2)
+        assert shop.get_item(item).status == "printed"

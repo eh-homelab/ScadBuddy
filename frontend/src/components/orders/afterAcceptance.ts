@@ -58,7 +58,9 @@ export const PARTLY_FULFILLED_TEXT = 'Some units of this design are accepted as 
 /** How the item takes a new revision now (#5350): on its plain route, after acceptance (an
  * accepted item on an accepted, in-production or ready order not on hold, with no print
  * running and no attempt accepted, #5592), or not at all. The caller checks that the item is
- * not settled. */
+ * not settled. `attempts` is read only through `partlyFulfilled`: `RevisionsPanel` shows its
+ * partly-fulfilled hint when the answer with `[]` differs from the answer with the attempts
+ * (#5598), so a new check here that reads the attempts must change that hint too. */
 export function reviseMode(
   order: Pick<Order, 'status' | 'on_hold'>,
   item: Pick<OrderItem, 'status' | 'revised_after_acceptance'>,
