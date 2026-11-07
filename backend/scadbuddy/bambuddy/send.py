@@ -166,6 +166,12 @@ _SLOT_HINTS = ";slots"
 #: before has none: Bambu Studio's CLI takes it for a 200 x 200 bed, so every plate past
 #: the first slices empty, and a reused one kept failing after the fix (#4638).
 _BED_STATED = "#bed"
+#: Follows :data:`_BED_STATED` in every :attr:`Target.key` of a copy laid out since the
+#: prime tower's place reserves the brim the slicer draws for the plate's height
+#: (:func:`~scadbuddy.render.plate.tower_brim`, #5545). A copy recorded before has its
+#: tower 3 mm from the edge, which a tall plate's brim passes, and reusing it kept every
+#: quote failing after the fix (#5566).
+_TOWER_BRIM = "#brim"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
@@ -208,10 +214,11 @@ class Target:
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        It starts with the plate's own key and :data:`_BED_STATED`, so a copy recorded
-        before #4638, whose file states no bed, is never reused.
+        It starts with the plate's own key, :data:`_BED_STATED` and :data:`_TOWER_BRIM`,
+        so a copy recorded before #4638, whose file states no bed, or before #5545, whose
+        tower leaves no room for a tall plate's brim, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}"
+        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}"
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
