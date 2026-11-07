@@ -38,9 +38,8 @@ from temporalio.worker import Worker
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
 from scadbuddy.auth.service_credentials import (
-    ExchangeReader,
     ServiceAuth,
-    ServiceCredentialConfigError,
+    exchange_source,
     token_source,
 )
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
@@ -68,7 +67,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.secrets import Kek
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
@@ -1068,17 +1067,7 @@ def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClien
             " store settings through the API's CRUD routes (#5298), e.g."
             " http://scadbuddy:8082"
         )
-    proof: Literal["k8s", "bootstrap"]
-    if settings.service_token_file is not None:
-        proof_file, proof = settings.service_token_file, "k8s"
-    elif settings.service_bootstrap_file is not None:
-        proof_file, proof = settings.service_bootstrap_file, "bootstrap"
-    else:
-        raise ServiceCredentialConfigError(
-            "SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE is required for"
-            " the render worker: it exchanges that proof for its service credential (#5494)"
-        )
-    credential = ServiceAuth(ExchangeReader("render", settings.api_internal_url, proof_file, proof))
+    credential = ServiceAuth(exchange_source("render", settings))
     return CrudClient(settings.api_internal_url, "render", credential, metrics=metrics)
 
 
@@ -1502,13 +1491,19 @@ async def run_projects_worker(
     health_port: HealthListen | None = HEALTH_PORT,
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
-    §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
-    runs unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
+    §4.3). No database (#5298): its flow runs, operations and payload keys go through
+    the API's CRUD routes, with a credential it exchanges its proof for, and the KEK
+    opens the payload keys: a flow's payloads are sealed per run, and it never runs
+    unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
     ``SCADBUDDY_REVISION``, its build made current once at start and `/readyz` ready once
     the queue routes to it, as the print worker. Every workflow on it is AUTO_UPGRADE
     (`client.projects_deployment`), never pinned (plan 2026-10-09 Ruling 13), so it stops
     without a drain; a run in flight moves to the current build at its next task."""
     stop = stop or asyncio.Event()
+    if settings.database_url:
+        logger.warning(
+            "ignoring SCADBUDDY_DATABASE_URL: the projects worker holds no database (#5298)"
+        )
     kek = settings_kek(settings.secret_key_file)
     if kek is None:
         raise ProjectsKeyMissingError(
@@ -1521,19 +1516,16 @@ async def run_projects_worker(
             " print and arrange call the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
+    # #4975 phase 4, #5494: the service credential on the API's routes, exchanged for
+    # its proof, with no view to fall back to; no proof refuses the start.
+    credential = ServiceAuth(exchange_source("projects", settings))
     metrics = worker_metrics(settings, "projects")
     # #5298: no event bus. The API makes every write that announces, and the event
     # commits there.
-    settings_store = SettingsStore(settings)
-    # #5210: on a role of its own, wait for the API's migrations and grants.
-    await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
     crud: CrudClient | None = None
     routes: FlowRoutes | None = None
     try:
         runtime, sdk_port = _sdk_runtime(settings)
-        # #4975 phase 4: the projects worker's service credential on the API's routes,
-        # exchanged for its proof when one is configured (#5494).
-        credential = ServiceAuth(token_source("projects", settings, kek))
         # #5298: flow runs, decisions, grants, operations and payload keys through the
         # API's CRUD routes. A key comes sealed and is opened here with the KEK (plan D10).
         crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
@@ -1598,7 +1590,6 @@ async def run_projects_worker(
             await routes.aclose()
         if crud is not None:
             await crud.aclose()
-        await asyncio.to_thread(settings_store.close)
 
 
 Queue = Literal["render", "bambuddy", "projects"]
@@ -1652,7 +1643,7 @@ def parse_queue(argv: Sequence[str] | None = None) -> Queue:
 
 def main() -> None:
     queue = parse_queue()
-    settings = Settings()
+    settings = NoDatabaseSettings() if queue == "projects" else Settings()
     configure_logging(settings.log_level)
     # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
     if queue not in SERVICE_NAMES:

@@ -494,8 +494,10 @@ function ItemDrawer({
 }) {
   const { order } = detail
   // The item's own price decides past `quoted` (#5349): one added after acceptance is quoted here.
+  // It gates only the quantity and a custom item's price, which stay pinned once a quote is accepted.
   const editable = itemOpen(order, item.quotes)
   // #5350: an item revised after acceptance takes a quote of its new design, and that quote's acceptance.
+  // The design and filament edits follow it (#5582): the quote's filaments here, revisions in `RevisionsPanel` (`reviseMode`).
   const quotable = priceOpen(order, item, item.quotes)
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   const [error, setError] = useState<string | null>(null)

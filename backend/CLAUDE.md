@@ -10,10 +10,11 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The render, print and projects
-workers each connect as a role of their own, with the grant lists in
-`render/worker_role.py` (`RENDER_GRANTS`) and `auth/caller_grants.py` (`PRINT_GRANTS`,
-`PROJECTS_GRANTS`, and `AGENT_GRANTS` for the agent). Template `pipeline/` Python runs in
+database owner and runs SQL on the agent's `ai_*` tables. The render and print workers
+each connect as a role of their own, with the grant lists in `render/worker_role.py`
+(`RENDER_GRANTS`) and `auth/caller_grants.py` (`PRINT_GRANTS`, and `AGENT_GRANTS` for
+the agent). The projects worker has no database client (#5298): it reaches flows,
+operations and payload keys through CRUD routes, and `PROJECTS_GRANTS` is empty. Template `pipeline/` Python runs in
 the render worker's pod, and openscad and `openscad-lsp` run in the API's pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
@@ -28,8 +29,10 @@ A caller gets its service credential from `auth/service_credentials.py` `token_s
 `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` it exchanges that proof
 at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token.py`, class
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
-credential, falling back to its view on a 404; otherwise it reads its sealed one from its
-view (`TokenReader`), as before (#5494). The API's own in-process callers use
+credential, falling back to its view on a 404 while it has a database URL; otherwise it
+reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
+(the projects worker, #5298) takes `exchange_source` instead: the exchange only, with no
+view, and no proof refuses its start. The API's own in-process callers use
 `InProcessProvider` (`proof = inprocess`). A new caller-side client takes a `token_source`,
 never a `TokenReader` of its own.
 
@@ -408,7 +411,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
   `--queue projects` (`run_projects_worker`, #1057) serves flow runs, deployment
   `scadbuddy-projects` (#4146; `/readyz` once the queue routes to it, as the print
-  worker's): Postgres and the KEK only, and it refuses to start without the KEK.
+  worker's): no database (#5298), the KEK, and a credential exchanged for
+  `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
+  start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
+  (`core/settings.py` `NoDatabaseSettings`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -608,7 +614,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `revision.added_after_acceptance` (with `accepted_quote_id`). While the mark stands the
   lock is `requote_open` (`_open_for_requote`, and `quote_check`): quotes, a quote's
   acceptance, a customer's answer and more revisions, never the quantity. `_accept_quote`
-  clears the mark; `_reopened_status` gives such an item `quoted` or `draft`. Agent
+  clears the mark; `_reopened_status` gives such an item `quoted` or `draft`.
+  `accept_fulfilment` refuses an attempt made before the accepted quote's revision
+  (`fulfilment_stale`, `_before_priced_design`, #5582). Agent
   `order_item_revision_add_after_acceptance` (outward; `order_item_revision_add` stays
   write); frontend `afterAcceptance.ts` `reviseMode`, `priceOpen`, `reviseWarning` in
   `RevisionsPanel` and `AddItemDialog` (`revise` with `mode`).

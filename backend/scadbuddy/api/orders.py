@@ -1623,11 +1623,12 @@ async def add_revision_after_acceptance(
     is `draft` again and `revised_after_acceptance`, so it takes a quote and that quote's
     acceptance, and is not printed or fulfilled before. The audit row is
     ``revision.added_after_acceptance``. 409 ``order_not_accepted`` while the order is
-    `draft` or `quoted` (use the plain route), ``item_locked`` once it is `shipped`,
-    ``order_closed``/``order_cancelled``, ``order_on_hold``, ``item_not_open`` for a
-    fulfilled or cancelled item, ``item_not_priced`` for an item with no accepted quote
-    (use the plain route), ``item_custom``, and ``print_in_flight`` while a print of
-    it runs."""
+    `draft` or `quoted` (use the plain route), ``order_closed``/``order_cancelled``,
+    ``order_on_hold``, ``item_not_open`` for a fulfilled or cancelled item (every item of
+    a `ready` or `shipped` order is one, so the route never works there and its
+    ``item_locked`` for `shipped` is not reached), ``item_not_priced`` for an item with
+    no accepted quote (use the plain route), ``item_custom``, and ``print_in_flight``
+    while a print of it runs."""
     return await _add_revision(
         order_id,
         item_id,
@@ -2028,6 +2029,13 @@ async def copy_archive_media(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept",
     response_model=Fulfilment,
     summary="Count an attempt's quantity as made",
+    description=(
+        "The attempt's quantity counts as made; the item is fulfilled once its accepted "
+        "attempts reach its quantity. 409 `fulfilment_accepted`, `fulfilment_failed`, "
+        "`item_not_open`, and `fulfilment_stale` for an attempt made before the revision "
+        "the accepted quote prices (an item revised after acceptance, #5350): it printed "
+        "an earlier design."
+    ),
 )
 async def accept_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep

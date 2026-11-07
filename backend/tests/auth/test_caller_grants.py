@@ -197,7 +197,7 @@ def test_a_worker_on_a_role_without_its_grants_waits(
 
 def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path: Path) -> None:
     store = _store(pg_conninfo, tmp_path)
-    open_for_caller(store, "projects")
+    open_for_caller(store, "print")
     try:
         with store.pool.connection() as conn:
             assert owns_schema(conn)
@@ -207,23 +207,10 @@ def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path
         store.close()
 
 
-def test_a_projects_worker_on_its_own_role_opens(
-    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
-) -> None:
-    """#5298: it only waits for the API's migrations and grants; it reads no settings."""
-    _grant(owner, role, "projects")
-    store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
-    try:
-        open_for_caller(store, "projects")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            store.snapshot()
-    finally:
-        store.close()
-
-
 def test_print_and_projects_lists_differ_where_their_work_does() -> None:
-    # The print worker rewrites settings in a printer merge; flow runs read none (#5298).
-    assert "UPDATE" in PRINT_GRANTS["settings"] and "settings" not in PROJECTS_GRANTS
+    # The print worker rewrites settings in a printer merge; the projects worker holds no
+    # database (#5298).
+    assert "UPDATE" in PRINT_GRANTS["settings"] and PROJECTS_GRANTS == {}
 
 
 #: The relations the projects worker reaches only through the CRUD routes (#5298): the

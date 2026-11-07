@@ -2506,12 +2506,16 @@ export const api = {
    */
   runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
   /**
-   * #5554 — the slice quotes that failed since `since` (the order's oldest item), newest
-   * first: a failure the page did not start (over MCP, in another tab) shows on its item
-   * with its start and end. The rows carry no error; `followQuote` reads it.
+   * #5554 — the newest `failed` activity row of one item's slice quotes since `since` (the
+   * item's `created_at`): a failure the page did not start (over MCP, in another tab) shows
+   * on its item with its start and end. The rows carry no error; `followQuote` reads it.
+   * #5585 — filtered by the item's subject, so no other order's failures push it off the
+   * page. A failed quote whose row stayed `running` is not here; `useSliceQuotes` finds it.
    */
-  failedQuotes: (since: string) =>
-    request<ActivityPage>(`/activity?${new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '200' })}`),
+  failedQuotes: (itemId: string, since: string) =>
+    request<ActivityPage>(
+      `/activity?${new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', subject: `order_item:${itemId}`, since, limit: '1' })}`,
+    ),
   /**
    * #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows
    * its own (`followRunning`). `onRunning` is told once the first read finds it still
