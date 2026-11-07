@@ -25,6 +25,12 @@ from tests.api.test_order_payments import (
 )
 from tests.auth.fake_oidc import CLIENT_ID, ISSUER, FakeIssuer
 
+
+def fake_status(client: TestClient) -> dict[str, Any]:
+    found = client.get("/api/v1/payments/providers").json()
+    return next(s for s in found if s["id"] == "fake")
+
+
 pytestmark = pytest.mark.requires_postgres
 
 HOOK = "/api/v1/payments/webhooks/fake"
@@ -76,7 +82,7 @@ def test_the_fake_provider_drives_a_request_through_paid_and_refunded(
     assert client.post(HOOK, content=body, headers=headers).json() == {"outcome": "recorded"}
     payments = client.get(f"/api/v1/orders/{order_id}").json()["payments"]
     assert [p["amount_minor"] for p in payments] == [req["amount_minor"], -400]
-    [status] = client.get("/api/v1/payments/providers").json()
+    status = fake_status(client)
     assert status["last_webhook_at"] is not None
 
 
@@ -91,7 +97,7 @@ def test_a_bad_signature_is_400_and_records_nothing(client: TestClient, pg_conni
         row = conn.execute("SELECT count(*) FROM payment_events").fetchone()
     assert row is not None and row[0] == 0
     assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
-    [status] = client.get("/api/v1/payments/providers").json()
+    status = fake_status(client)
     assert status["last_webhook_at"] is None
 
 

@@ -45,8 +45,8 @@ async def test_a_bad_signature_is_refused_before_the_body_is_read() -> None:
 
 
 def test_the_registry_offers_the_fake_only_when_asked() -> None:
-    assert providers(fake=False) == {}
-    assert set(providers(fake=True)) == {"fake"}
+    assert "fake" not in providers(fake=False)
+    assert "fake" in providers(fake=True)
 
 
 def test_the_fake_has_one_secret_field() -> None:

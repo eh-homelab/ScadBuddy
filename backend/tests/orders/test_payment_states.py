@@ -11,10 +11,22 @@ from scadbuddy.orders.models import Order
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments.credentials import PaymentCredentials, ProviderBusyError
 from scadbuddy.payments.models import PaymentRequestView, ProviderEvent
+from scadbuddy.store.refs import BlobRefs
+from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY
-from tests.orders.test_payment_requests import EVENT, PayShop, _slug, shop  # noqa: F401
+from tests.orders.test_payment_requests import EVENT, PayShop, _slug, connect
 
 pytestmark = pytest.mark.requires_postgres
+
+
+@pytest.fixture
+def shop(rows: OrderStore, pool: PgPool) -> PayShop:
+    """The fake provider offered and connected, as ``test_payment_requests.py``'s."""
+    made = PayShop(rows, BlobRefs(pool))
+    made.lifecycle.offered_providers = frozenset({"fake"})
+    connect(rows)
+    return made
+
 
 PENDING = ProviderEvent(
     event_id="p1", kind="pending", provider_ref="fake_r", amount_minor=700, currency="USD"
