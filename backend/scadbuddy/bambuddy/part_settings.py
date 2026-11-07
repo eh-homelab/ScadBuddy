@@ -93,8 +93,10 @@ class PartSettings(BaseModel):
         return tuple(values)
 
 
+#: The highest filament slot a request names.
+MAX_SLOT = 64
 #: A filament slot, from 1, as ``FilamentPlan.slots[].slot_id`` numbers it.
-SlotId = Annotated[int, Field(ge=1, le=64)]
+SlotId = Annotated[int, Field(ge=1, le=MAX_SLOT)]
 #: What a request's ``part_settings`` holds: the settings for each slot's parts.
 PartSettingsMap = dict[SlotId, PartSettings]
 
@@ -171,8 +173,9 @@ def by_colour(
     to the slot of that colour in ``colours`` (the output's, in slot order). A parameter
     the output has no value for, or whose colour no slot is, sets nothing. Two
     parameters of one colour share its slot; for a key both set, the one declared first
-    wins. ``None`` when nothing is left."""
-    slots = {colour_hex(colour): index for index, colour in enumerate(colours, start=1)}
+    wins. A colour past slot :data:`MAX_SLOT` sets nothing (#5649). ``None`` when
+    nothing is left."""
+    slots = {colour_hex(colour): index for index, colour in enumerate(colours[:MAX_SLOT], start=1)}
     found: dict[int, dict[str, Any]] = {}
     for name, settings in declared.items():
         hex_value = colour_hex(params.get(name))

@@ -28,7 +28,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
-from scadbuddy.bambuddy.output_reader import LocalOutputs, require
+from scadbuddy.bambuddy.output_reader import LocalOutputs, invalid_meta, require
 from scadbuddy.bambuddy.part_settings import dumped, normalised
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import (
@@ -212,6 +212,9 @@ class PreviewSlicer:
         outputs = LocalOutputs(core.outputs, core.catalogue)
         meta = await require(outputs, output_id)
         naming = await outputs.naming(meta)
+        # The run's refusal (#5649): never a price for a print the run refuses.
+        if naming.invalid_meta is not None:
+            raise invalid_meta(naming.invalid_meta)
         source = OutputSource(
             store=outputs,
             meta=meta,

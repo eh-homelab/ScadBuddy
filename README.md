@@ -312,8 +312,28 @@ on shutdown.
     that the listing leaves out; `scadbuddy_render_settle_failed_total` and
     `scadbuddy_render_settle_errors_total` count what it failed and the passes that
     could not finish.
-    `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
-    hold one). The schema is created and migrated at startup.
+    `SCADBUDDY_DATABASE_POOL_SIZE` (10): the most connections of the API's main pool
+    (`scadbuddy-api`, which the settings, the jobs and the presets share; before #5226
+    the settings and the jobs each had a pool of this size, so twice it), and of the
+    render worker's `scadbuddy-render` pool and the print worker's `scadbuddy-settings`
+    pool. Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
+    too small. The schema is created and migrated at startup.
+    An API process's pools hold at most that plus 13 connections: the event bus's 2,
+    the features' shared `scadbuddy-rows` 6, `scadbuddy-auth` 2, `scadbuddy-rack-usage`
+    2 and the `LISTEN` connection (#5226). On top of the pools come short-lived
+    connections of their own, one per lock or claim held at that moment: the models and
+    flows repository write locks (`library/repo_lock.py`), an order's project lock
+    (`orders/store.py`), a library copy's target locks (`print_library/copy_store.py`),
+    the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
+    output backfill's claim, the service credential rotation and the flow keys. So
+    leave headroom above the pools' sum. Every pool keeps only what it uses (the main
+    pool one more) and closes a connection left idle for a minute, one a minute
+    (psycopg_pool's `max_idle`). The agent sidecar holds at most 9 (`agent/src/db.ts`
+    `AGENT_DB_CONNECTIONS`), briefly more while a failed lock connection is replaced.
+    `scadbuddy_db_pool_connections{pool}`, `scadbuddy_db_pool_max_connections{pool}`
+    and `scadbuddy_db_pool_requests_waiting{pool}` (callers queued for a connection: a
+    pool too small for its load) show each pool, and every pool names itself as its
+    `application_name` in `pg_stat_activity`.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
     will not start without `SCADBUDDY_DATABASE_URL`, #467): each change is appended to an `events` table and sent with
     `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers

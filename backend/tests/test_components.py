@@ -380,15 +380,17 @@ def test_a_component_that_raises_on_exit_still_lets_the_core_close(
     state = getattr(app.state, STATE_ATTR)
     with pytest.raises(RuntimeError, match="on the way out"), TestClient(app):
         assert not state.projection._pool.closed
-    assert state.projection._pool.closed
-    assert state.settings_store._pool.closed
+    # One pool (#5226): the projection shares the settings store's, which closes it.
+    assert state.projection.pool is state.settings_store.pool
+    assert state.settings_store.pool.closed
 
 
 def test_a_core_close_that_raises_still_lets_the_rest_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
 ) -> None:
     """#653 review: not only a component's exit; the render queue's close raising
-    still closes the projection's pool and the settings store's after it."""
+    still closes the API's main pool (the settings store's, which the projection
+    shares, #5226) after it."""
     app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
     state = getattr(app.state, STATE_ATTR)
     close_render = state.render.aclose
@@ -400,8 +402,9 @@ def test_a_core_close_that_raises_still_lets_the_rest_close(
     monkeypatch.setattr(state.render, "aclose", raises)
     with pytest.raises(RuntimeError, match="render pool lost"), TestClient(app):
         pass
-    assert state.projection._pool.closed
-    assert state.settings_store._pool.closed
+    # One pool (#5226): the projection shares the settings store's, which closes it.
+    assert state.projection.pool is state.settings_store.pool
+    assert state.settings_store.pool.closed
 
 
 def test_a_worker_that_fails_to_stop_still_lets_the_core_close(
@@ -430,8 +433,9 @@ def test_a_worker_that_fails_to_stop_still_lets_the_core_close(
     monkeypatch.setattr(main, "_stop_worker", fails_to_stop)
     with pytest.raises(RuntimeError, match="would not stop"), TestClient(app):
         pass
-    assert state.projection._pool.closed
-    assert state.settings_store._pool.closed
+    # One pool (#5226): the projection shares the settings store's, which closes it.
+    assert state.projection.pool is state.settings_store.pool
+    assert state.settings_store.pool.closed
 
 
 def test_build_state_alone_registers_every_features_operation_kinds(

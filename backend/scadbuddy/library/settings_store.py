@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import (
@@ -67,7 +67,7 @@ from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_option
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
-from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.core.secrets import (
     Envelope,
     Kek,
@@ -809,21 +809,22 @@ class SettingsStore:
         *,
         events: EventBus | None = None,
         connect_timeout: float = 30.0,
+        pool_name: str = "scadbuddy-settings",
     ) -> None:
+        """``pool_name`` names its pool. The API's is also its render projection's and
+        its presets' (`api/deps.py`, #5226)."""
         self.defaults = defaults
         #: Told of every write, as ``settings.changed`` with the section it touched.
         self.events = events
         self.connect_timeout = connect_timeout
         #: Seals the `SECRET_FIELDS` at rest (#602); None keeps them plaintext.
         self._kek = settings_kek(defaults.secret_key_file)
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+        # One kept open: every request reads the settings.
+        self._pool = row_pool(
             defaults.database_url,
+            name=pool_name,
             min_size=1,
             max_size=defaults.database_pool_size,
-            open=False,
-            connection_class=Connection[DictRow],
-            kwargs={"autocommit": True, "row_factory": dict_row, **TCP_KEEPALIVE},
-            name="scadbuddy-settings",
         )
 
     @property

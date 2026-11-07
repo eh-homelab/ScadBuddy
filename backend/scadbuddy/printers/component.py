@@ -1,7 +1,7 @@
 """`PRINTERS`: the printer registry (#3823, plan 2026-10-16-printer-identity-native-path,
 Task 3).
 
-Building it does no I/O: the rows' pool is made closed and opened on first use, as
+Building it does no I/O: the shared rows pool (`rows/component.py`, #5226) opens on first use, as
 `print_library/component.py`'s is. The KEK is the settings' own (`settings_kek`, read
 once per process), so a key file that is set but unreadable has already failed the
 start. ``probe`` is replaced by tests on the built component."""
@@ -10,18 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.events import PrinterEvent, emit
-from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.printers.address import lan_address
@@ -29,13 +27,12 @@ from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.rows.component import ROWS
 from scadbuddy.workflows.follow import RPC_TIMEOUT
 from scadbuddy.workflows.printer_watch import ensure_watch, restart_watch, stop_watch
 
 logger = logging.getLogger(__name__)
 
-ROW_POOL_SIZE = 4
-CONNECT_TIMEOUT = 5.0
 #: The LAN link's whole probe: the certificate read, the MQTT connect and the first
 #: report (plan Task 3: "within 10 s").
 PROBE_TIMEOUT = 10.0
@@ -95,23 +92,10 @@ class Watches:
 
 
 class Printers:
-    def __init__(self, core: Core) -> None:
+    def __init__(self, core: Core, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self.core = core
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
-            core.settings.database_url,
-            min_size=1,
-            max_size=ROW_POOL_SIZE,
-            open=False,
-            timeout=CONNECT_TIMEOUT,
-            connection_class=Connection[DictRow],
-            kwargs={
-                "autocommit": True,
-                "row_factory": dict_row,
-                "connect_timeout": max(1, int(CONNECT_TIMEOUT)),
-                **TCP_KEEPALIVE,
-            },
-            name="scadbuddy-printers",
-        )
+        #: The rows' shared pool (`rows/component.py`), which `ROWS` closes.
+        self._pool = pool
         self._store = PrinterStore(
             self._pool,
             settings_kek(core.settings.secret_key_file),
@@ -146,25 +130,14 @@ class Printers:
     def kek(self) -> Kek | None:
         return self._store.kek
 
-    def close(self) -> None:
-        self._pool.close()
-
 
 PRINTERS: Key[Printers] = Key("printers")
 
 
 def _build(core: Core, components: Components) -> Printers:
-    return Printers(core)
+    return Printers(core, components.get(ROWS).pool)
 
 
-@asynccontextmanager
-async def _run(printers: Printers) -> AsyncIterator[None]:
-    try:
-        yield
-    finally:
-        await asyncio.to_thread(printers.close)
-
-
-COMPONENT = Component(PRINTERS, build=_build, run=_run)
+COMPONENT = Component(PRINTERS, build=_build)
 
 PrintersDep = Annotated[Printers, component_dep(PRINTERS)]
