@@ -101,7 +101,12 @@ def test_the_start_revokes_the_retired_roles(
 ) -> None:
     """#5298 Task 11: the start's grants are followed by `revoke_retired`."""
     calls: list[object] = []
-    monkeypatch.setattr(main, "revoke_retired", lambda conn: calls.append(conn) or [])
+
+    def record(conn: object) -> list[str]:
+        calls.append(conn)
+        return []
+
+    monkeypatch.setattr(main, "revoke_retired", record)
     _grant_and_rotate_at_start(getattr(app.state, STATE_ATTR))
     assert len(calls) == 1
 
