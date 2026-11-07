@@ -169,6 +169,7 @@ describe('RevisionsPanel (#5280)', () => {
   it.each([
     ['on hold', () => { state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true }],
     ['printing', () => { state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'printing' }],
+    ['queued', () => { state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued' }],
   ])('gives no partly-fulfilled hint while the item is %s: that is the reason (#5598)', async (_, block) => {
     state.items.find((i) => i.id === ITEM_APPROVED)!.quantity = 3
     const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
