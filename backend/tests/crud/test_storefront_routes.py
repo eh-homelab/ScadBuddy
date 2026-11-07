@@ -9,12 +9,11 @@ from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.testclient import TestClient
-from scadbuddy.api.crud_storefront import store_client, visitor_id
-from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 from scadbuddy.api import crud_areas, crud_storefront
+from scadbuddy.api.crud_storefront import store_client, visitor_id
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.models import Service
@@ -22,6 +21,7 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.main import create_app
+from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 CREDENTIALS = {
@@ -50,13 +50,26 @@ def storefront_token() -> str:
     return "sbsvc_storefront"
 
 
-@pytest.fixture
-def client() -> TestClient:
+class _Noted:
+    def note(self, *args: object) -> None: ...
+
+
+def make_client(mode: str = "off") -> TestClient:
     """The CRUD routers behind the real `auth_check` and gate, as `main.py` mounts them,
-    with a probe route that takes the visitor and client headers (`GET /draft` is Task 8's)."""
+    with a probe route that takes the visitor and client headers (`GET /draft` is Task 8's)
+    and a back-office route (class ``api``)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
-    app.state.scadbuddy = SimpleNamespace(settings=SimpleNamespace(auth_mode="off"))
+    auth = SimpleNamespace(would_refuse=_Noted())
+    app.state.scadbuddy = SimpleNamespace(
+        settings=SimpleNamespace(auth_mode=mode),
+        components=SimpleNamespace(get=lambda _component: auth),
+    )
     probe = crud_router("storefront")
+    back_office = APIRouter()
+
+    @back_office.get("/orders")
+    def orders() -> list[str]:
+        return []
 
     @probe.get("/draft")
     def draft(
@@ -67,9 +80,34 @@ def client() -> TestClient:
     app.include_router(crud_areas.router, prefix="/api/v1")
     app.include_router(crud_storefront.router, prefix="/api/v1")
     app.include_router(probe, prefix="/api/v1")
+    app.include_router(back_office, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: None, credentials=lambda: _Credentials())  # type: ignore[arg-type,return-value]
     return TestClient(app)
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return make_client()
+
+
+@pytest.mark.parametrize("mode", ["off", "observe", "enforce"])
+def test_the_storefront_guard_holds_in_every_mode(mode: str, render_token: str) -> None:
+    client = make_client(mode)
+    url = "/api/v1/internal/storefront/areas"
+    assert client.get(url).status_code == 401
+    assert client.get(url, headers=bearer(render_token)).status_code == 403
+    assert client.get(url, headers=bearer("sbsvc_storefront")).status_code == 200
+
+
+def test_the_storefront_credential_reaches_no_other_route(storefront_token: str) -> None:
+    client = make_client("enforce")
+    other = client.get("/api/v1/internal/crud/render/areas", headers=bearer(storefront_token))
+    assert other.status_code == 403
+    assert other.json()["reason"] == "wrong_caller"
+    back_office = client.get("/api/v1/orders", headers=bearer(storefront_token))
+    assert back_office.status_code == 403
+    assert back_office.json()["reason"] == "out_of_scope"
 
 
 def test_a_storefront_route_needs_the_storefront_credential(

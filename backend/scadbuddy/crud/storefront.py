@@ -3,10 +3,10 @@
 The edge holds no database: it calls ``/api/v1/internal/storefront/…`` with its
 ``storefront`` service credential, which it exchanges for its proof (`exchange_source`).
 `CrudClient` retries a missing route, a 5xx and a transport failure for 30 s and raises
-`CrudRefusedError` for a CRUD route's 4xx; the edge answers that refusal with its status,
-problem and ``Retry-After``. Each call sends the visitor id the edge verified
-(`VISITOR_HEADER`) and the browser's address (`CLIENT_HEADER`); a write also sends its
-``Idempotency-Key``, the same on each retry.
+`CrudRefusedError` for a CRUD route's 4xx; the edge answers a public one with its status,
+problem and ``Retry-After``, and any other with a bare 502 (`storefront/app.py`). Each call
+sends the visitor id the edge verified (`VISITOR_HEADER`) and the browser's address
+(`CLIENT_HEADER`); a write also sends its ``Idempotency-Key``, the same on each retry.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -222,3 +224,83 @@ def test_exactly_one_credential_proof_is_required(
 def test_the_trusted_proxies_are_cidrs(edge_env: None) -> None:
     with pytest.raises(ValidationError, match="TRUSTED_PROXIES"):
         load(trusted_proxies="nonsense")
+
+
+def test_an_octal_escaped_mac_is_a_new_visitor(edge_env: None, crud_mock: respx.Router) -> None:
+    """`SimpleCookie` would decode the quoted escape to a non-ASCII mac."""
+    forged = "v1." + "a" * 43 + "." + "\\351"
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        r = c.get("/api/store/v1/listings", headers={"cookie": f'{VISITOR_COOKIE}="{forged}"'})
+    assert r.status_code == 200
+    assert f"{VISITOR_COOKIE}=v1." in r.headers["set-cookie"]
+    assert crud_mock["listings"].calls.last.request.headers[VISITOR_HEADER] != "a" * 43
+
+
+def test_another_odd_cookie_keeps_the_visitor(edge_env: None, crud_mock: respx.Router) -> None:
+    """`SimpleCookie` drops the whole header for `foo={"a":1}`; the edge reads it as
+    Starlette does."""
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        first = c.get("/api/store/v1/listings").headers["set-cookie"].split(";")[0]
+        r = c.get("/api/store/v1/listings", headers={"cookie": f'foo={{"a":1}}; {first}'})
+    assert "set-cookie" not in r.headers
+    sent = crud_mock["listings"].calls.last.request
+    assert sent.headers[VISITOR_HEADER] == first.split("=", 1)[1].split(".")[1]
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        {"type": "https://scadbuddy.dev/problems/auth/forbidden", "reason": "wrong_caller"},
+        {"type": "https://scadbuddy.dev/problems/storefront/visitor_id", "detail": "x"},
+        {"type": "https://scadbuddy.dev/problems/storefront/store_client", "detail": "x"},
+        {"type": "about:blank", "detail": "the request did not match the expected shape"},
+    ],
+)
+def test_an_internal_crud_refusal_is_not_shown(
+    edge_env: None,
+    crud_mock: respx.Router,
+    problem: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    crud_mock["listings"].respond(403, json={**problem, "status": 403}, headers=CRUD)
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        r = c.get("/api/store/v1/listings")
+    assert r.status_code == 502
+    assert r.headers["content-type"] == "application/problem+json"
+    shown = r.json()
+    assert shown["detail"] == "The shop could not answer this request."
+    assert "reason" not in shown
+    assert shown["type"] == "about:blank" and shown["status"] == 502
+    assert problem["type"] in caplog.text
+
+
+class _Waiting:
+    """A CRUD client whose API never lists the areas: only ``stop`` ends the wait."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def wait_for_areas(self, stop: asyncio.Event) -> bool:
+        await stop.wait()
+        return False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_sigterm_ends_the_wait_for_the_areas(edge_env: None) -> None:
+    """Before the API answers, a SIGTERM must not wait for the kill. uvicorn's own handler
+    (here `seen`) still runs."""
+    seen: list[int] = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _frame: seen.append(signum))
+    crud = _Waiting()
+    app = create_app(load(), crud=crud)  # type: ignore[arg-type]
+    try:
+        asyncio.get_running_loop().call_later(0.2, os.kill, os.getpid(), signal.SIGTERM)
+        async with asyncio.timeout(5):
+            async with app.router.lifespan_context(app):
+                pass
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert seen == [signal.SIGTERM]
+    assert crud.closed

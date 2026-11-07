@@ -19,7 +19,12 @@ from fastapi import Request
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
-from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
+from scadbuddy.storefront.wire import (
+    CLIENT_HEADER,
+    STORE_CLIENT_PROBLEM,
+    VISITOR_HEADER,
+    VISITOR_ID_PROBLEM,
+)
 
 router = crud_router("storefront")
 
@@ -34,7 +39,7 @@ def visitor_id(request: Request) -> str:
         raise ApiError(
             400,
             f"{VISITOR_HEADER} must be a visitor id of 43 URL-safe characters.",
-            type_=f"{STOREFRONT_PROBLEMS}visitor_id",
+            type_=VISITOR_ID_PROBLEM,
         )
     return value
 
@@ -49,6 +54,6 @@ def store_client(request: Request) -> str:
         raise ApiError(
             400,
             f"{CLIENT_HEADER} must be one IP address.",
-            type_=f"{STOREFRONT_PROBLEMS}store_client",
+            type_=STORE_CLIENT_PROBLEM,
         ) from None
     return value

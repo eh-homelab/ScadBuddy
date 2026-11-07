@@ -13,16 +13,17 @@ import hashlib
 import hmac
 import re
 import secrets
-from http.cookies import CookieError, SimpleCookie
 from typing import Final
 
 from starlette.datastructures import MutableHeaders
+from starlette.requests import cookie_parser
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 VISITOR_COOKIE: Final = "sb_visitor"
 VISITOR_MAX_AGE: Final = 400 * 24 * 3600
 VERSION: Final = "v1"
-_VISITOR_ID: Final = re.compile(r"[A-Za-z0-9_-]{43}")
+#: A visitor id and a mac alike: 32 bytes as URL-safe base64, unpadded.
+_B64_32: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _mac(visitor_id: str, key: bytes) -> str:
@@ -35,24 +36,26 @@ def sign(visitor_id: str, key: bytes) -> str:
 
 
 def verify(cookie: str, key: bytes) -> str | None:
-    """The visitor id the cookie carries, or None when it is not one this key signed."""
+    """The visitor id the cookie carries, or None when it is not one this key signed. Both
+    parts are checked to be URL-safe base64 first, so the compare sees ASCII only."""
     version, _, rest = cookie.partition(".")
     visitor_id, _, mac = rest.partition(".")
-    if version != VERSION or _VISITOR_ID.fullmatch(visitor_id) is None:
+    if version != VERSION or _B64_32.fullmatch(visitor_id) is None:
         return None
-    return visitor_id if hmac.compare_digest(mac, _mac(visitor_id, key)) else None
+    if _B64_32.fullmatch(mac) is None:
+        return None
+    expected = _mac(visitor_id, key).encode()
+    return visitor_id if hmac.compare_digest(mac.encode(), expected) else None
 
 
 def _cookie(headers: list[tuple[bytes, bytes]]) -> str | None:
+    """The visitor cookie, read as Starlette reads ``request.cookies``: a cookie it cannot
+    parse costs only itself, never the others in the header."""
     for name, value in headers:
         if name == b"cookie":
-            jar: SimpleCookie = SimpleCookie()
-            try:
-                jar.load(value.decode("latin-1"))
-            except CookieError:
-                continue
-            if VISITOR_COOKIE in jar:
-                return jar[VISITOR_COOKIE].value
+            found = cookie_parser(value.decode("latin-1")).get(VISITOR_COOKIE)
+            if found is not None:
+                return found
     return None
 
 

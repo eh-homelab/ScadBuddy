@@ -1,6 +1,6 @@
 """The edge's routes: ``/healthz`` and the visitor routes under `STOREFRONT_PREFIX`, each
 of which forwards to the CRUD client with the verified visitor id and the browser's
-address. A CRUD refusal passes through (`app.py`)."""
+address. `app.py` answers a CRUD refusal."""
 
 from __future__ import annotations
 
