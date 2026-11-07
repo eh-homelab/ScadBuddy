@@ -518,8 +518,9 @@ class RemoteStoreFolders:
         code = error.status
         extensions = {k: v for k, v in problem.items() if k not in _PROBLEM_MEMBERS}
         if code == 424 and reason == BAMBUDDY_UNAVAILABLE:
-            code = int(extensions.pop("upstream_status"))
-            del extensions["reason"]
+            # A 424 without its status is still Bambuddy out of reach: a 502, retried.
+            code = int(extensions.pop("upstream_status", 502))
+            extensions.pop("reason", None)
         return ApiError(
             code,
             str(problem.get("detail", "")),
