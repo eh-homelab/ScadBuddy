@@ -19,6 +19,7 @@ takes the ``wall_loops`` bound, 1000, for them too.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -152,12 +153,24 @@ def dumped(value: PartSettingsMap | None) -> dict[str, dict[str, Any]] | None:
     return {str(slot): settings.model_dump(exclude_none=True) for slot, settings in kept.items()}
 
 
+def _whole_percent(text: str) -> str:
+    """``text`` rounded to a whole number, half up; as it is when it is not a number."""
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return text
+    if not number.is_finite():
+        return text
+    return str(number.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
 def process_part_settings(values: Mapping[str, Any]) -> PartSettings:
     """The process's own value of each part setting (#5627), from a process preset's
     flattened values (``PresetValues.values``: a string, or a list of strings for a
     vector option, ``slicing/presets.py`` ``apply_overrides``). The print dialog opens
     each control on it. A value the preset leaves out, or one out of :class:`PartSettings`'
-    bounds, is left out: the dialog then shows the control empty."""
+    bounds, is left out: the dialog then shows the control empty. A fractional density
+    (``15.5%``) is rounded to the nearest whole percent, half up, which the control takes."""
     read: dict[str, Any] = {}
     for key in PartSettings.model_fields:
         value = values.get(key)
@@ -167,7 +180,7 @@ def process_part_settings(values: Mapping[str, Any]) -> PartSettings:
             continue
         text = value.strip()
         if key == "sparse_infill_density":
-            text = text.removesuffix("%").strip()
+            text = _whole_percent(text.removesuffix("%").strip())
         try:
             read[key] = PartSettings.model_validate({key: text}).model_dump()[key]
         except ValidationError:

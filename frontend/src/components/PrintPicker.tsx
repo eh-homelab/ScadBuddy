@@ -276,8 +276,8 @@ interface Props {
     itemId: string
     /**
      * #5627 — the accepted quote's settings per slot, which the dialog opens on. The print
-     * sends none while they are unchanged (the item then prints with the quote's), and
-     * other ones would print what was not priced, so Print waits for them to be put back.
+     * sends the quote's own settings, so its body matches the background slice's. Other
+     * ones would print what was not priced, so Print is held while the dialog's differ.
      */
     quoted?: PartSettingsMap | null
     start: (body: OrderItemPrintRequest) => Promise<void>

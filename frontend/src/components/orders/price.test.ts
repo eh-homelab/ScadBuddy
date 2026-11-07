@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OrderItemDetail, Quote } from '../../api/types'
-import { byCreated, itemPrice, parseUnitPrice, unitPrice } from './price'
+import { byCreated, itemPrice, parseUnitPrice, quoteToPrint, unitPrice } from './price'
 
 type QuoteFields = Pick<Quote, 'id' | 'created_at' | 'unit_price_minor' | 'total_minor' | 'accepted'>
 
@@ -87,5 +87,33 @@ describe('byCreated', () => {
   it('breaks a tie by id', () => {
     const at = '2026-10-24T23:00:00Z'
     expect([{ id: 'q2', created_at: at }, { id: 'q1', created_at: at }].sort(byCreated).map((q) => q.id)).toEqual(['q1', 'q2'])
+  })
+})
+
+// #5627 — the test print sends the settings of the quote `test_print_check` stands on: the
+// newest slice quote of that revision, by `created_at` then `id` (the store's order).
+describe('quoteToPrint', () => {
+  const sliced = (id: string, created_at: string, revision_id: string | null): Quote => ({
+    ...quote({ id, created_at, unit_price_minor: 100, total_minor: 100, accepted: false }),
+    source: 'slice',
+    revision_id,
+  })
+
+  it("takes the test print's revision's newest slice quote, as the backend's quotes[-1]", () => {
+    const at = '2026-11-07T10:00:00.123456Z'
+    const item = {
+      current_revision_id: 'r2',
+      quotes: [
+        sliced('q3', at, 'r2'),
+        sliced('q2', at, null),
+        sliced('q9', '2026-11-07T11:00:00Z', 'r1'),
+        quote({ id: 'q8', created_at: '2026-11-07T12:00:00Z', unit_price_minor: 1, total_minor: 1, accepted: true }),
+      ],
+    }
+    // r2's: q2 (no revision, so the current one) and q3, tied on the instant; the id breaks it.
+    expect(quoteToPrint(item, 'r2')?.id).toBe('q3')
+    // A newer slice quote of another revision is not the test print's.
+    expect(quoteToPrint(item, 'r1')?.id).toBe('q9')
+    expect(quoteToPrint(item)?.id).toBe('q8')
   })
 })

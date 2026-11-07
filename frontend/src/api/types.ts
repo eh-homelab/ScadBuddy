@@ -468,8 +468,9 @@ export type SpoolImportRow = Schemas['SpoolImportRow']
  * colour slot (`colours[].slot`, from 0). */
 export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
- * item's copies, plates and request id are the server's. `part_settings` (#5627) only when
- * they differ from the accepted quote's: none sent prints with the quote's. */
+ * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
+ * sends the quote's own, so the body matches the background slice's; the server refuses
+ * others (`requote_needed`), and a body with none prints with the quote's. */
 export type OrderItemPrintRequest = Pick<
   RegistryRunRequest,
   'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings'

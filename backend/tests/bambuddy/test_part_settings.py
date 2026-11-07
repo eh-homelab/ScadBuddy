@@ -116,6 +116,18 @@ def test_the_process_values_are_read_as_the_settings_take_them() -> None:
     assert process_part_settings({}) == PartSettings()
 
 
+@pytest.mark.parametrize(
+    ("density", "read"),
+    [("15.5%", 16), ("15.4%", 15), ("0.5%", 1), ("99.5%", 100), ("100.5%", None), ("x%", None)],
+)
+def test_a_fractional_preset_density_is_rounded_to_a_whole_percent(
+    density: str, read: int | None
+) -> None:
+    """#5627 review: Bambu Studio's density may carry a fraction; the control takes whole
+    percents, so it opens on the nearest, half up, not empty."""
+    assert process_part_settings({"sparse_infill_density": density}).sparse_infill_density == read
+
+
 def test_slot_zero_is_refused() -> None:
     with pytest.raises(ValidationError):
         PrintRunRequest.model_validate(body(part_settings={"0": {"wall_loops": 3}}))

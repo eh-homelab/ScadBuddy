@@ -337,9 +337,10 @@ the model's or file's other choices (`ModelPrintChoices.part_settings`, left out
 entry when none are set). They are kept per model or file only, never at the print options'
 global or printer scope: a slot number names one file's colour. A quote opens on the item's
 newest slice quote's settings. An item's print opens on the accepted quote's (a test print
-on the newest slice quote's) and sends none while they are unchanged. Other settings would
-print what was not priced, so Print waits until they are put back. An item print that sends
-`{}` also prints with the quote's (`print_body` reads it as none sent). The run's result
+on the newest slice quote's) and sends the quote's own settings, so its body matches the
+background slice's. Other settings would print what was not priced, so Print is held while
+the dialog's settings differ from them. An item print from the API that sends none, or `{}`,
+prints with the quote's (`print_body` reads `{}` as none sent). The run's result
 records them (`PrintRunResult.part_settings`), and `GET /prints/{archive_id}` lists them as
 `part_settings`, found through the queue item's send and its run. A print started over
 the LAN has no queue item, so its record lists none. Every answer gives a slot's settings
