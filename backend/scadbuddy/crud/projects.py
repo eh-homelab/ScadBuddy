@@ -1,6 +1,7 @@
 """The projects worker's `FlowStore` over the CRUD routes (#5298): `RemoteFlowStore` has
 `flows/store.py` `FlowStore`'s method names, signatures and answers, so its callers do
-not change, and holds no database secret. The routes are `api/crud_projects.py`.
+not change, and holds no database secret. `RemotePayloadKeys` is `PgPayloadKeys` over
+them. The routes are `api/crud_projects.py`.
 
 Every write it sends is natural (plan D5): the client may send it again after a lost
 answer, and the route answers as it did the first time.
@@ -8,12 +9,14 @@ answer, and the route answers as it did the first time.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable, Coroutine
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
+from scadbuddy.core.secrets import Kek
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
@@ -25,14 +28,16 @@ from scadbuddy.flows.store import (
     ResetSupersededError,
 )
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, Hop, HopRecord, ProjectionWrite
+from scadbuddy.workflows.payload_codec import CachedPayloadKeys
 
 BASE = f"/api/v1{PREFIX}/projects"
 #: `api/crud_projects.py` `HOP_MOVED`, `RESET_SUPERSEDED`, `RESET_BEFORE_FLOOR`,
-#: `RESET_REFUSED`.
+#: `RESET_REFUSED`, `SUBJECT_FORGOTTEN`.
 HOP_MOVED = "hop_moved"
 RESET_SUPERSEDED = "reset-superseded"
 RESET_BEFORE_FLOOR = "reset-before-floor"
 RESET_REFUSED = "reset-refused"
+SUBJECT_FORGOTTEN = "subject-forgotten"
 #: A Reset's request: the route holds the run's lock for up to `RESET_CALL_S` while
 #: Temporal answers, then writes the row.
 RESET_REQUEST_S = RESET_CALL_S + 10.0
@@ -212,3 +217,27 @@ class RemoteFlowStore:
     async def approval_expiry_s(self) -> int:
         response = await self._send("GET", "/approval-expiry")
         return int(response.json()["seconds"])
+
+
+class RemotePayloadKeys(CachedPayloadKeys):
+    """The payload keys through the API (plan D10): it answers a key sealed, and this
+    worker opens it with the KEK it holds. Cached as `PgPayloadKeys`'s."""
+
+    def __init__(self, client: CrudClient, kek: Kek) -> None:
+        super().__init__(kek)
+        self._client = client
+
+    async def sealed_key(self, subject: str, create: bool) -> tuple[bytes, str] | None:
+        # The codec asks to create on every encode; a session's key is the agent's to make,
+        # so for a session (a grant check's result) it is only read (plan D10).
+        make = create and subject.startswith("flow-")
+        try:
+            response = await self._client.request(
+                "POST", f"{BASE}/payload-keys/{_part(subject)}", json={"create": make}
+            )
+        except CrudRefusedError as error:
+            if error.status == 410 and error.problem.get("reason") == SUBJECT_FORGOTTEN:
+                return None
+            raise
+        body = response.json()
+        return base64.b64decode(body["dek_sealed"]), str(body["kek_id"])

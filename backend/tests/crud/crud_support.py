@@ -2,17 +2,23 @@
 `api/crud_projects.py` over a real `FlowStore` and `OperationStore`, or `api/crud_render.py`
 over a settings pool, and `api/crud_areas.py`, behind the real `auth_check` and gate and the
 CRUD listener on a local port, and a client that reaches them with an in-process credential,
-as the worker does. `static_render_crud` is a render worker's client of a stand-in API that
-answers fixed store settings, for a test of the worker rather than the routes."""
+as the worker does. `api_payload_keys` gives the routes the API's payload keys on a store's
+schema, and `served_projects` serves a projects worker's store and payload keys as the
+worker's. `static_render_crud` is a render worker's client of a stand-in API that answers
+fixed store settings, for a test of the worker rather than the routes."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
+import psycopg
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
@@ -26,11 +32,12 @@ from scadbuddy.auth.service_credentials import (
     ServiceCredentialStore,
 )
 from scadbuddy.core.problems import install_problem_handlers
+from scadbuddy.core.secrets import kek_from_base64, seal_bytes
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.guard import CRUD_HEADERS
-from scadbuddy.crud.projects import RemoteFlowStore
+from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.settings_store import RenderStoreSettings, SettingsStore
@@ -38,6 +45,13 @@ from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.store.index import Pool
+from scadbuddy.workflows.flows_client import connect_flows
+from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
+
+#: The agent's migrations that make `ai_payload_keys` and `ai_forgotten_subjects`.
+AGENT_MIGRATIONS = Path(__file__).resolve().parent.parent / "fixtures" / "agent-migrations"
+#: The KEK of the API and the worker in a test.
+TEST_KEK = kek_from_base64(base64.b64encode(b"\x5a" * 32).decode())
 
 
 class _Noted:
@@ -49,21 +63,67 @@ class _NoSessions:
         return None
 
 
+def agent_key_tables(store: FlowStore) -> Connect:
+    """A connection to `store`'s schema, with the agent's key tables made there first."""
+    conninfo = cast(str, store._pool.conninfo)
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        made = conn.execute("SELECT to_regclass('ai_payload_keys')").fetchone()
+        if made is None or made[0] is None:
+            for sql in sorted(AGENT_MIGRATIONS.glob("*.sql")):
+                conn.execute(sql.read_text().encode())
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
+        async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+            yield conn
+
+    return connect
+
+
+def api_payload_keys(store: FlowStore) -> PgPayloadKeys:
+    """The API's payload keys under `TEST_KEK`, on `store`'s schema."""
+    return PgPayloadKeys(agent_key_tables(store), TEST_KEK)
+
+
+class DerivedPayloadKeys(PgPayloadKeys):
+    """The API's payload keys, each made as `tests/flows/flows_support.py` `Keys` derives
+    it, so a history recorded over the routes replays under `Keys`
+    (`test_project_replay.py`), and a test's own `Keys` opens what the worker sealed. It
+    skips `create_key`'s advisory lock on purpose: a derived key is the same whoever makes
+    it. Production code takes the lock."""
+
+    async def sealed_key(self, subject: str, create: bool) -> tuple[bytes, str] | None:
+        if create:
+            key = hashlib.sha256(subject.encode()).digest()
+            sealed = seal_bytes(TEST_KEK.key, key, payload_key_context(subject))
+            async with self._connect() as conn:
+                await conn.execute(
+                    "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)"
+                    " SELECT %s, %s, %s WHERE NOT EXISTS"
+                    " (SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s)"
+                    " ON CONFLICT (subject) DO NOTHING",
+                    (subject, sealed, TEST_KEK.id, subject),
+                )
+        return await super().sealed_key(subject, create)
+
+
 def crud_app(
     store: FlowStore,
     credentials: ServiceCredentialStore,
     *,
     client: Client | None = None,
+    keys: PgPayloadKeys | None = None,
     operations: OperationStore | None = None,
     kinds: Mapping[str, OperationKind] | None = None,
     settings_store: SettingsStore | None = None,
 ) -> FastAPI:
-    """The routes with the flows component's `store` and Temporal `client` (a Reset's),
-    the operations component's store and `kinds`, and the API's `settings_store`."""
+    """The routes with the flows component's `store`, Temporal `client` (a Reset's) and
+    payload `keys`, the operations component's store and `kinds`, and the API's
+    `settings_store`."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
-        FLOWS: SimpleNamespace(store=store, client=client),
+        FLOWS: SimpleNamespace(store=store, client=client, keys=keys),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
     }
     app.state.scadbuddy = SimpleNamespace(
@@ -83,6 +143,7 @@ async def served_crud(
     store: FlowStore,
     *,
     client: Client | None = None,
+    keys: PgPayloadKeys | None = None,
     operations: OperationStore | None = None,
     kinds: Mapping[str, OperationKind] | None = None,
     settings_store: SettingsStore | None = None,
@@ -95,6 +156,7 @@ async def served_crud(
         store,
         credentials,
         client=client,
+        keys=keys,
         operations=operations,
         kinds=kinds,
         settings_store=settings_store,
@@ -184,3 +246,16 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
     return CrudClient(
         "http://api", "render", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
     )
+
+
+@asynccontextmanager
+async def served_projects(
+    store: FlowStore, temporal_address: str
+) -> AsyncIterator[tuple[Client, RemoteFlowStore, Client]]:
+    """The API's flows client, on `DerivedPayloadKeys`, and a projects worker's store and
+    client over `served_crud`, its payload keys through the routes (`RemotePayloadKeys`)."""
+    keys = DerivedPayloadKeys(agent_key_tables(store), TEST_KEK)
+    client = await connect_flows(temporal_address, "default", keys)
+    async with served_crud(store, client=client, keys=keys) as crud:
+        worker = await connect_flows(temporal_address, "default", RemotePayloadKeys(crud, TEST_KEK))
+        yield client, RemoteFlowStore(crud), worker

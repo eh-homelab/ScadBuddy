@@ -5,7 +5,7 @@
    in one transaction: from then on every copy of the run's payloads (history,
    Visibility, Archival) is undecryptable, whatever fails next. The run's images
    (`ai_flow_blobs`, #2477), sealed under that key, are deleted in the same transaction.
-   A process that read the key keeps it 30 s at most (`PgPayloadKeys`).
+   A process that read the key keeps it 30 s at most (`CachedPayloadKeys`).
 2. The workflow terminated if open, then its execution deleted.
 3. The `workflow_runs` row.
 """
