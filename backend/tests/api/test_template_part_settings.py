@@ -165,6 +165,29 @@ def test_the_background_slices_copy_takes_them(
     assert '<metadata key="wall_loops" value="3"/>' in settings
 
 
+@respx.mock
+def test_the_check_reads_no_stem_title_or_part_slots(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5671 (the review of PR #5663): the dialog's check reads only the template's
+    ``print_settings`` and its refusal (`LocalOutputs.print_settings`), not the full
+    naming. With the stem and the part slots made to raise, the check still answers."""
+    from scadbuddy.bambuddy import output_reader
+
+    def unused(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("the check read more than it needs")
+
+    output_id = prepared(client, model)
+    routes()
+    preset_values({})
+    monkeypatch.setattr(output_reader, "output_stem", unused)
+    monkeypatch.setattr(output_reader.LocalOutputs, "_part_settings", unused)
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+
+
 @pytest.mark.requires_git
 def test_the_quotes_copy_takes_them(bambuddy: TestClient) -> None:
     """#5649: the slice quote prices the copy a run would print."""
