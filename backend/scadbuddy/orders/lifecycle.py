@@ -35,8 +35,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
+    OPEN_FOR_EDITS,
     REVISION_ROLES,
     SHOWN_IMAGES,
+    TAKES_ITEMS,
     Actor,
     AddressSnapshot,
     Approval,
@@ -85,11 +87,6 @@ from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
-#: The states an order's items and price may still change in (§4's `PATCH` rows).
-OPEN_FOR_EDITS: frozenset[OrderStatus] = frozenset({"draft", "quoted"})
-#: The states past acceptance an order still takes a new item in (#5349): an item added
-#: then starts unpriced, and needs its own quote and that quote's acceptance.
-TAKES_ITEMS: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready"})
 #: The states a person's decision has ended (nothing else may move).
 ENDED: frozenset[OrderStatus] = frozenset({"closed", "cancelled"})
 #: The states past a person's acceptance, which `derive` writes.
@@ -829,8 +826,9 @@ class Lifecycle:
         A closed order takes the status its rows give it again (`shipped`, as it
         closed, unless a row changed since). A cancelled one goes back to the status it
         was cancelled from, and the items that cancel took with it come back as
-        `reopen_item` brings one back (an accepted order's item with no accepted quote
-        stays cancelled); then its status follows from its rows. Either way `closed_at`
+        `reopen_item` brings one back (an item with no accepted quote too, as `draft` or
+        `quoted`: an order cancelled from `accepted`, `in_production` or `ready` takes
+        such an item, #5349); then its status follows from its rows. Either way `closed_at`
         and `cancelled_at` are cleared and the quotes' sliced files are held again."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -861,7 +859,10 @@ class Lifecycle:
                     # with every item the cancel took.
                     base = "draft"
                 for item, status, priced in taken:
-                    if base in DERIVED and not priced:
+                    # Past `quoted` an unpriced item comes back where the order takes one
+                    # (`TAKES_ITEMS`, #5349); a cancel is refused once shipped, so every
+                    # base here takes one.
+                    if not priced and base not in OPEN_FOR_EDITS | TAKES_ITEMS:
                         continue
                     restored.append((self.store.update_item(conn, item.id, status=status), None))
             # The status its rows give it now, written once, on one audit row.
@@ -904,8 +905,10 @@ class Lifecycle:
     def reopen_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
         """Undo a cancel: the item takes the state its quotes and attempts give it
         (`_reopened_status`), and its quotes' sliced files are held again. Refused once
-        the order ended (reopen the order instead), and on an order past `quoted` for
-        an item with no accepted quote: an accepted order only holds priced items."""
+        the order ended (reopen the order instead). An item with no accepted quote comes
+        back as `draft` or `quoted` while the order takes a new item (`draft`, `quoted`,
+        and `TAKES_ITEMS`, #5349), on hold too, as every reopen; on a `shipped` order it
+        is refused (`item_not_priced`), since a shipped order takes no unpriced item."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -917,11 +920,11 @@ class Lifecycle:
                     items=[item.id],
                 )
             status, priced = self._reopened_status(conn, item)
-            if order.status not in OPEN_FOR_EDITS and not priced:
+            if not priced and order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
                 raise LifecycleError(
                     "item_not_priced",
                     f"item {item_id} has no accepted quote, and order {order.number} is"
-                    f" {order.status}: an accepted order holds priced items only",
+                    f" {order.status}: a shipped order takes back a priced item only",
                     items=[item.id],
                 )
             item = self.store.update_item(conn, item.id, status=status)

@@ -27,6 +27,18 @@ Money = int
 OrderStatus = Literal[
     "draft", "quoted", "accepted", "in_production", "ready", "shipped", "closed", "cancelled"
 ]
+
+
+def _listed(types: frozenset[str]) -> list[JsonValue]:
+    """A set as the spec carries it, sorted so the export is stable."""
+    return list[JsonValue](sorted(types))
+
+
+#: The states an order's items and price may still change in (§4's `PATCH` rows).
+OPEN_FOR_EDITS: frozenset[OrderStatus] = frozenset({"draft", "quoted"})
+#: The states past acceptance an order still takes a new item in (#5349): an item added
+#: then starts unpriced, and needs its own quote and that quote's acceptance.
+TAKES_ITEMS: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready"})
 #: Every §3.5 state: `queued`, `printing` and `printed` are the print path's
 #: (``order_item_print``, #4719), which the item follows from its run.
 ItemStatus = Literal[
@@ -212,7 +224,14 @@ class Order(BaseModel):
     id: str
     number: str
     customer_id: str
-    status: OrderStatus
+    #: The spec carries `OPEN_FOR_EDITS` and `TAKES_ITEMS`, so the browser's copy
+    #: (``afterAcceptance.ts``) is checked against them (``afterAcceptance.test.ts``, #5349).
+    status: OrderStatus = Field(
+        json_schema_extra={
+            "x-open-for-edits": _listed(OPEN_FOR_EDITS),
+            "x-takes-items": _listed(TAKES_ITEMS),
+        }
+    )
     currency: str
     on_hold: bool
     #: The customer's rows an open order follows (Ruling 11)...
@@ -541,11 +560,6 @@ INLINE = frozenset(
 SHOWN_IMAGES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"})
 #: The ones the server shrinks to a thumbnail; a GIF or AVIF is shown as it is.
 THUMBNAILED = frozenset({"image/png", "image/jpeg", "image/webp"})
-
-
-def _listed(types: frozenset[str]) -> list[JsonValue]:
-    """A type set as the spec carries it, sorted so the export is stable."""
-    return list[JsonValue](sorted(types))
 
 
 class Attachment(BaseModel):

@@ -43,6 +43,18 @@ describe('orders mock (#4249)', () => {
     expect(held?.problem.type).toBe(`${PROBLEMS}order_on_hold`)
   })
 
+  it('takes an item added after acceptance back, alone or with its order (#5349)', async () => {
+    const added = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'request', title: 'Tag 49', quantity: 1 })
+    await api.cancelOrderItem(ORDER_ACCEPTED, added.id)
+    expect((await api.reopenOrderItem(ORDER_ACCEPTED, added.id)).status).toBe('draft')
+    await api.cancelOrder(ORDER_ACCEPTED)
+    const reopened = await api.reopenOrder(ORDER_ACCEPTED)
+    expect(reopened.status).toBe('accepted')
+    const detail = await api.order(ORDER_ACCEPTED)
+    expect(detail.items.find((i) => i.id === added.id)?.status).toBe('draft')
+    expect(detail.items.find((i) => i.id === ITEM_APPROVED)?.status).toBe('approved')
+  })
+
   it('lists newest first, pages by cursor, filters, and refuses an unknown parameter', async () => {
     const first = await api.orders(DEFAULT_ORDERS_QUERY, { limit: 2 })
     expect(first.items.map((o) => o.number)).toEqual(['ORD-2026-3', 'ORD-2026-2'])

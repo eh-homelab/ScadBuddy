@@ -149,3 +149,22 @@ def test_the_refusals(client: TestClient) -> None:
     problem(after(client, cancelled, kind="request", title="X", quantity=1), "order_cancelled")
     missing = after(client, "nope", kind="request", title="X", quantity=1)
     assert missing.status_code == 404
+
+
+def test_an_item_added_after_acceptance_comes_back_after_a_cancel(client: TestClient) -> None:
+    order_id, first = accepted_order(client)
+    added = after(client, order_id, kind="request", title="Tag 49", quantity=1).json()
+    cancel = client.post(f"/api/v1/orders/{order_id}/items/{added['id']}/cancel")
+    assert cancel.json()["status"] == "cancelled", cancel.text
+    back = client.post(f"/api/v1/orders/{order_id}/items/{added['id']}/reopen")
+    assert back.status_code == 200, back.text
+    assert back.json()["status"] == "draft"
+    assert client.post(f"/api/v1/orders/{order_id}/cancel").status_code == 200
+    reopened = client.post(f"/api/v1/orders/{order_id}/reopen")
+    assert reopened.json()["status"] == "accepted", reopened.text
+    seen = detail(client, order_id)
+    assert {i["id"]: i["status"] for i in seen["items"]} == {
+        first: "approved",
+        added["id"]: "draft",
+    }
+    assert seen["totals"]["unpriced_items"] == [added["id"]]

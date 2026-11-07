@@ -1017,7 +1017,7 @@ export const orderTools: Tool[] = [
     description:
       'Undo a close or a cancel. A closed order takes the status its items and shipments give it (`shipped` as ' +
       'it closed); a cancelled order goes back to the status it was cancelled from, with the items that cancel took. ' +
-      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (an accepted order takes ' +
+      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (a shipped order takes ' +
       'back a priced item only, `item_not_priced`). Outward, as a cancel is: it changes what the shop told the customer.',
     input: z.object({ order_id: orderId, item_id: itemId.optional() }),
     risk: 'outward',

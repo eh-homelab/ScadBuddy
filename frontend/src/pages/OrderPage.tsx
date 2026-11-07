@@ -4,7 +4,7 @@ import { api } from '../api/client'
 import type { OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
-import { addMode, itemOpen, OPEN_FOR_EDITS } from '../components/orders/afterAcceptance'
+import { addMode, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
@@ -584,14 +584,14 @@ function ItemDrawer({
             <UnfulfilDialog orderId={order.id} item={item} open={unfulfilling} onOpenChange={setUnfulfilling} onChanged={onChanged} />
           </>
         ) : item.status === 'cancelled' && !ENDED.has(order.status) ? (
-          OPEN_FOR_EDITS.has(order.status) || item.quotes.some((q) => q.accepted) ? (
+          OPEN_FOR_EDITS.has(order.status) || TAKES_ITEMS.has(order.status) || item.quotes.some((q) => q.accepted) ? (
             <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
               Reopen item
             </Button>
           ) : (
-            // `item_not_priced`: an accepted order takes back a priced item only.
+            // `item_not_priced`: a shipped order takes back a priced item only (#5349).
             <p className="text-xs text-muted-foreground" data-testid="reopen-unpriced">
-              This item had no accepted price, so it can't come back into an accepted order.
+              This item had no accepted price, so it can't come back into a shipped order.
             </p>
           )
         ) : (

@@ -14,6 +14,7 @@ from scadbuddy.core.events import OrderChanged, OrderItemChanged
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
     LifecycleError,
+    ManualQuoteInput,
     OrderEdit,
     derive,
     item_open,
@@ -242,3 +243,59 @@ def test_item_open_is_the_items_own_price(shop: Shop) -> None:
     assert item_open(order, shop.rows.quotes(first.id)) is False
     shipped = order.model_copy(update={"status": "shipped"})
     assert item_open(shipped, shop.rows.quotes(item.id)) is False
+
+
+@pytest.mark.parametrize("start", sorted(START))
+def test_a_cancelled_item_added_after_acceptance_reopens_unpriced(shop: Shop, start: str) -> None:
+    """The review of #5540: the order takes such an item, so it takes it back too."""
+    order, _ = START[start](shop)
+    item = add(shop, order)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    # Only the new item was open: with it cancelled, the order is as it started.
+    assert shop.get(order).status == start
+    # A reopen undoes a mistake, so a hold does not stop it, as every reopen.
+    shop.lifecycle.hold(order.id, BY)
+    back = shop.lifecycle.reopen_item(order.id, item.id, BY)
+    assert back.status == "draft"
+    assert shop.get(order).status == AFTER[start]
+    assert [e.detail for e in shop.rows.events(order.id) if e.kind == "item.reopened"] == [
+        {"item_id": item.id, "to": "draft"}
+    ]
+    # It still needs its own quote and that quote's acceptance.
+    shop.lifecycle.release(order.id, BY)
+    quote = shop.lifecycle.record_manual_quote(
+        order.id, item.id, ManualQuoteInput(unit_price_minor=5), BY
+    )
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    assert shop.lifecycle.reopen_item(order.id, item.id, BY).status == "quoted"
+    assert shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY).status == "approved"
+
+
+@pytest.mark.parametrize("start", ["accepted", "in_production"])
+def test_a_cancelled_order_reopens_with_its_unpriced_item(shop: Shop, start: str) -> None:
+    order, first = START[start](shop)
+    item = add(shop, order)
+    shop.lifecycle.cancel_order(order.id, BY)
+    assert shop.get_item(item).status == "cancelled"
+    reopened = shop.lifecycle.reopen_order(order.id, BY)
+    # The unpriced item comes back unpriced, and `derive` gives the status.
+    assert shop.get_item(item).status == "draft"
+    assert reopened.status == start
+    restored = [
+        e.detail["items"]
+        for e in shop.rows.events(order.id)
+        if e.kind == "order.status" and e.detail.get("reopened")
+    ]
+    assert len(restored) == 1 and sorted(restored[0]) == sorted([first.id, item.id])
+
+
+def test_a_shipped_order_takes_back_no_unpriced_item(shop: Shop) -> None:
+    order, first = accepted(shop)
+    item = add(shop, order)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    shop.fulfilled(order, first)
+    shop.shipped(order, shop.get_item(first))
+    assert shop.get(order).status == "shipped"
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.reopen_item(order.id, item.id, BY)
+    assert (refused.value.slug, refused.value.items) == ("item_not_priced", [item.id])

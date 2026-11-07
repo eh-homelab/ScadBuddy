@@ -213,7 +213,15 @@ class ItemCreate(ReferenceBody):
     #: Whether that price is accepted as it is saved: true (the browser's) leaves the item
     #: `approved`; false (the agent's `write` tools) leaves it `quoted`, for an `outward`
     #: accept. A custom item's only.
-    accept: bool | None = None
+    accept: bool | None = Field(
+        default=None,
+        description=(
+            "A custom item's only: whether its price is accepted as it is saved. Unset or"
+            " true leaves the item `approved`; false leaves it `quoted`. On"
+            " `POST /orders/{id}/items/after-acceptance` unset means false, and true is"
+            " 422: an item added after acceptance needs its quote accepted on its own."
+        ),
+    )
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
@@ -1394,7 +1402,7 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     description=(
         "Undoes a cancel: the item takes the state its quotes and attempts give it "
         "(`approved`, `failed`, `quoted` or `draft`). 409 `item_not_cancelled`, "
-        "`item_not_priced` (an order past `quoted` takes back a priced item only), and "
+        "`item_not_priced` (a `shipped` order takes back a priced item only), and "
         "`order_closed`/`order_cancelled`."
     ),
 )

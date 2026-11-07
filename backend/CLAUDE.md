@@ -579,7 +579,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   true` 422), its audit row is `item.added_after_acceptance`, and `derive` sets the status
   (`ready` goes back to `in_production`). Past `quoted` the lock is per item (`item_open`,
   `_open_for_item`, `quote.py` `quote_check`): an item with no accepted quote takes
-  revisions, edits, quotes and an accept; an accepted one stays pinned. Agent
+  revisions, edits, quotes and an accept; an accepted one stays pinned. A cancelled
+  unpriced item reopens (alone, or with its cancelled order) as `draft` or `quoted` on
+  such an order too; only a `shipped` one refuses it (`item_not_priced`). The two state
+  sets are in `orders/models.py` and the spec (`Order.status`'s `x-open-for-edits`,
+  `x-takes-items`), which `afterAcceptance.test.ts` checks the browser's copy against. Agent
   `order_item_add_after_acceptance` (outward; `order_item_add` stays write); frontend
   `components/orders/afterAcceptance.ts` (the rules, the confirm text) in `AddItemDialog`,
   `AddToOrderDialog` and the order page.

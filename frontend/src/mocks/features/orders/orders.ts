@@ -732,7 +732,7 @@ export const handlers = [
         // Nothing would come back priced: reopened open for edits, with every item taken.
         if (DERIVED.has(base) && !othersOpen && !taken.some(([, , priced]) => priced)) base = 'draft'
         for (const [found, status, priced] of taken) {
-          if (DERIVED.has(base) && !priced) continue
+          if (!priced && !OPEN_FOR_EDITS.has(base) && !TAKES_ITEMS.has(base)) continue
           found.status = status
           restored.push(found.id)
         }
@@ -910,8 +910,9 @@ export const handlers = [
       const found = itemOf(order, String(params.item))
       if (found.status !== 'cancelled') throw new Refused('item_not_cancelled', `item ${found.id} is ${found.status}: only a cancelled item reopens`, [found.id])
       const [status, priced] = reopenedStatus(found)
-      if (!OPEN_FOR_EDITS.has(order.status) && !priced) {
-        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: an accepted order holds priced items only`, [found.id])
+      // #5349: an order that takes a new item takes back an unpriced one; a shipped one does not.
+      if (!priced && !OPEN_FOR_EDITS.has(order.status) && !TAKES_ITEMS.has(order.status)) {
+        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: a shipped order takes back a priced item only`, [found.id])
       }
       found.status = status
       found.updated_at = now()

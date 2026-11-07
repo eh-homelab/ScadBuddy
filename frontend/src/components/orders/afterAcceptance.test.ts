@@ -1,9 +1,37 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { OrderStatus } from '../../api/types'
-import { addMode, itemOpen } from './afterAcceptance'
+import { addMode, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
+
+type Extension = 'x-open-for-edits' | 'x-takes-items'
+
+/** One of the state sets the spec `pnpm gen:api` (run before `pnpm test`) exported carries
+ * on `Order.status`: the backend's own (`orders/models.py`), read, not restated. */
+function specStates(extension: Extension): string[] {
+  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (cause) {
+    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
+  }
+  const spec = JSON.parse(text) as {
+    components?: { schemas?: { Order?: { properties?: { status?: Partial<Record<Extension, unknown>> } } } }
+  }
+  const states = spec.components?.schemas?.Order?.properties?.status?.[extension]
+  if (!Array.isArray(states)) throw new Error(`Order.status.${extension} not in the spec at ${path}`)
+  return states as string[]
+}
 
 // #5349: the backend's `_takes_item` and `item_open`, as the order page reads them.
 describe('afterAcceptance', () => {
+  it.each([
+    ['x-open-for-edits', OPEN_FOR_EDITS],
+    ['x-takes-items', TAKES_ITEMS],
+  ] as const)('matches the backend: %s', (extension, states) => {
+    expect([...states].sort()).toEqual([...specStates(extension)].sort())
+  })
+
   it.each<[OrderStatus, boolean, ReturnType<typeof addMode>]>([
     ['draft', false, 'open'],
     ['quoted', true, 'open'],

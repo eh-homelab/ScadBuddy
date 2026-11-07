@@ -176,7 +176,9 @@ def test_reopening_an_item_moves_the_order_back_to_draft(client: TestClient) -> 
     assert detail(client, order["id"])["order"]["status"] == "draft"
 
 
-def test_an_accepted_order_takes_back_a_priced_item_only(client: TestClient) -> None:
+def test_an_accepted_order_takes_back_an_unpriced_item_unpriced(client: TestClient) -> None:
+    """#5349: an accepted order takes an unpriced item (one added after acceptance), so
+    a cancelled one comes back as its quotes give it; a shipped order takes none."""
     upload(client)
     order = create_order(client, create_customer(client)["id"])
     kept = item_of(client, order["id"])
@@ -188,15 +190,38 @@ def test_an_accepted_order_takes_back_a_priced_item_only(client: TestClient) -> 
     client.post(f"/api/v1/orders/{order['id']}/items/{priced['id']}/cancel")
     assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
 
+    back = client.post(f"/api/v1/orders/{order['id']}/items/{priced['id']}/reopen")
+    assert back.json()["status"] == "approved"
+    assert detail(client, order["id"])["order"]["status"] == "accepted"
+    assert detail(client, order["id"])["totals"]["subtotal_minor"] == 2400
+    again = client.post(f"/api/v1/orders/{order['id']}/items/{unpriced['id']}/reopen")
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "draft"
+    totals = detail(client, order["id"])["totals"]
+    assert (totals["subtotal_minor"], totals["unpriced_items"]) == (2400, [unpriced["id"]])
+    assert detail(client, order["id"])["order"]["status"] == "accepted"
+
+
+def test_a_shipped_order_takes_back_a_priced_item_only(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    kept = item_of(client, order["id"])
+    unpriced = item_of(client, order["id"], title="Unpriced")
+    quote_and_accept(client, order["id"], kept["id"])
+    client.post(f"/api/v1/orders/{order['id']}/items/{unpriced['id']}/cancel")
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    fulfil(client, order["id"], kept["id"], 1)
+    shipped = client.post(
+        f"/api/v1/orders/{order['id']}/shipments",
+        json={"carrier": "Post", "items": [{"order_item_id": kept["id"], "quantity": 1}]},
+    )
+    assert shipped.status_code == 201, shipped.text
+    assert detail(client, order["id"])["order"]["status"] == "shipped"
     body = problem(
         client.post(f"/api/v1/orders/{order['id']}/items/{unpriced['id']}/reopen"),
         "item_not_priced",
     )
     assert body["items"] == [unpriced["id"]]
-    back = client.post(f"/api/v1/orders/{order['id']}/items/{priced['id']}/reopen")
-    assert back.json()["status"] == "approved"
-    assert detail(client, order["id"])["order"]["status"] == "accepted"
-    assert detail(client, order["id"])["totals"]["subtotal_minor"] == 2400
 
 
 def test_an_item_of_an_ended_order_does_not_reopen(client: TestClient) -> None:
