@@ -110,20 +110,18 @@ def folder_name(title: str) -> str:
     return cleaned[:100] or "Template"
 
 
-class RenderSettingsSource:
+class StoreSettingsSource:
     """The render key and the inbox, re-read at most every ``ttl`` seconds, so a key
-    rotated in Settings reaches every worker without a restart (spec §9, §10)."""
+    rotated in Settings reaches every worker without a restart (spec §9, §10). A subclass
+    says where they are read from (`_read`): the API's database here, the API's CRUD route
+    on a render worker (`crud/render.py`, #5298)."""
 
     def __init__(
         self,
-        pool: Pool,
-        defaults: Settings,
         *,
         ttl: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._pool = pool
-        self._defaults = defaults
         self.ttl = ttl
         self._clock = clock
         self._cached: RenderStoreSettings | None = None
@@ -134,13 +132,11 @@ class RenderSettingsSource:
     async def current(self) -> RenderStoreSettings:
         """The settings, re-read once ``ttl`` has passed. A re-read that fails keeps the
         last good ones (and clears `fresh`) rather than failing `/healthz` and the
-        renders with the database; only a first read that fails raises."""
+        renders with the database or the API; only a first read that fails raises."""
         now = self._clock()
         if self._cached is None or now - self._at >= self.ttl:
             try:
-                self._cached = await asyncio.to_thread(
-                    load_render_store_settings, self._pool, self._defaults
-                )
+                self._cached = await self._read()
             except Exception:
                 if self._cached is None:
                     raise
@@ -151,8 +147,11 @@ class RenderSettingsSource:
             self._at = now
         return self._cached
 
+    async def _read(self) -> RenderStoreSettings:
+        raise NotImplementedError
+
     def seed(self, current: RenderStoreSettings) -> None:
-        """Start from the settings the process read at start, so a database that is
+        """Start from the settings the process read at start, so a source that is
         down at the first re-read leaves these in place rather than nothing."""
         self._cached, self._at = current, self._clock()
 
@@ -172,6 +171,25 @@ class RenderSettingsSource:
             ),
             inbox_id=current.library_folder_id,
         )
+
+
+class RenderSettingsSource(StoreSettingsSource):
+    """The store settings read from the database: the API's (`load_render_store_settings`)."""
+
+    def __init__(
+        self,
+        pool: Pool,
+        defaults: Settings,
+        *,
+        ttl: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        super().__init__(ttl=ttl, clock=clock)
+        self._pool = pool
+        self._defaults = defaults
+
+    async def _read(self) -> RenderStoreSettings:
+        return await asyncio.to_thread(load_render_store_settings, self._pool, self._defaults)
 
 
 #: How long a find waits for another worker's folder lock before it fails.

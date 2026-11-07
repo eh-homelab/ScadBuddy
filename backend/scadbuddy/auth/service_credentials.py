@@ -381,7 +381,7 @@ class ServiceCredentialStore:
                     "UPDATE service_credentials SET last_used_at = %s WHERE id = %s",
                     (at, row["id"]),
                 )
-        return Service(row["caller"], frozenset(row["scopes"]))
+        return Service(row["caller"], frozenset(row["scopes"]), credential_id=str(row["id"]))
 
     def list(self) -> list[CredentialInfo]:
         with self._pool.connection() as conn:

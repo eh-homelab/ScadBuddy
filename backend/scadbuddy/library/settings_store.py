@@ -1368,8 +1368,9 @@ def load_render_store_settings(
     pool: ConnectionPool[Connection[DictRow]], defaults: Settings
 ) -> RenderStoreSettings:
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
-    the `render_settings` view, all of the settings the render worker's own role may
-    read (#601); the full key is in it only while no render key is stored."""
+    the `render_settings` view, all of the settings a render worker gets (#601), from
+    the API's CRUD route (#5298); the full key is in it only while no render key is
+    stored."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(

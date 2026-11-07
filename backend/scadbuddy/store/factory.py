@@ -18,7 +18,7 @@ from scadbuddy.store import BlobStore
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import RECOVER_LOCAL_SQL as RECOVER_LOCAL_SQL
 from scadbuddy.store.backends import RemoteBackend, build_backend
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore, StoreUsage
 from scadbuddy.store.download_cache import DownloadCache
@@ -40,7 +40,7 @@ class StoreBundle:
     snapshots: SnapshotStore | None
     remote_assets: RemoteAssets | None
     fonts: FontMirror | None
-    source: RenderSettingsSource
+    source: StoreSettingsSource
     remote: RemoteBackend | None = None
     #: #2788: whole Bambuddy downloads by sha256, when this process keeps them.
     downloads: DownloadCache | None = None
@@ -63,7 +63,7 @@ def build_store(
     config: Config,
     paths: DataPaths,
     pool: Pool,
-    source: RenderSettingsSource,
+    source: StoreSettingsSource,
     history: ModelHistory | None,
     fonts: FontService,
     metrics: Metrics | None,

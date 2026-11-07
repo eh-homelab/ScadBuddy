@@ -725,8 +725,17 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
   role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
-  `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
-  id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
+  `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
+  id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
+  (`http://scadbuddy:8082`; the worker reads the store settings through its CRUD
+  route, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
+  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
+  credential. The proof is required: without one the worker refuses to start, since
+  it has no other source of a credential. It needs no KEK
+  (`SCADBUDDY_SECRET_KEY_FILE`): the API opens the stored keys before it answers.
+  The store fields seeded from the environment (`SCADBUDDY_STORE_BACKEND`, the
+  Bambuddy and S3 settings, `SCADBUDDY_SOLID_CONCURRENCY` while no row is saved) come
+  from the API's environment, not the worker's. Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
@@ -739,16 +748,19 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `render_jobs`,
   `events`, `blob_refs`, the blob index `store_blobs` and `store_folders`, `assets`,
   the library leases (`library_leases`, `library_pin_holds`,
-  `library_install_slots`), the migrations ledger (read only) and the
-  `render_settings` view. It gets nothing on `settings`: the view shows only the
-  store's settings (backend, Bambuddy URL, library folder, render key), plus the full
-  Bambuddy key **only while no render key is saved** in Settings, the fallback
-  `/healthz` reports as `render_key_fallback`. Save a render key and the worker
-  cannot read the full key at all. A role created after the API started is granted
+  `library_install_slots`) and the migrations ledger (read only). It gets nothing
+  on `settings`: it reads the store's settings (backend, Bambuddy URL, library
+  folder, render key, S3 keys) from the API's CRUD route
+  `/api/v1/internal/crud/render/settings` (#5298), which answers the full Bambuddy
+  key **only while no render key is saved** in Settings, the fallback `/healthz`
+  reports as `render_key_fallback`. Save a render key and the worker cannot read the
+  full key at all. A role granted the older `render_settings` view keeps it until
+  #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
-  until the API has applied every migration its build has and its role holds
-  `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
+  until the API serves its CRUD areas (`settings`) and answers its first read of
+  the store settings, then until the API has applied every migration its build has
+  and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
   worker comes up first, it starts once the API has. On the API's own role (the
   same `SCADBUDDY_DATABASE_URL`) the grants are there already.
 - **Versioning:** workflows are pinned to the build that started them. At start
@@ -1316,10 +1328,11 @@ worker, which opens the same store) seals any key still stored in plaintext, onc
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the **same** file into the API, the render worker and the print worker, in one
-  rollout. They all read the keys from the database; a process without the key (or with
-  another one) cannot open a sealed key, logs `ignoring a stored secret this process
-  cannot open` and falls back to its own `SCADBUDDY_<FIELD>`.
+- Mount the **same** file into the API and the print worker, in one rollout. Both read the
+  keys from the database; a process without the key (or with another one) cannot open a
+  sealed key, logs `ignoring a stored secret this process cannot open` and falls back to
+  its own `SCADBUDDY_<FIELD>`. The render worker needs no key: the API opens its store
+  keys and answers them on its CRUD route (#5298).
 - Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
