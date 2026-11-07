@@ -225,6 +225,11 @@ refusals below cover it going away.
   still be priced by hand, cancelled, or replaced by a new item. A revision, a reference
   `PATCH` or `approval: design_first` is refused (`item_library_file`, 422 `reference`,
   422 `approval`), and so is a test print, which prints a revision.
+- The Add Item dialog has a "Library file" source: the library searched as the Library
+  page searches it (`GET /print/library/search`, unsliced 3MFs), one file picked, a
+  quantity and an optional title. The items grid names the file under the item's title
+  ("Library file in Bambuddy: <name>"), and the item's slice quote and print open the
+  print dialog on the file (a `library` source).
 
 ### 3.4 Quotes
 

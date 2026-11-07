@@ -15,6 +15,36 @@ const failure = (promise: Promise<unknown>) => promise.then(() => undefined, (e:
 describe('orders mock (#4249)', () => {
   beforeEach(() => resetMockState())
 
+  it('adds a library file item and refuses any other source as the backend does (#5544)', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 2 })
+    expect(added).toMatchObject({
+      kind: 'library_file',
+      title: 'drawer-label.3mf',
+      reference: null,
+      output_id: null,
+      status: 'draft',
+      library_file: { id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' },
+    })
+    for (const body of [
+      { library_file_id: 120, quantity: 1, output_id: OUTPUT_REAGAN },
+      { library_file_id: 120, quantity: 1, slug: MAZE_SLUG },
+      { library_file_id: 120, quantity: 1, kind: 'custom' as const, title: 'x', unit_price_minor: 1 },
+      { library_file_id: 120, quantity: 1, kind: 'model' as const },
+      { library_file_id: 120, quantity: 1, accept: false },
+      { library_file_id: 0, quantity: 1 },
+      { kind: 'library_file' as const, quantity: 1 },
+    ]) {
+      expect((await failure(api.addOrderItem(ORDER_DRAFT, body)))?.status, JSON.stringify(body)).toBe(422)
+    }
+    const missing = await failure(api.addOrderItem(ORDER_DRAFT, { library_file_id: 999_999, quantity: 1 }))
+    expect(missing?.status).toBe(422)
+    // An STL prints; the dialog's search lists unsliced 3MFs only, but the route takes any printable file.
+    expect((await api.addOrderItem(ORDER_DRAFT, { library_file_id: 46, quantity: 1 })).kind).toBe('library_file')
+    const late = await failure(api.addOrderItem(ORDER_ACCEPTED, { library_file_id: 120, quantity: 1 }))
+    expect(late?.problem.type).toBe(`${PROBLEMS}item_locked`)
+    expect((await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { library_file_id: 120, quantity: 1 })).status).toBe('draft')
+  })
+
   it('adds an item after acceptance as the backend does (#5349)', async () => {
     const custom = { kind: 'custom' as const, title: 'Tag 49', quantity: 2, unit_price_minor: 300 }
     const plain = await failure(api.addOrderItem(ORDER_ACCEPTED, custom))

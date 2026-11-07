@@ -46,6 +46,47 @@ describe('AddItemDialog (#4251)', () => {
     expect(added?.quantity).toBe(2)
   })
 
+  it('adds a library file found by the library search (#5544)', async () => {
+    const add = vi.spyOn(api, 'addOrderItem')
+    const search = vi.spyOn(api, 'searchLibrary')
+    const onClose = vi.fn()
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={onClose} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Library file' }))
+    expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeDisabled()
+    await user.type(within(dialog).getByLabelText('Library file'), 'drawer')
+    const results = await within(dialog).findByRole('list', { name: 'Library files' })
+    expect(search).toHaveBeenLastCalledWith({ q: 'drawer', all: false }, expect.any(AbortSignal))
+    await user.click(within(results).getByRole('button', { name: /drawer-label\.3mf/ }))
+    expect(within(dialog).getByTestId('add-item-library-file')).toHaveTextContent('drawer-label.3mf')
+    await user.clear(within(dialog).getByLabelText('Quantity'))
+    await user.type(within(dialog).getByLabelText('Quantity'), '3')
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { library_file_id: 120, quantity: 3 })
+    const order = await api.order(ORDER_DRAFT)
+    expect(order.items.find((i) => i.kind === 'library_file')?.library_file).toEqual({ id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' })
+  })
+
+  it('asks before it adds a library file to an accepted order (#5544)', async () => {
+    const add = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <AddItemDialog open orderId={ORDER_ACCEPTED} mode="after_acceptance" order={{ number: 'ORD-2026-2', status: 'accepted' }} onAdded={() => {}} onClose={onClose} />,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Library file' }))
+    await user.type(within(dialog).getByLabelText('Library file'), 'drawer')
+    await user.click(await within(dialog).findByRole('button', { name: /drawer-label\.3mf/ }))
+    await user.type(within(dialog).getByLabelText('Title (optional)'), 'Label')
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toBeInTheDocument()
+    expect(add).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(add).toHaveBeenCalledWith(ORDER_ACCEPTED, { library_file_id: 120, quantity: 1, title: 'Label' })
+  })
+
   it('adds one of the template\'s saved outputs by its id', async () => {
     const add = vi.spyOn(api, 'addOrderItem')
     const onClose = vi.fn()

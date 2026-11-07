@@ -3,6 +3,7 @@ import { api } from '../../api/client'
 import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
+import type { PrintSource } from '../../lib/printSource'
 import { useDebounced } from '../../lib/useDebounced'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
@@ -65,7 +66,7 @@ export function QuoteEditor({
   acceptPending?: boolean
   onChanged: () => void
   /** What a slice quote slices: the item's output and its colours' filaments. */
-  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
+  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> & Partial<Pick<OrderItem, 'library_file'>>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
   slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
   /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
@@ -73,6 +74,12 @@ export function QuoteEditor({
   parts?: string
 }) {
   const [slicing, setSlicing] = useState(false)
+  // What a slice quote slices: the item's output, or a library file item's file (#5544).
+  const sliceSource: PrintSource | null = item?.library_file
+    ? { kind: 'library', file: { id: item.library_file.id, filename: item.library_file.filename } }
+    : item?.output_id && item.reference
+      ? { kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }
+      : null
   const [price, setPrice] = useState('')
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
@@ -216,21 +223,21 @@ export function QuoteEditor({
             type="button"
             size="sm"
             variant="outline"
-            disabled={busy || !item.output_id || (slice.run !== undefined && !slice.run.error)}
+            disabled={busy || !(item.output_id || item.library_file) || (slice.run !== undefined && !slice.run.error)}
             onClick={() => setSlicing(true)}
             data-testid="quote-from-slice"
           >
             Quote from a slice…
           </Button>
-          {!item.output_id && (
+          {!item.output_id && !item.library_file && (
             <span className="text-xs text-muted-foreground">Render the item first: a slice quote slices its output.</span>
           )}
         </div>
       )}
-      {item?.output_id && item.reference && slice && slicing && (
+      {item && slice && slicing && sliceSource && (
         <PrintPicker
           open
-          source={{ kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }}
+          source={sliceSource}
           onClose={() => setSlicing(false)}
           onRan={() => undefined}
           quote={{

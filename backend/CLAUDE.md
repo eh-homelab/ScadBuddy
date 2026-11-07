@@ -741,7 +741,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (subject `library:<id>`; the check returns `library_file_id`). A file gone since is 409
   `library_file_gone` in the quote's check and run and the print's check. Its slots'
   filaments are written on the item (`OrderStore.set_library_colours`). Agent
-  `order_item_add`'s `library_file_id`.
+  `order_item_add`'s `library_file_id`. Frontend: `AddItemDialog`'s "Library file" source
+  (`components/orders/LibraryFilePicker.tsx` over `GET /print/library/search`), the items
+  grid's file line, and `QuoteEditor` and `PrintItem` on a `library` print source; mock
+  `mocks/features/orders/orders.ts` `addLibraryItem`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
