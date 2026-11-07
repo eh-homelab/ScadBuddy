@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from scadbuddy.library.assets import (
@@ -31,8 +31,15 @@ def asset_key(asset_id: str) -> str:
 
 
 class RemoteAssets:
-    def __init__(self, content: ContentStore) -> None:
+    """``drop_copy``: the render worker's way to drop a copy it cannot read
+    (`crud/render.py` `RemoteAssetRows.drop_copy`): the API does it, as the worker writes
+    no upload's index key (#5298). None on the API, which drops the copy itself."""
+
+    def __init__(
+        self, content: ContentStore, *, drop_copy: Callable[[str], bool] | None = None
+    ) -> None:
         self.content = content
+        self._drop_copy = drop_copy
 
     async def mirror(
         self, store: UsesAssets, meta: AssetMeta, *, slug: str | None, title: str | None
@@ -84,13 +91,24 @@ class RemoteAssets:
                     "an uploaded file is gone or altered in the blob store",
                     extra={"asset_id": asset_id, "reason": repr(error)},
                 )
-                await self._drop_bad(key)
+                await self._drop_bad(asset_id)
                 absent.append(asset_id)
         return absent
 
-    async def _drop_bad(self, key: str) -> None:
+    async def _drop_bad(self, asset_id: str) -> None:
         """Drop a copy that cannot be read, object too, so the API's `backfill` mirrors
-        the upload again; only the row when the object cannot be removed."""
+        the upload again; only the row when the object cannot be removed. On a render
+        worker the API drops it (`drop_copy`), and keeps the row of an object it cannot
+        release, so the object stays tracked; a failure is logged."""
+        key = asset_key(asset_id)
+        if self._drop_copy is not None:
+            try:
+                await asyncio.to_thread(self._drop_copy, asset_id)
+            except Exception:
+                logger.exception(
+                    "could not have the API drop an unreadable upload's copy", extra={"key": key}
+                )
+            return
         try:
             await self.content.delete(key)
         except Exception:

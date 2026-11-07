@@ -45,6 +45,7 @@ from scadbuddy.library.assets import (
     LAST_USED_MAX,
     AssetMeta,
     AssetNotFoundError,
+    AssetRejectedError,
 )
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.render.inputs import legacy_inputs
@@ -71,14 +72,20 @@ REUSE_LOST = "reuse-lost"
 #: An index write Postgres picked as a deadlock's victim on every try:
 #: `crud/render.py` `DEADLOCK`.
 DEADLOCK = "deadlock"
-#: A blob-index put, swap or mark of a key only the API writes: a 403.
+#: A blob-index write (put, swap, mark, delete, stale delete) of a key only the API
+#: writes: a 403.
 API_OWNED_KEY = "api-owned-key"
 #: The index keys only the API writes: an upload's copy (`store/assets.py` `asset_key`,
 #: whose meta an adopt writes the upload's row from), a font family's
 #: (`store/fonts.py` `font_key`) and a template revision's snapshot
-#: (`store/snapshots.py` `snapshot_key`). The render worker reads them, and deletes or
-#: forgets a copy it cannot read, but never stores one.
+#: (`store/snapshots.py` `snapshot_key`). The render worker reads and touches them and
+#: writes none of them: a copy it cannot read, the API drops (an upload's,
+#: ``POST …/assets/{id}/drop-copy``) or forgets (a font's or snapshot's,
+#: ``POST …/blob-index/{key}/forget-copy``) for it.
 API_OWNED_PREFIXES = ("asset-", "font-", "src-")
+#: The owned keys a worker may have the API forget (the row only): `FontMirror.sync` and
+#: `SnapshotStore.materialize` forget a copy they cannot read, so the API stores it again.
+FORGETTABLE_PREFIXES = ("font-", "src-")
 #: An adopt's own refusals, `crud/render.py` `RemoteAssetRows.adopt`: no copy of the upload
 #: in the blob store (a 404), or a copy of another kind or size (a 422).
 NO_COPY = "no-copy"
@@ -319,7 +326,9 @@ async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Q
 # row it took), so each takes an ``Idempotency-Key`` (a 428 without one) and writes its
 # ledger row in the index write's transaction, inside the deadlock retry, so a victim
 # rolls back whole and is tried again whole. A key or object id may hold slashes. A put,
-# swap or mark of a key only the API writes (`API_OWNED_PREFIXES`) is a 403.
+# swap, mark, delete or stale delete of a key only the API writes (`API_OWNED_PREFIXES`)
+# is a 403; a touch of one is allowed (`SnapshotStore` touches the snapshot it renders
+# from, so the sweep keeps it).
 
 
 class IndexPut(BaseModel):
@@ -396,7 +405,7 @@ def _indexed(
 def _worker_writable(*keys: str) -> None:
     """Refuse a write of a key only the API writes (`API_OWNED_PREFIXES`): a render
     credential could otherwise forge an upload's metadata for an adopt, or a font's or
-    snapshot's object for another render."""
+    snapshot's object for another render, or drop a row and leave its object untracked."""
     owned = sorted(key for key in keys if key.startswith(API_OWNED_PREFIXES))
     if owned:
         raise ApiError(
@@ -538,6 +547,22 @@ async def index_touch(key: str, state: StateDep) -> None:
     await asyncio.to_thread(_index(state).touch, key)
 
 
+@router.post("/blob-index/{key:path}/forget-copy", name="crud_render_index_forget_copy")
+async def index_forget_copy(key: str, state: StateDep) -> BlobStat | None:
+    """A font's or snapshot's copy the worker could not read: the API drops its row
+    (`ContentStore.forget`, the object stays), so the API stores it again (`FontMirror`
+    `backfill`, `SnapshotStore.pin`). The row taken, or null. Served with the ``assets``
+    area. Any other key is a 403 ``api-owned-key``: the worker deletes its own keys
+    through the index routes. Natural: a resend finds no row."""
+    if not key.startswith(FORGETTABLE_PREFIXES):
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a font's or snapshot's copy is forgotten here.",
+            reason=API_OWNED_KEY,
+        )
+    return await asyncio.to_thread(_index(state).delete, key)
+
+
 @router.delete("/blob-index/{key:path}/stale", name="crud_render_index_delete_stale")
 async def index_delete_stale(
     key: str,
@@ -547,6 +572,7 @@ async def index_delete_stale(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> BlobStat | None:
     """R15: drop ``key``'s row if untouched since ``before``; the row taken, or null."""
+    _worker_writable(key)
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -567,6 +593,7 @@ async def index_delete(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> BlobStat | None:
     """R15: drop ``key``'s row (with ``backend``, only a row on it); the row, or null."""
+    _worker_writable(key)
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -729,7 +756,38 @@ async def adopt_asset(asset_id: str, body: AssetMeta, state: StateDep) -> None:
             "The blob store's copy of this upload is not the file named.",
             reason=COPY_MISMATCH,
         )
-    await asyncio.to_thread(state.assets.adopt_row, held)
+    try:
+        await asyncio.to_thread(state.assets.adopt_row, held)
+    except AssetRejectedError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+
+
+class Dropped(BaseModel):
+    dropped: bool
+
+
+@router.post("/assets/{asset_id}/drop-copy", name="crud_render_drop_asset_copy")
+async def drop_asset_copy(asset_id: str, state: StateDep) -> Dropped:
+    """An upload's copy in the blob store the worker could not read (gone or altered):
+    the API drops it with its own `ContentStore.delete`: the row, then the object, the
+    row put back if the object cannot be released, so it stays tracked and a later pass
+    retries. ``dropped``: whether it went. A release that fails is logged and answered
+    false, not a 5xx the worker's client would send again; the copy is then still the
+    API's `backfill`'s and sweep's to deal with. Natural: a resend finds no row."""
+    if not ASSET_ID_RE.fullmatch(asset_id):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not an upload id.")
+    content = state.store.content
+    if content is None:
+        return Dropped(dropped=False)  # the local store keeps no copies
+    key = asset_key(asset_id)
+    if await asyncio.to_thread(content.index.get, key) is None:
+        return Dropped(dropped=False)
+    try:
+        await content.delete(key)
+    except Exception:
+        logger.exception("could not drop an unreadable upload's copy", extra={"key": key})
+        return Dropped(dropped=False)
+    return Dropped(dropped=True)
 
 
 @router.post("/assets/last-used", name="crud_render_assets_last_used")

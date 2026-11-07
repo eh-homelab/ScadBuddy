@@ -66,6 +66,7 @@ from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store import BlobRefs
+from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
@@ -234,11 +235,14 @@ def render_crud_app(
     credentials: ServiceCredentialStore,
     *,
     projection: JobProjection | None = None,
+    content: ContentStore | None = None,
 ) -> FastAPI:
     """The render routes, reading the store settings from ``pool`` under ``settings``
     (none: a test of the job routes only), writing the job rows through ``projection``,
     and the blob refs, piece geometry, blob index and the uploads' rows on ``pool`` (the
-    API's upload files are not these routes': its `AssetStore` has no root to read)."""
+    API's upload files are not these routes': its `AssetStore` has no root to read).
+    ``content`` is the API's blob store, which drops an upload's copy (none: the local
+    store, which keeps no copies)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
     app.state.scadbuddy = SimpleNamespace(
@@ -247,6 +251,7 @@ def render_crud_app(
         projection=projection,
         refs=BlobRefs(pool),
         assets=AssetStore(Path("/nonexistent/api-assets"), pool),
+        store=SimpleNamespace(content=content),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_render.router, prefix="/api/v1")
@@ -311,12 +316,14 @@ async def served_render_refs(
 
 
 @contextmanager
-def threaded_render_crud(pool: Pool) -> Iterator[CrudSyncClient]:
-    """A render worker's `CrudSyncClient` of the render routes on ``pool``, served by a
-    server on a thread and event loop of its own, so a blocking call from the test's loop
-    (or a sync test) is answered."""
+def threaded_render_crud(
+    pool: Pool, content: ContentStore | None = None
+) -> Iterator[CrudSyncClient]:
+    """A render worker's `CrudSyncClient` of the render routes on ``pool`` (the API's blob
+    store ``content``), served by a server on a thread and event loop of its own, so a
+    blocking call from the test's loop (or a sync test) is answered."""
     credentials = ServiceCredentialStore(pool)
-    app = render_crud_app(pool, None, credentials)
+    app = render_crud_app(pool, None, credentials, content=content)
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
     )

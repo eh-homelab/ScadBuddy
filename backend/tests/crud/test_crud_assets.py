@@ -23,25 +23,30 @@ import time
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 
 from scadbuddy.auth.service_credentials import ServiceAuth
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient, CrudUnavailableError
 from scadbuddy.crud.guard import CRUD_HEADERS
-from scadbuddy.crud.render import BASE, RemoteAssetRows
+from scadbuddy.crud.render import BASE, RemoteAssetRows, RemoteBlobIndex
 from scadbuddy.library import assets as assets_module
 from scadbuddy.library.assets import (
     LAST_USED_MAX,
     AssetMeta,
     AssetNotFoundError,
     AssetRejectedError,
+    AssetRows,
     AssetStore,
     RemoteAssetStore,
 )
-from scadbuddy.store.assets import RemoteAssets
+from scadbuddy.store.assets import RemoteAssets, asset_key
+from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
+from scadbuddy.store.local import LocalContentBackend
 from tests.crud.crud_support import FixedToken, threaded_render_crud
 from tests.support.store import local_content, store_pool
 
@@ -437,3 +442,80 @@ async def test_the_id_locks_are_forgotten_once_free(
     worker.prune_local(grace=3600)
     assert worker._locks.held() == 0
     assert worker._touched == {}  # older than the prune's start: forgotten
+
+
+# -- an unreadable copy, dropped by the API ----------------------------------------
+
+
+class _Unreleasable(LocalContentBackend):
+    """A backend whose objects cannot be released (Bambuddy out of reach)."""
+
+    async def remove(self, backend_id: str) -> None:
+        raise RuntimeError("Bambuddy is restarting")
+
+
+def _corrupt(root: Path, meta: AssetMeta) -> None:
+    (root / f"asset/{meta.id}").write_bytes(b"altered")
+
+
+async def test_an_unreadable_copy_is_dropped_by_the_api(
+    tmp_path: Path, api: AssetStore, pool: Pool
+) -> None:
+    content = local_content(tmp_path / "blobs", pool)
+    with threaded_render_crud(pool, content) as client:
+        rows = RemoteAssetRows(client)
+        worker_content = ContentStore(content.backend, RemoteBlobIndex(client))
+        remote = RemoteAssets(worker_content, drop_copy=rows.drop_copy)
+        meta = await _uploaded(api, RemoteAssets(content))
+        _corrupt(tmp_path / "blobs", meta)
+        worker = RemoteAssetStore(tmp_path / "worker" / "assets", rows)
+        assert await remote.ensure(worker, [meta.id]) == [meta.id]
+        assert content.index.get(asset_key(meta.id)) is None  # the API dropped it
+        assert not (tmp_path / "blobs" / f"asset/{meta.id}").exists()
+        assert rows.drop_copy(meta.id) is False  # natural: nothing left to drop
+
+
+async def test_a_copy_whose_object_cannot_be_released_stays_tracked(
+    tmp_path: Path, api: AssetStore, pool: Pool
+) -> None:
+    """`ContentStore.delete` on the API: the row goes back when the release fails, so the
+    object is never left with no row (the worker's own restore would be refused)."""
+    content = local_content(tmp_path / "blobs", pool)
+    content.backend = _Unreleasable(tmp_path / "blobs")
+    with threaded_render_crud(pool, content) as client:
+        rows = RemoteAssetRows(client)
+        worker_content = ContentStore(content.backend, RemoteBlobIndex(client))
+        remote = RemoteAssets(worker_content, drop_copy=rows.drop_copy)
+        meta = await _uploaded(api, RemoteAssets(content))
+        _corrupt(tmp_path / "blobs", meta)
+        worker = RemoteAssetStore(tmp_path / "worker" / "assets", rows)
+        assert await remote.ensure(worker, [meta.id]) == [meta.id]
+        held = content.index.get(asset_key(meta.id))
+        assert held is not None  # still tracked
+        assert (tmp_path / "blobs" / f"asset/{meta.id}").exists()
+
+
+async def test_a_rejected_adopt_leaves_no_file(
+    api: AssetStore, remote: RemoteAssets, worker: RemoteAssetStore, pool: Pool
+) -> None:
+    meta = await _uploaded(api, remote)
+    data = _stored(api, meta)
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM store_blobs WHERE key = %s", (asset_key(meta.id),))
+    with pytest.raises(AssetRejectedError):
+        worker.adopt(meta, data)
+    assert worker.ids() == []
+
+
+def test_a_prune_batch_whose_last_uses_fail_is_counted(tmp_path: Path) -> None:
+    metrics = Metrics(role="render")
+
+    class _Down:
+        def last_used(self, ids: Sequence[str]) -> dict[str, datetime | None]:
+            raise CrudUnavailableError("down", "unreached")
+
+    store = RemoteAssetStore(tmp_path / "assets", cast(AssetRows, _Down()), metrics=metrics)
+    store.root.mkdir(parents=True)
+    (store.root / f"{'a' * 64}.svg").write_bytes(b"x")
+    assert store.prune_local(grace=0) == []
+    assert metrics.registry.get_sample_value("scadbuddy_render_asset_prune_failures_total") == 1

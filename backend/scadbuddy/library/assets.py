@@ -53,6 +53,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.provenance import ROOT_MODEL
@@ -990,9 +991,11 @@ class RemoteAssetStore:
     `use` waits on it.
     """
 
-    def __init__(self, root: Path, rows: AssetRows) -> None:
+    def __init__(self, root: Path, rows: AssetRows, *, metrics: Metrics | None = None) -> None:
         self.root = root
         self._rows = rows
+        #: Counts a batch whose last uses could not be read (`asset_prune_failures`).
+        self._metrics = metrics
         self._locks = _IdLocks()
         #: When `use` or `adopt` last let each id go, by `time.monotonic`.
         self._touched: dict[str, float] = {}
@@ -1045,10 +1048,17 @@ class RemoteAssetStore:
         _require_bytes(meta, data)
         with self._touching(meta.id):
             blob = self.blob_path(meta)
-            if not blob.is_file():
+            written = not blob.is_file()
+            if written:
                 self.root.mkdir(parents=True, exist_ok=True)
                 _write_atomically(blob, data)
-            self._rows.adopt(meta)
+            try:
+                self._rows.adopt(meta)
+            except AssetRejectedError:
+                # Not the API's copy: forget the file this call wrote, which has no row.
+                if written:
+                    blob.unlink(missing_ok=True)
+                raise
 
     def prune_local(self, *, grace: float, now: float | None = None) -> list[str]:
         """`AssetStore.prune_local`: remove the copies last used more than ``grace``
@@ -1072,6 +1082,8 @@ class RemoteAssetStore:
                         "could not read the last uses of a batch of assets",
                         extra={"assets": len(batch)},
                     )
+                    if self._metrics is not None:
+                        self._metrics.asset_prune_failures.inc()
                     continue
                 for asset_id in batch:
                     used = stamps.get(asset_id)

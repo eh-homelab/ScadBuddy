@@ -130,6 +130,7 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "render_data_bytes",
         "store_render_key_fallback",
         "crud_client_seconds",
+        "asset_prune_failures",
     },
     "print": _WORKER_COMMON
     | _LISTENING
@@ -368,6 +369,12 @@ class Metrics:
             "Time from submit to a settled job, by kind and outcome: what the user waits for.",
             ["kind", "outcome"],
             buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+        self.asset_prune_failures = Counter(
+            "scadbuddy_render_asset_prune_failures",
+            "Batches of a render worker's prune of its local upload copies whose last uses"
+            " the API did not answer (#5298): their copies wait for the next prune.",
             registry=r,
         )
         self.crud_client_seconds = Histogram(

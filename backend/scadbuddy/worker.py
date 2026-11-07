@@ -267,7 +267,7 @@ def build_worker_deps(
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     fetcher = CheckoutFetcher(libraries, InstallPermits(INSTALL_CONCURRENCY, pool), checkouts)
     # The files on this volume, the rows the API's: a worker never uploads, so no caps.
-    uploads = RemoteAssetStore(paths.assets, assets)
+    uploads = RemoteAssetStore(paths.assets, assets, metrics=metrics)
     try:
         wait_until_ready(pool, stopping=stopping)
         backend = current.store_backend
@@ -279,6 +279,8 @@ def build_worker_deps(
             pool=pool,
             index=index,
             folders=folders,
+            # The worker writes no upload's index key: the API drops a bad copy (#5298).
+            drop_asset_copy=assets.drop_copy,
             source=source,
             # On bambuddy a worker has no git: the API makes the snapshots it renders from.
             history=None,
