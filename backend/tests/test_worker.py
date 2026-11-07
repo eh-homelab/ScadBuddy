@@ -2534,11 +2534,12 @@ def test_each_worker_reports_under_its_deployments_name(
     monkeypatch.setattr(sys, "argv", ["scadbuddy.worker", "--queue", queue])
     monkeypatch.setattr(worker_module, "configure_tracing", lambda name, **_: named.append(name))
     monkeypatch.setattr(worker_module, "configure_logging", lambda level: None)
-    monkeypatch.setattr(
-        worker_module,
-        "Settings",
-        lambda: SimpleNamespace(log_level="INFO", version="v", revision="r"),
-    )
+    for settings in ("Settings", "NoDatabaseSettings"):
+        monkeypatch.setattr(
+            worker_module,
+            settings,
+            lambda: SimpleNamespace(log_level="INFO", version="v", revision="r"),
+        )
 
     def ran(main: Any) -> None:
         main.close()

@@ -48,6 +48,7 @@ from scadbuddy.auth.service_credentials import (
     ServiceCredentialConfigError,
     ServiceCredentialStore,
     TokenReader,
+    exchange_source,
     token_source,
 )
 from scadbuddy.core.secrets import Kek
@@ -1001,6 +1002,26 @@ def test_a_caller_with_a_proof_exchanges_it(tmp_path: Path) -> None:
         assert isinstance(token_source("projects", settings, None), ExchangeReader)
     with pytest.raises(ServiceCredentialConfigError):
         token_source("print", _settings(service_token_file=proof), KEK)
+
+
+def test_a_caller_without_a_database_only_exchanges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5298: no view reader is built, even with a database URL set; no proof refuses."""
+
+    def no_view(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a view reader was built")
+
+    monkeypatch.setattr(TokenReader, "__init__", no_view)
+    proof = tmp_path / "token"
+    for update in ({"service_token_file": proof}, {"service_bootstrap_file": proof}):
+        settings = _settings(api_internal_url="http://scadbuddy:8080", **update)
+        reader = exchange_source("projects", settings)
+        assert isinstance(reader, ExchangeReader) and reader._fallback is None
+    with pytest.raises(ServiceCredentialConfigError, match="SCADBUDDY_SERVICE_TOKEN_FILE"):
+        exchange_source("projects", _settings(api_internal_url="http://scadbuddy:8080"))
+    with pytest.raises(ServiceCredentialConfigError, match="SCADBUDDY_API_INTERNAL_URL"):
+        exchange_source("projects", _settings(service_token_file=proof))
 
 
 def test_both_proofs_is_a_start_error(tmp_path: Path) -> None:
