@@ -9,6 +9,7 @@ import base64
 import faulthandler
 import logging
 import secrets
+import socket
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -207,8 +208,12 @@ async def test_a_flow_runs_on_a_projects_worker_with_no_database(
             caplog.at_level(logging.WARNING, logger="scadbuddy.worker"),
         ):
             tried = _no_database(refused)
+            # A bound port, as the Deployment's probes reach: the health server starts too.
+            health = socket.socket()
+            health.bind(("127.0.0.1", 0))
+            health_url = f"http://127.0.0.1:{health.getsockname()[1]}"
             worker = asyncio.create_task(
-                worker_module.run_projects_worker(settings, stop=stop, health_port=None)
+                worker_module.run_projects_worker(settings, stop=stop, health_port=health)
             )
             try:
                 spec = GrantSpec.model_validate(
@@ -226,9 +231,13 @@ async def test_a_flow_runs_on_a_projects_worker_with_no_database(
                         grant=spec,
                     )
                     run = await flows.finished(run_id)
+                    async with httpx.AsyncClient() as probe:
+                        assert (await probe.get(f"{health_url}/healthz")).status_code == 200
+                        assert (await probe.get(f"{health_url}/readyz")).status_code in (200, 503)
             finally:
                 stop.set()
                 await asyncio.wait_for(worker, timeout=30)
+                health.close()
     assert tried == []
     assert run.result == "result: 'done'", run.result
     [step] = run.steps
