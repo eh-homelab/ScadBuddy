@@ -478,6 +478,88 @@ export const orderTools: Tool[] = [
         ),
       ),
   }),
+  // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
+  // beside its filament. Making a part, editing it, correcting a count, its stock line and
+  // a model's rule are the Parts page's (coverage.ts).
+  defineTool({
+    name: 'part_list',
+    label: 'List parts',
+    description:
+      'The parts inventory (keychain hooks, rings, magnets): each part\'s pack, its unit cost (a decimal string in ' +
+      'minor units, the weighted average of the stock on hand), what is `on_hand` (below zero when more was used ' +
+      'than recorded) and `low` at or below its low-stock level. With `low`, only the low ones. With `order_id`, ' +
+      "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand.",
+    input: z.object({
+      low: z.boolean().default(false),
+      order_id: orderId.optional(),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/parts', 'GET /api/v1/orders/{order_id}/parts'],
+    handler: async ({ low, order_id }, { backend }) => {
+      if (order_id !== undefined) {
+        return json(
+          await ok(
+            backend.GET('/api/v1/orders/{order_id}/parts', { params: { path: { order_id } } }),
+            `get the parts of order ${order_id}`,
+          ),
+        )
+      }
+      return json(await ok(backend.GET('/api/v1/parts', { params: { query: { low } } }), 'list the parts'))
+    },
+  }),
+  defineTool({
+    name: 'part_stock_add',
+    label: 'Add stock to a part',
+    description:
+      "Record packs bought: `packs` of the part's pack join the stock, at `pack_price_minor` each (with tax, in " +
+      "the part's currency's minor units) when given, which becomes the part's pack price. The unit cost becomes " +
+      'the weighted average of the stock on hand and the new packs; orders already fulfilled keep their cost.',
+    input: z.object({
+      part_id: ID.describe('A part id, as part_list returns it'),
+      packs: z.number().int().min(1).max(10_000).default(1),
+      pack_price_minor: z.number().int().min(0).optional(),
+      note: z.string().max(1000).default(''),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/parts/{part_id}/stock'],
+    title: ({ part_id, packs }) => `Add ${packs} pack(s) to part ${part_id}`,
+    handler: async ({ part_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/parts/{part_id}/stock', { params: { path: { part_id } }, body }),
+          `add stock to part ${part_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_parts_set',
+    label: "Set a line item's parts",
+    description:
+      'The parts one unit of a line item uses, replaced whole (an empty list clears them). A new item takes its ' +
+      "model's rule; this changes it. When the item is fulfilled its parts times its quantity leave stock as a " +
+      '`material` cost entry, and come back when it is unfulfilled. Refused (409 `item_parts_used`) for a ' +
+      'fulfilled item. Stock never blocks: it can go below zero.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      parts: z
+        .array(z.object({ part_id: ID.describe('A part id, as part_list returns it'), per_unit: z.number().int().min(1).max(1000) }).strict())
+        .max(50),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/orders/{order_id}/items/{item_id}/parts'],
+    title: ({ order_id, item_id }) => `Set the parts of item ${item_id} on order ${order_id}`,
+    handler: async ({ order_id, item_id, parts }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/orders/{order_id}/items/{item_id}/parts', {
+            params: { path: { order_id, item_id } },
+            body: { parts },
+          }),
+          `set the parts of item ${item_id}`,
+        ),
+      ),
+  }),
   defineTool({
     name: 'order_create',
     label: 'Create an order',

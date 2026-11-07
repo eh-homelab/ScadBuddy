@@ -165,6 +165,47 @@ describe('order tools (#4249)', () => {
     expect(removals).toContain('DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}')
   })
 
+  it('lists parts, adds stock and sets an item\'s parts through their routes (#5543)', async () => {
+    const sent: { path: string; body?: unknown; query?: string }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/parts`, ({ request }) => {
+        sent.push({ path: 'list', query: new URL(request.url).search })
+        return HttpResponse.json([{ id: 'p1', on_hand: 2, low: true }])
+      }),
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/parts`, () => {
+        sent.push({ path: 'order' })
+        return HttpResponse.json({ order_id: ORDER, items: [], needs: [], short: [] })
+      }),
+      http.post(`${BACKEND}/api/v1/parts/p1/stock`, async ({ request }) => {
+        sent.push({ path: 'stock', body: await request.json() })
+        return HttpResponse.json({ id: 'p1', on_hand: 102 })
+      }),
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/parts`, async ({ request }) => {
+        sent.push({ path: 'item', body: await request.json() })
+        return HttpResponse.json([{ part_id: 'p1', per_unit: 2, used: 0 }])
+      }),
+    )
+    expect([tool('part_list').risk, tool('part_stock_add').risk, tool('order_item_parts_set').risk]).toEqual([
+      'read',
+      'write',
+      'write',
+    ])
+
+    await tool('part_list').execute({ low: true }, ctx())
+    await tool('part_list').execute({ order_id: ORDER }, ctx())
+    const stock = await tool('part_stock_add').execute({ part_id: 'p1', packs: 1 }, ctx())
+    await tool('order_item_parts_set').execute({ order_id: ORDER, item_id: ITEM, parts: [{ part_id: 'p1', per_unit: 2 }] }, ctx())
+
+    expect(firstText(stock)).toEqual({ id: 'p1', on_hand: 102 })
+    expect(sent).toEqual([
+      { path: 'list', query: '?low=true' },
+      { path: 'order' },
+      { path: 'stock', body: { packs: 1, note: '' } },
+      { path: 'item', body: { parts: [{ part_id: 'p1', per_unit: 2 }] } },
+    ])
+    expect(() => tool('part_stock_add').execute({ part_id: 'p1', packs: 0 }, ctx())).toThrow('packs')
+  })
+
   it('passes the list filters and the cursor through to the backend', async () => {
     let url = ''
     server.use(

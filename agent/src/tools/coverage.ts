@@ -7,6 +7,30 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'POST /api/v1/parts',
+    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+  },
+  {
+    operation: 'PATCH /api/v1/parts/{part_id}',
+    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+  },
+  {
+    operation: 'POST /api/v1/parts/{part_id}/adjust',
+    reason: "A person's count of the shelf (#5543, job cost spec §11), with a note why it differs; the assistant cannot count stock.",
+  },
+  {
+    operation: 'GET /api/v1/parts/{part_id}/moves',
+    reason: "The Parts page's stock line (#5543); part_list gives each part's stock now.",
+  },
+  {
+    operation: 'GET /api/v1/parts/rules/{slug}',
+    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+  },
+  {
+    operation: 'PUT /api/v1/parts/rules/{slug}',
+    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+  },
+  {
     operation: 'GET /api/v1/print/library-copies',
     reason: "The Library page's list of recent copies between the libraries (#5355); an agent follows the copy it started with get_library_copy.",
   },
