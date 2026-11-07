@@ -115,5 +115,33 @@ describe('LibraryFilePicker (#5544)', () => {
       expect(await screen.findByRole('list', { name: 'Library files' })).toBeInTheDocument()
       expect(search).toHaveBeenCalledTimes(2)
     })
+
+    it('says Searching…, not an earlier answer for the same query (#5635)', async () => {
+      const real = api.searchLibrary.bind(api)
+      let drawerCalls = 0
+      const never = new Promise<never>(() => {})
+      vi.spyOn(api, 'searchLibrary').mockImplementation(async (query, signal) => {
+        if (query.q !== 'drawer') return never
+        drawerCalls += 1
+        if (drawerCalls === 1) return real(query, signal)
+        if (drawerCalls === 2) throw new ApiError(502, 'Bambuddy did not answer.')
+        return never
+      })
+      const { user } = renderPage(picker(), { userEventOptions: { advanceTimers: vi.advanceTimersByTime } })
+      const box = screen.getByLabelText('Library file')
+      await user.type(box, 'drawer')
+      await act(() => vi.advanceTimersByTimeAsync(300))
+      expect(await screen.findByRole('list', { name: 'Library files' })).toBeInTheDocument()
+      // Another query that never answers, then back: the second search for "drawer" fails.
+      await user.type(box, 'x')
+      await act(() => vi.advanceTimersByTimeAsync(300))
+      await user.type(box, '{Backspace}')
+      await act(() => vi.advanceTimersByTimeAsync(300))
+      expect(await screen.findByRole('alert')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Retry' }))
+      expect(await screen.findByText('Searching…')).toBeInTheDocument()
+      expect(screen.queryByRole('list', { name: 'Library files' })).toBeNull()
+      expect(drawerCalls).toBe(3)
+    })
   })
 })
