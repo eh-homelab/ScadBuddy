@@ -54,7 +54,8 @@ def build_backend(
                 f" {RECOVER_LOCAL_SQL} in the API's database, in the schema the"
                 " API's SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
                 " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
-                ' See README, "Recovering an unready blob store".'
+                " A render worker refuses the local store (#5298 plan D11): keep its"
+                ' Deployments down. See README, "Recovering an unready blob store".'
             )
         return BambuddyContentBackend(source.target, pool, index=index, folders=folders)
     if current.s3 is None or not current.s3.prefix:
@@ -64,6 +65,7 @@ def build_backend(
             f" {RECOVER_LOCAL_SQL} in the API's database, in the schema the"
             " API's SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
             " stored, set SCADBUDDY_STORE_BACKEND=local), then set them in Settings."
-            ' See README, "Recovering an unready blob store".'
+            " A render worker refuses the local store (#5298 plan D11): keep its"
+            ' Deployments down. See README, "Recovering an unready blob store".'
         )
     return S3ContentBackend(current.s3)

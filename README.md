@@ -584,9 +584,9 @@ Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD 'â
 CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
 the API itself stays on the database's owner role. At every start the API grants each
 role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
-render worker's `RENDER_GRANTS`) and its credential's view; a role created after the
-API started is granted on the API's next start. A worker on its own role never
-migrates: it waits until the API has migrated and granted it. The agent's role owns the
+render worker's `RENDER_GRANTS`, empty now) and its credential's view; a role created
+after the API started is granted on the API's next start. The print worker, on its own
+role, never migrates: it waits until the API has migrated and granted it. The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 

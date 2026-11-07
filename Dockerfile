@@ -836,7 +836,8 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # and importing the module must not.
 # The render worker (#424) is this same image run as `python -m scadbuddy.worker`: it
 # serves /healthz and /metrics on 9090 (probe that, not the HEALTHCHECK below, which
-# is the API's 8080). Phase 1 runs one replica, sharing /data with the API.
+# is the API's 8080). It holds no database and runs only on a remote store (bambuddy or
+# s3, #5298 plan D11), with a /data of its own (an emptyDir is enough).
 # SIGTERM starts its drain (tini forwards it; no preStop needed): it polls until no
 # workflow pinned to its build is running (or, after 30 s, until it sees its build is
 # still current: a restart of the same build), for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
