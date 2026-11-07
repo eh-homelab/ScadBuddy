@@ -8,6 +8,9 @@ view (`grant_caller_views`). A worker on its own role never migrates: it waits u
 API has migrated and granted (`open_for_caller`), while a worker on the API's own role
 (the deployment before it makes the roles) migrates as it always did.
 
+The projects worker has no list and no role: it holds no database (#5298), and the API
+takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`).
+
 A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
 its list.
@@ -96,14 +99,6 @@ PRINT_SEQUENCES = (
     "native_slices_id_seq",
 )
 
-#: What the projects worker (`--queue projects`, flow runs) touches of the backend's:
-#: nothing. It holds no database (#5298): its flow runs, decisions, grants, operations
-#: and payload keys go through the API's CRUD routes (`crud/projects.py`,
-#: `crud/operations.py`). An existing role keeps the grants it held: they are never
-#: revoked from a live role here, but by the role's revoke (#5298, plan 2026-11-06
-#: Task 11).
-PROJECTS_GRANTS: Grants = {}
-
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads
 #: flow runs and their decisions, and its session files' trigger
 #: (`ai_session_files_hold_blob`, not SECURITY DEFINER) holds and drops `blob_refs`.
@@ -119,7 +114,6 @@ AGENT_GRANTS: Grants = {
 GRANTS: Mapping[ServiceCaller, Grants] = {
     "agent": AGENT_GRANTS,
     "print": PRINT_GRANTS,
-    "projects": PROJECTS_GRANTS,
 }
 SEQUENCES: Mapping[ServiceCaller, tuple[str, ...]] = {"print": PRINT_SEQUENCES}
 

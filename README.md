@@ -578,7 +578,7 @@ store or another caller's credential:
 |---|---|---|
 | render worker | `scadbuddy_render` | `scadbuddy-render.yaml` |
 | print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
-| flow runs' worker | `scadbuddy_projects`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-projects.yaml` |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
@@ -591,7 +591,8 @@ migrates: it waits until the API has migrated and granted it. The agent's role o
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
-On 2026-11-05 the render, print and projects workers connected as their own roles, and
+On 2026-11-05 the render, print and projects workers connected as their own roles (the
+projects worker has made no connection since 2026-11-07, #5298), and
 the agent sidecar and the agent workers still connected as the owner. **The target
 (#5295) replaces these roles.** A role per caller in one database is not a boundary, so
 only the CRUD service (the API) will hold a database secret. Every other caller becomes an
