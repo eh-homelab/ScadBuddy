@@ -61,25 +61,35 @@ export async function grantBackendRoles(sql: Sql, projectsRole: string = PROJECT
   return granted
 }
 
+/** The `pg_advisory_xact_lock` key every grant and revoke of the backend's roles takes, so
+ * the API and this sidecar starting together run them one after the other, never into
+ * "tuple concurrently updated". It must equal `backend/scadbuddy/render/worker_role.py`
+ * `GRANT_LOCK` ("SCADRNDR" in ASCII); `test/grants.pg.test.ts` checks that. */
+export const GRANT_LOCK = 0x5343_4144_524e_4452n
+
 /**
  * Revoke everything a role the agent's belongs to granted `role` on the current schema's
- * relations; the relations taken back. Idempotent: a missing role, the agent's own role
- * and a role granted nothing are no-ops. The API revokes its own grants and the schema's
- * USAGE (`backend/scadbuddy/auth/revoke.py`); a grant is revoked only by its grantor.
+ * relations, in one transaction under `GRANT_LOCK`; the relations taken back. Idempotent:
+ * a missing role, the agent's own role and a role granted nothing are no-ops. The API
+ * revokes its own grants and the schema's USAGE (`backend/scadbuddy/auth/revoke.py`); a
+ * grant is revoked only by its grantor.
  */
 export async function revokeRole(sql: Sql, role: string): Promise<string[]> {
   if (!NAME.test(role)) throw new Error(`refusing to revoke a role named ${JSON.stringify(role)}`)
-  const [found] = await sql<{ mine: boolean }[]>`
-    SELECT pg_has_role(current_user, rolname, 'MEMBER') AS mine FROM pg_roles WHERE rolname = ${role}`
-  if (!found || found.mine) return []
-  const relations = await sql<{ name: string; sequence: boolean }[]>`
-    SELECT DISTINCT c.relname AS name, c.relkind = 'S' AS sequence FROM pg_class c, aclexplode(c.relacl) a
-    WHERE c.relnamespace = current_schema()::regnamespace
-      AND a.grantee = ${role}::regrole AND pg_has_role(current_user, a.grantor, 'MEMBER')
-    ORDER BY c.relname`
-  for (const { name, sequence } of relations) {
-    if (!NAME.test(name)) throw new Error(`refusing to revoke a table named ${JSON.stringify(name)}`)
-    await sql.unsafe(`REVOKE ALL ON ${sequence ? 'SEQUENCE' : 'TABLE'} "${name}" FROM "${role}"`)
-  }
-  return relations.map(r => r.name)
+  return sql.begin(async tx => {
+    await tx`SELECT pg_advisory_xact_lock(${GRANT_LOCK.toString()}::bigint)`
+    const [found] = await tx<{ mine: boolean }[]>`
+      SELECT pg_has_role(current_user, rolname, 'MEMBER') AS mine FROM pg_roles WHERE rolname = ${role}`
+    if (!found || found.mine) return []
+    const relations = await tx<{ name: string; sequence: boolean }[]>`
+      SELECT DISTINCT c.relname AS name, c.relkind = 'S' AS sequence FROM pg_class c, aclexplode(c.relacl) a
+      WHERE c.relnamespace = current_schema()::regnamespace
+        AND a.grantee = ${role}::regrole AND pg_has_role(current_user, a.grantor, 'MEMBER')
+      ORDER BY c.relname`
+    for (const { name, sequence } of relations) {
+      if (!NAME.test(name)) throw new Error(`refusing to revoke a table named ${JSON.stringify(name)}`)
+      await tx.unsafe(`REVOKE ALL ON ${sequence ? 'SEQUENCE' : 'TABLE'} "${name}" FROM "${role}"`)
+    }
+    return relations.map(r => r.name)
+  })
 }

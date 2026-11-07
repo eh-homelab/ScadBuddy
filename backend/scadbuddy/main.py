@@ -1081,11 +1081,16 @@ def _rotate_service_credentials(state: AppState) -> None:
     none can be sealed, so none are issued. First, a sealed credential of a caller that
     reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
-    retired = auth.credentials.revoke_retired_legacy()
-    if retired:
-        logger.info(
-            "revoked the retired callers' sealed credentials", extra={"credentials": retired}
-        )
+    try:
+        retired = auth.credentials.revoke_retired_legacy()
+    except Exception:
+        # Never in the way of the rotation: the next start or sweep tries again.
+        logger.warning("could not revoke the retired callers' sealed credentials", exc_info=True)
+    else:
+        if retired:
+            logger.info(
+                "revoked the retired callers' sealed credentials", extra={"credentials": retired}
+            )
     kek = auth.kek
     if kek is None:
         return
