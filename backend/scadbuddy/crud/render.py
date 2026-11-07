@@ -19,8 +19,9 @@ names, signatures and answers. Every write is natural.
 use, `IndexesBlobs`) over the routes, with the same answers: a `put` the object it
 replaced, a delete the row it took, `ReuseLostError` and, once the API's own retries are
 spent, `DeadlockDetected` as over SQL. Its non-natural writes send an
-``Idempotency-Key`` each (`WriteKeys`). A put, swap or mark of a key only the API writes
-(an upload's, a font's, a snapshot's) is refused, a `CrudRefusedError` 403.
+``Idempotency-Key`` each (`WriteKeys`). A put, swap, mark or delete of a key only the API
+writes (an upload's, a font's, a snapshot's) is refused, a `CrudRefusedError` 403; a
+forget of a font's or snapshot's copy goes to the API's ``forget-copy`` instead.
 
 `RemoteStoreFolders` is `store/bambuddy.py` `FolderFinder` (`KeepsFolders`) over the
 routes (plan D6): the API finds or makes a folder in Bambuddy itself, with its own render
@@ -77,6 +78,9 @@ REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
+#: `api/crud_render.py` `FORGETTABLE_PREFIXES`: the keys only the API writes that the
+#: worker has it forget.
+FORGETTABLE_PREFIXES = ("font-", "src-")
 #: `api/crud_render.py` `NO_COPY` and `COPY_MISMATCH`: an adopt's own refusals.
 NO_COPY = "no-copy"
 COPY_MISMATCH = "copy-mismatch"
@@ -429,6 +433,15 @@ class RemoteBlobIndex:
         self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/touch")
 
     def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
+        """A font's or snapshot's key with no ``backend`` (`ContentStore.forget` of a copy
+        the worker could not read) goes to ``…/forget-copy``, where the API drops the
+        row: the worker writes no key only the API writes. Any other key only the API
+        writes is refused (a `CrudRefusedError` 403); an upload's copy is dropped through
+        `RemoteAssetRows.drop_copy`."""
+        if backend is None and key.startswith(FORGETTABLE_PREFIXES):
+            response = self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/forget-copy")
+            forgotten = response.json()
+            return None if forgotten is None else BlobStat.model_validate(forgotten)
         body = self._write("DELETE", f"/{_part(key)}", backend=backend)
         return None if body is None else BlobStat.model_validate(body)
 
@@ -594,6 +607,13 @@ class RemoteAssetRows:
             if (error.status, reason) in ((404, NO_COPY), (422, COPY_MISMATCH)):
                 raise AssetRejectedError(str(error.problem.get("detail", ""))) from error
             raise
+
+    def drop_copy(self, asset_id: str) -> bool:
+        """Have the API drop its blob-store copy of an upload the worker could not read
+        (`ContentStore.delete` on the API: a copy whose object cannot be released stays
+        tracked). Whether it went."""
+        response = self._client.request("POST", f"{BASE}/assets/{_part(asset_id)}/drop-copy")
+        return bool(response.json()["dropped"])
 
     def last_used(self, ids: Sequence[str]) -> dict[str, datetime | None]:
         response = self._client.request("POST", f"{BASE}/assets/last-used", json={"ids": list(ids)})
