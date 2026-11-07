@@ -977,6 +977,30 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         expect(asked).toHaveLength(1)
         expect(run.body).toBeUndefined()
       })
+
+      // #5352 — asked through Bambuddy's queue, it keeps its project and every option.
+      it('path bambuddy sends the project, the calibrations and timelapse, and approves the queue', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        server.use(row(2), linkedNative(), ...capturedRun(run))
+        const options = { bed_levelling: 'on', flow_cali: 'on', nozzle_offset_cali: 'off', vibration_cali: false, timelapse: true }
+        const args = { ...chosen, printer: PRINTER, project_id: 265, path: 'bambuddy', options }
+        const result = await tool('print_output').execute(args, ctx())
+        expect(result.isError).toBeFalsy()
+        expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2, project_id: 265, path: 'bambuddy', options })
+        const { context } = pendingCtx()
+        const answer = firstText(await runTool(tool('print_output'), args, context)) as { summary: string }
+        expect(answer.summary).toContain(`on printer "Garage" through Bambuddy's queue`)
+        expect(answer.summary).not.toContain('over the LAN')
+      })
+    })
+
+    it('path bambuddy on a row that links no Bambuddy printer is refused before anything is sent (#5352)', async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      server.use(row(null), ...capturedRun(run))
+      const result = await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER, path: 'bambuddy' }, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toMatch(/links no Bambuddy printer, so it cannot print through Bambuddy's queue/)
+      expect(run.body).toBeUndefined()
     })
 
     it("keeps a Bambuddy run's queue item ids and its Bambuddy URL, with no follow handle", async () => {

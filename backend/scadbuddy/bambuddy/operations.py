@@ -351,7 +351,12 @@ def bambuddy_kinds_over(
         # The run's own decision (plan 2026-10-18 D2): a native run's slice builds no
         # Bambuddy client (D3).
         route = await slice_route(
-            settings, printers, reports, printer=body.printer, printer_id=body.printer_id
+            settings,
+            printers,
+            reports,
+            printer=body.printer,
+            printer_id=body.printer_id,
+            asked=body.path,
         )
         lan = route is not None and route.native
         own = await library()

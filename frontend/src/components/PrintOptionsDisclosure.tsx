@@ -8,6 +8,8 @@ import {
   formatOption,
   isNonDefault,
   isSet,
+  LAN_CALIBRATIONS,
+  lanHonours,
   optionValue,
   PREHEAT_CHOICES,
   PRINT_OPTIONS,
@@ -68,6 +70,11 @@ interface Props {
    * so a save never remembers the seed for every later print.
    */
   toRemember?: PrintOptions
+  /**
+   * #5352 — the print goes over the LAN: a calibration offers only the value the LAN
+   * start does, and the others are disabled with a hint, as the backend refuses them.
+   */
+  native?: boolean
 }
 
 const UNSET = ''
@@ -109,6 +116,7 @@ export function PrintOptionsDisclosure({
   heldOnly = false,
   known,
   toRemember = value,
+  native = false,
 }: Props) {
   const slug = subject?.key
   const noun = subject?.noun ?? 'model'
@@ -349,6 +357,7 @@ export function PrintOptionsDisclosure({
                     source={effectiveScope(layers, spec.name)}
                     noun={noun}
                     nonDefault={isNonDefault(spec.name, effective, defaults)}
+                    lan={native && spec.name in LAN_CALIBRATIONS}
                     onChange={(next) => set(spec.name, next)}
                   />
                 ))}
@@ -436,6 +445,7 @@ function OptionRow({
   source,
   noun,
   nonDefault,
+  lan,
   onChange,
 }: {
   spec: OptionSpec
@@ -444,6 +454,7 @@ function OptionRow({
   source: OptionLayer['scope'] | null
   noun: OptionsSubject['noun']
   nonDefault: boolean
+  lan: boolean
   onChange: (next: OptionValue) => void
 }) {
   const id = `option-${spec.name}`
@@ -455,6 +466,7 @@ function OptionRow({
     formatOption(spec.kind, isSet(effective) ? effective : fallback),
     source ? `from ${scopeLabel(source, noun)}` : "Bambuddy's default",
     spec.hint,
+    lan && lanHint(spec),
   ]
     .filter(Boolean)
     .join(' · ')
@@ -475,7 +487,7 @@ function OptionRow({
         </div>
         <span className="text-[11px] text-muted-foreground">{readout}</span>
       </div>
-      <OptionControl id={id} spec={spec} value={effective} fallback={fallback} onChange={onChange} />
+      <OptionControl id={id} spec={spec} value={effective} fallback={fallback} lan={lan} onChange={onChange} />
     </li>
   )
 }
@@ -485,12 +497,14 @@ function OptionControl({
   spec,
   value,
   fallback,
+  lan = false,
   onChange,
 }: {
   id: string
   spec: OptionSpec
   value: OptionValue
   fallback: OptionValue
+  lan?: boolean
   onChange: (next: OptionValue) => void
 }) {
   const defaultLabel =
@@ -535,11 +549,22 @@ function OptionControl({
       <SelectContent>
         <SelectItem value={DEFAULT}>{defaultLabel}</SelectItem>
         {choices.map((choice) => (
-          <SelectItem key={choice} value={choice}>
+          <SelectItem
+            key={choice}
+            value={choice}
+            disabled={lan && !lanHonours(spec.name, spec.kind === 'boolean' ? choice === 'true' : choice)}
+          >
             {formatOption(spec.kind, spec.kind === 'boolean' ? choice === 'true' : choice)}
           </SelectItem>
         ))}
       </SelectContent>
     </Select>
   )
+}
+
+/** #5352 — what a print over the LAN does with a calibration, for its row. */
+function lanHint(spec: OptionSpec): string {
+  const honoured = LAN_CALIBRATIONS[spec.name]
+  const done = honoured == null ? 'set by the printer' : formatOption(spec.kind, honoured)
+  return `Over the LAN: ${done}; only Bambuddy's queue sets it otherwise`
 }

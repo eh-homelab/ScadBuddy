@@ -6,7 +6,15 @@ import pytest
 from pydantic import ValidationError
 
 from scadbuddy.bambuddy.models import QueueItemCreate
-from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, PrintOptions, resolve
+from scadbuddy.bambuddy.options import (
+    BAMBUDDY_DEFAULTS,
+    LAN_CALIBRATIONS,
+    PrintOptions,
+    lan_calibration_refusal,
+    resolve,
+)
+from scadbuddy.printers.lan import project_file_command
+from scadbuddy.printers.lan_models import ProjectFile
 from tests.bambuddy.conftest import recording
 
 
@@ -90,3 +98,68 @@ def test_an_absent_scope_is_skipped() -> None:
 
 def test_resolving_nothing_leaves_every_option_to_bambuddy() -> None:
     assert resolve(None, None).is_empty()
+
+
+# ── #5352: a print over the LAN takes the calibration value the LAN start sends ──────
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"flow_cali": "off"},
+        {"bed_levelling": "auto"},
+        {"nozzle_offset_cali": "auto"},
+        {"flow_cali": "off", "bed_levelling": "auto", "nozzle_offset_cali": "auto"},
+        # Not calibrations: the LAN start sends these itself.
+        {"timelapse": True, "layer_inspect": False},
+    ],
+)
+def test_what_the_lan_does_passes(options: dict[str, object]) -> None:
+    assert lan_calibration_refusal(PrintOptions.model_validate(options)) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "named"),
+    [
+        ("flow_cali", "on", 'flow_cali "on"'),
+        ("flow_cali", "auto", 'flow_cali "auto"'),
+        ("bed_levelling", "on", 'bed_levelling "on"'),
+        ("bed_levelling", "off", 'bed_levelling "off"'),
+        ("nozzle_offset_cali", "on", 'nozzle_offset_cali "on"'),
+        ("nozzle_offset_cali", "off", 'nozzle_offset_cali "off"'),
+        ("vibration_cali", True, "vibration_cali true"),
+        ("vibration_cali", False, "vibration_cali false"),
+    ],
+)
+def test_what_the_lan_cannot_honour_is_refused(name: str, value: object, named: str) -> None:
+    refusal = lan_calibration_refusal(PrintOptions.model_validate({name: value}))
+    assert refusal is not None and refusal.startswith(f"A print over the LAN cannot set {named}:")
+    # The control a person has: Settings > Printers' "How <name> prints" select, whose
+    # `bambuddy` choice is labelled "Through Bambuddy" (frontend
+    # `components/settings/Printers.tsx` `PATHS`); `run_path` takes it as set.
+    assert refusal.endswith(
+        'in Settings > Printers, set how the printer prints to "Through Bambuddy" (it must'
+        " link a Bambuddy printer)."
+    )
+
+
+def test_the_lan_values_are_what_the_lan_start_sends() -> None:
+    """`LAN_CALIBRATIONS` reads the start command: ``flow_cali`` false, and no field at
+    all for the three left to the printer."""
+    command = project_file_command(
+        ProjectFile(
+            url="ftp://x.3mf",
+            param="p",
+            subtask_name="s",
+            use_ams=True,
+            ams_mapping=[0],
+            md5="0" * 32,
+        ),
+        "1",
+    )["print"]
+    assert command["flow_cali"] is False and LAN_CALIBRATIONS["flow_cali"] == "off"
+    for left in ("bed_levelling", "bed_leveling", "nozzle_offset_cali", "vibration_cali"):
+        assert left not in command
+    assert LAN_CALIBRATIONS["bed_levelling"] == LAN_CALIBRATIONS["nozzle_offset_cali"] == "auto"
+    assert LAN_CALIBRATIONS["vibration_cali"] is None

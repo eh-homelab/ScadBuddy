@@ -1,4 +1,5 @@
 import { http, HttpResponse } from 'msw'
+import { z } from 'zod'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
@@ -574,6 +575,9 @@ describe('pricing tools (#4250)', () => {
       filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
+    // #5352: the quote slices on the route its print will take.
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, path: 'bambuddy' } }, ctx())
+    expect(body).toMatchObject({ path: 'bambuddy' })
   })
 
   it('answers a slice quote still running past the follow window', async () => {
@@ -618,6 +622,28 @@ describe('pricing tools (#4250)', () => {
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
       'on Bambuddy printer 1',
     )
+  })
+
+  it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/print`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'succeeded', result: { id: 'f1' } }),
+      ),
+    )
+    const { filaments: _priced, ...dialog } = SLICE
+    const options = { bed_levelling: 'on', flow_cali: 'on', nozzle_offset_cali: 'on', vibration_cali: true, timelapse: true }
+    const args = { order_id: ORDER, item_id: ITEM, ...dialog, options, path: 'bambuddy' }
+    await tool('order_item_print').execute(args, ctx())
+    expect(body).toMatchObject({ options, path: 'bambuddy' })
+    expect(tool('order_item_print').summarize?.(args as never)).toContain("through Bambuddy's queue")
+    // An unknown option is refused by the schema, as the backend would refuse it.
+    expect(z.object(tool('order_item_print').shape).safeParse({ ...args, options: { flow_calibration: 'on' } }).success).toBe(false)
+    expect(z.object(tool('order_item_print').shape).safeParse({ ...args, path: 'cloud' }).success).toBe(false)
   })
 
   it("reads an attempt's archives and copies one's finish photo with a key (#4253 §8.2)", async () => {
