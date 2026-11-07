@@ -23,7 +23,8 @@ export function localDay(at: Date | string): string {
 }
 
 /** A URL value that is a calendar day; any other is no value. */
-const isDay = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(localMidnight(value).getTime())
+/** A real calendar day: `2026-02-31` rolls over to Mar 3 in `Date`, so the round trip rejects it. */
+const isDay = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && localDay(localMidnight(value)) === value
 
 /** A day `offset` days from `day`, in the calendar. */
 function addDays(day: string, offset: number): string {

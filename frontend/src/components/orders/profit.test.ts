@@ -19,12 +19,12 @@ function specDefaultDays(): number {
 
 // Node reads `TZ` again each time it changes, so each case runs in the zone it names.
 const zone = process.env.TZ
-afterEach(() => {
-  process.env.TZ = zone
-})
-afterAll(() => {
-  process.env.TZ = zone
-})
+function restoreZone() {
+  if (zone === undefined) delete process.env.TZ
+  else process.env.TZ = zone
+}
+afterEach(restoreZone)
+afterAll(restoreZone)
 
 describe('the profit report period (#5546)', () => {
   it('has the server’s default length', () => {
@@ -40,6 +40,13 @@ describe('the profit report period (#5546)', () => {
   ])('covers the days picked from local midnight in %s', (tz, from, to) => {
     process.env.TZ = tz
     expect(periodOf('2026-10-01', '2026-10-31')).toEqual({ from, to })
+  })
+
+  it('takes a day that does not exist as no day (#5548 review)', () => {
+    process.env.TZ = 'UTC'
+    const now = new Date('2026-11-06T12:00:00Z')
+    expect(shownPeriod('2026-02-31', '2026-03-31', now)).toEqual({ from: '2026-01-01', to: '2026-03-31' })
+    expect(shownPeriod('2026-01-01', '2026-13-01', now)).toEqual({ from: '2026-01-01', to: '2026-11-06' })
   })
 
   it('crosses a DST change by the calendar, not by 24 hours', () => {
