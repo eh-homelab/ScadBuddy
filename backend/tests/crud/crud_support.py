@@ -6,7 +6,8 @@ that reaches them with an in-process credential, as the worker does. `api_payloa
 gives the routes the API's payload keys on a store's schema, and `served_projects` serves a
 projects worker's store and payload keys as the worker's. `static_render_crud` is a render
 worker's client of a stand-in API that answers fixed store settings and serves no job route,
-for a test of the worker that renders nothing."""
+for a test of the worker that renders nothing. `FakeClock` is a client clock that moves only
+by the client's own waits, so a test's count of tries does not depend on wall time."""
 
 from __future__ import annotations
 
