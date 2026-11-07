@@ -5,7 +5,7 @@ import { mockModels, setMockMedia } from '../../handlers'
 import { printersState } from '../printers'
 import { upload } from './attachments'
 import type { Resolved } from './orders'
-import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, openForItem, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
+import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, OPEN_FOR_EDITS, openForRequote, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, TAKES_ITEMS, transition, withFilaments } from './orders'
 import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revisionsOf, state } from './state'
 
 /**
@@ -13,11 +13,25 @@ import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revision
  * `orders/lifecycle.py` `_revise`, `add_revision`, `send_revision`, `answer_revision`): an
  * item's designs, numbered per item. A new one supersedes a sent, unanswered newest one and
  * drops the item's quotes; only the newest is sent, answered or test-printed; a customer's
- * acceptance on a `together` item also accepts the quote that names it.
+ * acceptance on a `together` item also accepts the quote that names it. An accepted item's
+ * new design (#5350, `…/revisions/after-acceptance`) keeps its accepted quote until a quote
+ * of the new design is accepted.
  */
 
+/** `lifecycle.py` `REQUOTED` (#5350): the states a revised accepted item goes back to `draft` from. */
+const REQUOTED = new Set(['quoted', 'approved', 'printed', 'failed'])
+
 /** `Lifecycle._revise`: the item's next revision, and the item's design a copy of it. */
-export function pushRevision(order: Order, item: OrderItem, reference: NonNullable<OrderItem['reference']>, colours: OrderItem['colours'], note: string): Revision {
+export function pushRevision(
+  order: Order,
+  item: OrderItem,
+  reference: NonNullable<OrderItem['reference']>,
+  colours: OrderItem['colours'],
+  note: string,
+  afterAcceptance = false,
+): Revision {
+  const requote = TAKES_ITEMS.has(order.status) && (afterAcceptance || item.revised_after_acceptance)
+  const kept = requote ? (quotesOf(item.id).find((q) => q.accepted)?.id ?? null) : null
   const all = revisionsOf(item.id)
   const newest = all.at(-1)
   let superseded: string | null = null
@@ -46,10 +60,17 @@ export function pushRevision(order: Order, item: OrderItem, reference: NonNullab
   item.reference = reference
   item.colours = colours
   item.current_revision_id = revision.id
+  item.updated_at = now()
+  if (requote) {
+    // #5350: the accepted quote stays; the item waits for a quote of the new design.
+    item.revised_after_acceptance = true
+    if (REQUOTED.has(item.status)) item.status = 'draft'
+    event(order, 'revision.added_after_acceptance', { item_id: item.id, revision_id: revision.id, number: revision.number, superseded, order_status: order.status, accepted_quote_id: kept })
+    return revision
+  }
   // Every quote goes stale (§4.3), so a quoted or approved item is a draft again.
   for (const q of quotesOf(item.id)) q.accepted = false
   if (item.status === 'quoted' || item.status === 'approved') item.status = 'draft'
-  item.updated_at = now()
   event(order, 'revision.added', { item_id: item.id, revision_id: revision.id, number: revision.number, superseded })
   return revision
 }
@@ -76,11 +97,37 @@ function unknownKeys(request: Request, body: Record<string, unknown>, allowed: s
 
 const base = '/api/v1/orders/:id/items/:item/revisions'
 
-export const handlers = [
-  http.post(base, async ({ request, params }) => {
+/** `RevisionInput`'s `note`: a string of at most 4000 characters, as the backend's 422 says. */
+function badNote(request: Request, body: Record<string, unknown>) {
+  if (!('note' in body)) return null
+  if (typeof body.note !== 'string') return fieldProblem(request, 'note', 'Input should be a valid string')
+  if (body.note.length > 4000) return fieldProblem(request, 'note', 'String should have at most 4000 characters')
+  return null
+}
+
+/** `Lifecycle._revisable_after_acceptance` (#5350): the checks past the item's own. */
+function revisableAfterAcceptance(order: Order, item: OrderItem) {
+  if (OPEN_FOR_EDITS.has(order.status)) {
+    throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted: revise the item with POST /orders/${order.id}/items/${item.id}/revisions`, [item.id])
+  }
+  if (!TAKES_ITEMS.has(order.status)) throw new Refused('item_locked', `order ${order.number} is ${order.status}: its items' designs are final once shipped`, [item.id])
+  notOnHold(order)
+  if (!quotesOf(item.id).some((q) => q.accepted)) {
+    throw new Refused('item_not_priced', `item ${item.id} has no accepted quote: revise it with POST /orders/${order.id}/items/${item.id}/revisions`, [item.id])
+  }
+  if (item.status === 'queued' || item.status === 'printing') throw new Refused('print_in_flight', `item ${item.id} is ${item.status}: settle its print first`, [item.id])
+  const open = printInFlight(item.id)
+  if (open) throw new Refused('print_in_flight', `item ${item.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [item.id])
+}
+
+/** `POST …/revisions` and, with `afterAcceptance`, `POST …/revisions/after-acceptance` (#5350). */
+function addRevision(afterAcceptance: boolean) {
+  return async ({ request, params }: { request: Request; params: Record<string, string | readonly string[] | undefined> }) => {
     const body = (await request.json()) as RevisionCreate & Record<string, unknown>
     const extra = unknownKeys(request, body, ['note', 'reference', 'output_id', 'filaments'])
     if (extra) return extra
+    const note = badNote(request, body)
+    if (note) return note
     let resolved: Resolved | undefined
     if (body.reference || body.output_id) {
       const found = resolveReference({ ...(body.reference ?? {}), output_id: body.output_id ?? null })
@@ -92,22 +139,28 @@ export const handlers = [
       notEnded(order)
       const found = itemOf(order, String(params.item))
       if (found.kind === 'custom') throw new Refused('item_custom', `item ${found.id} is a custom item`)
-      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
-      openForItem(order, found, "an item's design")
+      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`, [found.id])
+      if (afterAcceptance) revisableAfterAcceptance(order, found)
+      else openForRequote(order, found, "an item's design")
       let reference = found.reference
       let colours = found.colours
       if (resolved) ({ reference, colours } = resolved)
       if (reference === null) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`)
       if (body.filaments) colours = withFilaments({ ...found, colours }, body.filaments).colours
       const output = 'output_id' in body ? (body.output_id ?? null) : sameDesign(reference, found.reference) ? found.output_id : null
-      const revision = pushRevision(order, found, reference, colours, body.note ?? '')
+      const revision = pushRevision(order, found, reference, colours, body.note ?? '', afterAcceptance)
       found.output_id = output ?? null
       rederive(order)
       return HttpResponse.json(revision, { status: 201 })
     } catch (error) {
       return refused(request, error)
     }
-  }),
+  }
+}
+
+export const handlers = [
+  http.post(base, addRevision(false)),
+  http.post(`${base}/after-acceptance`, addRevision(true)),
 
   http.post(`${base}/:revision/send`, ({ request, params }) =>
     transition(request, () => {
@@ -149,7 +202,7 @@ export const handlers = [
       if (body.answer === 'accepted' && found.approval === 'together') {
         quote = quoteOf(found, revision)
         if (!quote) throw new Refused('revision_not_quoted', `revision ${revision.number} has no quote: this item is approved together`)
-        openForItem(order, found, "an item's price")
+        openForRequote(order, found, "an item's price")
         notOnHold(order)
       }
       // Every check that can throw comes first (acceptQuote's too); the stamp follows.

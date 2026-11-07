@@ -1565,8 +1565,10 @@ async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
         "new note). 404 `item_not_found`; 409 `item_custom` (a custom item has no "
         "design), `item_has_no_design` (a request's first revision must name one), "
         "`item_not_open`, `item_locked` (the order is accepted and the item's price with "
-        "it; an item added after acceptance with no accepted quote still takes one) and "
-        "`order_closed`/`order_cancelled`. Allowed on hold: a revision advances nothing."
+        "it; an item added after acceptance with no accepted quote still takes one, and "
+        "so does an item revised after acceptance, #5350; revise an accepted item with "
+        "`POST .../revisions/after-acceptance`) and `order_closed`/`order_cancelled`. "
+        "Allowed on hold: a revision advances nothing."
     ),
 )
 async def add_revision(
@@ -1574,6 +1576,80 @@ async def add_revision(
     item_id: str,
     body: RevisionCreate,
     orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> Revision:
+    return await _add_revision(
+        order_id,
+        item_id,
+        body,
+        orders,
+        after_acceptance=False,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/after-acceptance",
+    response_model=Revision,
+    status_code=status.HTTP_201_CREATED,
+    summary="Revise an accepted item's design",
+)
+async def add_revision_after_acceptance(
+    order_id: str,
+    item_id: str,
+    body: RevisionCreate,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> Revision:
+    """#5350: the same body as `POST /orders/{id}/items/{item}/revisions`, for an item
+    with an accepted quote on an order that is `accepted`, `in_production` or `ready`.
+    It changes what the customer gets. The accepted quote stays accepted: the order's
+    total keeps the agreed price until a quote of the new revision is accepted. The item
+    is `draft` again and `revised_after_acceptance`, so it takes a quote and that quote's
+    acceptance, and is not printed or fulfilled before. The audit row is
+    ``revision.added_after_acceptance``. 409 ``order_not_accepted`` while the order is
+    `draft` or `quoted` (use the plain route), ``item_locked`` once it is `shipped`,
+    ``order_closed``/``order_cancelled``, ``order_on_hold``, ``item_not_open`` for a
+    fulfilled or cancelled item, ``item_not_priced`` for an item with no accepted quote
+    (use the plain route), ``item_custom``, and ``print_in_flight`` while a print of
+    it runs."""
+    return await _add_revision(
+        order_id,
+        item_id,
+        body,
+        orders,
+        after_acceptance=True,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+
+
+async def _add_revision(
+    order_id: str,
+    item_id: str,
+    body: RevisionCreate,
+    orders: OrdersComponent,
+    *,
+    after_acceptance: bool,
     catalogue: CatalogueDep,
     history: HistoryDep,
     outputs: OutputsDep,
@@ -1606,6 +1682,7 @@ async def add_revision(
             output_id=output_id,
             filaments=body.filaments,
             note=body.note,
+            after_acceptance=after_acceptance,
         )
     )
 

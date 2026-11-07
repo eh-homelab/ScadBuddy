@@ -152,6 +152,19 @@ export function openForItem(order: Order, item: OrderItem, what: string) {
   if (TAKES_ITEMS.has(order.status) && !quotesOf(item.id).some((q) => q.accepted)) return
   throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted`, [item.id])
 }
+/** `lifecycle.py` `requote_open` (#5350): open as `openForItem`, and past `quoted` while
+ * the item was revised after acceptance. */
+export function requoteOpen(order: Order, item: OrderItem): boolean {
+  if (OPEN_FOR_EDITS.has(order.status)) return true
+  if (!TAKES_ITEMS.has(order.status)) return false
+  return item.revised_after_acceptance || !quotesOf(item.id).some((q) => q.accepted)
+}
+/** `Lifecycle._open_for_requote` (#5350): the refusal names the route that revises an accepted item. */
+export function openForRequote(order: Order, item: OrderItem, what: string) {
+  if (requoteOpen(order, item)) return
+  const route = TAKES_ITEMS.has(order.status) && item.kind !== 'custom' ? `; revise it with POST /orders/${order.id}/items/${item.id}/revisions/after-acceptance` : ''
+  throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted${route}`, [item.id])
+}
 /** `Lifecycle._takes_item` (#5349): the plain add, or the add after acceptance. */
 export function takesItem(order: Order, afterAcceptance: boolean) {
   notEnded(order)
@@ -251,6 +264,8 @@ function detail(order: Order): OrderDetail {
 function reopenedStatus(item: OrderItem): [OrderItem['status'], boolean] {
   const quotes = quotesOf(item.id)
   const accepted = quotes.some((q) => q.accepted)
+  // #5350: priced at its kept quote, but its new design waits for its own.
+  if (accepted && item.revised_after_acceptance) return [quotes.some((q) => !q.accepted && q.revision_id === item.current_revision_id) ? 'quoted' : 'draft', true]
   if (accepted) return [productionOf(item.id).at(-1)?.outcome === 'failed' ? 'failed' : 'approved', true]
   return [quotes.length > 0 ? 'quoted' : 'draft', false]
 }
@@ -324,6 +339,8 @@ export function acceptQuote(order: Order, found: OrderItem, quote: Quote): Order
   checkQuote(found, quote)
   for (const q of quotesOf(found.id)) q.accepted = q.id === quote.id
   found.status = 'approved'
+  // #5350: the new price replaces the one kept since a revision after acceptance.
+  found.revised_after_acceptance = false
   found.updated_at = now()
   event(order, 'quote.accepted', { item_id: found.id, quote_id: quote.id })
   rederive(order)
@@ -448,6 +465,7 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
           output_id: null,
           approval: 'together',
           current_revision_id: null,
+          revised_after_acceptance: false,
           created_at: at,
           updated_at: at,
         }
@@ -484,6 +502,7 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
           output_id: null,
           approval: 'design_first',
           current_revision_id: null,
+          revised_after_acceptance: false,
           created_at: at,
           updated_at: at,
         }
@@ -518,6 +537,7 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
         output_id: body.output_id ?? null,
         approval: 'together',
         current_revision_id: null,
+        revised_after_acceptance: false,
         created_at: at,
         updated_at: at,
       }
@@ -915,7 +935,9 @@ export const handlers = [
       const moved = resolved !== undefined && !filled && (found.kind === 'custom' || !sameDesign(resolved.reference, found.reference) || (resolved.colours.length > 0 && JSON.stringify(resolved.colours) !== JSON.stringify(found.colours)))
       const revised = moved || refiled?.changed === true
       const repins = revised || body.quantity != null || price !== null
-      if (repins) openForItem(order, found, "an item's reference, quantity and filaments")
+      if (repins && (body.quantity != null || price !== null)) openForItem(order, found, "an item's reference, quantity and filaments")
+      // A design change alone: an item revised after acceptance takes it (#5350).
+      else if (repins) openForRequote(order, found, "an item's reference and filaments")
       if (price !== null && accept) notOnHold(order)
       if (revised) {
         const reference = resolved?.reference ?? found.reference!
@@ -1024,7 +1046,7 @@ export const handlers = [
       const order = lock(String(params.id))
       notEnded(order)
       const found = itemOf(order, String(params.item))
-      openForItem(order, found, "an item's price")
+      openForRequote(order, found, "an item's price")
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       if (found.kind === 'custom') {
         throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field (PATCH the item's unit_price_minor)`, [found.id])
@@ -1061,7 +1083,7 @@ export const handlers = [
       const order = lock(String(params.id))
       notEnded(order)
       const found = itemOf(order, String(params.item))
-      openForItem(order, found, "an item's price")
+      openForRequote(order, found, "an item's price")
       notOnHold(order)
       const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === found.id)
       if (!quote) throw new Refused('quote_not_found', `no quote ${String(params.quote)} of item ${found.id}`, [], true)

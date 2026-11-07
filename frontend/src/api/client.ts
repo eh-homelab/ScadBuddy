@@ -2425,6 +2425,9 @@ export const api = {
   // -- design revisions (#5280, storefront spec 2026-11-02 §4) -----------------------------
   addOrderItemRevision: (orderId: string, itemId: string, body: RevisionCreate) =>
     request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #5350 — a new design of an accepted item; its accepted price stays until a new quote is accepted. */
+  addOrderItemRevisionAfterAcceptance: (orderId: string, itemId: string, body: RevisionCreate) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/after-acceptance`, { method: 'POST', body: JSON.stringify(body) }),
   sendOrderItemRevision: (orderId: string, itemId: string, revisionId: string) =>
     request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/send`, { method: 'POST' }),
   answerOrderItemRevision: (orderId: string, itemId: string, revisionId: string, body: RevisionAnswerInput) =>

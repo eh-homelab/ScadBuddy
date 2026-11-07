@@ -5,7 +5,7 @@ import type { Approval, Fulfilment, Order, OrderAttachment, OrderAttachmentRole,
 import { timeAgo } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
 import { AddItemDialog } from './AddItemDialog'
-import { itemOpen } from './afterAcceptance'
+import { addRevision, reviseMode, reviseWarning } from './afterAcceptance'
 import { EndAttempt } from './EndAttempt'
 import { AttachmentCard, FilePick } from './OrderAttachments'
 import { PrintItem } from './PrintItem'
@@ -61,6 +61,8 @@ export function RevisionsPanel({
   const [note, setNote] = useState('')
   const [picking, setPicking] = useState(false)
   const [busy, setBusy] = useState(false)
+  // #5350: a new design of an accepted item waits for a second click on the confirm.
+  const [confirming, setConfirming] = useState(false)
   if (item.kind === 'custom') return null
 
   const revisions = [...item.revisions].sort((a, b) => b.number - a.number)
@@ -68,7 +70,33 @@ export function RevisionsPanel({
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   const ended = ENDED.has(order.status)
   // #5349: an item added after acceptance has no accepted price, and still takes revisions.
-  const canRevise = itemOpen(order, item.quotes) && !settled
+  // #5350: an accepted item takes one on its own route, after a confirm.
+  const mode = settled ? null : reviseMode(order, item, item.quotes)
+  const canRevise = mode !== null
+
+  /** The same design again, as a new revision: on an accepted item, after a confirm. */
+  function sameDesign() {
+    if (mode === null) return
+    if (mode === 'after_acceptance' && !confirming) {
+      setConfirming(true)
+      return
+    }
+    setError(null)
+    setBusy(true)
+    addRevision(order.id, item.id, { note }, mode)
+      .then(() => {
+        setNote('')
+        setAdding(false)
+        setConfirming(false)
+        onChanged()
+      })
+      .catch((caught: unknown) => {
+        setError(refusalText(caught))
+        // A failed save asks again before the next try.
+        setConfirming(false)
+      })
+      .finally(() => setBusy(false))
+  }
 
   async function run(action: () => Promise<unknown>, describe: (error: unknown) => string = refusalText): Promise<boolean> {
     setError(null)
@@ -111,40 +139,67 @@ export function RevisionsPanel({
           </Select>
         </div>
         {canRevise && (
-          <Button variant="outline" size="sm" aria-expanded={adding} onClick={() => setAdding((now) => !now)}>
+          <Button
+            variant="outline"
+            size="sm"
+            aria-expanded={adding}
+            onClick={() => {
+              setAdding((now) => !now)
+              setConfirming(false)
+            }}
+          >
             New revision
           </Button>
         )}
       </div>
+      {item.revised_after_acceptance && !settled && (
+        <p className="text-[13px] text-muted-foreground" data-testid="revised-after-acceptance">
+          New design after acceptance: quote it, then accept the new quote. Until then the accepted price stays.
+        </p>
+      )}
       {adding && canRevise && (
         <div className="flex flex-col gap-2 rounded-xl border p-3" data-testid="new-revision">
           <Label htmlFor={`revision-note-${item.id}`}>Revision note</Label>
-          <Textarea id={`revision-note-${item.id}`} rows={2} value={note} onChange={(event) => setNote(event.target.value)} />
+          <Textarea
+            id={`revision-note-${item.id}`}
+            rows={2}
+            value={note}
+            onChange={(event) => {
+              setNote(event.target.value)
+              setConfirming(false)
+            }}
+          />
+          {confirming && (
+            <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
+              {reviseWarning(order)}
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               disabled={busy || item.reference === null}
               title={item.reference === null ? 'This item has no design yet: change the design.' : undefined}
-              onClick={() =>
-                void run(() => api.addOrderItemRevision(order.id, item.id, { note })).then((ok) => {
-                  if (ok) {
-                    setNote('')
-                    setAdding(false)
-                  }
-                })
-              }
+              onClick={sameDesign}
             >
               {busy && <Spinner />}
-              Add revision (same design)
+              {confirming ? 'Change the accepted item' : 'Add revision (same design)'}
             </Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => setPicking(true)}>
-              Change the design…
-            </Button>
+            {confirming ? (
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirming(false)}>
+                Back
+              </Button>
+            ) : (
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => setPicking(true)}>
+                Change the design…
+              </Button>
+            )}
           </div>
-          {picking && (
+          {picking && mode !== null && (
             <AddItemDialog
               open
               orderId={order.id}
+              mode={mode}
+              order={order}
               revise={{ itemId: item.id, slug: item.reference?.slug ?? null }}
               onAdded={() => {
                 setNote('')

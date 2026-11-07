@@ -225,4 +225,39 @@ describe('AddItemDialog (#4251)', () => {
     expect(itemId).toBe('item-1')
     expect(body).toMatchObject({ note: 'a maze instead', reference: { slug: MAZE_SLUG } })
   })
+
+  it("asks before it changes an accepted item's design, then revises on the after-acceptance route (#5350)", async () => {
+    const plain = vi.spyOn(api, 'addOrderItemRevision')
+    const after = vi.spyOn(api, 'addOrderItemRevisionAfterAcceptance').mockRejectedValueOnce(new Error('order ORD-2026-2 is on hold'))
+    const onAdded = vi.fn()
+    const { user } = renderPage(
+      <AddItemDialog
+        open
+        orderId={ORDER_ACCEPTED}
+        mode="after_acceptance"
+        order={{ number: 'ORD-2026-2', status: 'in_production' }}
+        revise={{ itemId: 'item-1', slug: null }}
+        onAdded={onAdded}
+        onClose={vi.fn()}
+      />,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'New revision' })
+    await user.type(within(dialog).getByLabelText('Template'), 'maze')
+    await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
+    await waitFor(() => expect(within(dialog).getByRole('radio', { name: 'Current version, default settings' })).toBeChecked())
+    await user.click(within(dialog).getByRole('button', { name: 'Add revision' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(
+      /^ORD-2026-2 is in production\. A new design changes what the customer gets\./,
+    )
+    expect(after).not.toHaveBeenCalled()
+    // A failed save clears the confirm: the next try asks again.
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    expect(await within(dialog).findByText(/on hold/)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('alert', { name: 'Confirm the change' })).toBeNull()
+    await user.click(within(dialog).getByRole('button', { name: 'Add revision' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(after).toHaveBeenCalledTimes(2))
+    expect(after.mock.calls[1]![1]).toBe('item-1')
+    expect(plain).not.toHaveBeenCalled()
+  })
 })

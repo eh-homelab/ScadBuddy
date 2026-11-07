@@ -141,7 +141,8 @@ _ORDER = (
 _ITEM = (
     "id, order_id, position, status, quantity, title, notes, kind, requires_printing, sku,"
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
-    " delivered_attachment_id, current_revision_id, approval, created_at, updated_at"
+    " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
+    " revised_after_acceptance"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -234,6 +235,7 @@ def _item_of(row: DictRow) -> OrderItem:
         delivered_attachment_id=row["delivered_attachment_id"],
         current_revision_id=row["current_revision_id"],
         approval=row["approval"],
+        revised_after_acceptance=row["revised_after_acceptance"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1084,6 +1086,7 @@ class OrderStore:
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | UnsetType = UNSET,
         approval: Approval | UnsetType = UNSET,
+        revised_after_acceptance: bool | UnsetType = UNSET,
     ) -> OrderItem:
         """The item's own fields; its design (reference and colours) is `set_design`'s
         alone (spec 2026-11-02 §4.1)."""
@@ -1096,6 +1099,7 @@ class OrderStore:
             "sku": sku,
             "requires_printing": requires_printing,
             "approval": approval,
+            "revised_after_acceptance": revised_after_acceptance,
         }
         row = _update(conn, "order_items", item_id, fields, _ITEM)
         if row is None:

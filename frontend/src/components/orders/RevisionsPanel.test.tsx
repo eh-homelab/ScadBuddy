@@ -105,14 +105,55 @@ describe('RevisionsPanel (#5280)', () => {
     await waitFor(() => expect(state.items.find((i) => i.id === ITEM_DRAFT)!.approval).toBe('design_first'))
   })
 
-  it('sets the approval in any open order, as the backend allows; revising stays locked', async () => {
+  it('sets the approval in any open order, as the backend allows', async () => {
     const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
     const select = await screen.findByRole('combobox', { name: 'Approval' })
     expect(select).toBeEnabled()
-    expect(screen.queryByRole('button', { name: 'New revision' })).toBeNull()
     const other = state.items.find((i) => i.id === ITEM_APPROVED)!.approval === 'design_first' ? 'Design and price together' : 'Design first'
     await choose(user, select, other)
     await waitFor(() => expect(state.items.find((i) => i.id === ITEM_APPROVED)!.approval).toBe(other === 'Design first' ? 'design_first' : 'together'))
+  })
+
+  it('revises an accepted item after a confirm, and keeps its accepted price (#5350)', async () => {
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'New revision' }))
+    await user.type(screen.getByRole('textbox', { name: 'Revision note' }), 'a bigger loop')
+    await user.click(screen.getByRole('button', { name: 'Add revision (same design)' }))
+    // The first click only asks.
+    expect(screen.getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(
+      /^ORD-2026-2 is accepted\. A new design changes what the customer gets\..*Until then the accepted price stays\.$/,
+    )
+    expect(revisionsOf(ITEM_APPROVED)).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Change the accepted item' }))
+    await waitFor(() => expect(revisionsOf(ITEM_APPROVED)).toHaveLength(2))
+    expect(revisionsOf(ITEM_APPROVED)[1]).toMatchObject({ number: 2, note: 'a bigger loop' })
+    const item = state.items.find((i) => i.id === ITEM_APPROVED)!
+    expect(item.revised_after_acceptance).toBe(true)
+    expect(item.status).toBe('draft')
+    // The accepted price stands until a quote of the new design is accepted.
+    expect(state.quotes.find((q) => q.id === QUOTE_ACCEPTED)!.accepted).toBe(true)
+    expect(await screen.findByTestId('revised-after-acceptance')).toHaveTextContent(/Until then the accepted price stays/)
+    expect(state.events.filter((e) => e.kind === 'revision.added_after_acceptance')).toHaveLength(1)
+  })
+
+  it('asks again after a failed revision of an accepted item (#5350)', async () => {
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'New revision' }))
+    await user.click(screen.getByRole('button', { name: 'Add revision (same design)' }))
+    // Held behind the page's back: the save is refused.
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    await user.click(screen.getByRole('button', { name: 'Change the accepted item' }))
+    await waitFor(() => expect(screen.getAllByRole('alert').map((a) => a.textContent).join('|')).toMatch(/on hold/))
+    expect(screen.queryByRole('alert', { name: 'Confirm the change' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Add revision (same design)' })).toBeInTheDocument()
+    expect(revisionsOf(ITEM_APPROVED)).toHaveLength(1)
+  })
+
+  it('offers no revision of an accepted item on hold (#5350)', async () => {
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await screen.findByRole('combobox', { name: 'Approval' })
+    expect(screen.queryByRole('button', { name: 'New revision' })).toBeNull()
   })
 
   it('locks the approval for a settled item', async () => {

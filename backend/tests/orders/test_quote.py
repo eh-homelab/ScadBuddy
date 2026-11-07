@@ -317,6 +317,15 @@ def test_the_check_refuses_an_order_that_is_not_open(shop: Shop) -> None:
             shop.rows, POLICY, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.pla)
         )
     assert (refused.value.status, refused.value.type.rsplit("/", 1)[-1]) == (409, "order_not_open")
+    # #5350: revised after acceptance, the item takes a slice quote of its new design, and a
+    # filament changed for it keeps the old accepted quote.
+    shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, after_acceptance=True)
+    slots = quote_check(
+        shop.rows, POLICY, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg)
+    )
+    assert slots == {0: shop.pla, 1: shop.petg}
+    shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, filaments={1: shop.petg})
+    assert [q.accepted for q in shop.rows.quotes(shop.item.id)] == [True]
 
 
 def test_the_check_needs_a_filament_per_slot(shop: Shop) -> None:
