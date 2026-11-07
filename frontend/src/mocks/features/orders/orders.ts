@@ -57,12 +57,12 @@ const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor'])
 /**
  * Pydantic's lax `int` (#5573, measured with `ChargeInput.model_validate_json`): an integral
  * number, a boolean, or a string of one integer with `_` separators and an optional zero
- * fraction (" +1_000.0 " is 1000); "5.5" and "1e3" are refused.
+ * fraction (" +1_000.0 " is 1000); "5.5", "5." and "1e3" are refused.
  */
 function laxInt(value: unknown): number | null {
   if (typeof value === 'number') return Number.isInteger(value) ? value : null
   if (typeof value === 'boolean') return value ? 1 : 0
-  if (typeof value === 'string' && /^\s*[+-]?\d+(_\d+)*(\.0*)?\s*$/.test(value)) return Math.trunc(Number(value.replaceAll('_', '')))
+  if (typeof value === 'string' && /^\s*[+-]?\d+(_\d+)*(\.0+)?\s*$/.test(value)) return Number(value.replaceAll('_', ''))
   return null
 }
 
