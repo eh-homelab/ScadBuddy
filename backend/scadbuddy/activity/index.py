@@ -81,6 +81,8 @@ ACTIVITY_REPAIR_WINDOW_DEFAULT = 86400.0
 ACTIVITY_PRUNE_MARGIN = 3600.0
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
+#: #5596 — how many subjects one ``list_per_subject`` reads.
+MAX_SUBJECTS = 200
 #: The window ``facets`` counts over when its caller names none.
 FACETS_WINDOW = timedelta(days=7)
 
@@ -156,7 +158,8 @@ _VISIBLE = sql.SQL("source <> ''")
 _LIBRARY_RUN = re.compile(r"library-([0-9]+)")
 _OUTPUT_ID = re.compile(r"[0-9a-f]{32}")
 # The subject filter compares this expression, so a plain index on ``activity.subject``
-# cannot serve it: one added for that filter has to be an expression index on this CASE.
+# cannot serve it: ``activity_subject_key`` (migration 20261107T0625Z) is an expression
+# index on this CASE, with ``created_at DESC, id DESC`` after it. Change both together.
 _SUBJECT_KEY = sql.SQL(
     "CASE WHEN subject ~ '^library-[0-9]+$' THEN 'library:' || substr(subject, 9)"
     " WHEN subject ~ '^[0-9a-f]{32}$' THEN 'output:' || subject ELSE subject END"
@@ -176,6 +179,39 @@ def subject_key(subject: str) -> str:
 
 def _where(conditions: list[sql.Composable]) -> sql.Composable:
     return sql.SQL(" AND ").join(conditions)
+
+
+def _conditions(filters: ActivityFilter) -> tuple[list[sql.Composable], list[Any]]:
+    """``filters``' conditions but its ``subject``, and their parameters, in order."""
+    where: list[sql.Composable] = [_VISIBLE]
+    params: list[Any] = []
+
+    def add(condition: str, *values: Any) -> None:
+        where.append(sql.SQL(condition))  # fixed text from this module only
+        params.extend(values)
+
+    if filters.kinds:
+        add("kind = ANY(%s)", list(filters.kinds))
+    if filters.statuses:
+        add("status = ANY(%s)", list(filters.statuses))
+    for column, value in (
+        ("principal", filters.principal),
+        ("session", filters.session),
+        ("via_tool", filters.via_tool),
+        ("parent_id", filters.parent),
+    ):
+        if value is not None:
+            where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
+            params.append(value)
+    if filters.q is not None:
+        add("title ILIKE '%%' || %s || '%%'", _escape_like(filters.q))
+    if filters.since is not None:
+        add("created_at >= %s", filters.since)
+    if filters.until is not None:
+        add("created_at < %s", filters.until)
+    for name, value in filters.facets.items():
+        add("facets @> %s::jsonb", json.dumps({name: value}))
+    return where, params
 
 
 _SELECT = sql.SQL("SELECT {} FROM activity").format(
@@ -547,40 +583,14 @@ class ActivityIndex:
     ) -> tuple[builtins.list[ActivityRow], str | None]:
         if not 1 <= limit <= MAX_LIMIT:
             raise ValueError(f"limit must be 1 to {MAX_LIMIT}")
-        where: builtins.list[sql.Composable] = [_VISIBLE]
-        params: builtins.list[Any] = []
-
-        def add(condition: str, *values: Any) -> None:
-            where.append(sql.SQL(condition))  # fixed text from this module only
-            params.extend(values)
-
-        if filters.kinds:
-            add("kind = ANY(%s)", list(filters.kinds))
-        if filters.statuses:
-            add("status = ANY(%s)", list(filters.statuses))
-        for column, value in (
-            ("principal", filters.principal),
-            ("session", filters.session),
-            ("via_tool", filters.via_tool),
-            ("parent_id", filters.parent),
-        ):
-            if value is not None:
-                where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
-                params.append(value)
+        where, params = _conditions(filters)
         if filters.subject is not None:
             # Either spelling finds the rows of both (#3856).
             where.append(sql.SQL("{} = %s").format(_SUBJECT_KEY))
             params.append(subject_key(filters.subject))
-        if filters.q is not None:
-            add("title ILIKE '%%' || %s || '%%'", _escape_like(filters.q))
-        if filters.since is not None:
-            add("created_at >= %s", filters.since)
-        if filters.until is not None:
-            add("created_at < %s", filters.until)
-        for name, value in filters.facets.items():
-            add("facets @> %s::jsonb", json.dumps({name: value}))
         if cursor is not None:
-            add("(created_at, id) < (%s, %s)", *cursor)
+            where.append(sql.SQL("(created_at, id) < (%s, %s)"))
+            params.extend(cursor)
         params.append(limit + 1)
         with self.pool.connection() as conn:
             found = conn.execute(
@@ -591,6 +601,57 @@ class ActivityIndex:
             ).fetchall()
         rows = [ActivityRow.model_validate(r) for r in found[:limit]]
         return rows, encode_cursor(rows[-1]) if len(found) > limit else None
+
+    async def list_per_subject(
+        self,
+        filters: ActivityFilter,
+        subjects: builtins.list[str],
+        *,
+        limit: int = DEFAULT_LIMIT,
+    ) -> tuple[builtins.list[ActivityRow], dict[str, str]]:
+        """#5596 — each subject's newest ``limit`` rows that match ``filters`` (its
+        ``subject`` is not read), newest first over all, and the cursor of each subject's
+        next page, by the subject as given: pass it to ``list`` with that one subject.
+        One query: each subject is a keyset read of ``activity_subject_key``."""
+        return await asyncio.to_thread(self._list_per_subject, filters, subjects, limit)
+
+    def _list_per_subject(
+        self,
+        filters: ActivityFilter,
+        subjects: builtins.list[str],
+        limit: int,
+    ) -> tuple[builtins.list[ActivityRow], dict[str, str]]:
+        if not 1 <= limit <= MAX_LIMIT:
+            raise ValueError(f"limit must be 1 to {MAX_LIMIT}")
+        if not 1 <= len(subjects) <= MAX_SUBJECTS:
+            raise ValueError(f"subjects must be 1 to {MAX_SUBJECTS}")
+        # One read per key, whichever spelling named it; the first spelling names it back.
+        given: dict[str, str] = {}
+        for subject in subjects:
+            given.setdefault(subject_key(subject), subject)
+        where, params = _conditions(filters)
+        where.append(sql.SQL("{} = s.key").format(_SUBJECT_KEY))
+        query = sql.SQL(
+            "SELECT s.key AS subject_key_, a.* FROM unnest(%s::text[]) AS s(key)"
+            " CROSS JOIN LATERAL ({} WHERE {} ORDER BY created_at DESC, id DESC LIMIT %s) a"
+            " ORDER BY a.created_at DESC, a.id DESC"
+        ).format(_SELECT, _where(where))
+        with self.pool.connection() as conn:
+            found = conn.execute(query, [list(given), *params, limit + 1]).fetchall()
+        rows: builtins.list[ActivityRow] = []
+        counts: dict[str, int] = {}
+        last: dict[str, ActivityRow] = {}
+        for record in found:
+            values = dict(record)
+            key = values.pop("subject_key_")
+            counts[key] = counts.get(key, 0) + 1
+            if counts[key] > limit:
+                continue
+            row = ActivityRow.model_validate(values)
+            rows.append(row)
+            last[key] = row
+        cursors = {given[key]: encode_cursor(last[key]) for key, n in counts.items() if n > limit}
+        return rows, cursors
 
     async def children(self, activity_id: str) -> builtins.list[ActivityRow]:
         return await asyncio.to_thread(self._children, activity_id)

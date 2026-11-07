@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun } from '../../api/client'
-import type { ActivityPage, OrderItemDetail, SliceQuoteRequest } from '../../api/types'
+import type { Activity, ActivityPage, OrderItemDetail, SliceQuoteRequest } from '../../api/types'
 import { refusalText } from './refusal'
 
 /** A slice quote of one item, while it runs and after it fails. */
@@ -117,6 +117,8 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     (itemId: string, body: SliceQuoteRequest, known: readonly string[]) =>
       new Promise<void>((accepted, refused) => {
         const run = { startedAt: Date.now(), error: null, known }
+        // #5596 — this order's set, as the follows of `followRunning` keep theirs.
+        const followedSet = followed.current
         let running = false
         update(orderId, itemId, run)
         api
@@ -127,7 +129,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
             (operation) => {
               running = true
               // Its own follow ends it; a stale activity row of it is not followed again.
-              followed.current.add(operation.id)
+              followedSet.add(operation.id)
               accepted()
             },
             follows.current.signal,
@@ -171,6 +173,12 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     if (itemsOf === null || !items) return
     const forOrder = itemsOf
     const signal = follows.current.signal
+    // #5596 — this order's collections, kept by each follow: one that the order change
+    // aborts settles after the `[orderId]` effect put in the next order's, and must not
+    // write into them.
+    const probeMap = probes.current
+    const followedSet = followed.current
+    const shownSet = shownFailures.current
     // #5585 — per item, the probes of its `running` rows: this run's follows and, through
     // `probes`, those an earlier run started whose answer may still be out. A row can stay
     // `running` after its operation ended; only a real run hides a failure.
@@ -182,13 +190,13 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
         const { operationId, itemId } = idsOf(row)
         const item = seen.current.items?.find((i) => i.id === itemId)
         if (!operationId || !item) continue
-        const earlier = probes.current.get(operationId)
+        const earlier = probeMap.get(operationId)
         if (earlier) {
           probeOf(itemId, earlier)
           continue
         }
-        if (seen.current.runs.has(itemId) || followed.current.has(operationId)) continue
-        followed.current.add(operationId)
+        if (seen.current.runs.has(itemId) || followedSet.has(operationId)) continue
+        followedSet.add(operationId)
         const started = row.created_at ? Date.parse(row.created_at) : NaN
         const run: SliceQuoteRun = { startedAt: Number.isNaN(started) ? Date.now() : started, error: null, known: item.quotes.map((q) => q.id) }
         // Shown only once its operation reads as running: one that already ended behind a
@@ -197,11 +205,11 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
         let shown = false
         let told!: (found: Probe) => void
         const probe = new Promise<Probe>((resolve) => (told = resolve))
-        probes.current.set(operationId, probe)
+        probeMap.set(operationId, probe)
         probeOf(itemId, probe)
         const settle = (found: Probe) => {
           told(found)
-          probes.current.set(operationId, Promise.resolve(found))
+          probeMap.set(operationId, Promise.resolve(found))
         }
         api
           .followQuote(operationId, signal, () => {
@@ -217,23 +225,25 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
               if (current.current === forOrder) quoted.current()
             },
             (cause: unknown) => {
-              if (!shown && mayHaveRun(cause)) {
-                // Its first read was lost: it may be running still, so it hides the item's
-                // failures as a running one does. Neither kept nor marked followed: the
-                // next reload follows its row again, or, once the row is gone, shows them.
+              if (mayHaveRun(cause)) {
+                // Its first read, or a later one, was lost: it may be running still, so it
+                // hides the item's failures as a running one does. Neither kept nor marked
+                // followed: the next reload follows its row again, or, once the row is
+                // gone, shows them. #5596 — a run it showed stays, detached, until its
+                // quote shows; once that run is dismissed, its row is followed again.
                 told({ running: 'unknown' })
-                probes.current.delete(operationId)
-                followed.current.delete(operationId)
+                probeMap.delete(operationId)
+                followedSet.delete(operationId)
+                if (shown) update(forOrder, itemId, { ...run, detached: true })
                 return
               }
-              // A failure it names, with a start to order it by; not a lost answer, nor a
-              // pruned operation's 404.
-              const failed = !mayHaveRun(cause) && !(cause instanceof ApiError && cause.status === 404) && !Number.isNaN(started)
+              // A failure it names, with a start to order it by; not a pruned operation's 404.
+              const failed = !(cause instanceof ApiError && cause.status === 404) && !Number.isNaN(started)
               const ended = row.finished_at ?? row.updated_at
               const finishedAt = shown ? Date.now() : ended && !Number.isNaN(Date.parse(ended)) ? Date.parse(ended) : started
-              if (shown && failed) shownFailures.current.add(operationId)
+              if (shown && failed) shownSet.add(operationId)
               settle({ running: false, failure: failed ? { operationId, startedAt: started, finishedAt, error: refusalText(cause) } : undefined })
-              if (shown) update(forOrder, itemId, mayHaveRun(cause) ? { ...run, detached: true } : { ...run, error: refusalText(cause), finishedAt: Date.now() })
+              if (shown) update(forOrder, itemId, { ...run, error: refusalText(cause), finishedAt: Date.now() })
             },
           )
       }
@@ -248,18 +258,18 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       const answered = (at: number) => item.quotes.some((q) => Date.parse(q.created_at) >= at)
       // #5585 — a stale `running` row's failure that started later is the item's newest.
       if (stale && (!operationId || Number.isNaN(started) || stale.startedAt >= started)) {
-        if (shownFailures.current.has(stale.operationId) || answered(stale.startedAt)) return
-        shownFailures.current.add(stale.operationId)
+        if (shownSet.has(stale.operationId) || answered(stale.startedAt)) return
+        shownSet.add(stale.operationId)
         update(forOrder, itemId, { startedAt: stale.startedAt, finishedAt: stale.finishedAt, error: stale.error, known: item.quotes.map((q) => q.id) })
         return
       }
       if (!row || !operationId || Number.isNaN(started)) return
       const ended = row.finished_at ? Date.parse(row.finished_at) : NaN
       const finished = Number.isNaN(ended) ? started : ended
-      if (followed.current.has(operationId)) return
+      if (followedSet.has(operationId)) return
       // A quote made since it started answers it: the failure is no longer the latest.
       if (answered(started)) return
-      followed.current.add(operationId)
+      followedSet.add(operationId)
       // The row carries no error: its operation's read does (a failed one throws it).
       api.followQuote(operationId, signal).then(
         () => undefined,
@@ -275,9 +285,16 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     const running = api.runningQuotes().then(followRunning, (cause: unknown) => {
       console.debug('could not read the running slice quotes; their items show idle', cause)
     })
-    // #5585 — one read per item, filtered by its subject: no other order's failures push
-    // its newest off the page. An item whose quote runs, or that shows a run already, is
-    // not read: its failure would not show.
+    // #5585 — each item's failures, filtered by its subject: no other order's failures push
+    // its newest off the page. #5596 — one read for every item of the order, made once the
+    // first item needs it. An item whose quote runs, or that shows a run already, needs
+    // none: its failure would not show.
+    let failures: Promise<Map<string, Activity>> | undefined
+    const failedOf = () =>
+      (failures ??= api.failedQuotes(items).catch((cause: unknown) => {
+        console.debug('could not read the failed slice quotes; the items show none', cause)
+        return new Map<string, Activity>()
+      }))
     for (const item of items) {
       void (async () => {
         await running
@@ -286,13 +303,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
         const stale = found
           .map((p) => (p.running === false ? p.failure : undefined))
           .reduce<Failure | undefined>((a, b) => (!a || (b && b.startedAt > a.startedAt) ? b : a), undefined)
-        let row: ActivityPage['items'][number] | undefined
-        try {
-          row = (await api.failedQuotes(item.id, item.created_at)).items[0]
-        } catch (cause) {
-          console.debug('could not read the failed slice quotes; the item shows none', cause)
-        }
-        showFailure(item.id, row, stale)
+        showFailure(item.id, (await failedOf()).get(item.id), stale)
       })()
     }
   }, [itemsOf, items, update])

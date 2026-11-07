@@ -65,11 +65,13 @@ export const activityTools = [
     risk: 'read',
     routes: ['GET /api/v1/activity'],
     handler: async (args, ctx) => {
-      const { kind, status, ...rest } = args
+      const { kind, status, subject, ...rest } = args
       const query = {
         ...rest,
         kind: kind === undefined ? undefined : [kind],
         status: status === undefined ? undefined : [status],
+        // #5596 — the route takes `subject` repeated; one subject answers as before.
+        subject: subject === undefined ? undefined : [subject],
         principal: pinned(ctx, args.principal),
       }
       return json(await ok(ctx.backend.GET('/api/v1/activity', { params: { query } }), 'list activity'))
