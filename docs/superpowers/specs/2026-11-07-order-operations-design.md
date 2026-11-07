@@ -188,8 +188,8 @@ have "versions" (git commits: `list_versions`, `diff_version`, `restore_version`
 ### 5.3 Depends on
 
 #5280 (scadify, revisions). Its revisions, `revision_id` on quotes and test prints are on
-main (#5315, #5337, #5347); scadify reviewed §5 against them on 2026-11-07. §5 starts
-once scadify confirms #5280 has nothing left that §5 needs.
+main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against them on
+2026-11-07. §5 is not blocked.
 
 ## 6. A derived machine rate (#4625)
 
@@ -252,7 +252,7 @@ Actuals (logged maintenance or replaced parts feeding back). A later issue.
 1. §3 sources (independent).
 2. §4 items card, steps 1–5.
 3. §6 machine rate (independent; can run beside §4).
-4. §5 versions, after #5280.
+4. §5 print setups (not blocked; #5280 is closed).
 
 ## 9. Left to the builder
 
