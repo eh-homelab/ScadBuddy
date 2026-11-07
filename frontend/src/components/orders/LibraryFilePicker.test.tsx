@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { act, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../../api/client'
 import type { LibrarySearch } from '../../api/types'
@@ -60,5 +60,60 @@ describe('LibraryFilePicker (#5544)', () => {
     const list = await screen.findByRole('list', { name: 'Library files' })
     expect(within(list).getAllByRole('button')).toHaveLength(8)
     expect(within(list).getByText('4 more; narrow the search.')).toBeInTheDocument()
+  })
+
+  // #5633: a failed search can run again for the same query.
+  describe('Retry', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** Fails the first `failures` searches, then answers from the mocked library. */
+    const failFirst = (failures: number) => {
+      const real = api.searchLibrary.bind(api)
+      let left = failures
+      return vi.spyOn(api, 'searchLibrary').mockImplementation(async (query, signal) => {
+        if (left > 0) {
+          left -= 1
+          throw new ApiError(502, 'Bambuddy did not answer.')
+        }
+        return real(query, signal)
+      })
+    }
+
+    it('runs the same query again and shows its files', async () => {
+      const search = failFirst(1)
+      const { user } = renderPage(picker(), { userEventOptions: { advanceTimers: vi.advanceTimersByTime } })
+      await user.type(screen.getByLabelText('Library file'), 'drawer')
+      await act(() => vi.advanceTimersByTimeAsync(300))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy did not answer.')
+      expect(search).toHaveBeenCalledTimes(1)
+      await user.click(screen.getByRole('button', { name: 'Retry' }))
+      expect(await screen.findByRole('list', { name: 'Library files' })).toBeInTheDocument()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(search).toHaveBeenCalledTimes(2)
+      expect(search.mock.calls[1]?.[0]).toEqual({ q: 'drawer', all: false })
+    })
+
+    it('runs again after the query is edited and put back within the debounce', async () => {
+      const search = failFirst(1)
+      const { user } = renderPage(picker(), { userEventOptions: { advanceTimers: vi.advanceTimersByTime } })
+      const box = screen.getByLabelText('Library file')
+      await user.type(box, 'drawer')
+      await act(() => vi.advanceTimersByTimeAsync(300))
+      expect(await screen.findByRole('alert')).toBeInTheDocument()
+      // Edit and restore inside 250 ms: the asked query never changes, so nothing runs.
+      await user.type(box, 'x')
+      await user.type(box, '{Backspace}')
+      await act(() => vi.advanceTimersByTimeAsync(300))
+      expect(search).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Retry' }))
+      expect(await screen.findByRole('list', { name: 'Library files' })).toBeInTheDocument()
+      expect(search).toHaveBeenCalledTimes(2)
+    })
   })
 })
