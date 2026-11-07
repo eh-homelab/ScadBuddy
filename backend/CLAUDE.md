@@ -587,6 +587,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_item_add_after_acceptance` (outward; `order_item_add` stays write); frontend
   `components/orders/afterAcceptance.ts` (the rules, the confirm text) in `AddItemDialog`,
   `AddToOrderDialog` and the order page.
+  The charges changed after acceptance (#5351, spec §3.5 "As built"): `PUT
+  …/charges/after-acceptance` (`Lifecycle.replace_charges_after_acceptance`, body
+  `{charges}`) on a `TAKES_ITEMS` order not on hold; refused `order_not_accepted` before
+  that, `order_not_editable` once shipped. Its audit row
+  `charges.replaced_after_acceptance` holds the charges before and after. `PATCH` with
+  charges past `quoted` names the route. Agent `order_charges_update_after_acceptance`
+  (outward); frontend `ChargesEditor` with `addMode` and `chargesWarning`. A no-charge
+  item is #5349's custom item at price 0; job cost shows its cost as a `loss`.
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`

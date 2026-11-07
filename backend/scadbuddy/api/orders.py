@@ -179,8 +179,10 @@ class OrderCreate(BaseModel):
 
 class OrderPatch(BaseModel):
     """Notes and the due date in any open state; the address ids (the order's own
-    customer's) and the charges, replaced whole, while `draft` or `quoted`. A field
-    left out is untouched; ``null`` clears the due date or an address."""
+    customer's) and the charges, replaced whole, while `draft` or `quoted`. Past that,
+    charges are 409 ``order_not_editable``, which names
+    `PUT /orders/{id}/charges/after-acceptance` (#5351). A field left out is untouched;
+    ``null`` clears the due date or an address."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -201,6 +203,15 @@ class OrderPatch(BaseModel):
             billing_address_id=self.billing_address_id if "billing_address_id" in given else UNSET,
             charges=self.charges,
         )
+
+
+class ChargesBody(BaseModel):
+    """`PUT /orders/{id}/charges/after-acceptance` (#5351): the charges part of
+    `PATCH /orders/{id}`, replaced whole."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    charges: list[ChargeInput]
 
 
 class ReferenceBody(BaseModel):
@@ -983,6 +994,28 @@ async def patch_order(order_id: str, body: OrderPatch, orders: OrdersDep) -> Ord
                 errors=[{"loc": ["body", field], "msg": error.detail}],
             ) from None
         raise
+
+
+@router.put(
+    "/{order_id}/charges/after-acceptance",
+    response_model=Order,
+    summary="Change the charges of an accepted order",
+)
+async def put_charges_after_acceptance(
+    order_id: str, body: ChargesBody, orders: OrdersDep
+) -> Order:
+    """#5351: the charges, replaced whole, on an order that is `accepted`,
+    `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. It changes
+    what the customer pays: a fee or a discount (negative) keeps an agreed total when an
+    item is added after acceptance. The audit row ``charges.replaced_after_acceptance``
+    holds the charges before and after. 409 ``order_not_accepted`` while the order is
+    `draft` or `quoted` (use `PATCH /orders/{id}`), ``order_not_editable`` once it is
+    `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
+    _path(order_id)
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges)
+    )
 
 
 @router.get("/{order_id}/events", response_model=list[OrderEvent], summary="The audit line")

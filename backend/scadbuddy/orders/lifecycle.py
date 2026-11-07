@@ -16,10 +16,10 @@ and the offending ids, with no HTTP shape: ``api/orders.py`` maps each to a 409 
 On hold (§7.2 as plan Ruling 14 narrows it): every transition that advances the order
 (``accept_order``, ``accept_quote``, ``record_fulfilment``, ``claim_print``,
 ``update_fulfilment``, ``accept_fulfilment``, ``unfulfil_item``, ``add_shipment``,
-``update_shipment``, ``close_order``, and an item added after acceptance, #5349) is refused
-with ``order_on_hold``; ``release``, the cancels, a payment and the plain edits go through,
-so a person can fix what the hold was for. The print follow (``follow_print``) records
-what a printer did, on hold too.
+``update_shipment``, ``close_order``, an item added after acceptance, #5349, and the
+charges changed after acceptance, #5351) is refused with ``order_on_hold``; ``release``,
+the cancels, a payment and the plain edits go through, so a person can fix what the hold
+was for. The print follow (``follow_print``) records what a printer did, on hold too.
 """
 
 from __future__ import annotations
@@ -315,6 +315,11 @@ def derive(
     return "accepted"
 
 
+def _charge_line(charge: ChargeInput) -> dict[str, Any]:
+    """A charge as an audit row holds it: its kind, label and signed amount."""
+    return {"kind": charge.kind, "label": charge.label, "amount_minor": charge.amount_minor}
+
+
 def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
     """Whether an item's design, quantity and price may still change: while the order is
     `draft` or `quoted`, and past it while the item has no accepted quote, which only an
@@ -490,10 +495,16 @@ class Lifecycle:
                 or not isinstance(edit.billing_address_id, UnsetType)
             )
             if structural and order.status not in OPEN_FOR_EDITS:
+                # Past `quoted` the charges change on their own route (#5351).
+                route = (
+                    f"; change the charges with PUT /orders/{order.id}/charges/after-acceptance"
+                    if edit.charges is not None and order.status in TAKES_ITEMS
+                    else ""
+                )
                 raise LifecycleError(
                     "order_not_editable",
                     f"order {order.number} is {order.status}: only its notes and due date"
-                    " may change now",
+                    f" may change now{route}",
                 )
             for name in ("shipping_address_id", "billing_address_id"):
                 wanted = getattr(edit, name)
@@ -527,6 +538,47 @@ class Lifecycle:
             if edit.charges is not None:
                 self.store.replace_charges(conn, order.id, edit.charges)
                 self._event(conn, order, by, "charges.replaced", count=len(edit.charges))
+        self._told(_Change(order))
+        return order
+
+    def replace_charges_after_acceptance(
+        self, order_id: str, by: Actor, charges: Sequence[ChargeInput]
+    ) -> Order:
+        """The charges, replaced whole, on an order past `quoted` (#5351): a fee or a
+        discount that keeps an agreed total when an item is added after acceptance. It
+        changes what the customer pays, so it is its own route and the agent's `outward`
+        tier. Only an `accepted`, `in_production` or `ready` order (`TAKES_ITEMS`) that is
+        not on hold takes it: `order_not_accepted` before that (use ``edit_order``),
+        `order_not_editable` once `shipped`, `order_closed`/`order_cancelled` after. The
+        audit row ``charges.replaced_after_acceptance`` holds the charges before and after,
+        written in the same transaction."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            if order.status in OPEN_FOR_EDITS:
+                raise LifecycleError(
+                    "order_not_accepted",
+                    f"order {order.number} is {order.status}, not accepted: change the charges"
+                    f" with PATCH /orders/{order.id}",
+                )
+            if order.status not in TAKES_ITEMS:
+                raise LifecycleError(
+                    "order_not_editable",
+                    f"order {order.number} is {order.status}: its charges are final once shipped",
+                )
+            self._not_on_hold(order)
+            before = self.store.charges(order.id, conn=conn)
+            after = self.store.replace_charges(conn, order.id, charges)
+            self._event(
+                conn,
+                order,
+                by,
+                "charges.replaced_after_acceptance",
+                order_status=order.status,
+                before=[_charge_line(charge) for charge in before],
+                after=[_charge_line(charge) for charge in after],
+            )
+            order = self.store.order(order.id, conn=conn) or order
         self._told(_Change(order))
         return order
 

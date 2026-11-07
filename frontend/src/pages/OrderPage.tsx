@@ -335,7 +335,7 @@ export function OrderPage() {
           <Card size="sm">
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-medium">Money</h2>
-              <ChargesEditor orderId={order.id} currency={order.currency} exponent={order.minor_exponent} charges={charges} editable={editable} onChanged={reload} />
+              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
                 <dt className="text-muted-foreground">Items</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>

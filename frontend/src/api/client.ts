@@ -2357,6 +2357,9 @@ export const api = {
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** #5351 — the charges, replaced whole, on an accepted, in-production or ready order. */
+  replaceChargesAfterAcceptance: (id: string, charges: NonNullable<OrderPatch['charges']>) =>
+    request<Order>(`/orders/${seg(id)}/charges/after-acceptance`, { method: 'PUT', body: JSON.stringify({ charges }) }),
   acceptOrder: (id: string) => request<Order>(`/orders/${seg(id)}/accept`, { method: 'POST' }),
   cancelOrder: (id: string, reason?: string) =>
     request<Order>(`/orders/${seg(id)}/cancel`, { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) }),
