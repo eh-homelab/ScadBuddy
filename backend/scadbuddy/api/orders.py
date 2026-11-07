@@ -22,11 +22,11 @@ import asyncio
 import logging
 import zipfile
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -47,33 +47,52 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
+from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.print_source import printable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import SettingsPatch
+from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
-from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.archives import AttemptArchives, attempt_archives
+from scadbuddy.orders.bambuddy import ServedLibrary
+from scadbuddy.orders.component import OrdersComponent, OrdersDep
+from scadbuddy.orders.costs import (
+    CostRates,
+    MarginState,
+    OrderCosts,
+    OrderMargin,
+    order_costs,
+    order_margins,
+)
 from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.integrations import NotLinkedError, not_linked
+from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
+from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
+    LabourRate,
     LifecycleError,
     ManualQuoteInput,
     OrderEdit,
     ShipmentEdit,
     ShipmentInput,
+    stale_attempt,
 )
 from scadbuddy.orders.models import (
+    Approval,
     Attachment,
     Charge,
     ChargeInput,
+    CostEntry,
+    CostEntryInput,
     Filament,
     FilamentInput,
     FilamentPatch,
     Fulfilment,
     ItemKind,
+    LibraryFileRef,
     Money,
     Order,
     OrderEvent,
@@ -84,19 +103,40 @@ from scadbuddy.orders.models import (
     Payment,
     PriceBook,
     PricingPolicy,
+    Product,
     Quote,
+    Revision,
     Shipment,
     SpoolImport,
+    TimeEntry,
+    TimeEntryInput,
 )
-from scadbuddy.orders.operations import ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
+from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.report import (
+    DEFAULT_DAYS,
+    ProfitReport,
+    ReportGroup,
+    default_period,
+    profit_report,
+)
+from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
-from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
+from scadbuddy.orders.store import (
+    UNSET,
+    FilamentExistsError,
+    OrderStore,
+    UnsetType,
+    decode_cursor,
+    encode_cursor,
+)
+from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
+from scadbuddy.print_library.ids import is_native_id
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +145,29 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
-LIST_PARAMS = frozenset({"status", "customer_id", "q", "from", "to", "cursor", "limit"})
+#: A ``margin_state`` request reads at most this many store pages of this size (#5515).
+#: When it reaches the cap, it returns the rows found so far (maybe none) and the cursor
+#: it reached, and the client carries on from there.
+#: frontend/src/mocks/features/orders/orders.ts mirrors both values: change them together.
+SCAN_PAGE_SIZE = MAX_LIMIT
+MAX_SCAN_PAGES = 10
+LIST_PARAMS = frozenset(
+    {
+        "status",
+        "customer_id",
+        "q",
+        "from",
+        "to",
+        "accepted_from",
+        "accepted_to",
+        "currency",
+        "product",
+        "margin_state",
+        "cursor",
+        "limit",
+    }
+)
+REPORT_PARAMS = frozenset({"from", "to", "group"})
 #: A line item's largest quantity: `order_items.quantity` is an `integer` column
 #: (migration 20261020T0446Z_orders.sql), so a larger one is a 422, never a 500 (#4763).
 MAX_QUANTITY = 2**31 - 1
@@ -124,8 +186,10 @@ class OrderCreate(BaseModel):
 
 class OrderPatch(BaseModel):
     """Notes and the due date in any open state; the address ids (the order's own
-    customer's) and the charges, replaced whole, while `draft` or `quoted`. A field
-    left out is untouched; ``null`` clears the due date or an address."""
+    customer's) and the charges, replaced whole, while `draft` or `quoted`. Past that,
+    charges are 409 ``order_not_editable``, which names
+    `PUT /orders/{id}/charges/after-acceptance` (#5351). A field left out is untouched;
+    ``null`` clears the due date or an address."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +212,15 @@ class OrderPatch(BaseModel):
         )
 
 
+class ChargesBody(BaseModel):
+    """`PUT /orders/{id}/charges/after-acceptance` (#5351): the charges part of
+    `PATCH /orders/{id}`, replaced whole."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    charges: list[ChargeInput]
+
+
 class ReferenceBody(BaseModel):
     """`{slug, commit, inputs}`. Beside ``output_id`` each may be left out (the output's
     stands in) or given, and then must agree with the output's: ``inputs`` as the whole
@@ -163,10 +236,17 @@ class ReferenceBody(BaseModel):
 class ItemCreate(ReferenceBody):
     """A ``model`` item (the default) names what to make: ``output_id``, or ``slug``,
     ``commit`` and ``inputs``. A ``custom`` item (#4954) names nothing: it takes a
-    ``title`` and a ``unit_price_minor`` instead, and ``requires_printing``."""
+    ``title`` and a ``unit_price_minor`` instead, and ``requires_printing``. A ``request``
+    item (#5280) is what a customer wants made before any design exists: a ``title``,
+    ``quantity``, ``notes`` and ``sku`` only; its first revision names the design. A
+    ``library_file`` item (#5544) names a file of the library: ``library_file_id``, with
+    ``kind`` left out or ``library_file``, and no other source."""
 
     kind: ItemKind = "model"
     output_id: str | None = None
+    #: A file of the library that serves (#5544), as `print_output` takes one: the item
+    #: prints it. Its ``kind`` is ``library_file``.
+    library_file_id: int | None = Field(default=None, ge=1)
     quantity: int = Field(ge=1, le=MAX_QUANTITY)
     title: str | None = Field(default=None, max_length=200)
     notes: str = ""
@@ -178,10 +258,44 @@ class ItemCreate(ReferenceBody):
     #: Whether that price is accepted as it is saved: true (the browser's) leaves the item
     #: `approved`; false (the agent's `write` tools) leaves it `quoted`, for an `outward`
     #: accept. A custom item's only.
-    accept: bool | None = None
+    accept: bool | None = Field(
+        default=None,
+        description=(
+            "A custom item's only: whether its price is accepted as it is saved. Unset or"
+            " true leaves the item `approved`; false leaves it `quoted`. On"
+            " `POST /orders/{id}/items/after-acceptance` unset means false, and true is"
+            " 422: an item added after acceptance needs its quote accepted on its own."
+        ),
+    )
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
+        if self.library_file_id is not None or self.kind == "library_file":
+            if "kind" in self.model_fields_set and self.kind != "library_file":
+                raise ValueError(
+                    f"library_file_id names a library file item: drop kind {self.kind!r}"
+                )
+            if self.library_file_id is None:
+                raise ValueError("a library_file item needs a library_file_id")
+            named = [
+                name
+                for name in (
+                    "slug",
+                    "commit",
+                    "inputs",
+                    "output_id",
+                    "unit_price_minor",
+                    "requires_printing",
+                    "accept",
+                )
+                if getattr(self, name) is not None
+            ]
+            if named:
+                raise ValueError(
+                    f"a library file item names its file only: drop {', '.join(named)}"
+                )
+            self.kind = "library_file"
+            return self
         if self.kind == "custom":
             named = [
                 name
@@ -194,6 +308,24 @@ class ItemCreate(ReferenceBody):
                 raise ValueError("a custom item needs a title")
             if self.unit_price_minor is None:
                 raise ValueError("a custom item needs a unit_price_minor")
+        elif self.kind == "request":
+            named = [
+                name
+                for name in (
+                    "slug",
+                    "commit",
+                    "inputs",
+                    "output_id",
+                    "unit_price_minor",
+                    "requires_printing",
+                    "accept",
+                )
+                if getattr(self, name) is not None
+            ]
+            if named:
+                raise ValueError(f"a request item takes no {', '.join(named)}")
+            if not (self.title or "").strip():
+                raise ValueError("a request item needs a title")
         else:
             named = [
                 name
@@ -206,8 +338,9 @@ class ItemCreate(ReferenceBody):
 
 
 class ItemPatch(BaseModel):
-    """The reference, replaced whole, and the quantity while `draft` or `quoted` (each
-    drops the accepted quote); title and notes in any open state."""
+    """The reference, replaced whole, and the quantity while `draft` or `quoted`, or past
+    that while the item has no accepted quote (#5349; each drops the accepted quote);
+    title and notes in any open state."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -228,6 +361,17 @@ class ItemPatch(BaseModel):
     #: Whether a custom item's new price is accepted (true, the default) or left
     #: `quoted` for an `outward` accept (false, the agent's); nothing else reads it.
     accept: bool = True
+    #: Whether the item's design is approved before it is priced (`design_first`) or
+    #: with its quote (`together`), in any open state.
+    approval: Approval | None = None
+
+
+class RevisionCreate(RevisionInput):
+    """A new revision: the shop's note and colours (``RevisionInput``) and, to change the
+    design, a ``reference`` or an ``output_id``, as a line item's patch takes them."""
+
+    reference: ReferenceBody | None = None
+    output_id: str | None = None
 
 
 class PaymentCreate(BaseModel):
@@ -249,9 +393,32 @@ class CancelBody(BaseModel):
 # -- views -------------------------------------------------------------------------------------
 
 
+class ItemAttempt(Fulfilment):
+    """An attempt as the order detail shows it. ``stale``: it printed a design earlier
+    than the one the accepted quote prices (#5592), so its acceptance is refused
+    (`fulfilment_stale`); the rule is `lifecycle.py` `stale_attempt`."""
+
+    stale: bool
+
+
 class ItemDetail(OrderItem):
     quotes: list[Quote]
-    fulfilments: list[Fulfilment]
+    fulfilments: list[ItemAttempt]
+    revisions: list[Revision]
+
+
+def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
+    quotes = store.quotes(item.id)
+    revisions = store.revisions(item.id)
+    return ItemDetail(
+        **item.model_dump(),
+        quotes=quotes,
+        fulfilments=[
+            ItemAttempt(**f.model_dump(), stale=stale_attempt(f, quotes, revisions))
+            for f in store.fulfilments(item.id, purpose=None)
+        ],
+        revisions=revisions,
+    )
 
 
 class OrderTotals(BaseModel):
@@ -286,8 +453,22 @@ class OrderDetail(BaseModel):
     projects: list[OrderProject] = Field(default_factory=list)
 
 
+class OrderRow(Order):
+    """A row of ``GET /orders``: the order and its margin, the same figures as its
+    ``GET /orders/{id}/costs`` (job cost spec §6.2, §7)."""
+
+    #: Charged less real cost; None without a charged figure.
+    margin_minor: Money | None = None
+    #: Of what was charged, to a tenth; None without a charged figure above zero.
+    margin_percent: float | None = None
+    #: ``loss``, ``unknown``, ``thin`` or ``ok``; None without a charged figure.
+    margin_state: MarginState | None = None
+    #: The margin is built on an estimated part (a default labour, a quote's grams).
+    margin_estimated: bool = False
+
+
 class OrderPage(BaseModel):
-    items: list[Order]
+    items: list[OrderRow]
     next_cursor: str | None
 
 
@@ -318,27 +499,120 @@ def _path(*values: str) -> None:
 # -- orders ------------------------------------------------------------------------------------
 
 
+def _cost_rates(settings: SettingsStore) -> CostRates:
+    runtime = settings.snapshot().runtime
+    return CostRates(
+        shop_currency=runtime.orders_currency,
+        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
+        labour_per_item=runtime.pricing_labour_per_item,
+        thin_margin_percent=runtime.orders_thin_margin_percent,
+    )
+
+
+def _row(order: Order, margin: OrderMargin) -> OrderRow:
+    return OrderRow(
+        **order.model_dump(exclude={"minor_exponent"}),
+        margin_minor=margin.margin_minor,
+        margin_percent=margin.margin_percent,
+        margin_state=margin.margin_state,
+        margin_estimated=bool(margin.estimated),
+    )
+
+
+def _order_page(
+    store: OrderStore,
+    filters: OrderFilter,
+    margin_state: list[MarginState] | None,
+    cursor: str | None,
+    limit: int,
+    rates: CostRates,
+) -> OrderPage:
+    """A page of rows. With ``margin_state``, the store's pages are read in turn and
+    each order's margin computed until ``limit`` orders match, none are left, or
+    ``MAX_SCAN_PAGES`` pages were read: a margin is computed on read, never stored (§5),
+    so it cannot be a SQL filter. At the cap the page can be short or empty and still
+    have a ``next_cursor``."""
+    if not margin_state:
+        orders, next_cursor = store.orders(filters, cursor, limit)
+        margins = order_margins(store, orders, rates)
+        return OrderPage(items=[_row(o, margins[o.id]) for o in orders], next_cursor=next_cursor)
+    wanted = set(margin_state)
+    found: list[OrderRow] = []
+    for _ in range(MAX_SCAN_PAGES):
+        orders, more = store.orders(filters, cursor, SCAN_PAGE_SIZE)
+        margins = order_margins(store, orders, rates)
+        for order in orders:
+            if margins[order.id].margin_state not in wanted:
+                continue
+            if len(found) == limit:
+                last = found[-1]
+                return OrderPage(items=found, next_cursor=encode_cursor(last.created_at, last.id))
+            found.append(_row(order, margins[order.id]))
+        if more is None:
+            return OrderPage(items=found, next_cursor=None)
+        cursor = more
+    return OrderPage(items=found, next_cursor=cursor)
+
+
 @router.get("", response_model=OrderPage, summary="List orders")
 async def list_orders(
     request: Request,
     orders: OrdersDep,
-    status_: Annotated[OrderStatus | None, Query(alias="status")] = None,
+    settings: SettingsStoreDep,
+    status_: Annotated[list[OrderStatus] | None, Query(alias="status")] = None,
     customer_id: str | None = None,
     q: str | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: datetime | None = None,
+    accepted_from: datetime | None = None,
+    accepted_to: datetime | None = None,
+    currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
+    product: Annotated[str | None, Query(min_length=1, max_length=210)] = None,
+    margin_state: Annotated[list[MarginState] | None, Query()] = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
-    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``."""
+    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. ``status``
+    may be repeated, for orders of any of them (#5276). Each row carries its margin
+    (``margin_minor``, ``margin_percent``, ``margin_state``, ``margin_estimated``): the
+    figures ``GET /orders/{id}/costs`` gives the order, read from Postgres only (job cost
+    spec §6.2, §8). ``margin_state`` may be repeated, for orders in any of those states
+    (``margin_state=loss&margin_state=thin`` is the list's "Loss or thin"). An order with
+    no charged figure has no state and never matches it. A ``margin_state`` request reads
+    a bounded number of orders, so its page can be short or empty while ``next_cursor``
+    remains: follow the cursor until it is null. ``accepted_from`` (inclusive),
+    ``accepted_to`` (exclusive), ``currency`` and ``product`` (``model:<slug>``,
+    ``sku:<sku>`` or ``custom``) are a profit report row's orders (job cost spec §6.4)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
-    filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)
     try:
-        rows, next_cursor = await asyncio.to_thread(orders.store.orders, filters, cursor, limit)
-    except ValueError:
-        raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
-    return OrderPage(items=rows, next_cursor=next_cursor)
+        wanted = None if product is None else Product.parse(product)
+    except ValueError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            errors=[{"loc": ["query", "product"], "msg": str(error)}],
+        ) from None
+    filters = OrderFilter(
+        status=status_,
+        customer_id=customer_id,
+        q=q,
+        since=from_,
+        until=to,
+        accepted_since=accepted_from,
+        accepted_until=accepted_to,
+        currency=currency,
+        product=wanted,
+    )
+    if cursor is not None:
+        try:
+            decode_cursor(cursor)
+        except ValueError:
+            raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
+    rates = await asyncio.to_thread(_cost_rates, settings)
+    return await asyncio.to_thread(
+        _order_page, orders.store, filters, margin_state, cursor, limit, rates
+    )
 
 
 @router.post(
@@ -608,6 +882,97 @@ async def estimate(
     )
 
 
+@router.get(
+    "/history/unit-cost",
+    response_model=UnitCostHistory,
+    summary="A model's real cost per unit from its past jobs",
+    description=(
+        "The quote warning's history (job cost spec §6.3): the items of `slug` that are "
+        "fulfilled on an order that is not cancelled, in `currency` (the shop's by "
+        "default), the newest 10 whose last accepted attempt is within 365 days. "
+        "`unit_cost_minor` is their real cost (as `GET /orders/{id}/costs` gives each "
+        "item) over their units. `main_reason` is the cost part that most exceeded what "
+        "their accepted quotes priced for it; failed prints, test prints and cost entries "
+        "count in full. `suggested_unit_price_minor` is the unit cost marked up by "
+        "`pricing_markup_percent`, or with no markup the lowest price that is not thin. "
+        "With `unit_price_minor`, `warning` says that price leaves a margin below "
+        "`orders_thin_margin_percent`, and `below_cost` that it is below the unit cost "
+        "itself (a price above the cost can still warn with a thin margin). Advice only. "
+        "With no history, `jobs` is 0 and nothing warns. With `item_id` (the item being "
+        "quoted), its parts at today's unit costs (`parts_unit_minor`, #5543) replace the "
+        "past jobs' own parts entries in the unit cost and the suggestion."
+    ),
+)
+async def unit_cost(
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    slug: Annotated[str, Query(min_length=1, max_length=200)],
+    currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
+    unit_price_minor: Annotated[int | None, Query(ge=0)] = None,
+    item_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+) -> UnitCostHistory:
+    _path(slug, *([item_id] if item_id is not None else []))
+    runtime = settings.snapshot().runtime
+    parts_unit: Decimal | None = None
+    if item_id is not None:
+        parts_unit = await asyncio.to_thread(
+            orders.lifecycle.parts.unit_cost_of_item,
+            item_id,
+            currency or runtime.orders_currency,
+        )
+    return await asyncio.to_thread(
+        unit_cost_history,
+        orders.store,
+        slug,
+        _cost_rates(settings),
+        markup_percent=runtime.pricing_markup_percent,
+        now=datetime.now(UTC),
+        currency=currency,
+        unit_price_minor=unit_price_minor,
+        parts_unit_minor=parts_unit,
+    )
+
+
+@router.get(
+    "/reports/profit",
+    response_model=ProfitReport,
+    summary="The profit report by model",
+    description=(
+        "Job cost spec §6.4: the orders accepted at or after `from` and before `to` "
+        f"(by default the last {DEFAULT_DAYS} days), cancelled ones too, per currency "
+        "(never summed across currencies) and per product: one row per model `slug`, one "
+        "per custom item `sku`, one `custom` row for items with neither. Each row has its "
+        "orders, units, what was charged, the real cost, the margin and the waste (the "
+        "cost of test and failed attempts). Each item's figures are those "
+        "`GET /orders/{id}/costs` gives it. The `order` row is the orders' own figures "
+        "(their entries, shipments' cost and charges), over the orders that have any, and "
+        "the `total` row each currency's orders' own figures summed. A product row's "
+        "`product` is its `GET /orders` filter (`custom` also matches an empty SKU). "
+        "The report reads at most `max_orders` orders, newest accepted first: "
+        "with `complete` false it covers the orders accepted from `read_from` only."
+    ),
+)
+async def profit(
+    request: Request,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    from_: Annotated[datetime | None, Query(alias="from")] = None,
+    to: datetime | None = None,
+    group: ReportGroup = "model",
+) -> ProfitReport:
+    _no_nul(request)
+    _unknown(request, REPORT_PARAMS)
+    since, until = default_period(to if to is not None else datetime.now(UTC))
+    if from_ is not None:
+        since = from_
+    if since.tzinfo is None or until.tzinfo is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from and to need a time zone")
+    if since >= until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from must be before to")
+    rates = await asyncio.to_thread(_cost_rates, settings)
+    return await asyncio.to_thread(profit_report, orders.store, rates, since=since, until=until)
+
+
 def item_price(item: ItemDetail) -> tuple[Money, bool] | None:
     """The item's price and whether an accepted quote stands behind it: the accepted
     quote's total, else the newest quote's unit price times the item's quantity now;
@@ -657,14 +1022,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
         order = store.order(order_id)
         if order is None:
             return None
-        items = [
-            ItemDetail(
-                **item.model_dump(),
-                quotes=store.quotes(item.id),
-                fulfilments=store.fulfilments(item.id),
-            )
-            for item in store.items(order.id)
-        ]
+        items = [item_detail(store, item) for item in store.items(order.id)]
         charges = store.charges(order.id)
         payments = store.payments(order.id)
         return OrderDetail(
@@ -701,12 +1059,153 @@ async def patch_order(order_id: str, body: OrderPatch, orders: OrdersDep) -> Ord
         raise
 
 
+@router.put(
+    "/{order_id}/charges/after-acceptance",
+    response_model=Order,
+    summary="Change the charges of an accepted order",
+)
+async def put_charges_after_acceptance(
+    order_id: str, body: ChargesBody, orders: OrdersDep
+) -> Order:
+    """#5351: the charges, replaced whole, on an order that is `accepted`,
+    `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. It changes
+    what the customer pays: a fee or a discount (negative) keeps an agreed total when an
+    item is added after acceptance. The audit row ``charges.replaced_after_acceptance``
+    holds the charges before and after. 409 ``order_not_accepted`` while the order is
+    `draft` or `quoted` (use `PATCH /orders/{id}`), ``order_not_editable`` once it is
+    `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
+    _path(order_id)
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges)
+    )
+
+
 @router.get("/{order_id}/events", response_model=list[OrderEvent], summary="The audit line")
 async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     return await asyncio.to_thread(orders.store.events, order_id)
+
+
+@router.get(
+    "/{order_id}/costs",
+    response_model=OrderCosts,
+    summary="The real cost and margin of an order and each of its items",
+    description=(
+        "Per item, its accepted quote's seconds, grams and filament cost for the item's "
+        "quantity beside every attempt, failures included. Each attempt is costed in "
+        "filament and machine time: its actual grams and seconds, else its quote's "
+        "(`estimated` names which), at the quote's own rates, else at the price book and "
+        "today's machine rate (also `estimated`); a figure with no source is left out and "
+        "the attempt is `unknown`. Each item adds its labour (its time entries, else a "
+        "default from its quote or `pricing_labour_per_item`, `labour_default`) and its "
+        "cost entries; the order adds its own entries and its shipments' cost. "
+        "`revenue_minor` is what was charged (an item's accepted quote, 0 once cancelled; "
+        "the order's items plus every charge but tax), and `margin_state` is `loss`, "
+        "`unknown`, `thin` (below `orders_thin_margin_percent`) or `ok`. With Bambuddy "
+        "linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its archives, shown "
+        "and never in any sum; `bambuddy_unavailable` says some archive could not be read. "
+        "Nothing is stored."
+    ),
+)
+async def get_order_costs(
+    order_id: str, orders: OrdersDep, settings: SettingsStoreDep
+) -> OrderCosts:
+    _path(order_id)
+    rates = _cost_rates(settings)
+    costs = await order_costs(orders.store, orders.integrations, order_id, rates)
+    if costs is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    return costs
+
+
+@router.post(
+    "/{order_id}/time-entries",
+    response_model=TimeEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Log time on an order or one of its items",
+    description=(
+        "In any order status, ended and on hold included. The entry copies the labour rate "
+        "in force (`pricing_labour_rate_per_hour`) as `rate_minor_per_hour`, so a later "
+        "change never rewrites it; for an order in a currency other than the shop's, no "
+        "rate can be copied and it is null. With a `source` (a timer's "
+        "`timer:<item or order>:<started_at>`), "
+        "a second write of the same order and source returns the first entry as it was "
+        "recorded, whatever its kind, and writes nothing (200). On the audit line as "
+        "`time.added`."
+    ),
+    responses={status.HTTP_200_OK: {"model": TimeEntry, "description": "Already recorded"}},
+)
+async def add_time_entry(
+    order_id: str,
+    body: TimeEntryInput,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    response: Response,
+) -> TimeEntry:
+    _path(order_id)
+    by = current_actor()
+
+    runtime = settings.snapshot().runtime
+    rate = LabourRate(Decimal(runtime.pricing_labour_rate_per_hour), runtime.orders_currency)
+    entry, written = await _run(
+        lambda: orders.lifecycle.add_time_entry(order_id, body, by, labour_rate=rate)
+    )
+    if not written:
+        response.status_code = status.HTTP_200_OK
+    return entry
+
+
+@router.delete(
+    "/{order_id}/time-entries/{entry_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a time entry",
+)
+async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
+    _path(order_id, entry_id)
+    by = current_actor()
+    await _run(lambda: orders.lifecycle.remove_time_entry(order_id, entry_id, by))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{order_id}/cost-entries",
+    response_model=CostEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a cost to an order or one of its items",
+    description=(
+        "Money the job cost in the order's currency: the assistant's spend, a payment "
+        "fee, materials, anything else. Shipping is a shipment's `cost_minor`, never an "
+        "entry. In any order status. With a `source`, a second write of the same order, "
+        "kind and source returns the first entry as it was recorded, whatever this "
+        "call's amount, note or item, and writes nothing (200). On the audit "
+        "line as `cost.added`."
+    ),
+    responses={status.HTTP_200_OK: {"model": CostEntry, "description": "Already recorded"}},
+)
+async def add_cost_entry(
+    order_id: str, body: CostEntryInput, orders: OrdersDep, response: Response
+) -> CostEntry:
+    _path(order_id)
+    by = current_actor()
+    entry, written = await _run(lambda: orders.lifecycle.add_cost_entry(order_id, body, by))
+    if not written:
+        response.status_code = status.HTTP_200_OK
+    return entry
+
+
+@router.delete(
+    "/{order_id}/cost-entries/{entry_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a cost entry",
+)
+async def remove_cost_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
+    _path(order_id, entry_id)
+    by = current_actor()
+    await _run(lambda: orders.lifecycle.remove_cost_entry(order_id, entry_id, by))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 #: How long an accept waits for its Bambuddy projects (§8.1) before answering anyway.
@@ -875,20 +1374,122 @@ async def add_item(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    settings: SettingsStoreDep,
+    library: PrintLibraryDep,
 ) -> OrderItem:
     """From an output (``output_id``: its commit, inputs, libraries and colours), or by
     hand (``slug``, ``commit``, ``inputs``); either way the reference is checked
     against the catalogue and the commit's schema (Ruling 6). A ``custom`` item (#4954)
     is a title, a quantity and a price, its price a `manual` quote: accepted as it is
     saved, so the item is `approved` (409 ``order_on_hold`` on hold), unless ``accept`` is
-    false (the agent's), which leaves it `quoted`."""
+    false (the agent's), which leaves it `quoted`. A ``request`` item (#5280) is a title,
+    a quantity, notes and a sku, approved design first: it has no design until its first
+    revision. Only while the order is `draft` or `quoted`: past that, 409
+    ``item_locked`` names `POST /orders/{id}/items/after-acceptance`. A library file
+    item (#5544) names ``library_file_id``, a file of the library that serves, read as
+    `POST /print/library/{file_id}/run` reads it: a file it does not have (deleted, or
+    the other library's) or one it does not print is 422; the item records the file's
+    id, name and library, starts `draft`, and is priced by a slice quote of the file or a
+    manual quote."""
+    return await _add_item(
+        order_id,
+        body,
+        orders,
+        after_acceptance=False,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+        settings=settings,
+        library=library,
+    )
+
+
+@router.post(
+    "/{order_id}/items/after-acceptance",
+    response_model=OrderItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a line item to an accepted order",
+)
+async def add_item_after_acceptance(
+    order_id: str,
+    body: ItemCreate,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStoreDep,
+    library: PrintLibraryDep,
+) -> OrderItem:
+    """#5349: the same body as `POST /orders/{id}/items`, on an order that is
+    `accepted`, `in_production` or `ready`. It changes what the customer gets. The item
+    starts unpriced (a custom item `quoted`, its price not accepted; ``accept: true`` is
+    422), and needs its own quote and that quote's acceptance before it is printed or
+    fulfilled. The order's accepted prices and charges do not change; its status follows
+    `derive` (a `ready` order goes back to `in_production`). The audit row is
+    ``item.added_after_acceptance``. 409 ``order_not_accepted`` while the order is
+    `draft` or `quoted` (use `POST /orders/{id}/items`), ``item_locked`` once it is
+    `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
+    return await _add_item(
+        order_id,
+        body,
+        orders,
+        after_acceptance=True,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+        settings=settings,
+        library=library,
+    )
+
+
+async def _add_item(
+    order_id: str,
+    body: ItemCreate,
+    orders: OrdersComponent,
+    *,
+    after_acceptance: bool,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStore,
+    library: PrintLibrary,
+) -> OrderItem:
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     by = current_actor()
+    if body.kind == "library_file":
+        assert body.library_file_id is not None
+        file = await _library_file(body.library_file_id, settings, library)
+        return await _run(
+            lambda: orders.lifecycle.add_library_item(
+                order_id,
+                by,
+                file,
+                quantity=body.quantity,
+                title=body.title,
+                notes=body.notes,
+                sku=body.sku,
+                after_acceptance=after_acceptance,
+            )
+        )
     if body.kind == "custom":
         assert body.title is not None and body.unit_price_minor is not None
         title, price = body.title.strip(), body.unit_price_minor
+        # After acceptance an unset accept means false: the price waits for its own accept.
+        accept = body.accept is True if after_acceptance else body.accept is not False
         return await _run(
             lambda: orders.lifecycle.add_custom_item(
                 order_id,
@@ -899,7 +1500,22 @@ async def add_item(
                 notes=body.notes,
                 sku=body.sku,
                 requires_printing=bool(body.requires_printing),
-                accept=body.accept is not False,
+                accept=accept,
+                after_acceptance=after_acceptance,
+            )
+        )
+    if body.kind == "request":
+        assert body.title is not None
+        request_title = body.title.strip()
+        return await _run(
+            lambda: orders.lifecycle.add_request_item(
+                order_id,
+                by,
+                title=request_title,
+                quantity=body.quantity,
+                notes=body.notes,
+                sku=body.sku,
+                after_acceptance=after_acceptance,
             )
         )
     resolved = await _resolved(
@@ -922,7 +1538,37 @@ async def add_item(
             title=body.title,
             notes=body.notes,
             sku=body.sku,
+            after_acceptance=after_acceptance,
         )
+    )
+
+
+async def _library_file(
+    file_id: int, settings: SettingsStore, library: PrintLibrary
+) -> LibraryFileRef:
+    """The file a library file item names (#5544), read from the library that serves as
+    `POST /print/library/{file_id}/run` reads it: 422 ``library_file_id`` for a file it
+    does not have (deleted, trashed, or the other library's) or one it does not print."""
+    found = await ServedLibrary(settings, library.serving_native).file(file_id)
+    if found is None:
+        raise _bad_library_file(f"no library file {file_id} in the library that serves")
+    if not printable(found.file_type):
+        raise _bad_library_file(
+            f"library file {found.filename} is a {found.file_type or 'file of unknown type'}:"
+            " ScadBuddy prints only 3MF and STL files"
+        )
+    return LibraryFileRef(
+        id=file_id,
+        filename=found.filename,
+        library="native" if is_native_id(file_id) else "bambuddy",
+    )
+
+
+def _bad_library_file(message: str) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        message,
+        errors=[{"loc": ["body", "library_file_id"], "msg": message}],
     )
 
 
@@ -970,6 +1616,7 @@ async def patch_item(
             sku=body.sku if "sku" in given else UNSET,
             requires_printing=body.requires_printing,
             accept=body.accept,
+            approval=body.approval,
         )
     )
 
@@ -981,7 +1628,8 @@ async def patch_item(
 )
 async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Response:
     """Only while the item is `draft` (Ruling 10): else 409 ``item_not_draft`` names the
-    cancel route, and the caller decides."""
+    cancel route, and the caller decides. A draft item with time or cost entries is 409
+    ``item_has_entries`` (#5326): remove them, or cancel it."""
     _path(order_id, item_id)
     by = current_actor()
     await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))
@@ -995,7 +1643,7 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     description=(
         "Undoes a cancel: the item takes the state its quotes and attempts give it "
         "(`approved`, `failed`, `quoted` or `draft`). 409 `item_not_cancelled`, "
-        "`item_not_priced` (an order past `quoted` takes back a priced item only), and "
+        "`item_not_priced` (a `shipped` order takes back a priced item only), and "
         "`order_closed`/`order_cancelled`."
     ),
 )
@@ -1012,6 +1660,190 @@ async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
     _path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.cancel_item(order_id, item_id, by))
+
+
+# -- design revisions (#5280, spec 2026-11-02 §4.3) -----------------------------------------
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions",
+    response_model=Revision,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a design revision",
+    description=(
+        "A new design for the item while its order is open: the `reference` or "
+        "`output_id` to change it, or neither to repeat the current one (new photos, a "
+        "new note). 404 `item_not_found`; 409 `item_custom` (a custom item has no "
+        "design), `item_has_no_design` (a request's first revision must name one), "
+        "`item_not_open`, `item_locked` (the order is accepted and the item's price with "
+        "it; an item added after acceptance with no accepted quote still takes one, and "
+        "so does an item revised after acceptance, #5350; revise an accepted item with "
+        "`POST .../revisions/after-acceptance`) and `order_closed`/`order_cancelled`. "
+        "Allowed on hold: a revision advances nothing."
+    ),
+)
+async def add_revision(
+    order_id: str,
+    item_id: str,
+    body: RevisionCreate,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> Revision:
+    return await _add_revision(
+        order_id,
+        item_id,
+        body,
+        orders,
+        after_acceptance=False,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/after-acceptance",
+    response_model=Revision,
+    status_code=status.HTTP_201_CREATED,
+    summary="Revise an accepted item's design",
+)
+async def add_revision_after_acceptance(
+    order_id: str,
+    item_id: str,
+    body: RevisionCreate,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> Revision:
+    """#5350: the same body as `POST /orders/{id}/items/{item}/revisions`, for an item
+    with an accepted quote on an order that is `accepted`, `in_production` or `ready`.
+    It changes what the customer gets. The accepted quote stays accepted: the order's
+    total keeps the agreed price until a quote of the new revision is accepted. The item
+    is `draft` again and `revised_after_acceptance`, so it takes a quote and that quote's
+    acceptance, and is not printed or fulfilled before. The audit row is
+    ``revision.added_after_acceptance``. 409 ``order_not_accepted`` while the order is
+    `draft` or `quoted` (use the plain route), ``order_closed``/``order_cancelled``,
+    ``order_on_hold``, ``item_not_open`` for a fulfilled or cancelled item (every item of
+    a `ready` or `shipped` order is one, so the route never works there and its
+    ``item_locked`` for `shipped` is not reached), ``item_not_priced`` for an item with
+    no accepted quote (use the plain route), ``item_custom``, ``print_in_flight``
+    while a print of it runs, and ``item_partly_fulfilled`` once an attempt of it is
+    accepted (#5592)."""
+    return await _add_revision(
+        order_id,
+        item_id,
+        body,
+        orders,
+        after_acceptance=True,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+
+
+async def _add_revision(
+    order_id: str,
+    item_id: str,
+    body: RevisionCreate,
+    orders: OrdersComponent,
+    *,
+    after_acceptance: bool,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> Revision:
+    _path(order_id, item_id)
+    given = body.model_fields_set
+    resolved = None
+    if body.reference is not None or ("output_id" in given and body.output_id is not None):
+        resolved = await _resolved(
+            body.reference or ReferenceBody(),
+            body.output_id,
+            catalogue=catalogue,
+            history=history,
+            outputs=outputs,
+            paths=paths,
+            config=config,
+            fetcher=fetcher,
+        )
+    output_id: str | UnsetType | None = body.output_id if "output_id" in given else UNSET
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.add_revision(
+            order_id,
+            item_id,
+            by,
+            resolved,
+            output_id=output_id,
+            filaments=body.filaments,
+            note=body.note,
+            after_acceptance=after_acceptance,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/send",
+    response_model=Revision,
+    summary="Send a revision to the customer",
+    description=(
+        "Phase 1 stamps `sent_at` only; nothing is delivered to the customer. Sending a "
+        "revision already sent and unanswered returns it. 404 `revision_not_found`; 409 "
+        "`revision_not_newest`, `revision_answered`, `revision_empty` (no file on it), "
+        "`revision_not_quoted` (a `together` item needs a quote that names it), "
+        "`item_not_open` and `order_closed`/`order_cancelled`."
+    ),
+)
+async def send_revision(
+    order_id: str, item_id: str, revision_id: str, orders: OrdersDep
+) -> Revision:
+    _path(order_id, item_id, revision_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.send_revision(order_id, item_id, revision_id, by))
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
+    response_model=Revision,
+    summary="Record the customer's answer to a revision",
+    description=(
+        "`accepted` or `changes_requested` (which needs a note) on the newest sent "
+        "revision; on a `together` item an acceptance also accepts the quote that names "
+        "it. 404 `revision_not_found`; 409 `revision_not_newest`, `revision_not_sent`, "
+        "`revision_answered`, `revision_not_quoted`, `item_not_open` and "
+        "`order_closed`/`order_cancelled`/`order_on_hold`."
+    ),
+)
+async def answer_revision(
+    order_id: str,
+    item_id: str,
+    revision_id: str,
+    body: RevisionAnswerInput,
+    orders: OrdersDep,
+) -> Revision:
+    _path(order_id, item_id, revision_id)
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by)
+    )
 
 
 # -- quotes (§3.4: manual, or from a slice since phase 2) ----------------------------------
@@ -1095,6 +1927,7 @@ async def print_item(
     item_id: str,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Fulfilment | JSONResponse:
@@ -1108,8 +1941,9 @@ async def print_item(
     for an unknown order or item; 409 ``order_not_accepted``, ``order_on_hold``,
     ``order_closed``/``order_cancelled``, ``item_custom``, ``item_not_open``,
     ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
-    quantity: accept them), ``print_request_conflict`` (the key's print is another
-    item's), and ``requote_needed`` (no accepted quote, its output gone,
+    quantity: accept them), ``print_in_flight`` (a test print of the item is still
+    open), ``print_request_conflict`` (the key's print is another item's, or the key's
+    test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced); and the
     print run's own refusals, as the print route answers them."""
     _path(order_id, item_id)
@@ -1127,6 +1961,58 @@ async def print_item(
             "request_id": print_request_id(item_id, idempotency_key or ""),
             # Ruling 12: who it is for comes from the author header, never the body.
             "by": current_actor().model_dump(mode="json"),
+            # #5602: a caller other than the page is told of `path` in a refusal.
+            **({"api": True} if asked_by_api(http) else {}),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Fulfilment)
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/test-print",
+    response_model=Fulfilment,
+    summary="Test-print a revision of an item",
+    responses=OPERATION_RESPONSES,
+)
+async def test_print_item(
+    order_id: str,
+    item_id: str,
+    revision_id: str,
+    body: PrintRunRequest,
+    response: Response,
+    http: Request,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Fulfilment | JSONResponse:
+    """A test print of the item's current revision (storefront spec §4.4): the
+    ``order_item_print`` operation as ``POST …/print`` runs it, for one copy, recorded as
+    an attempt of purpose `test` naming the revision. It counts for nothing: the item's
+    status, its made quantity and the order's status stay as they were, and it is never
+    accepted. Allowed on an order not yet accepted and for an item in any open state.
+    Refused before anything starts: 404 for an unknown order, item or revision
+    (``revision_not_found``); 409 ``order_on_hold``, ``order_closed``/``order_cancelled``,
+    ``item_custom``, ``item_has_no_design``, ``item_not_open``, ``revision_not_newest``
+    (only the current revision prints: the print is of the item's output, its render),
+    ``print_in_flight`` (a print of the item, of either purpose, is still open),
+    ``print_request_conflict`` (the key's print is another item's or a production
+    print), and ``requote_needed`` (no slice quote of the revision,
+    its sliced file gone or no longer the file it priced, or the output gone); and the
+    print run's own refusals, as the print route answers them."""
+    _path(order_id, item_id, revision_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_PRINT],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "revision_id": revision_id,
+            "request": body.model_dump(mode="json", exclude_unset=True),
+            "request_id": print_request_id(item_id, idempotency_key or ""),
+            "by": current_actor().model_dump(mode="json"),
+            **({"api": True} if asked_by_api(http) else {}),
         },
         idempotency_key=idempotency_key,
     )
@@ -1165,10 +2051,108 @@ async def update_fulfilment(
     )
 
 
+class ArchiveCopy(BaseModel):
+    """What of the archive to copy (§8.2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    what: ArchiveMedia
+    #: A ``finish_`` photo of the archive (``AttemptArchives``' ``finish_photos``);
+    #: left out, its latest. Only for ``finished_photo``.
+    name: str | None = Field(
+        default=None, max_length=255, pattern=r"^finish_[A-Za-z0-9_-]+\.[a-z]+$"
+    )
+
+    @model_validator(mode="after")
+    def _name_for_a_photo(self) -> Self:
+        if self.name is not None and self.what != "finished_photo":
+            raise ValueError("`name` names a photo: it goes with `finished_photo` only")
+        return self
+
+
+@router.get(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives",
+    response_model=AttemptArchives,
+    summary="The Bambuddy archives of an attempt's print",
+)
+async def get_attempt_archives(
+    order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
+) -> AttemptArchives:
+    """The archives the attempt's print run made in Bambuddy (one per plate, §8.2), with
+    what each offers to copy: its ``finish_`` photos and whether it has a timelapse.
+    Reading them copies what they say onto the attempt once its print settled
+    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``).
+    ``linked`` is false, with no archives, without Bambuddy; an attempt by hand naming no
+    archive, or one Bambuddy has linked no archive to yet, has none. 404 for an attempt
+    not the item's."""
+    _path(order_id, item_id, fulfilment_id)
+    return await attempt_archives(
+        orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy",
+    response_model=Attachment,
+    summary="Copy an archive's finish photo or timelapse onto the attempt",
+    responses={
+        404: {"description": "No such attempt of the item"},
+        413: {"description": "Larger than the upload limit in Settings"},
+        **OPERATION_RESPONSES,
+    },
+)
+async def copy_archive_media(
+    order_id: str,
+    item_id: str,
+    fulfilment_id: str,
+    archive_id: Annotated[int, Path(ge=1)],
+    body: ArchiveCopy,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Attachment | JSONResponse:
+    """The ``order_attempt_copy`` operation (§8.2, §6.2): the archive's ``finish_``
+    photo (``name``, else its latest) or its timelapse pulled once from Bambuddy and
+    kept as ScadBuddy's own file, an attachment of the attempt (listed under its item)
+    with the role ``finished`` or ``timelapse``; the same bytes again are the attachment
+    already there. Refused
+    with 409: ``not_linked`` (no Bambuddy), ``archive_not_attempts`` (not one of the
+    attempt's prints), ``archive_gone`` (deleted in Bambuddy), ``no_finish_photo``,
+    ``no_timelapse`` (pull it off the printer first, ``POST
+    /prints/{archive_id}/timelapse/pull``). Allowed in any state of the order, as an
+    upload is."""
+    _path(order_id, item_id, fulfilment_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ATTEMPT_COPY],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "fulfilment_id": fulfilment_id,
+            "archive_id": archive_id,
+            "what": body.what,
+            "name": body.name,
+            # Ruling 12: who added it comes from the author header, never the body.
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Attachment)
+
+
 @router.post(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept",
     response_model=Fulfilment,
     summary="Count an attempt's quantity as made",
+    description=(
+        "The attempt's quantity counts as made; the item is fulfilled once its accepted "
+        "attempts reach its quantity. 409 `fulfilment_accepted`, `fulfilment_failed`, "
+        "`item_not_open`, and `fulfilment_stale` for an attempt made before the revision "
+        "the accepted quote prices (an item revised after acceptance, #5350): it printed "
+        "an earlier design."
+    ),
 )
 async def accept_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep

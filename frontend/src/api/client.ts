@@ -32,8 +32,12 @@ import type {
   ModelSetting,
   ImageSettings,
   MemorySettings,
+  PushServices,
+  NotifyChannel,
+  NotifyChannelInput,
   WorkspaceFile,
   WorkspaceFileList,
+  PickerSession,
   WorkspaceSettings,
   AttachmentView,
   AiSessionEdit,
@@ -49,8 +53,12 @@ import type {
   Job,
   CatalogueLibrary,
   DependencyReport,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryCopyResult,
+  LibraryCopyRequest,
+  LibraryCopyStarted,
+  LibraryCopyStatus,
   LibraryDeleteResult,
   LibraryFileName,
   LibraryFolder,
@@ -61,6 +69,7 @@ import type {
   LibrarySearch,
   LibraryMoveResult,
   LibraryRenameResult,
+  LibraryEntryUpdated,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -79,7 +88,9 @@ import type {
   BatchChoice,
   PrintBatch,
   BatchQueueProgress,
+  ModelFacets,
   ModelSummary,
+  ReadmeImage,
   ModelVersion,
   Output,
   OutputPlate,
@@ -103,6 +114,7 @@ import type {
   ActivityDetail,
   ActivityFacets,
   ActivityPage,
+  Activity,
   PrintProgress,
   PrintersNow,
   PrinterRow,
@@ -123,7 +135,10 @@ import type {
   FlowDecided,
   FlowProposal,
   FlowRunQueue,
+  FlowCommitMessage,
   FlowDefinition,
+  FlowDetails,
+  FlowDetailsUpdate,
   FlowGrantSpec,
   FlowGrantView,
   FlowHostInterface,
@@ -195,6 +210,8 @@ import type {
   NativeSpoolCreate,
   NativeSpoolPatch,
   Fulfilment,
+  AttemptArchives,
+  ArchiveCopy,
   FulfilmentInput,
   OrderAttachment,
   OrderAttachmentPatch,
@@ -204,6 +221,24 @@ import type {
   OrderCreate,
   OrderDetail,
   OrderEstimate,
+  UnitCostHistory,
+  ProfitReport,
+  InventoryPart,
+  PartCreate,
+  PartPatch,
+  StockAdd,
+  StockAdjust,
+  StockMove,
+  PartRule,
+  PartRuleLine,
+  ItemPart,
+  ItemPartRow,
+  OrderParts,
+  OrderCosts,
+  TimeEntry,
+  TimeEntryCreate,
+  CostEntry,
+  CostEntryCreate,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -215,6 +250,9 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  Revision,
+  RevisionAnswerInput,
+  RevisionCreate,
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
@@ -242,6 +280,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { unmatchable } from '../lib/catalogueQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
 import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
@@ -313,6 +352,30 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+export const MODELS_PAGE_LIMIT = 500
+/** #5596 — the most `subject`s one `GET /activity` takes (`activity/index.py` `MAX_SUBJECTS`). */
+export const ACTIVITY_SUBJECTS = 200
+/** A slice quote's activity subject is `order_item:<id>`. */
+const ORDER_ITEM = 'order_item:'
+
+/** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
+export interface ModelFilters {
+  q: string
+  tags: string[]
+  origin: 'all' | 'builtin' | 'mine'
+  sort: 'updated' | 'name'
+}
+
+function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
+  const query = new URLSearchParams()
+  if (q.trim()) query.set('q', q.trim())
+  // As typed: the route folds them, and the browser cannot fold as it does (#5305 review).
+  for (const tag of new Set(tags)) query.append('tag', tag)
+  if (origin !== 'all') query.set('origin', origin)
+  return query
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -1024,7 +1087,7 @@ export const api = {
       body: JSON.stringify({ call_id: callId, answer }),
     }),
 
-  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string) =>
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string, boundHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1033,6 +1096,8 @@ export const api = {
         ...(reason ? { reason } : {}),
         // #2482: approve a parent's proposal, exactly the one shown (its hash).
         ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
+        // #4445: the printer the card named (its entry's `bound_hash`): another is refused.
+        ...(boundHash ? { bound_hash: boundHash } : {}),
       }),
     }),
 
@@ -1053,7 +1118,14 @@ export const api = {
   archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
   unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
   /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
-  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
+  deleteFlow: (name: string, message?: FlowCommitMessage) =>
+    request<FlowState>(`/workflows/names/${seg(name)}`, {
+      method: 'DELETE',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
+  /** #3186 — a flow's display name and description: one commit of `flow.json`, not a version. */
+  updateFlowDetails: (name: string, body: FlowDetailsUpdate) =>
+    request<FlowDetails>(`/workflows/names/${seg(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   /**
    * One flow's versions, newest first: the one place the page reads them from, its git
@@ -1089,8 +1161,11 @@ export const api = {
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
 
   /** A new version with the script at `commit`: a new commit, type-checked first. */
-  restoreFlowVersion: (name: string, commit: string) =>
-    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
+  restoreFlowVersion: (name: string, commit: string, message?: FlowCommitMessage) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, {
+      method: 'POST',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
 
   /**
    * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
@@ -1169,6 +1244,72 @@ export const api = {
 
   listModels: () => request<ModelSummary[]>('/models'),
 
+  /**
+   * #2290 — one page of the catalogue, searched, filtered and sorted on the server.
+   * `total` is how many models the filters select (`X-Total-Count`).
+   */
+  listModelsPage: async (
+    filters: ModelFilters,
+    page: { limit?: number; after?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    // Tags no model can carry all of select none, and GET /models would refuse them.
+    if (unmatchable(filters.tags)) return { items: [], total: 0 }
+    const query = modelFilterParams(filters)
+    query.set('sort', filters.sort)
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models?${query}`, { headers: { Accept: 'application/json' }, signal })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as ModelSummary[]
+    return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
+  },
+
+  /**
+   * The first `size` models `filters` select, read in pages of at most
+   * `MODELS_PAGE_LIMIT` (the backend's `MAX_PAGE_LIMIT`), each after the last: a window
+   * past the cap asked for in one read answers 422 (#5289 review). A chunk whose `after`
+   * went away (409) reads the window again from the top, once; `signal` stops it
+   * between chunks (#5292 review).
+   */
+  listModelsWindow: async (
+    filters: ModelFilters,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const read = async (): Promise<{ items: ModelSummary[]; total: number }> => {
+      const items: ModelSummary[] = []
+      let total = 0
+      while (items.length < size) {
+        signal?.throwIfAborted()
+        const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
+        const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug }, signal)
+        items.push(...page.items)
+        total = page.total
+        if (page.items.length < limit) break
+      }
+      return { items, total }
+    }
+    try {
+      return await read()
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) return await read()
+      throw cause
+    }
+  },
+
+  /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
+  modelFacets: async (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal): Promise<ModelFacets> => {
+    if (!unmatchable(filters.tags)) {
+      return await request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal })
+    }
+    // None selected: only the whole catalogue's count is asked for, and each tag is at 0.
+    const every = await request<ModelFacets>(`/model-facets?${modelFilterParams({ ...filters, tags: [] })}`, {
+      signal,
+    })
+    return { total: every.total, matched: 0, tags: [...new Set(filters.tags)].map((tag) => ({ tag, count: 0 })) }
+  },
+
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
   /** #2146 — a library file (or an output) opened as an editable mesh model, named `name`. */
@@ -1189,11 +1330,32 @@ export const api = {
     return command<ModelSummary>('/models', { method: 'POST', body })
   },
 
+  /**
+   * #4703 — an uploaded 3MF or STL opened as an editable mesh model
+   * (`POST /models/from-mesh/upload`); its type is its name's extension.
+   */
+  createMeshModelFromUpload: (file: File, name?: string) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (name) body.append('name', name)
+    return command<ModelSummary>('/models/from-mesh/upload', { method: 'POST', body })
+  },
+
   /** Multipart with a `file` part, like the output thumbnail PUT. */
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
     return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+  },
+
+  /**
+   * #5475 — an image into the template's `images/` folder, for its README, as one
+   * revision. The answer's `path` is what the README links: `images/<name>`.
+   */
+  addReadmeImage: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return command<ReadmeImage>(`/models/${seg(slug)}/images`, { method: 'POST', body })
   },
 
   /**
@@ -1297,9 +1459,19 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
-  deleteModel: (slug: string, force = false) =>
-    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
+  /**
+   * 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway.
+   * #5371 — `deleteInboxCopies` also trashes its outputs' copies in ScadBuddy's own library
+   * (each copy still filed under the template's folder, and the per-print copies with their
+   * slices), refused with 409 while one of their print runs is open. Never Bambuddy's inbox.
+   */
+  deleteModel: (slug: string, force = false, deleteInboxCopies = false) => {
+    const query = new URLSearchParams()
+    if (force) query.set('force', 'true')
+    if (deleteInboxCopies) query.set('delete_inbox_copies', 'true')
+    const search = query.size ? `?${query.toString()}` : ''
+    return command<unknown>(`/models/${seg(slug)}${search}`, { method: 'DELETE' }).then(() => undefined)
+  },
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
@@ -1434,7 +1606,7 @@ export const api = {
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
-   * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
+   * #204 — stores an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter (#959). The answer's `id` (the
    * SHA-256 of what the server kept) is the value the render takes.
    */
   uploadAsset: (slug: string, file: File) => {
@@ -1476,6 +1648,10 @@ export const api = {
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
+
+  /** A PNG of an uploaded STL, 3MF or OBJ (#959); an image is its own picture. */
+  assetPreviewUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/preview`,
 
   /**
    * A sample file the template ships beside its source (a `file` parameter's
@@ -1652,6 +1828,26 @@ export const api = {
     `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
+
+  /**
+   * #2290 — one page of a model's outputs, newest first. `after` is the last output id
+   * of the page before; `total` is how many outputs the model has (`X-Total-Count`).
+   */
+  listOutputsPage: async (
+    slug: string,
+    page: { limit?: number; after?: string } = {},
+  ): Promise<{ items: Output[]; total: number }> => {
+    const query = new URLSearchParams()
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models/${seg(slug)}/outputs?${query}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as Output[]
+    // Without the header a full page cannot tell its end: `Infinity` keeps Load more.
+    const header = response.headers.get('X-Total-Count')
+    const total = header !== null ? Number(header) : page.limit !== undefined && items.length >= page.limit ? Infinity : items.length
+    return { items, total }
+  },
 
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
@@ -1871,10 +2067,11 @@ export const api = {
 
   /**
    * #2169 — slice the dialog's choices in the background, through the run's own path,
-   * without queueing; follow it with `getPreviewSlice`.
+   * without queueing; follow it with `getPreviewSlice`. `fresh` (#4433, the dialog's
+   * Reslice) slices again even when a finished slice of the same choices exists.
    */
-  previewSlice: (outputId: string, body: PrintRunRequest) =>
-    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+  previewSlice: (outputId: string, body: PrintRunRequest, fresh = false) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice${fresh ? '?fresh=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2140,18 +2337,45 @@ export const api = {
   /** Back in the pickers, so a new order can name them again. */
   unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
-  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number } = {}) => {
-    const search = new URLSearchParams(ordersApiParams(query))
+  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number; statuses?: Order['status'][] } = {}) => {
+    const search = ordersApiParams(query)
+    // #5276: `status` repeated is orders of any of them, filtered by the server.
+    for (const status of page.statuses ?? []) search.append('status', status)
     if (page.limit !== undefined) search.set('limit', String(page.limit))
     if (page.cursor) search.set('cursor', page.cursor)
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<OrderPage>(`/orders${suffix}`)
   },
+  /** #5329 §6.4 — the profit report by model: the orders accepted in `[from, to)`, by
+   * default the last 90 days. */
+  profitReport: (period: { from?: string; to?: string } = {}) => {
+    const search = new URLSearchParams()
+    if (period.from) search.set('from', period.from)
+    if (period.to) search.set('to', period.to)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ProfitReport>(`/orders/reports/profit${suffix}`)
+  },
   order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
+  /** #4251 §6.4 — the accepted quotes beside the attempts. */
+  orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
+  /** #5326 — time on the order or (with `order_item_id`) one of its items, at today's
+   * labour rate, which the entry keeps. Allowed in every order status. */
+  addTimeEntry: (orderId: string, body: TimeEntryCreate) =>
+    request<TimeEntry>(`/orders/${seg(orderId)}/time-entries`, { method: 'POST', body: JSON.stringify(body) }),
+  removeTimeEntry: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/time-entries/${seg(id)}`, { method: 'DELETE' }),
+  /** #5326 — money the job cost, in the order's currency. */
+  addCostEntry: (orderId: string, body: CostEntryCreate) =>
+    request<CostEntry>(`/orders/${seg(orderId)}/cost-entries`, { method: 'POST', body: JSON.stringify(body) }),
+  removeCostEntry: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/cost-entries/${seg(id)}`, { method: 'DELETE' }),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** #5351 — the charges, replaced whole, on an accepted, in-production or ready order. */
+  replaceChargesAfterAcceptance: (id: string, charges: NonNullable<OrderPatch['charges']>) =>
+    request<Order>(`/orders/${seg(id)}/charges/after-acceptance`, { method: 'PUT', body: JSON.stringify({ charges }) }),
   acceptOrder: (id: string) => request<Order>(`/orders/${seg(id)}/accept`, { method: 'POST' }),
   cancelOrder: (id: string, reason?: string) =>
     request<Order>(`/orders/${seg(id)}/cancel`, { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) }),
@@ -2165,6 +2389,9 @@ export const api = {
     request<Payment>(`/orders/${seg(id)}/payments`, { method: 'POST', body: JSON.stringify(body) }),
   addOrderItem: (orderId: string, body: OrderItemCreate) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #5349 — an item added to an accepted, in-production or ready order: it starts unpriced. */
+  addOrderItemAfterAcceptance: (orderId: string, body: OrderItemCreate) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/after-acceptance`, { method: 'POST', body: JSON.stringify(body) }),
   updateOrderItem: (orderId: string, itemId: string, body: OrderItemPatch) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderItem: (orderId: string, itemId: string) =>
@@ -2186,9 +2413,11 @@ export const api = {
     file: File,
     fields: { role?: OrderAttachmentRole; caption?: string },
     onProgress?: (fraction: number) => void,
+    /** #4251 — one of the item's attempts. */
+    fulfilmentId?: string | null,
   ): Promise<OrderAttachment> =>
     uploadForm<OrderAttachment>(
-      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}/attachments`,
+      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}${itemId && fulfilmentId ? `/fulfilments/${seg(fulfilmentId)}` : ''}/attachments`,
       () => {
         const body = new FormData()
         body.append('file', file)
@@ -2198,6 +2427,49 @@ export const api = {
       },
       onProgress,
     ),
+  // -- design revisions (#5280, storefront spec 2026-11-02 §4) -----------------------------
+  addOrderItemRevision: (orderId: string, itemId: string, body: RevisionCreate) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #5350 — a new design of an accepted item; its accepted price stays until a new quote is accepted. */
+  addOrderItemRevisionAfterAcceptance: (orderId: string, itemId: string, body: RevisionCreate) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/after-acceptance`, { method: 'POST', body: JSON.stringify(body) }),
+  sendOrderItemRevision: (orderId: string, itemId: string, revisionId: string) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/send`, { method: 'POST' }),
+  answerOrderItemRevision: (orderId: string, itemId: string, revisionId: string, body: RevisionAnswerInput) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A file on one revision: its `render`, a `reference`, or (with `fulfilmentId`) the photo of its test print. */
+  addRevisionAttachment: (
+    orderId: string,
+    itemId: string,
+    revisionId: string,
+    file: File,
+    opts: { role: OrderAttachmentRole; caption?: string; fulfilmentId?: string | null },
+    onProgress?: (fraction: number) => void,
+  ): Promise<OrderAttachment> =>
+    uploadForm<OrderAttachment>(
+      `/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        body.append('role', opts.role)
+        if (opts.caption) body.append('caption', opts.caption)
+        if (opts.fulfilmentId) body.append('fulfilment_id', opts.fulfilmentId)
+        return body
+      },
+      onProgress,
+    ),
+  /** A test print of the item's newest revision: one copy, an attempt of purpose `test`. */
+  testPrintRevision: (orderId: string, itemId: string, revisionId: string, body: PrintRunRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/test-print`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A test-print photo of an accepted revision, copied into its template's photos. */
+  revisionPhotoToModel: (orderId: string, attachmentId: string) =>
+    command<ModelSummary>(`/orders/${seg(orderId)}/attachments/${seg(attachmentId)}/to-model`, { method: 'POST' }),
   updateOrderAttachment: (orderId: string, id: string, body: OrderAttachmentPatch) =>
     request<OrderAttachment>(`/orders/${seg(orderId)}/attachments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderAttachment: (orderId: string, id: string) =>
@@ -2239,6 +2511,37 @@ export const api = {
    */
   runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
   /**
+   * #5554 — the newest `failed` activity row of each item's slice quotes, by item id: a
+   * failure the page did not start (over MCP, in another tab) shows on its item with its
+   * start and end. The rows carry no error; `followQuote` reads it. #5585 — filtered by
+   * each item's subject, so no other order's failures push one off the page. #5596 — one
+   * request per `ACTIVITY_SUBJECTS` items (the route's bound), since the oldest item's
+   * `created_at`, one row per subject. #5599 — a request that fails drops its own items
+   * only: the map holds the other requests' rows. A failed quote whose row stayed
+   * `running` is not here; `useSliceQuotes` finds it.
+   */
+  failedQuotes: async (items: readonly { id: string; created_at: string }[]) => {
+    const newest = new Map<string, Activity>()
+    for (let at = 0; at < items.length; at += ACTIVITY_SUBJECTS) {
+      const chunk = items.slice(at, at + ACTIVITY_SUBJECTS)
+      const since = chunk.reduce((a, b) => (Date.parse(b.created_at) < Date.parse(a) ? b.created_at : a), chunk[0]!.created_at)
+      const query = new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '1' })
+      for (const item of chunk) query.append('subject', `${ORDER_ITEM}${item.id}`)
+      // #5599 — a failed chunk loses its own items' failures only, not the other chunks'.
+      let page: ActivityPage
+      try {
+        page = await request<ActivityPage>(`/activity?${query}`)
+      } catch (cause) {
+        console.debug('could not read the failed slice quotes of some items; they show none', cause)
+        continue
+      }
+      for (const row of page.items) {
+        if (row.subject.startsWith(ORDER_ITEM)) newest.set(row.subject.slice(ORDER_ITEM.length), row)
+      }
+    }
+    return newest
+  },
+  /**
    * #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows
    * its own (`followRunning`). `onRunning` is told once the first read finds it still
    * running: an activity row can say running of one that has already ended.
@@ -2263,6 +2566,25 @@ export const api = {
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
+  /** #5328, job cost spec §6.3: the model's real cost per unit in its last fulfilled jobs,
+   * in `currency`, and whether `unitPrice` warns (`warning`, `below_cost`). Advice only.
+   * With `itemId` (#5543), the item's parts at today's unit costs are in the unit cost. */
+  unitCostHistory: (slug: string, currency: string, unitPrice: number, itemId?: string) =>
+    request<UnitCostHistory>(
+      `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice), ...(itemId ? { item_id: itemId } : {}) })}`,
+    ),
+  // -- the parts inventory (#5543, job cost spec §11) -------------------------------------------
+  parts: (low = false) => request<InventoryPart[]>(`/parts${low ? '?low=true' : ''}`),
+  createPart: (body: PartCreate) => request<InventoryPart>('/parts', { method: 'POST', body: JSON.stringify(body) }),
+  updatePart: (id: string, body: PartPatch) => request<InventoryPart>(`/parts/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  addPartStock: (id: string, body: StockAdd) => request<InventoryPart>(`/parts/${seg(id)}/stock`, { method: 'POST', body: JSON.stringify(body) }),
+  adjustPartStock: (id: string, body: StockAdjust) => request<InventoryPart>(`/parts/${seg(id)}/adjust`, { method: 'POST', body: JSON.stringify(body) }),
+  partMoves: (id: string) => request<StockMove[]>(`/parts/${seg(id)}/moves`),
+  partRule: (slug: string) => request<PartRule>(`/parts/rules/${seg(slug)}`),
+  setPartRule: (slug: string, lines: PartRuleLine[]) => request<PartRule>(`/parts/rules/${seg(slug)}`, { method: 'PUT', body: JSON.stringify({ lines }) }),
+  orderParts: (orderId: string) => request<OrderParts>(`/orders/${seg(orderId)}/parts`),
+  setItemParts: (orderId: string, itemId: string, parts: ItemPart[]) =>
+    request<ItemPartRow[]>(`/orders/${seg(orderId)}/items/${seg(itemId)}/parts`, { method: 'PUT', body: JSON.stringify({ parts }) }),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>
@@ -2274,6 +2596,16 @@ export const api = {
     }),
   acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
     request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+  /** #4253 §8.2 — the attempt's Bambuddy archives and what each offers to copy. */
+  attemptArchives: (orderId: string, itemId: string, fulfilmentId: string) =>
+    request<AttemptArchives>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives`),
+  /** #4253 §8.2 — the `order_attempt_copy` operation: an archive's finish photo or timelapse
+   * kept as the item's attachment. */
+  copyArchiveMedia: (orderId: string, itemId: string, fulfilmentId: string, archiveId: number, body: ArchiveCopy) =>
+    command<OrderAttachment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives/${archiveId}/copy`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   addShipment: (orderId: string, body: ShipmentInput) =>
     request<Shipment>(`/orders/${seg(orderId)}/shipments`, { method: 'POST', body: JSON.stringify(body) }),
   updateShipment: (orderId: string, shipmentId: string, body: ShipmentEdit) =>
@@ -2288,6 +2620,26 @@ export const api = {
     if (query.all) search.set('all', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<LibraryListing>(`/print/library${suffix}`)
+  },
+
+  /**
+   * #2290 — one page of a folder's files, in the listing's order, with the tree. `after`
+   * is the last file id of the page before; `fileId` beside a `folderId` stretches the
+   * first page down to that file. `total` is how many files the folder lists.
+   */
+  listLibraryPage: async (
+    query: { folderId: number | null; all: boolean; fileId?: number },
+    page: { limit: number; after?: number },
+  ): Promise<LibraryListing & { total: number }> => {
+    const search = new URLSearchParams({ limit: String(page.limit) })
+    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
+    if (query.all) search.set('all', 'true')
+    if (page.after !== undefined) search.set('after', String(page.after))
+    const response = await send(`${API_BASE}/print/library?${search}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const listing = (await response.json()) as LibraryListing
+    return { ...listing, total: Number(response.headers.get('X-Total-Count') ?? (listing.files ?? []).length) }
   },
 
   /** #3630 — library files whose name or folder holds every word, from every folder. */
@@ -2326,6 +2678,25 @@ export const api = {
       body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
     }),
 
+  /** #5355 — a copy between Bambuddy's library and ScadBuddy's own, started as a job; the same request joins a running one. */
+  startLibraryCopy: (body: LibraryCopyRequest) =>
+    request<LibraryCopyStarted>('/print/library-copies', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #5355 — a library copy's counts, whether it runs, and its files' outcomes. */
+  getLibraryCopy: (copyId: string) => request<LibraryCopyStatus>(`/print/library-copies/${seg(copyId)}`),
+
+  /** #5355 — Bambuddy's library (every file type) as a copy's source, whichever library the page serves. */
+  getBambuddyLibrary: (folderId: number | null) =>
+    request<LibraryListing>(`/print/bambuddy-library${folderId === null ? '' : `?folder_id=${folderId}`}`),
+
+  /** #4703 — uploads a file into a library folder (`null` is the top level); its name is the library name. */
+  uploadLibraryFile: (file: File, folderId: number | null) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (folderId !== null) body.append('folder_id', String(folderId))
+    return command<LibraryEntryUpdated>('/print/library/files', { method: 'POST', body })
+  },
+
   /** #2670 — a new name for a file, its extension kept. */
   renameLibraryFile: (fileId: number, filename: string) =>
     command<LibraryRenameResult>('/print/library/rename', {
@@ -2349,6 +2720,10 @@ export const api = {
     command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  /** #5321 — one library file by id, whatever its type, with its folder's path. */
+  getLibraryFile: (fileId: number) => request<LibraryFileEntry>(`/print/library/${fileId}`),
+  /** #1031 — the library file itself, always served as a download. */
+  libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
@@ -2402,9 +2777,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #2169 — slice the dialog's choices for a library file in the background. */
-  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
-    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
+  /** #2169 — slice the dialog's choices for a library file in the background; `fresh` as `previewSlice`'s. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest, fresh = false) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice${fresh ? '?fresh=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2699,6 +3074,27 @@ export const api = {
       body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
     }),
 
+  /** #815 — the push services the agent may send Web Push to. */
+  getPushServices: () => request<PushServices>('/ai/settings/push-services'),
+
+  putPushServices: (hosts: string[]) =>
+    request<PushServices>('/ai/settings/push-services', { method: 'PUT', body: JSON.stringify({ hosts }) }),
+
+  /** #815 — the notification channels (ntfy, Home Assistant), served by the agent service. */
+  listNotifyChannels: () => request<{ channels: NotifyChannel[] }>('/ai/notify/channels'),
+
+  createNotifyChannel: (input: NotifyChannelInput) =>
+    request<NotifyChannel>('/ai/notify/channels', { method: 'POST', body: JSON.stringify(input) }),
+
+  updateNotifyChannel: (id: string, patch: Partial<NotifyChannelInput>) =>
+    request<NotifyChannel>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+
+  deleteNotifyChannel: (id: string) =>
+    request<void>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  testNotifyChannel: (id: string) =>
+    request<{ ok: boolean; detail?: string }>(`/ai/notify/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
 
@@ -2714,6 +3110,33 @@ export const api = {
    */
   getAiSessionFile: async (id: string, path: string): Promise<Blob> => {
     const response = await send(`${API_BASE}${sessionFilePath(id, path)}`)
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    return await response.blob()
+  },
+
+  /**
+   * #4703 — the workspace file picker's list: the sessions that touched `resource`, or
+   * (without one, "Advanced") every session the user may see, each with the files
+   * `accept` takes, searched by `q` (title or file name).
+   */
+  listWorkspacePicks: (query: { resource?: ResourceRef | null; accept: string; q?: string }) => {
+    const params = new URLSearchParams()
+    if (query.resource) {
+      params.set('resource_type', query.resource.type)
+      params.set('resource_id', query.resource.id)
+    }
+    params.set('accept', query.accept)
+    if (query.q) params.set('q', query.q)
+    return request<{ sessions: PickerSession[] }>(`/ai/workspace-files?${params}`)
+  },
+
+  /**
+   * #4703 — a picked workspace file's bytes, as they were at `sha256`. The agent answers
+   * 409 when the file has changed since the list was read, and 422 when it holds a saved
+   * Claude credential or a plugin secret (a header value or an OAuth token); both throw `ApiError`.
+   */
+  pickAiSessionFile: async (id: string, path: string, sha256: string): Promise<Blob> => {
+    const response = await send(`${API_BASE}${sessionFilePath(id, path)}?expected_sha256=${encodeURIComponent(sha256)}`)
     if (!response.ok) throw new ApiError(await readProblem(response))
     return await response.blob()
   },

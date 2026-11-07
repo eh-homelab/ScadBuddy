@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import {
+  ArrowLeftRightIcon,
   ChevronDownIcon,
   CopyIcon,
   FolderIcon,
@@ -16,6 +17,7 @@ import {
   SearchIcon,
   Trash2Icon,
   XIcon,
+  UploadIcon,
 } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type {
@@ -39,10 +41,13 @@ import {
   type FolderAction,
 } from '../components/library/LibraryFolderDialogs'
 import { MoreMenu, RowContextMenu, type MenuEntry } from '../components/library/LibraryMenus'
+import { LibraryFileDetails } from '../components/library/LibraryFileDetails'
 import { LibraryTree } from '../components/library/LibraryTree'
 import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
+import { LibraryCopyDialog } from '../components/library/LibraryCopyDialog'
+import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Spinner } from '../components/ui/spinner'
@@ -101,6 +106,20 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`
 }
 
+/** #2290 — how many of a folder's files are read at a time. */
+export const LIBRARY_PAGE_SIZE = 60
+/** The most `?shown=` opens with: the backend's page limit. */
+const MAX_SHOWN = 500
+
+/** How many files `?shown=` asks for: at least a page, at most `MAX_SHOWN`. */
+function shownFrom(params: URLSearchParams): number {
+  const asked = Math.floor(Number(params.get('shown')))
+  return Number.isFinite(asked) ? Math.min(MAX_SHOWN, Math.max(LIBRARY_PAGE_SIZE, asked)) : LIBRARY_PAGE_SIZE
+}
+
+/** A folder's listing as read so far, with how many files the folder lists. */
+type Listed = LibraryListing & { total: number }
+
 /**
  * #313 — Bambuddy's library by folder. Each unsliced 3MF has Print, which opens the same
  * spool-first dialog an output uses; the file is sliced as it stands in Bambuddy.
@@ -112,6 +131,8 @@ function plural(count: number, word: string): string {
  * `/library/<folder path>` the folder, `?file=<id>` a file highlighted (its folder found
  * when the path names none), `?print=<id>` its print dialog open. Back and forward move
  * between them.
+ * #1031 — a card's thumbnail or name opens the file's details (`?details=<id>`, its
+ * folder found as for `?file=`), with the card's actions.
  * #2167 — Delete on a card, or Delete selected, moves files to Bambuddy's trash after a
  * confirmation; Undo restores them from it.
  * #2670 — a card's actions menu (Rename, Copy to…, Move to…), or Copy and Move selected,
@@ -128,6 +149,8 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
+  /** #1031 — the file whose details are open. */
+  const detailsParam = idParam(search.get('details'))
   /** #2672 — the batch print open, by id: a reload resumes it. */
   const batchParam = search.get('batch')
   // #3630 — the search, kept in the URL so Back returns to its results.
@@ -146,10 +169,19 @@ export function LibraryPage() {
   const foldersId = useId()
   // Where focus goes back once a folder is chosen and the tree folds away (#3315).
   const foldersToggle = useRef<HTMLButtonElement>(null)
-  const [listing, setListing] = useState<LibraryListing | null>(null)
+  const [listing, setListing] = useState<Listed | null>(null)
+  // The listing on screen, for a Load more that lands after a read again replaced it.
+  const listingNow = useRef<Listed | null>(null)
+  useEffect(() => {
+    listingNow.current = listing
+  }, [listing])
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [moreError, setMoreError] = useState<string | null>(null)
+  // #2290 — narrows the folder tree to the folders named so, and their parents.
+  const [folderFilter, setFolderFilter] = useState('')
   // #3633 — each folder's last listing, shown at once when it is opened again while it
   // is read afresh. Emptied by a reload, which follows a change made here.
-  const listed = useRef(new Map<string, LibraryListing>())
+  const listed = useRef(new Map<string, Listed>())
   const listedReload = useRef(0)
   const [results, setResults] = useState<LibrarySearch | null>(null)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -173,9 +205,23 @@ export function LibraryPage() {
   // folder change until that listing arrives. Comparing with `printParam` here is what
   // makes the held value safe; it never stands in for a link that is not there (#3458).
   const printListed = printParam !== null && seenPrint === printParam
-  const linked = fileParam ?? (printListed ? null : printParam)
+  // #1031 — the same for a details link: a file a listing on screen holds (its card
+  // clicked) needs no read of its folder, which would blank the grid behind the drawer.
+  // Once seen it stays seen while its details are open, so a rename or move that takes it
+  // out of view does not send the page after its folder.
+  const [listedDetails, setListedDetails] = useState<number | null>(null)
+  const seenDetails =
+    detailsParam === null
+      ? null
+      : listedDetails === detailsParam || (onScreen?.files ?? []).some((file) => file.id === detailsParam)
+        ? detailsParam
+        : null
+  if (seenDetails !== listedDetails) setListedDetails(seenDetails)
+  const linked = fileParam ?? (seenDetails !== null ? null : detailsParam) ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
+  /** #4703 — a file is being uploaded into the folder on screen: from disk, or from an assistant session's workspace. */
+  const [uploading, setUploading] = useState(false)
   const [picked, setPicked] = useState<LibraryEntry[]>([])
   /** What Arrange opens on: the ticked files, or a folder's (#3650). */
   const [arranging, setArranging] = useState<LibraryEntry[] | null>(null)
@@ -186,7 +232,18 @@ export function LibraryPage() {
   const [confirming, setConfirming] = useState<LibraryEntry[]>([])
   const [deleted, setDeleted] = useState<Deleted | null>(null)
   const [transfer, setTransfer] = useState<{ mode: TransferMode; files: LibraryEntry[] } | null>(null)
+  // #5355 — a copy between Bambuddy's library and ScadBuddy's own.
+  const [copying, setCopying] = useState(false)
   const [renaming, setRenaming] = useState<LibraryEntry | null>(null)
+  /** #1031 — the open details' file as a rename or move here left it, while no listing holds it. */
+  const [detailsKept, setDetailsKept] = useState<LibraryEntry | null>(null)
+  // Kept for the details open when it was set only: closed (or another file's opened), it
+  // is dropped, so a later link to the file reads it as it is then (#5322 review).
+  const [keptFor, setKeptFor] = useState(detailsParam)
+  if (keptFor !== detailsParam) {
+    setKeptFor(detailsParam)
+    setDetailsKept(null)
+  }
   const [done, setDone] = useState<Done | null>(null)
   const [folderAction, setFolderAction] = useState<FolderAction | null>(null)
   const [folderError, setFolderError] = useState<string | null>(null)
@@ -239,8 +296,12 @@ export function LibraryPage() {
     if (wantedKey !== null) setListing(listed.current.get(`${wantedKey}|${advanced}`) ?? null)
     setSlow(false)
     const slowTimer = window.setTimeout(() => setSlow(true), SLOW_MS)
+    setMoreError(null)
+    // #2290 — as many files as the URL says were shown (Back returns to them), and down
+    // to a linked file at least.
+    const linkedFile = ask.fileId ?? linked ?? undefined
     api
-      .listLibrary({ folderId: ask.folderId, fileId: ask.fileId, all: advanced })
+      .listLibraryPage({ folderId: ask.folderId, fileId: linkedFile, all: advanced }, { limit: shownFrom(search) })
       .then((next) => {
         if (!live) return
         setTree(next.folders ?? [])
@@ -267,7 +328,8 @@ export function LibraryPage() {
       live = false
       window.clearTimeout(slowTimer)
     }
-    // `wanted` and `location.search` are read through `wantedKey` and when the answer lands.
+    // `wanted`, `linked`, `search` and `location.search` are read through `wantedKey` and
+    // when the answer lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantedKey, missing, advanced, reload])
 
@@ -345,6 +407,7 @@ export function LibraryPage() {
         else next.set('q', text)
         next.delete('file')
         next.delete('print')
+        next.delete('details')
         return next
       },
       { replace: searching },
@@ -364,6 +427,20 @@ export function LibraryPage() {
       navigate(-1)
     } else {
       next.delete('print')
+      setSearch(next, { replace: true })
+    }
+  }
+
+  /** #1031 — opens or closes a file's details, as a URL Back returns from. */
+  function openDetails(file: LibraryEntry | null) {
+    const next = new URLSearchParams(search)
+    if (file) {
+      next.set('details', String(file.id))
+      setSearch(next, { state: { detailsOpened: true } })
+    } else if ((location.state as { detailsOpened?: boolean } | null)?.detailsOpened) {
+      navigate(-1)
+    } else {
+      next.delete('details')
       setSearch(next, { replace: true })
     }
   }
@@ -427,9 +504,13 @@ export function LibraryPage() {
     setPicked((now) => now.filter((file) => !gone.has(file.id)))
     setDone(null)
     setDeleted({ result, restoring: false, restored: null, error: null })
-    if (fileParam !== null && gone.has(fileParam)) {
+    const goneParams = (['file', 'details'] as const).filter((name) => {
+      const id = name === 'file' ? fileParam : detailsParam
+      return id !== null && gone.has(id)
+    })
+    if (goneParams.length > 0) {
       const next = new URLSearchParams(search)
-      next.delete('file')
+      for (const name of goneParams) next.delete(name)
       setSearch(next, { replace: true })
     }
     setReload((n) => n + 1)
@@ -444,6 +525,16 @@ export function LibraryPage() {
       // A ticked file keeps its tick where it went: its folder is what the next move reads.
       setPicked((now) => now.map((file) => (moved.has(file.id) ? { ...file, folder_id: folderId } : file)))
       setDone({ kind: 'move', result, where })
+      // #1031 — the file whose details are open moved: the page and its drawer follow it.
+      const followed = detailsParam === null ? undefined : files.find((file) => file.id === detailsParam)
+      if (followed && moved.has(followed.id)) {
+        setDetailsKept({ ...followed, folder_id: folderId })
+        if (!searching) {
+          const next = new URLSearchParams(search)
+          for (const name of ['by', 'project', 'shown', 'file']) next.delete(name)
+          navigate({ pathname: libraryPath(tree ?? [], folderId), search: `?${next.toString()}` }, { replace: true })
+        }
+      }
     } else {
       const result = await api.copyLibraryFiles(files.map((file) => file.id), folderId)
       setDone({ kind: 'copy', result, where })
@@ -456,6 +547,8 @@ export function LibraryPage() {
   async function renameFile(file: LibraryEntry, filename: string) {
     const result = await api.renameLibraryFile(file.id, filename)
     setPicked((now) => now.map((row) => (row.id === file.id ? { ...row, filename: result.filename } : row)))
+    // #1031 — its details keep it by its new name, listed again or not (out of a search).
+    if (file.id === detailsParam) setDetailsKept({ ...file, filename: result.filename })
     setRenaming(null)
     setDeleted(null)
     setDone({ kind: 'rename', result })
@@ -510,6 +603,43 @@ export function LibraryPage() {
     setReload((n) => n + 1)
   }
 
+  /** #2290 — the folder's next page, after the last file shown. */
+  async function loadMore() {
+    const from = listing
+    const last = from?.files?.at(-1)
+    if (!from || !last) return
+    setLoadingMore(true)
+    setMoreError(null)
+    try {
+      const next = await api.listLibraryPage(
+        { folderId: from.folder_id ?? null, all: from.all ?? false },
+        { limit: LIBRARY_PAGE_SIZE, after: last.id },
+      )
+      // A read again (a change made here, Advanced) answered meanwhile: its listing stands.
+      if (listingNow.current !== from) return
+      const grown: Listed = { ...next, files: [...(from.files ?? []), ...(next.files ?? [])] }
+      // No file after the last one shown, though the total can still count one added
+      // before it since (#5291 review): Load more goes until the folder is read again.
+      if ((next.files ?? []).length === 0) grown.total = grown.files?.length ?? 0
+      listed.current.set(`folder:${from.folder_id ?? null}|${from.all ?? false}`, grown)
+      setListing(grown)
+      setSearch(
+        (now) => {
+          const kept = new URLSearchParams(now)
+          kept.set('shown', String((grown.files ?? []).length))
+          return kept
+        },
+        { replace: true },
+      )
+    } catch (cause) {
+      // The last file shown went away: the folder is read again from the top.
+      if (cause instanceof ApiError && cause.status === 409) setReload((n) => n + 1)
+      else setMoreError(cause instanceof ApiError ? cause.detail : 'Could not read more files.')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
   /** #3650 — Arrange on a folder's printable files, read afresh. */
   async function arrangeFolder(folder: LibraryFolderView) {
     setFolderError(null)
@@ -556,6 +686,11 @@ export function LibraryPage() {
   const batchable = picked.filter((file) => file.printable)
   const printing =
     printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
+  const detailsFile =
+    detailsParam === null
+      ? null
+      : ((onScreen?.files ?? []).find((file) => file.id === detailsParam) ??
+        (detailsKept?.id === detailsParam ? detailsKept : null))
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
   const folder = folderId === null ? undefined : tree?.find((row) => row.id === folderId)
   // #3631 — the folder's own subfolders, shown beside its files: a folder of folders is
@@ -589,6 +724,7 @@ export function LibraryPage() {
   const listingShown = !searching && showFiles && listing !== null && (listing.folder_id ?? null) === folderId
   const listedPrintable = listingShown ? files.filter((file) => file.printable) : []
   const unpicked = listedPrintable.filter((file) => !isPicked(file))
+  const moreFiles = listingShown && listing !== null && listing.total > files.length
   const linkedMissing = fileParam !== null && listing !== null && !files.some((file) => file.id === fileParam)
 
   /** #3650 — what a folder's menus offer: on right-click, and on its ⋯ button. */
@@ -646,15 +782,28 @@ export function LibraryPage() {
 
   /** What every card does: the same on a folder's files and on search results. */
   const cardActions = (file: LibraryEntry) => ({
-    highlighted: file.id === fileParam,
+    highlighted: file.id === fileParam || file.id === detailsParam,
     picked: isPicked(file),
     actionsDisabled: tree === null,
     onPick: () => togglePicked(file),
+    onOpen: () => openDetails(file),
     onPrint: () => openPrint(file),
     onRename: () => setRenaming(file),
     onTransfer: (mode: TransferMode) => setTransfer({ mode, files: [file] }),
     onDelete: () => setConfirming([file]),
   })
+
+  const folderFilterBox = (
+    <Input
+      type="search"
+      value={folderFilter}
+      onChange={(event) => setFolderFilter(event.target.value)}
+      placeholder="Filter folders"
+      aria-label="Filter folders"
+      data-testid="library-folder-filter"
+      className="mb-2 h-8"
+    />
+  )
 
   const sidebar = byProject ? (
     <LibraryTree
@@ -666,7 +815,68 @@ export function LibraryPage() {
       rootLabel="All projects"
     />
   ) : (
-    <LibraryTree folders={tree ?? []} selected={folderId} onSelect={selectFolder} wrapRow={folderMenu} />
+    <>
+      {folderFilterBox}
+      <LibraryTree
+        folders={tree ?? []}
+        selected={folderId}
+        onSelect={selectFolder}
+        wrapRow={folderMenu}
+        filter={folderFilter}
+      />
+    </>
+  )
+
+  // A file's dialogs. While its details are open they are rendered in the drawer's tree:
+  // Radix's non-modal dialogs (ui/dialog) are outside the modal drawer otherwise, and a
+  // click in one would close it (#1031).
+  const fileDialogs = (
+    <>
+      <PrintPicker
+        open={printing !== null || (printArranged && arranged !== null)}
+        source={
+          printing
+            ? { kind: 'library', file: printing }
+            : printArranged && arranged
+              ? { kind: 'output', output: arranged.output }
+              : undefined
+        }
+        onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
+        // #3651 — an arranged file opens on the project its sources are all in.
+        content={!printing && printArranged ? arranged?.from : undefined}
+        onRan={() => (printing ? undefined : setArrangedSent(true))}
+      />
+      <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
+      <FileUploadDialog
+        open={uploading}
+        title={`Upload into ${folder ? folderLabel(tree ?? [], folder.id) : 'the top level'}`}
+        description="The file keeps its name in the library."
+        onClose={() => setUploading(false)}
+        // Any file, as the library takes any: a 3MF or G-code prints from it.
+        accept=""
+        hint="Any file. A sliced 3MF or G-code can be printed from the library."
+        onFile={async (file) => {
+          await api.uploadLibraryFile(file, folder?.id ?? null)
+          setReload((n) => n + 1)
+        }}
+        workspace={{ resource: null, label: 'this folder' }}
+      />
+      <LibraryCopyDialog
+        open={copying}
+        onClose={() => setCopying(false)}
+        nativeFolders={tree ?? []}
+        picked={picked}
+        onCopied={() => setReload((n) => n + 1)}
+      />
+      <TransferLibraryFilesDialog
+        mode={transfer?.mode ?? 'move'}
+        files={transfer?.files ?? []}
+        folders={tree ?? []}
+        onClose={() => setTransfer(null)}
+        onConfirm={transferFiles}
+      />
+      <RenameLibraryFileDialog file={renaming} onClose={() => setRenaming(null)} onConfirm={renameFile} />
+    </>
   )
 
   return (
@@ -718,16 +928,20 @@ export function LibraryPage() {
                       rootLabel="All projects"
                     />
                   ) : (
-                    <LibraryTree
-                      folders={tree}
-                      selected={folderId}
-                      wrapRow={folderMenu}
-                      onSelect={(id) => {
-                        setFoldersOpen(false)
-                        selectFolder(id)
-                        foldersToggle.current?.focus()
-                      }}
-                    />
+                    <>
+                      {folderFilterBox}
+                      <LibraryTree
+                        folders={tree}
+                        selected={folderId}
+                        wrapRow={folderMenu}
+                        filter={folderFilter}
+                        onSelect={(id) => {
+                          setFoldersOpen(false)
+                          selectFolder(id)
+                          foldersToggle.current?.focus()
+                        }}
+                      />
+                    </>
                   )}
               </CollapsibleContent>
             </Collapsible>
@@ -769,6 +983,14 @@ export function LibraryPage() {
             <Button
               size="sm"
               variant="outline"
+              data-testid="library-copy-between"
+              onClick={() => setCopying(true)}
+            >
+              <ArrowLeftRightIcon /> Copy between libraries…
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               data-testid="library-move-selected"
               disabled={picked.length === 0 || tree === null}
               onClick={() => setTransfer({ mode: 'move', files: picked })}
@@ -804,8 +1026,9 @@ export function LibraryPage() {
                 })
               }
             >
-              {/* What it adds: this folder's unticked files, whatever is ticked elsewhere. */}
-              Select all in folder ({unpicked.length})
+              {/* What it adds: this folder's unticked files, whatever is ticked elsewhere;
+                  only those read so far while the folder has more (#2290). */}
+              {moreFiles ? 'Select all shown' : 'Select all in folder'} ({unpicked.length})
             </Button>
             {picked.length > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setPicked([])}>
@@ -868,6 +1091,7 @@ export function LibraryPage() {
               tree={tree}
               entries={folder ? folderEntries(folder, false) : undefined}
               onNewFolder={() => setFolderAction({ kind: 'create', folder: folder ?? null })}
+              onUpload={() => setUploading(true)}
             />
           )}
 
@@ -984,24 +1208,48 @@ export function LibraryPage() {
                   <FileCard key={file.id} file={file} {...cardActions(file)} />
                 ))}
               </CardGrid>
+              {listingShown && listing && listing.total > 0 && (moreFiles || files.length > LIBRARY_PAGE_SIZE) && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="sb-num text-xs text-muted-foreground" data-testid="library-shown">
+                    Showing {files.length} of {listing.total}
+                  </p>
+                  {moreFiles && (
+                    <Button size="sm" variant="outline" disabled={loadingMore} onClick={() => void loadMore()}>
+                      {loadingMore ? 'Loading…' : 'Load more'}
+                    </Button>
+                  )}
+                  {moreError && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {moreError}
+                    </p>
+                  )}
+                </div>
+              )}
             </>
           )}
         </section>
 
-        <PrintPicker
-          open={printing !== null || (printArranged && arranged !== null)}
-          source={
-            printing
-              ? { kind: 'library', file: printing }
-              : printArranged && arranged
-                ? { kind: 'output', output: arranged.output }
-                : undefined
-          }
-          onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
-          // #3651 — an arranged file opens on the project its sources are all in.
-          content={!printing && printArranged ? arranged?.from : undefined}
-          onRan={() => (printing ? undefined : setArrangedSent(true))}
-        />
+        {detailsParam !== null && (
+          <LibraryFileDetails
+            // Keyed: each file's drawer captures its own opener for focus return.
+            key={detailsParam}
+            fileId={detailsParam}
+            file={detailsFile}
+            // A listing that failed (a link to a file the library lacks) holds nothing either.
+            listed={onScreen !== null || error !== null}
+            folders={tree ?? []}
+            // A search result names its folder by path, which the tree may not hold.
+            folderPath={searching ? ((results?.files ?? []).find((row) => row.id === detailsParam)?.folder_path ?? null) : null}
+            actionsDisabled={tree === null}
+            onClose={() => openDetails(null)}
+            onPrint={(file) => openPrint(file)}
+            onRename={(file) => setRenaming(file)}
+            onTransfer={(file, mode) => setTransfer({ mode, files: [file] })}
+            onDelete={(file) => setConfirming([file])}
+            dialogs={fileDialogs}
+          />
+        )}
+        {detailsParam === null && fileDialogs}
         {batchParam !== null && <BatchPrintDialog key={batchParam} batchId={batchParam} onClose={closeBatch} />}
         <ArrangeDialog
           open={arranging !== null}
@@ -1014,16 +1262,7 @@ export function LibraryPage() {
             setArrangedSent(false)
           }}
         />
-        <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
         {deleted && <DeletedToast deleted={deleted} onUndo={() => void undo()} onDismiss={() => setDeleted(null)} />}
-        <TransferLibraryFilesDialog
-          mode={transfer?.mode ?? 'move'}
-          files={transfer?.files ?? []}
-          folders={tree ?? []}
-          onClose={() => setTransfer(null)}
-          onConfirm={transferFiles}
-        />
-        <RenameLibraryFileDialog file={renaming} onClose={() => setRenaming(null)} onConfirm={renameFile} />
         <FolderNameDialog
           action={folderAction}
           folders={tree ?? []}
@@ -1092,6 +1331,7 @@ function WhereHeader({
   tree,
   entries,
   onNewFolder,
+  onUpload,
 }: {
   byProject: boolean
   project: LibraryProject | undefined
@@ -1100,6 +1340,8 @@ function WhereHeader({
   tree: LibraryFolderView[] | null
   entries: MenuEntry[] | undefined
   onNewFolder: () => void
+  /** #4703 — upload a file into this folder. */
+  onUpload: () => void
 }) {
   if (tree === null) return null
   if (byProject) {
@@ -1144,6 +1386,9 @@ function WhereHeader({
         </span>
       )}
       <span className="ml-auto flex items-center gap-1">
+        <Button size="sm" variant="ghost" onClick={onUpload} data-testid="library-upload">
+          <UploadIcon /> Upload…
+        </Button>
         <Button size="sm" variant="ghost" onClick={onNewFolder} data-testid="library-new-folder">
           <FolderPlusIcon /> New folder
         </Button>
@@ -1522,6 +1767,8 @@ interface FileCardProps {
   picked: boolean
   actionsDisabled: boolean
   onPick: () => void
+  /** #1031 — opens the file's details. */
+  onOpen: () => void
   onPrint: () => void
   onRename: () => void
   onTransfer: (mode: TransferMode) => void
@@ -1535,6 +1782,7 @@ function FileCard({
   picked,
   actionsDisabled,
   onPick,
+  onOpen,
   onPrint,
   onRename,
   onTransfer,
@@ -1560,20 +1808,29 @@ function FileCard({
           )}
         >
           <div className="relative">
-            {file.has_thumbnail ? (
-              <img
-                src={api.libraryThumbnailUrl(file.id)}
-                alt=""
-                loading="lazy"
-                className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
-              />
-            ) : (
-              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
-                <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                  {nameParts(file.filename).extension || 'file'}
+            {/* #1031 — the thumbnail opens the file's details. */}
+            <button
+              type="button"
+              onClick={onOpen}
+              aria-label={`Details of ${file.filename}`}
+              data-testid={`library-open-${file.id}`}
+              className="block w-full cursor-pointer rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {file.has_thumbnail ? (
+                <img
+                  src={api.libraryThumbnailUrl(file.id)}
+                  alt=""
+                  loading="lazy"
+                  className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
+                />
+              ) : (
+                <span aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
+                  <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                    {nameParts(file.filename).extension || 'file'}
+                  </span>
                 </span>
-              </div>
-            )}
+              )}
+            </button>
             <Checkbox
               aria-label={`Select ${file.filename}`}
               checked={picked}
@@ -1581,7 +1838,7 @@ function FileCard({
               className="absolute top-2 left-2 bg-background/90 shadow-sm"
             />
           </div>
-          <FileName file={file} />
+          <FileName file={file} onOpen={onOpen} />
           {where}
           <FileFacts file={file} />
           {file.printable ? (
@@ -1635,7 +1892,7 @@ function FileCard({
  * `.gcode.3mf` are badges, so the part that tells two cards apart is never what is cut.
  * The whole name is its tooltip.
  */
-function FileName({ file }: { file: LibraryEntry }) {
+function FileName({ file, onOpen }: { file: LibraryEntry; onOpen: () => void }) {
   const parts = nameParts(file.filename)
   const shown = shortName(parts.stem)
   const badges = [
@@ -1648,17 +1905,21 @@ function FileName({ file }: { file: LibraryEntry }) {
     <div className="min-w-0">
       <Tooltip>
         <TooltipTrigger asChild>
-          <p
+          {/* #1031 — the name opens the details too; one tab stop, the thumbnail's. */}
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={onOpen}
             data-testid={`library-name-${file.id}`}
             data-filename={file.filename}
             className={cn(
-              'line-clamp-2 text-sm leading-snug font-medium',
+              'line-clamp-2 w-full cursor-pointer text-left text-sm leading-snug font-medium hover:underline',
               // A cut name fills both lines, so its tail is never what the clamp hides.
               shown === parts.stem ? '[overflow-wrap:anywhere]' : 'break-all',
             )}
           >
             {shown}
-          </p>
+          </button>
         </TooltipTrigger>
         <TooltipContent className="break-all">{file.filename}</TooltipContent>
       </Tooltip>

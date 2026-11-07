@@ -193,7 +193,7 @@ IdP until it expires (§13 D5).
 - **Lifetime**: an idle timeout, slid at most once a minute so a busy page does not
   write on every request, and an absolute one (§13 D5). Expired and revoked rows go to a
   `housekeeping` sweep on the prune Schedule (a new entry in `SWEEPS`, never a loop in
-  the API, per CLAUDE.md).
+  the API, per backend/CLAUDE.md).
 - **Revocation** writes `revoked_at` and publishes `auth.session_revoked` on the event bus,
   which every replica's sockets hear (§5.4). Settings gets a "Signed-in sessions" list
   with revoke, and "Sign out everywhere".
@@ -362,7 +362,7 @@ handed its token (§7.2) without a plaintext secret in Postgres or its backups.
 |---|---|---|
 | `agent` | `api` (every public `/api/v1` route), `internal.workspace` | yes, any principal (§7.3) |
 | `print` | `internal.outputs`, `internal.library` | no |
-| `projects` | the flow host routes (`render`, `outputs` create, the print queue, `arrange`, `operations` reads) | yes, only the run's `started_by` (§7.3) |
+| `projects` | the flow host routes, class `flow.host` (#5298): the 11 routes in `backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`: render, the job and operation reads, outputs create, read and arrange, print runs create (output and library) and read, the print options read, and the printer read of `flow_decide` | yes, only the run's `started_by` (§7.3) |
 
 The Rust slicer keeps its transfer tokens (C6), which are already a credential per request
 and need no caller identity.
@@ -374,8 +374,11 @@ The API issues and rotates them; nobody pastes a secret into a manifest (§13 D4
 - At start, and on the prune Schedule, the API checks each caller's newest live
   credential; when it has fewer than 7 days left, the API mints the next one, valid for
   30 days. The overlap is those 7 days: both are live, so a rotation never cuts a caller
-  off mid-call; one past `expires_at` is refused.
-- A caller reads its current token at start and every hour from a view that its own
+  off mid-call; one past `expires_at` is refused. It also mints the next one at once when
+  the newest live one carries other scopes than the release names (`SCOPES`, #5298); the
+  old one stays live until it expires.
+- A caller reads its current token at start and every hour (and again, at most every 5 s,
+  after the API answers it 401 or 403 `out_of_scope`, #5298) from a view that its own
   Postgres role alone may select (`service_credentials_<caller>`, granted as
   `worker_role.py` grants `RENDER_GRANTS` to `scadbuddy_render`, #601), and unseals it
   with the KEK. Today only the render worker has a role of its own: the print and

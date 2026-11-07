@@ -122,20 +122,17 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
   const TURN_MAX_SECONDS = 900
   /** The tools the worker's Settings switch off, unknown to the turn's own seam. */
   const disabled = new Set<string>()
-  /** Each session a ToolCall gathered its turn's secrets for. */
-  let secretsFor: string[]
-
   beforeAll(async () => {
     const env = agentSessionsEnv()
     const activities = toolCallActivities(TOOLS, {
       services: services({
-        secrets: async () => ['a-saved-claude-credential'],
+        // The one list every mode checks (main.ts, #5480): saved credentials and plugin tokens.
+        secrets: async () => ['a-saved-claude-credential', PLUGIN_TOKEN],
         toolOverrides: { of: async (tool) => ({ disabled: disabled.has(tool) }), disabled: async () => disabled },
       }),
       sessions: { ownerOf: (id) => deps!.sessions.ownerOf(id) },
       approvals: { approved: (id, call) => deps!.approvals!.approved(id, call) },
       audit: { hash: (n, i) => deps!.audit!.hash(n, i), summarise: (n, i) => deps!.audit!.summarise(n, i), record: async () => {} },
-      turnSecrets: async (session) => (secretsFor.push(session), [PLUGIN_TOKEN]),
     })
     worker = await Worker.create({
       connection: env.nativeConnection,
@@ -155,7 +152,6 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     expect(await db.ready()).toBe(true)
     fake = await startFakeAnthropic((r) => script(r))
     ran = []
-    secretsFor = []
     disabled.clear()
     deps = {
       services: services(),
@@ -260,10 +256,9 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
   it("redacts a ToolCall's result of the turn's plugin tokens, as an in-process call is", async () => {
     script = (r) => (lastContent(r).includes('tool_result') ? { text: 'Read.' } : { toolUse: { name: 'mcp__scadbuddy__echo', input: {} } })
     const m = await agent()
-    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'read it back' })
+    const { turn } = await m.start(browser, { origin: 'chat', prompt: 'read it back' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(ran.map((r) => r.tool)).toEqual(['echo'])
-    expect(secretsFor).toEqual([session.id])
     const told = fake.messageCalls().map(lastContent).find((c) => c.includes('tool_result'))
     expect(told).toContain('the plugin answered with')
     expect(told).not.toContain(PLUGIN_TOKEN)

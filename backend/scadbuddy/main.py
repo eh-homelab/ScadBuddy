@@ -38,6 +38,7 @@ from scadbuddy.api import (
     mesh_models,
     metrics,
     models,
+    order_attachments,
     outputs,
     print_attachments,
     telemetry,
@@ -86,6 +87,8 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.crud import idempotency
+from scadbuddy.crud import listener as crud_listener
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -112,8 +115,14 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
-from scadbuddy.printers.bambuddy_sync import sync_printers
+from scadbuddy.printers.bambuddy_sync import (
+    apply_virtual_printers,
+    boot_adoption_due,
+    read_virtual_printers,
+    sync_printers,
+)
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
@@ -187,6 +196,7 @@ from scadbuddy.workflows.housekeeping import (
     ensure_schedules,
     library_worker,
 )
+from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.previews import (
@@ -251,6 +261,8 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
     types, can only describe it through `openapi_extra`, which FastAPI copies in
     verbatim: the model would be inlined and never named, and the generated client
     would have no type for it. Named here, `openapi_extra` points at it by `$ref`.
+    A name already in the spec is refused: two models under one name would leave one
+    shape for both, and a client would build the wrong body (#5317).
     """
     generate = app.openapi
 
@@ -260,6 +272,8 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
         schema = generate()
         named = schema.setdefault("components", {}).setdefault("schemas", {})
         for model in extra:
+            if model.__name__ in named:
+                raise ValueError(f"the OpenAPI spec already names a {model.__name__}")
             named[model.__name__] = model.model_json_schema(
                 ref_template="#/components/schemas/{model}"
             )
@@ -791,6 +805,49 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
     await _with_bambuddy(state, sweep)
 
 
+#: How long the boot's virtual-printer pass may wait for Bambuddy's two lists.
+VP_BOOT_TIMEOUT = 60.0
+
+
+async def _adopt_virtual_rows_logged(state: AppState) -> None:
+    """#5236: the boot's virtual-printer pass. A row made by hand before the sync existed,
+    with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
+    left to the sweeps' Schedule, which prod turns off. So, once per boot and only when
+    `boot_adoption_due`, the sync's virtual-printer part runs: two Bambuddy lists, no
+    access code, no probe. Nothing without a Bambuddy. Bambuddy refusing, unreachable or
+    past `VP_BOOT_TIMEOUT` is one WARNING from this pass (the client logs its own failed
+    request besides); anything else, the registry's own ApiErrors too (#5259), one logged
+    traceback; never raised."""
+    try:
+        registry = state.components.get(PRINTERS)
+        rows = await asyncio.to_thread(registry.store.list)
+        if not boot_adoption_due(rows):
+            return
+        settings = await asyncio.to_thread(state.settings_store.load)
+        # Only Bambuddy's calls are in here: an ApiError from the registry's writes below
+        # is a local fault, never "Bambuddy unreachable" (#5259).
+        try:
+            async with asyncio.timeout(VP_BOOT_TIMEOUT), client_for(settings) as client:
+                listing = await read_virtual_printers(client)
+        except ApiError as error:
+            if error.type == NOT_CONFIGURED_PROBLEM:
+                return
+            logger.warning(
+                "could not sync the virtual printers from Bambuddy at start",
+                extra={"status": error.status},
+            )
+            return
+        except TimeoutError:
+            logger.warning(
+                "could not sync the virtual printers from Bambuddy at start",
+                extra={"timeout": VP_BOOT_TIMEOUT},
+            )
+            return
+        await apply_virtual_printers(registry, listing)
+    except Exception:
+        logger.exception("could not sync the virtual printers from Bambuddy at start")
+
+
 async def _sweep_print_library_logged(state: AppState) -> None:
     """#3827: the native library's old trash and orphan blobs; nothing on ``bambuddy``."""
     try:
@@ -1047,10 +1104,16 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         logger.exception("could not issue the service credentials")
 
 
+def _prune_crud_requests(state: AppState) -> None:
+    with state.settings_store.pool.connection() as conn:
+        idempotency.prune(conn)
+
+
 async def _sweep_auth_sessions_logged(state: AppState) -> None:
     """#4975: the signed-in sessions no request can use again, and (in the activity, so
-    the workflow's history is unchanged) the service credentials' rotation (phase 4) and
-    the spent delegation codes and long-dead access tokens (phase 6)."""
+    the workflow's history is unchanged) the service credentials' rotation (phase 4), the
+    spent delegation codes and long-dead access tokens (phase 6), and the CRUD routes'
+    idempotency replies past their 24 h (#5298, plan D5)."""
     auth = state.components.get(AUTH)
     try:
         deleted = await asyncio.to_thread(auth.sessions.delete_expired)
@@ -1067,6 +1130,11 @@ async def _sweep_auth_sessions_logged(state: AppState) -> None:
         await asyncio.to_thread(auth.tokens.delete_expired)
     except Exception:
         logger.exception("could not delete the spent delegation codes or old access tokens")
+        raise
+    try:
+        await asyncio.to_thread(_prune_crud_requests, state)
+    except Exception:
+        logger.exception("could not prune the CRUD routes' idempotency ledger")
         raise
     if deleted:
         logger.info("deleted expired sessions", extra={"sessions": deleted})
@@ -1329,7 +1397,13 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
-    watches = WatchActivities(registry.store, registry.reports, state.events)
+    watches = WatchActivities(
+        registry.store,
+        registry.reports,
+        state.events,
+        rack=state.components.get(RACK_USAGE),
+        settle_failed=state.metrics.rack_watch_settle_failed,
+    )
     content = state.store.content
     lan = LanDeps(
         printers=registry.store,
@@ -1392,6 +1466,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedOperationWorkflow,
     VersionedFlowTriggerFire,
     VersionedStoreMigration,
+    VersionedLibraryCopy,
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
 )
@@ -1506,6 +1581,12 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
+        *library_copy_activities(
+            lambda: state.settings_store.pool,
+            lambda: state.settings_store.load(),
+            state.components.get(PRINT_LIBRARY),
+            lambda: state.uploads,
+        ),
         *slice_activities(
             state.components.get(SLICING),
             state.components.get(PRINT_LIBRARY),
@@ -1708,6 +1789,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             config=state.config,
             paths=state.paths,
             pool=pool,
+            index=BlobIndex(pool),
             source=source,
             history=state.history,
             fonts=state.fonts,
@@ -1774,6 +1856,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow = follow_changes(state)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
+    adopt_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -1811,6 +1894,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _attach_backfills_logged(state, reraise=False, stop=stop_background),
             name="attach backfills",
         )
+        # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
+        # VP's, with the sweeps off too.
+        adopt_now = asyncio.create_task(
+            _adopt_virtual_rows_logged(state), name="adopt virtual printers"
+        )
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
         if serves_print_queue(state.settings):
@@ -1833,6 +1921,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # backfill's Schedule (#1054), triggered once the library worker connects.
         if state.previews is not None:
             state.previews.start()
+        # #5298 (plan D3): the workers' CRUD port, once the app can answer.
+        await crud_listener.start(app, state.settings.crud_port)
         logger.info(
             "scadbuddy started",
             extra={
@@ -1846,6 +1936,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         yield
     finally:
+        # First: no worker's CRUD call starts on stores closing below.
+        await crud_listener.stop(app)  # never raises: the rest of the shutdown runs
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()
@@ -1853,7 +1945,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now)
+        await _join_background(stop_background, backfill, attach_now, adopt_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
@@ -1998,7 +2090,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         media.MediaUpload,
         mesh_models.MeshUpload,
         library_print.LibraryFileUploadForm,
-        print_attachments.AttachmentUpload,
+        print_attachments.PrintAttachmentUpload,
+        order_attachments.OrderAttachmentUpload,
+        order_attachments.RevisionAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

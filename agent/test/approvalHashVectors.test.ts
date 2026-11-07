@@ -18,6 +18,9 @@ const INPUTS: Array<[string, string]> = [
   ['write', '{"\\ue000":1,"\\ud83d\\ude00":2,"b":[1,2,{"z":null,"a":true}],"a":false}'],
   ['count', '{"n":9007199254740993,"m":1152921504606846976,"f":3.14,"z":0}'],
   ['empty', '{}'],
+  // #4445 review: a flow's print binding, `printer` as the script wrote it (uppercase) and a
+  // LAN-only row's null marker. backend flows/print_binding.py hashes the same.
+  ['print_output', '{"output_id":"o1","printer":"00000000-0000-4000-8000-0000000000AA","printer_id":null}'],
 ]
 
 describe('approval hash vectors', () => {

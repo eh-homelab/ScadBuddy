@@ -56,6 +56,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
         systemAppend: '',
         systemPromptBase: 'claude_code',
         toolSearch: 'off',
+        toolLoadings: [],
         disabledTools: [],
         raisedTiers: [],
         httpRequest: false,

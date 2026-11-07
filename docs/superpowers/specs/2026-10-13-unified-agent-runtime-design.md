@@ -651,7 +651,9 @@ never did (`questions/service.ts:34-38`).
   - Claude Code marks any call that was in flight as *unknown* and never re-runs it (E4).
   - The activity sends one user message: *"The agent service restarted during this turn.
     Calls that were in flight are marked as interrupted; check before repeating any of
-    them. Continue the task."*
+    them. New files in the working directory since the last wait for an answer may be
+    missing; check before relying on them. Continue the task."* (the files sentence since
+    #5140: a new file reaches the workspace only at a park or at the turn's end).
   - Only when the turn's prompt is in the transcript. The first placement records the main
     transcript's last entry (`ai_sessions.turn_mark`); a later one sends the restart message
     when a user entry landed after that mark, and otherwise sends the turn's own message.
@@ -1011,7 +1013,7 @@ plugin pin retire; the list below is otherwise kept as written for the record.*
     pointing here;
   - the parity plan is marked complete or superseded;
   - `docs/ai/operating.md`;
-  - `CLAUDE.md`'s layout bullets for `agent-durable/` and the commands block.
+  - `agent-durable/CLAUDE.md`'s layout bullets for `agent-durable/` and the commands block.
 
 ## 12. Risks, unknowns, follow-ups
 

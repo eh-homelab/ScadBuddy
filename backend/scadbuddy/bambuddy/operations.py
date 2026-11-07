@@ -344,13 +344,19 @@ def bambuddy_kinds_over(
     async def preview_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """#2169: the dialog's background slice, through the run's own path. The upload
         is reused and a finished slice of the same is answered again, so a rerun slices
-        nothing twice."""
+        nothing twice. A fresh start (the dialog's Reslice, #4433) reuses no finished
+        slice, so its rerun can slice again."""
         settings = await asyncio.to_thread(settings_store.load)
         body = PrintRunRequest.model_validate(request["request"])
         # The run's own decision (plan 2026-10-18 D2): a native run's slice builds no
         # Bambuddy client (D3).
         route = await slice_route(
-            settings, printers, reports, printer=body.printer, printer_id=body.printer_id
+            settings,
+            printers,
+            reports,
+            printer=body.printer,
+            printer_id=body.printer_id,
+            asked=body.path,
         )
         lan = route is not None and route.native
         own = await library()
@@ -404,6 +410,8 @@ def bambuddy_kinds_over(
                     native_reads=own,
                     route=route,
                     title=title,
+                    # The dialog's Reslice (#4433): no finished slice answers it.
+                    fresh=bool(request.get("fresh")),
                 )
             )
 
@@ -424,7 +432,8 @@ def bambuddy_kinds_over(
         # The dialog follows the operation anyway; the effect (download, upload, slice
         # start) routinely outlasts the command deadline (#2462). A rerun slices nothing
         # twice (`preview_run`), so a run Temporal timed out on its heartbeat is tried
-        # again rather than recorded failed (#4635).
+        # again rather than recorded failed (#4635). A fresh start's rerun (Reslice,
+        # #4433) can slice again: that costs one slice and queues nothing.
         OperationKind("preview_slice", no_check, preview_run, run_attempts=3, answers_running=True),
         # Only ever a prelude (`output_delete`); a copy already gone counts as deleted,
         # so a retry deletes nothing twice.

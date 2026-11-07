@@ -10,6 +10,7 @@ import type {
   OrderItemCreate,
   OrderItemPatch,
   OrderPatch,
+  OrderRow,
   OrderStatus,
   PaymentCreate,
   Quote,
@@ -20,8 +21,13 @@ import type {
 import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
 import { printersState } from '../printers'
+import { mockLibraryFile } from '../library'
 import { byCreated } from '../../../components/orders/price'
-import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state, UNKNOWN_PARAMETER } from './state'
+import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, revisionsOf, state, UNKNOWN_PARAMETER } from './state'
+import { pushRevision } from './revisions'
+import { orderRow } from './costs'
+import { productOf } from './report'
+import { fillFromRule, returnParts, useParts } from './parts'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -30,15 +36,52 @@ import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, 
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'cursor', 'limit'])
+const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
+/** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
+export const SCAN_PAGE_SIZE = 100
+export const MAX_SCAN_PAGES = 10
 const STATUSES = new Set<OrderStatus>(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled'])
 export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
+/** `lifecycle.py` `TAKES_ITEMS` (#5349): past acceptance, the states that still take an item. */
+export const TAKES_ITEMS = new Set<OrderStatus>(['accepted', 'in_production', 'ready'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
 const DERIVED = new Set<OrderStatus>(['accepted', 'in_production', 'ready', 'shipped'])
 export const SETTLED = new Set(['fulfilled', 'cancelled'])
 const FULFILLABLE = new Set(['approved', 'failed'])
 /** #4719 — the print path's states: an attempt is edited, or accepted once printed, in them. */
 const PRINTING = new Set(['queued', 'printing', 'printed'])
+
+const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax'])
+const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor'])
+
+/**
+ * Pydantic's lax `int` (#5573, measured with `ChargeInput.model_validate_json`): an integral
+ * number, a boolean, or a string of one integer with `_` separators and an optional zero
+ * fraction (" +1_000.0 " is 1000); "5.5", "5." and "1e3" are refused.
+ */
+function laxInt(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : null
+  if (typeof value === 'boolean') return value ? 1 : 0
+  if (typeof value === 'string' && /^\s*[+-]?\d+(_\d+)*(\.0+)?\s*$/.test(value)) return Number(value.replaceAll('_', ''))
+  return null
+}
+
+/**
+ * The backend's `ChargeInput` 422: known kind, label 1..200 code points (as Pydantic counts),
+ * integer amount, no other keys. Pydantic's lax `int` also takes an integer string such as "4".
+ */
+function chargeProblem(c: unknown): string | null {
+  if (typeof c !== 'object' || c === null) return 'Input should be an object'
+  const row = c as Record<string, unknown>
+  const extra = Object.keys(row).find((k) => !CHARGE_KEYS.has(k))
+  if (extra) return `${extra}: Extra inputs are not permitted`
+  if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee' or 'tax'"
+  const points = typeof row.label === 'string' ? [...row.label].length : 0
+  if (points < 1 || points > 200) return 'label: String should have 1 to 200 characters'
+  if (laxInt(row.amount_minor) === null) return 'amount_minor: Input should be a valid integer'
+  return null
+}
 
 /** `Lifecycle._after`: the status the item's latest attempt gives it. */
 function after(latest: Fulfilment, current: string): OrderItem['status'] {
@@ -64,6 +107,32 @@ function decodeCursor(cursor: string): [string, string] | null {
 const itemsOf = (orderId: string) => state.items.filter((i) => i.order_id === orderId).sort((a, b) => a.position - b.position)
 export const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_item_id === itemId)
 const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_item_id === itemId).sort((a, b) => a.attempt - b.attempt)
+/** `lifecycle.py` `stale_attempt` (#5582, #5592): a production attempt older than the revision
+ * the accepted quote prices printed an earlier design. Its accept is refused, and the detail
+ * marks it `stale`. */
+function staleAttempt(attempt: Fulfilment): boolean {
+  if (attempt.purpose !== 'production') return false
+  const pricedId = quotesOf(attempt.order_item_id).find((q) => q.accepted)?.revision_id
+  const priced = pricedId == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === pricedId)
+  return priced !== undefined && Date.parse(attempt.created_at) < Date.parse(priced.created_at)
+}
+/** The attempts that count (#5280): a test print is never one of the item's production. */
+const productionOf = (itemId: string) => attemptsOf(itemId).filter((f) => f.purpose !== 'test')
+/** `OrderStore.print_starting`: the items whose `order_item_print` operation is still
+ * running. The mock attaches a run at once, so a test adds an item here to stand for a
+ * start still under way. */
+export const printsStarting = new Set<string>()
+
+export function reset(): void {
+  printsStarting.clear()
+}
+
+/** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. A claim
+ * counts by its `print_request_id`, its run attached or not yet. */
+export const printInFlight = (itemId: string) => attemptsOf(itemId).find((f) => f.print_request_id && f.outcome === 'unknown' && f.finished_at === null)
+/** `orders/printing.py` `print_request_id`: one claim per item and Idempotency-Key. The
+ * backend hashes the pair; the mock joins it. */
+export const printRequestId = (itemId: string, key: string) => `order-item-print-${itemId}-${key}`
 const shipmentsOf = (orderId: string) => state.shipments.filter((s) => s.order_id === orderId)
 
 export function lock(orderId: string): Order {
@@ -79,12 +148,58 @@ export function itemOf(order: Order, itemId: string): OrderItem {
 export function notEnded(order: Order) {
   if (ENDED.has(order.status)) throw new Refused(`order_${order.status}`, `order ${order.number} is ${order.status}`)
 }
-function notOnHold(order: Order) {
+export function notOnHold(order: Order) {
   if (order.on_hold) throw new Refused('order_on_hold', `order ${order.number} is on hold`)
 }
 export function openForItems(order: Order, what: string) {
   if (!OPEN_FOR_EDITS.has(order.status)) {
     throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted`)
+  }
+}
+/** `Lifecycle._open_for_item` (#5349): past `quoted`, an item with no accepted quote stays open. */
+export function openForItem(order: Order, item: OrderItem, what: string) {
+  if (OPEN_FOR_EDITS.has(order.status)) return
+  if (TAKES_ITEMS.has(order.status) && !quotesOf(item.id).some((q) => q.accepted)) return
+  throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted`, [item.id])
+}
+/** `lifecycle.py` `requote_open` (#5350): open as `openForItem`, and past `quoted` while
+ * the item was revised after acceptance. */
+export function requoteOpen(order: Order, item: OrderItem): boolean {
+  if (OPEN_FOR_EDITS.has(order.status)) return true
+  if (!TAKES_ITEMS.has(order.status)) return false
+  return item.revised_after_acceptance || !quotesOf(item.id).some((q) => q.accepted)
+}
+/** `Lifecycle._open_for_requote` (#5350): the refusal names the route that revises an accepted item. */
+export function openForRequote(order: Order, item: OrderItem, what: string) {
+  if (requoteOpen(order, item)) return
+  const route = TAKES_ITEMS.has(order.status) && item.kind !== 'custom' ? `; revise it with POST /orders/${order.id}/items/${item.id}/revisions/after-acceptance` : ''
+  throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted${route}`, [item.id])
+}
+/** `Lifecycle._takes_item` (#5349): the plain add, or the add after acceptance. */
+export function takesItem(order: Order, afterAcceptance: boolean) {
+  notEnded(order)
+  if (!afterAcceptance) {
+    if (TAKES_ITEMS.has(order.status)) {
+      throw new Refused(
+        'item_locked',
+        `order ${order.number} is ${order.status}: the list of items is pinned once accepted; add an item with POST /orders/${order.id}/items/after-acceptance`,
+      )
+    }
+    openForItems(order, 'the list of items')
+    return
+  }
+  if (OPEN_FOR_EDITS.has(order.status)) {
+    throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted: add the item with POST /orders/${order.id}/items`)
+  }
+  if (!TAKES_ITEMS.has(order.status)) throw new Refused('item_locked', `order ${order.number} is ${order.status}: it takes no new item once shipped`)
+  notOnHold(order)
+}
+/** `Lifecycle._added`: the add's audit row. */
+function added(order: Order, item: OrderItem, afterAcceptance: boolean, detail: Record<string, unknown> = {}) {
+  if (afterAcceptance) {
+    event(order, 'item.added_after_acceptance', { item_id: item.id, title: item.title, quantity: item.quantity, order_status: order.status, ...detail })
+  } else {
+    event(order, 'item.added', { item_id: item.id, ...detail })
   }
 }
 export function event(order: Order, kind: string, detail: Record<string, unknown> = {}) {
@@ -116,14 +231,14 @@ export function rederive(order: Order) {
     const settled = items.every((i) => SETTLED.has(i.status))
     const fulfilled = items.filter((i) => i.status === 'fulfilled')
     if (settled && fulfilled.length > 0) status = uncovered(fulfilled, shipmentsOf(order.id)).length > 0 ? 'ready' : 'shipped'
-    else if (items.some((i) => attemptsOf(i.id).length > 0)) status = 'in_production'
+    else if (items.some((i) => productionOf(i.id).length > 0)) status = 'in_production'
     else status = 'accepted'
   }
   if (status !== order.status) setStatus(order, status)
 }
 
 function detail(order: Order): OrderDetail {
-  const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id) }))
+  const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
   const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position)
   const payments = state.payments.filter((p) => p.order_id === order.id)
   // `api/orders.py` `_totals`: an accepted quote's total, else the newest quote's unit
@@ -159,11 +274,13 @@ function detail(order: Order): OrderDetail {
 function reopenedStatus(item: OrderItem): [OrderItem['status'], boolean] {
   const quotes = quotesOf(item.id)
   const accepted = quotes.some((q) => q.accepted)
-  if (accepted) return [attemptsOf(item.id).at(-1)?.outcome === 'failed' ? 'failed' : 'approved', true]
+  // #5350: priced at its kept quote, but its new design waits for its own.
+  if (accepted && item.revised_after_acceptance) return [quotes.some((q) => !q.accepted && q.revision_id === item.current_revision_id) ? 'quoted' : 'draft', true]
+  if (accepted) return [productionOf(item.id).at(-1)?.outcome === 'failed' ? 'failed' : 'approved', true]
   return [quotes.length > 0 ? 'quoted' : 'draft', false]
 }
 
-/** The backend's answer for a `Refused`: 404 for a missing row, 409 typed by the slug otherwise. */
+/** The backend's answer for a `Refused`: 404 for a missing row, else 409, each typed by the slug. */
 export function refused(request: Request, error: unknown) {
   if (error instanceof FilamentsRefused) return fieldProblem(request, 'filaments', error.message)
   if (error instanceof FieldRefused) return fieldProblem(request, error.field, error.message)
@@ -172,7 +289,8 @@ export function refused(request: Request, error: unknown) {
     ...(error.items.length > 0 ? { items: error.items } : {}),
     ...(error.shipments.length > 0 ? { shipments: error.shipments } : {}),
   }
-  return error.notFound ? problem(request, 404, error.message) : problem(request, 409, error.message, PROBLEMS + error.slug, extensions)
+  // A 404 is typed by its slug too, as `orders/problems.py` `refused` types it.
+  return problem(request, error.notFound ? 404 : 409, error.message, PROBLEMS + error.slug, extensions)
 }
 
 /** A body naming a slot or a filament that cannot be (#4250): a 422 on `filaments`. */
@@ -205,6 +323,40 @@ export function withFilaments(found: OrderItem, filaments: Record<string, string
   return { colours, changed: colours.some((c, i) => c.filament_id !== found.colours[i]?.filament_id) }
 }
 
+/** The refusals of `acceptQuote`, for a caller that must know before it writes. */
+export function checkQuote(found: OrderItem, quote: Quote) {
+  if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+  if (quote.quantity !== found.quantity) throw new Refused('quote_stale', `quote ${quote.id} priced ${quote.quantity}, the item is now ${found.quantity}`)
+  if (found.kind !== 'custom') {
+    if (quote.revision_id != null && quote.revision_id !== found.current_revision_id) {
+      throw new Refused('quote_stale', `quote ${quote.id} prices an earlier revision of the design`)
+    }
+    if (found.approval === 'design_first') {
+      const revisionId = quote.revision_id ?? found.current_revision_id
+      if (revisionsOf(found.id).find((r) => r.id === revisionId)?.answer !== 'accepted') {
+        throw new Refused('revision_not_accepted', `the customer has not accepted the design of item ${found.id}`)
+      }
+    }
+  }
+}
+
+/**
+ * `Lifecycle._accept_quote`, once the caller has checked the order and the item: a quote of
+ * another quantity or of an earlier revision is stale, and a `design_first` item's quote
+ * needs its revision accepted (#5280).
+ */
+export function acceptQuote(order: Order, found: OrderItem, quote: Quote): OrderItem {
+  checkQuote(found, quote)
+  for (const q of quotesOf(found.id)) q.accepted = q.id === quote.id
+  found.status = 'approved'
+  // #5350: the new price replaces the one kept since a revision after acceptance.
+  found.revised_after_acceptance = false
+  found.updated_at = now()
+  event(order, 'quote.accepted', { item_id: found.id, quote_id: quote.id })
+  rederive(order)
+  return found
+}
+
 /** A transition: the lifecycle's rules, then the derivation, then the answer. */
 export function transition<T>(request: Request, run: () => T) {
   try {
@@ -214,7 +366,7 @@ export function transition<T>(request: Request, run: () => T) {
   }
 }
 
-type Resolved = { reference: NonNullable<OrderItem['reference']>; colours: OrderItem['colours'] }
+export type Resolved = { reference: NonNullable<OrderItem['reference']>; colours: OrderItem['colours'] }
 
 /**
  * `Lifecycle._custom_price` (#4954): a custom item's typed price as a `manual` quote,
@@ -245,7 +397,7 @@ function customPrice(order: Order, found: OrderItem, price: number, accept: bool
 }
 
 /** `orders/reference.py`: from the output, or by hand against the catalogue; a problem names the field. */
-function resolveReference(body: { slug?: string | null; commit?: string | null; inputs?: Record<string, unknown> | null; output_id?: string | null }): Resolved | [string, string] {
+export function resolveReference(body: { slug?: string | null; commit?: string | null; inputs?: Record<string, unknown> | null; output_id?: string | null }): Resolved | [string, string] {
   let { slug, commit, inputs } = body
   let colours: OrderItem['colours'] = []
   let libraries: Resolved['reference']['libraries'] = []
@@ -278,12 +430,204 @@ function unknownKeys(request: Request, body: Record<string, unknown>, allowed: s
   return null
 }
 
+/** Whether two references name the same design: the template, its commit and its inputs. */
+export function sameDesign(a: OrderItem['reference'], b: OrderItem['reference']): boolean {
+  if (a === null || b === null) return a === b
+  return a.slug === b.slug && a.commit === b.commit && JSON.stringify(a.inputs) === JSON.stringify(b.inputs)
+}
+
+/** `print_library/ids.py` `NATIVE_ID_BASE`: a native library file's id is at least this. */
+const NATIVE_ID_BASE = 1_000_000_000
+
+/**
+ * #5544 — a library file item, as `ItemCreate._shape` and `api/orders.py` `_library_file`
+ * answer: the file only (any other source, kind or custom field is 422), and a file the
+ * library does not have or does not print is 422 on `library_file_id`.
+ */
+function addLibraryItem(request: Request, order: Order, body: OrderItemCreate & Record<string, unknown>, afterAcceptance: boolean) {
+  if ('kind' in body && body.kind !== 'library_file') return fieldProblem(request, 'body', `library_file_id names a library file item: drop kind '${String(body.kind)}'`)
+  const fileId = body.library_file_id
+  if (fileId == null) return fieldProblem(request, 'body', 'a library_file item needs a library_file_id')
+  if (!Number.isInteger(fileId) || fileId < 1) return fieldProblem(request, 'library_file_id', 'Input should be greater than or equal to 1')
+  const named = (['slug', 'commit', 'inputs', 'output_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
+  if (named.length) return fieldProblem(request, 'body', `a library file item names its file only: drop ${named.join(', ')}`)
+  const file = mockLibraryFile(fileId)
+  if (!file) return fieldProblem(request, 'library_file_id', `no library file ${fileId} in the library that serves`)
+  if (!['3mf', 'gcode.3mf', 'stl'].includes((file.file_type ?? '').toLowerCase())) {
+    return fieldProblem(request, 'library_file_id', `library file ${file.filename} is a ${file.file_type ?? 'file of unknown type'}: ScadBuddy prints only 3MF and STL files`)
+  }
+  try {
+    takesItem(order, afterAcceptance)
+    const at = now()
+    const created: OrderItem = {
+      id: newId('i'),
+      order_id: order.id,
+      position: itemsOf(order.id).length,
+      status: 'draft',
+      quantity: body.quantity as number,
+      title: body.title?.trim() || file.filename,
+      notes: body.notes ?? '',
+      kind: 'library_file',
+      requires_printing: true,
+      sku: body.sku ?? null,
+      reference: null,
+      library_file: { id: file.id, filename: file.filename, library: file.id >= NATIVE_ID_BASE ? 'native' : 'bambuddy' },
+      colours: [],
+      output_id: null,
+      approval: 'together',
+      current_revision_id: null,
+      revised_after_acceptance: false,
+      created_at: at,
+      updated_at: at,
+    }
+    state.items.push(created)
+    added(order, created, afterAcceptance, { item_kind: 'library_file', library_file_id: file.id })
+    rederive(order)
+    return HttpResponse.json(created, { status: 201 })
+  } catch (error) {
+    return refused(request, error)
+  }
+}
+
+/** `POST /orders/:id/items` and, with `afterAcceptance`, `…/items/after-acceptance` (#5349). */
+function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
+  return async ({ request, params }) => {
+    const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'library_file_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
+    if (extra) return extra
+    if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
+    const order = state.orders.find((o) => o.id === params.id)
+    if (!order) return problem(request, 404, `no order '${String(params.id)}'`)
+    if (body.library_file_id != null || body.kind === 'library_file') return addLibraryItem(request, order, body, afterAcceptance)
+    if (body.kind === 'custom') {
+      // `ItemCreate._shape` and `Lifecycle.add_custom_item` (#4954).
+      const named = (['slug', 'commit', 'inputs', 'output_id'] as const).filter((name) => body[name] != null)
+      if (named.length) return fieldProblem(request, 'body', `a custom item names no source: drop ${named.join(', ')}`)
+      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a custom item needs a title')
+      const price = body.unit_price_minor
+      // After acceptance an unset accept means false, and a true one is refused (#5349).
+      const accept = afterAcceptance ? body.accept === true : body.accept !== false
+      if (afterAcceptance && accept) return fieldProblem(request, 'accept', 'accept: an item added after acceptance needs its quote accepted on its own')
+      if (price == null || !Number.isInteger(price) || price < 0) return fieldProblem(request, 'body', 'a custom item needs a unit_price_minor')
+      try {
+        takesItem(order, afterAcceptance)
+        if (accept) notOnHold(order)
+        const at = now()
+        const created: OrderItem = {
+          id: newId('i'),
+          order_id: order.id,
+          position: itemsOf(order.id).length,
+          status: 'draft',
+          quantity: body.quantity as number,
+          title: body.title.trim(),
+          notes: body.notes ?? '',
+          kind: 'custom',
+          requires_printing: body.requires_printing ?? false,
+          sku: body.sku ?? null,
+          reference: null,
+          colours: [],
+          output_id: null,
+          approval: 'together',
+          current_revision_id: null,
+          revised_after_acceptance: false,
+          created_at: at,
+          updated_at: at,
+        }
+        state.items.push(created)
+        added(order, created, afterAcceptance, { item_kind: 'custom' })
+        customPrice(order, created, price, accept)
+        rederive(order)
+        return HttpResponse.json(created, { status: 201 })
+      } catch (error) {
+        return refused(request, error)
+      }
+    }
+    if (body.kind === 'request') {
+      // `ItemCreate._shape` and `Lifecycle.add_request_item` (#5280): a title, no source.
+      const named = (['slug', 'commit', 'inputs', 'output_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
+      if (named.length) return fieldProblem(request, 'body', `a request item takes no ${named.join(', ')}`)
+      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a request item needs a title')
+      try {
+        takesItem(order, afterAcceptance)
+        const at = now()
+        const created: OrderItem = {
+          id: newId('i'),
+          order_id: order.id,
+          position: itemsOf(order.id).length,
+          status: 'draft',
+          quantity: body.quantity as number,
+          title: body.title.trim(),
+          notes: body.notes ?? '',
+          kind: 'request',
+          requires_printing: true,
+          sku: body.sku ?? null,
+          reference: null,
+          colours: [],
+          output_id: null,
+          approval: 'design_first',
+          current_revision_id: null,
+          revised_after_acceptance: false,
+          created_at: at,
+          updated_at: at,
+        }
+        state.items.push(created)
+        added(order, created, afterAcceptance, { item_kind: 'request' })
+        rederive(order)
+        return HttpResponse.json(created, { status: 201 })
+      } catch (error) {
+        return refused(request, error)
+      }
+    }
+    if (body.unit_price_minor != null || body.requires_printing != null || body.accept != null) return fieldProblem(request, 'body', 'only a custom item takes unit_price_minor, requires_printing or accept')
+    const resolved = resolveReference(body)
+    if (Array.isArray(resolved)) return fieldProblem(request, resolved[0], resolved[1])
+    try {
+      takesItem(order, afterAcceptance)
+      const at = now()
+      const position = itemsOf(order.id).length
+      const created: OrderItem = {
+        id: newId('i'),
+        order_id: order.id,
+        position,
+        status: 'draft',
+        quantity: body.quantity as number,
+        title: body.title ?? resolved.reference.template_name,
+        notes: body.notes ?? '',
+        kind: 'model',
+        requires_printing: true,
+        sku: body.sku ?? null,
+        reference: resolved.reference,
+        colours: resolved.colours,
+        output_id: body.output_id ?? null,
+        approval: 'together',
+        current_revision_id: null,
+        revised_after_acceptance: false,
+        created_at: at,
+        updated_at: at,
+      }
+      state.items.push(created)
+      added(order, created, afterAcceptance)
+      // `Lifecycle.add_item`: the design it is made with is its revision 1.
+      pushRevision(order, created, resolved.reference, resolved.colours, '')
+      fillFromRule(order, created)
+      rederive(order)
+      return HttpResponse.json(created, { status: 201 })
+    } catch (error) {
+      return refused(request, error)
+    }
+  }
+}
+
 export const handlers = [
   http.get('/api/v1/orders', ({ request }) => {
     const sp = new URL(request.url).searchParams
     for (const name of sp.keys()) if (!LIST_PARAMS.has(name)) return problem(request, 400, `unknown query parameter '${name}'`, UNKNOWN_PARAMETER)
-    const status = sp.get('status')
-    if (status !== null && !STATUSES.has(status as OrderStatus)) return problem(request, 422, 'status is not an order status')
+    // Repeated, any of them (#5276).
+    const statuses = sp.getAll('status')
+    if (statuses.some((s) => !STATUSES.has(s as OrderStatus))) return problem(request, 422, 'status is not an order status')
+    // #5327: repeated, any of them. An order with no charged figure has no state.
+    const margins = sp.getAll('margin_state')
+    if (margins.some((m) => !MARGIN_STATES.has(m))) return problem(request, 422, 'margin_state is not a margin state')
     const limit = Number(sp.get('limit') ?? '50')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return problem(request, 422, 'limit must be an integer from 1 to 100')
     let after: [string, string] | null = null
@@ -296,21 +640,51 @@ export const handlers = [
     const customer = sp.get('customer_id')
     const from = sp.get('from')
     const to = sp.get('to')
+    // #5329: a profit report row's orders, as `OrderStore.orders` narrows them.
+    const acceptedFrom = sp.get('accepted_from')
+    const acceptedTo = sp.get('accepted_to')
+    const currency = sp.get('currency')
+    if (currency !== null && !/^[A-Z]{3}$/.test(currency)) return fieldProblem(request, 'currency', 'String should match pattern')
+    const product = sp.get('product')
+    if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
-      .filter((o) => !status || o.status === status)
+      .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
       .filter((o) => !to || Date.parse(o.created_at) <= Date.parse(to))
+      .filter((o) => !acceptedFrom || (o.accepted_at != null && Date.parse(o.accepted_at) >= Date.parse(acceptedFrom)))
+      .filter((o) => !acceptedTo || (o.accepted_at != null && Date.parse(o.accepted_at) < Date.parse(acceptedTo)))
+      .filter((o) => !currency || o.currency === currency)
+      .filter((o) => !product || state.items.some((i) => i.order_id === o.id && productOf(i) === product))
       .filter((o) => {
         if (!q) return true
         const owner = state.customers.find((c) => c.id === o.customer_id)
         return o.number.toLowerCase().includes(q) || o.notes.toLowerCase().includes(q) || (owner?.display_name ?? '').toLowerCase().includes(q) || (owner?.company ?? '').toLowerCase().includes(q)
       })
       .filter((o) => !after || o.created_at < after[0] || (o.created_at === after[0] && o.id < after[1]))
-    const page = rows.slice(0, limit)
-    const last = page.at(-1)
-    return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })
+    if (margins.length === 0) {
+      const page = rows.slice(0, limit).map(orderRow)
+      const last = page.at(-1)
+      return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })
+    }
+    // `_order_page`'s margin scan (#5515): read SCAN_PAGE_SIZE rows at a time, at most
+    // MAX_SCAN_PAGES times. At the cap the page can be short or empty, and its cursor is
+    // the last row read, not the last match.
+    const found: OrderRow[] = []
+    let stopped: Order | undefined
+    for (let start = 0; start < MAX_SCAN_PAGES * SCAN_PAGE_SIZE; start += SCAN_PAGE_SIZE) {
+      const read = rows.slice(start, start + SCAN_PAGE_SIZE)
+      for (const order of read.map(orderRow)) {
+        if (order.margin_state == null || !margins.includes(order.margin_state)) continue
+        const last = found.at(-1)
+        if (last && found.length === limit) return HttpResponse.json({ items: found, next_cursor: encodeCursor(last) })
+        found.push(order)
+      }
+      if (rows.length <= start + SCAN_PAGE_SIZE) return HttpResponse.json({ items: found, next_cursor: null })
+      stopped = read.at(-1)
+    }
+    return HttpResponse.json({ items: found, next_cursor: stopped ? encodeCursor(stopped) : null })
   }),
 
   http.post('/api/v1/orders', async ({ request }) => {
@@ -370,7 +744,9 @@ export const handlers = [
       notEnded(order)
       const structural = body.charges != null || 'shipping_address_id' in body || 'billing_address_id' in body
       if (structural && !OPEN_FOR_EDITS.has(order.status)) {
-        throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: only its notes and due date may change now`)
+        // #5351: past `quoted` the charges change on their own route, which the refusal names.
+        const route = body.charges != null && TAKES_ITEMS.has(order.status) ? `; change the charges with PUT /orders/${order.id}/charges/after-acceptance` : ''
+        throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: only its notes and due date may change now${route}`)
       }
       const owner = state.customers.find((c) => c.id === order.customer_id)
       for (const field of ['shipping_address_id', 'billing_address_id'] as const) {
@@ -387,6 +763,38 @@ export const handlers = [
         body.charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
         event(order, 'charges.replaced', { count: body.charges.length })
       }
+      order.updated_at = now()
+      return HttpResponse.json(order)
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
+
+  /** `PUT /orders/:id/charges/after-acceptance` (#5351): `Lifecycle.replace_charges_after_acceptance`. */
+  http.put('/api/v1/orders/:id/charges/after-acceptance', async ({ request, params }) => {
+    const body = (await request.json()) as { charges?: OrderPatch['charges'] } & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['charges'])
+    if (extra) return extra
+    if (!Array.isArray(body.charges)) return fieldProblem(request, 'charges', 'Field required')
+    const charges = body.charges
+    for (const [i, c] of charges.entries()) {
+      const bad = chargeProblem(c)
+      if (bad) return fieldProblem(request, `charges.${i}`, bad)
+    }
+    const parsed = charges.map((c) => ({ ...c, amount_minor: laxInt(c.amount_minor) as number }))
+    try {
+      const order = lock(String(params.id))
+      notEnded(order)
+      if (OPEN_FOR_EDITS.has(order.status)) {
+        throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted: change the charges with PATCH /orders/${order.id}`)
+      }
+      if (!TAKES_ITEMS.has(order.status)) throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: its charges are final once shipped`)
+      notOnHold(order)
+      const line = (c: { kind: string; label: string; amount_minor: number }) => ({ kind: c.kind, label: c.label, amount_minor: c.amount_minor })
+      const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
+      state.charges = state.charges.filter((c) => c.order_id !== order.id)
+      parsed.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
+      event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after: parsed.map(line) })
       order.updated_at = now()
       return HttpResponse.json(order)
     } catch (error) {
@@ -488,7 +896,7 @@ export const handlers = [
         // Nothing would come back priced: reopened open for edits, with every item taken.
         if (DERIVED.has(base) && !othersOpen && !taken.some(([, , priced]) => priced)) base = 'draft'
         for (const [found, status, priced] of taken) {
-          if (DERIVED.has(base) && !priced) continue
+          if (!priced && !OPEN_FOR_EDITS.has(base) && !TAKES_ITEMS.has(base)) continue
           found.status = status
           restored.push(found.id)
         }
@@ -546,87 +954,11 @@ export const handlers = [
     }
   }),
 
-  http.post('/api/v1/orders/:id/items', async ({ request, params }) => {
-    const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
-    if (extra) return extra
-    if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
-    const order = state.orders.find((o) => o.id === params.id)
-    if (!order) return problem(request, 404, `no order '${String(params.id)}'`)
-    if (body.kind === 'custom') {
-      // `ItemCreate._shape` and `Lifecycle.add_custom_item` (#4954).
-      const named = (['slug', 'commit', 'inputs', 'output_id'] as const).filter((name) => body[name] != null)
-      if (named.length) return fieldProblem(request, 'body', `a custom item names no source: drop ${named.join(', ')}`)
-      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a custom item needs a title')
-      const price = body.unit_price_minor
-      if (price == null || !Number.isInteger(price) || price < 0) return fieldProblem(request, 'body', 'a custom item needs a unit_price_minor')
-      try {
-        notEnded(order)
-        openForItems(order, 'the list of items')
-        if (body.accept !== false) notOnHold(order)
-        const at = now()
-        const created: OrderItem = {
-          id: newId('i'),
-          order_id: order.id,
-          position: itemsOf(order.id).length,
-          status: 'draft',
-          quantity: body.quantity as number,
-          title: body.title.trim(),
-          notes: body.notes ?? '',
-          kind: 'custom',
-          requires_printing: body.requires_printing ?? false,
-          sku: body.sku ?? null,
-          reference: null,
-          colours: [],
-          output_id: null,
-          created_at: at,
-          updated_at: at,
-        }
-        state.items.push(created)
-        event(order, 'item.added', { item_id: created.id, item_kind: 'custom' })
-        customPrice(order, created, price, body.accept !== false)
-        rederive(order)
-        return HttpResponse.json(created, { status: 201 })
-      } catch (error) {
-        return refused(request, error)
-      }
-    }
-    if (body.unit_price_minor != null || body.requires_printing != null || body.accept != null) return fieldProblem(request, 'body', 'only a custom item takes unit_price_minor, requires_printing or accept')
-    const resolved = resolveReference(body)
-    if (Array.isArray(resolved)) return fieldProblem(request, resolved[0], resolved[1])
-    try {
-      notEnded(order)
-      openForItems(order, 'the list of items')
-      const at = now()
-      const position = itemsOf(order.id).length
-      const created: OrderItem = {
-        id: newId('i'),
-        order_id: order.id,
-        position,
-        status: 'draft',
-        quantity: body.quantity as number,
-        title: body.title ?? resolved.reference.template_name,
-        notes: body.notes ?? '',
-        kind: 'model',
-        requires_printing: true,
-        sku: body.sku ?? null,
-        reference: resolved.reference,
-        colours: resolved.colours,
-        output_id: body.output_id ?? null,
-        created_at: at,
-        updated_at: at,
-      }
-      state.items.push(created)
-      event(order, 'item.added', { item_id: created.id })
-      rederive(order)
-      return HttpResponse.json(created, { status: 201 })
-    } catch (error) {
-      return refused(request, error)
-    }
-  }),
+  http.post('/api/v1/orders/:id/items', addItem(false)),
+  http.post('/api/v1/orders/:id/items/after-acceptance', addItem(true)),
   http.patch('/api/v1/orders/:id/items/:item', async ({ request, params }) => {
     const body = (await request.json()) as OrderItemPatch & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
+    const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments', 'sku', 'unit_price_minor', 'requires_printing', 'accept', 'approval'])
     if (extra) return extra
     let resolved: Resolved | undefined
     if (body.reference || body.output_id) {
@@ -644,6 +976,7 @@ export const handlers = [
       for (const name of ['unit_price_minor', 'requires_printing'] as const) {
         if (body[name] != null && !custom) throw new FieldRefused(name, `${name}: only a custom item takes one`)
       }
+      if (body.approval != null && found.kind === 'custom' && resolved === undefined) throw new FieldRefused('approval', 'approval: a custom item has no design')
       const accept = body.accept !== false
       let price: number | null = null
       if (custom) {
@@ -657,23 +990,45 @@ export const handlers = [
         if (wanted !== null && (body.quantity != null || wanted !== current || unpinned)) price = wanted
       }
       const refiled = body.filaments ? withFilaments(found, body.filaments) : undefined
-      const repins = resolved !== undefined || body.quantity != null || refiled?.changed === true || price !== null
-      if (repins) openForItems(order, "an item's reference, quantity and filaments")
+      // #5280: a different reference, or a slot's filament, is the item's next revision; the
+      // item's own reference sent again changes nothing and makes none.
+      // The colours' fill: an item with no slots given its first render's amends the current
+      // revision in place (`Lifecycle.update_item`): no new revision, the quotes and status kept.
+      const filled =
+        resolved !== undefined && found.kind !== 'custom' && found.colours.length === 0 && resolved.colours.length > 0 && found.current_revision_id !== null && sameDesign(resolved.reference, found.reference)
+      const moved = resolved !== undefined && !filled && (found.kind === 'custom' || !sameDesign(resolved.reference, found.reference) || (resolved.colours.length > 0 && JSON.stringify(resolved.colours) !== JSON.stringify(found.colours)))
+      const revised = moved || refiled?.changed === true
+      const repins = revised || body.quantity != null || price !== null
+      if (repins && (body.quantity != null || price !== null)) openForItem(order, found, "an item's reference, quantity and filaments")
+      // A design change alone: an item revised after acceptance takes it (#5350).
+      else if (repins) openForRequote(order, found, "an item's reference and filaments")
       if (price !== null && accept) notOnHold(order)
+      if (revised) {
+        const reference = resolved?.reference ?? found.reference!
+        const referenceMoved = resolved !== undefined && !sameDesign(resolved.reference, found.reference)
+        pushRevision(order, found, reference, refiled?.changed ? refiled.colours : referenceMoved ? resolved!.colours : found.colours, '')
+        // An output no longer matches a reference that moved.
+        if (referenceMoved && !('output_id' in body)) found.output_id = null
+      }
+      if (filled) {
+        const revision = revisionsOf(found.id).find((r) => r.id === found.current_revision_id)!
+        revision.colours = resolved!.colours
+        found.colours = resolved!.colours
+        event(order, 'revision.amended', { item_id: found.id, revision_id: revision.id })
+      }
       if (resolved) {
-        found.reference = resolved.reference
-        found.colours = resolved.colours
         found.kind = 'model'
         found.requires_printing = true
       }
+      if (body.approval != null) found.approval = body.approval
       if ('sku' in body) found.sku = body.sku ?? null
       if (body.requires_printing != null) found.requires_printing = body.requires_printing
-      if (refiled?.changed) found.colours = refiled.colours
       if ('output_id' in body) found.output_id = body.output_id ?? null
       if (body.quantity != null) found.quantity = body.quantity
       if (body.title != null) found.title = body.title
       if (body.notes != null) found.notes = body.notes
-      if (repins) {
+      if (repins && !revised) {
+        // A revision drops the quotes itself; a quantity or price change here.
         for (const q of quotesOf(found.id)) q.accepted = false
         found.status = 'draft'
       }
@@ -691,12 +1046,20 @@ export const handlers = [
       if (found.status !== 'draft') {
         throw new Refused('item_not_draft', `item ${found.id} is ${found.status}: cancel it instead (POST /orders/${order.id}/items/${found.id}/cancel)`, [found.id])
       }
+      if (state.timeEntries.some((e) => e.order_item_id === found.id) || state.costEntries.some((e) => e.order_item_id === found.id)) {
+        throw new Refused(
+          'item_has_entries',
+          `item ${found.id} has time or cost entries: remove them or cancel it (POST /orders/${order.id}/items/${found.id}/cancel)`,
+          [found.id],
+        )
+      }
       // Its files go with it (`Lifecycle.delete_item`), each on the audit line.
       for (const attachment of state.attachments.filter((a) => a.item_id === found.id)) {
         event(order, 'attachment.removed', { attachment_id: attachment.id, item_id: found.id, filename: attachment.filename, was_delivered: found.delivered_attachment_id === attachment.id })
         delete state.files[attachment.id]
       }
       state.attachments = state.attachments.filter((a) => a.item_id !== found.id)
+      state.revisions = state.revisions.filter((r) => r.item_id !== found.id)
       state.items = state.items.filter((i) => i.id !== found.id)
       event(order, 'item.deleted', { item_id: found.id })
       rederive(order)
@@ -713,8 +1076,9 @@ export const handlers = [
       const found = itemOf(order, String(params.item))
       if (found.status !== 'cancelled') throw new Refused('item_not_cancelled', `item ${found.id} is ${found.status}: only a cancelled item reopens`, [found.id])
       const [status, priced] = reopenedStatus(found)
-      if (!OPEN_FOR_EDITS.has(order.status) && !priced) {
-        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: an accepted order holds priced items only`, [found.id])
+      // #5349: an order that takes a new item takes back an unpriced one; a shipped one does not.
+      if (!priced && !OPEN_FOR_EDITS.has(order.status) && !TAKES_ITEMS.has(order.status)) {
+        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: a shipped order takes back a priced item only`, [found.id])
       }
       found.status = status
       found.updated_at = now()
@@ -745,16 +1109,19 @@ export const handlers = [
     try {
       const order = lock(String(params.id))
       notEnded(order)
-      openForItems(order, "an item's price")
       const found = itemOf(order, String(params.item))
+      openForRequote(order, found, "an item's price")
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       if (found.kind === 'custom') {
         throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field (PATCH the item's unit_price_minor)`, [found.id])
       }
+      // `lifecycle.py` `has_design`: a template reference, or a library file (#5544).
+      if (found.reference === null && !found.library_file) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`, [found.id])
       const price = body.unit_price_minor as number
       const quote: Quote = {
         id: newId('q'),
         order_item_id: found.id,
+        revision_id: found.current_revision_id,
         created_at: now(),
         source: 'manual',
         accepted: false,
@@ -780,25 +1147,18 @@ export const handlers = [
     transition(request, () => {
       const order = lock(String(params.id))
       notEnded(order)
-      openForItems(order, "an item's price")
-      notOnHold(order)
       const found = itemOf(order, String(params.item))
-      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      openForRequote(order, found, "an item's price")
+      notOnHold(order)
       const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === found.id)
       if (!quote) throw new Refused('quote_not_found', `no quote ${String(params.quote)} of item ${found.id}`, [], true)
-      if (quote.quantity !== found.quantity) throw new Refused('quote_stale', `quote ${quote.id} priced ${quote.quantity}, the item is now ${found.quantity}`)
-      for (const q of quotesOf(found.id)) q.accepted = q.id === quote.id
-      found.status = 'approved'
-      found.updated_at = now()
-      event(order, 'quote.accepted', { item_id: found.id, quote_id: quote.id })
-      rederive(order)
-      return found
+      return acceptQuote(order, found, quote)
     }),
   ),
 
   http.post('/api/v1/orders/:id/items/:item/fulfilments', async ({ request, params }) => {
     const body = (await request.json()) as FulfilmentInput & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes'])
+    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes', 'archive_id'])
     if (extra) return extra
     try {
       const order = lock(String(params.id))
@@ -820,6 +1180,8 @@ export const handlers = [
         accepted_at: null,
         created_by: BROWSER,
         created_at: now(),
+        purpose: 'production',
+        archive_ids: body.archive_id == null ? [] : [body.archive_id],
       }
       state.fulfilments.push(attempt)
       found.status = body.outcome === 'failed' ? 'failed' : 'approved'
@@ -831,20 +1193,28 @@ export const handlers = [
     }
   }),
   http.patch('/api/v1/orders/:id/items/:item/fulfilments/:f', async ({ request, params }) => {
-    const body = (await request.json()) as FulfilmentInput
+    const body = (await request.json()) as FulfilmentInput & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes', 'archive_id'])
+    if (extra) return extra
     return transition(request, () => {
       const order = lock(String(params.id))
       notEnded(order)
-      if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
+      const test = state.fulfilments.find((f) => f.id === params.f)?.purpose === 'test'
+      // `Lifecycle.update_fulfilment`: a test print's attempt (#5280) is settled on an order
+      // not yet accepted too, for an item in any state, and never moves the item.
+      if (!test && !DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
       notOnHold(order)
       const found = itemOf(order, String(params.item))
       const attempt = state.fulfilments.find((f) => f.id === params.f && f.order_item_id === found.id)
       if (!attempt) throw new Refused('fulfilment_not_found', `no attempt ${String(params.f)} of item ${found.id}`, [], true)
       if (attempt.accepted_at) throw new Refused('fulfilment_accepted', `attempt ${attempt.attempt} is accepted`)
-      if (!FULFILLABLE.has(found.status) && !PRINTING.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (!test && !FULFILLABLE.has(found.status) && !PRINTING.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (attempt.print_request_id && !attempt.print_run_id && printsStarting.has(found.id)) {
+        throw new Refused('print_starting', `attempt ${attempt.attempt}'s print is still starting`, [found.id])
+      }
       Object.assign(attempt, { quantity: body.quantity, outcome: body.outcome, failure_reason: body.failure_reason ?? null, started_at: body.started_at ?? null, finished_at: body.finished_at ?? null, notes: body.notes ?? '' })
-      const latest = attemptsOf(found.id).at(-1)!
-      found.status = after(latest, found.status)
+      const latest = productionOf(found.id).at(-1)
+      if (!test && latest) found.status = after(latest, found.status)
       event(order, 'fulfilment.updated', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, outcome: attempt.outcome })
       rederive(order)
       return attempt
@@ -862,10 +1232,16 @@ export const handlers = [
       if (attempt.accepted_at) throw new Refused('fulfilment_accepted', `attempt ${attempt.attempt} is already accepted`)
       if (attempt.outcome === 'failed') throw new Refused('fulfilment_failed', `attempt ${attempt.attempt} failed; nothing was made`)
       if (!FULFILLABLE.has(found.status) && found.status !== 'printed') throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      // #5582 — `_before_priced_design`: an attempt older than the accepted quote's revision printed an earlier design.
+      if (staleAttempt(attempt)) {
+        throw new Refused('fulfilment_stale', `attempt ${attempt.attempt} printed an earlier design than the accepted quote's`, [found.id])
+      }
       attempt.accepted_at = now()
       const made = attemptsOf(found.id).filter((f) => f.accepted_at).reduce((sum, f) => sum + f.quantity, 0)
-      if (made >= found.quantity) found.status = 'fulfilled'
-      else if (found.status === 'printed') found.status = 'approved'
+      if (made >= found.quantity) {
+        found.status = 'fulfilled'
+        useParts(order, found)
+      } else if (found.status === 'printed') found.status = 'approved'
       event(order, 'fulfilment.accepted', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, made })
       rederive(order)
       return attempt
@@ -885,19 +1261,31 @@ export const handlers = [
       if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
       notOnHold(order)
       const found = itemOf(order, String(params.item))
-      if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      // `quote.py` `reference_of`, skipped for a library file item (#5544), which names its file.
+      if (found.reference === null && !found.library_file) {
+        if (found.kind === 'request') throw new Refused('item_has_no_design', `item ${found.id} is a request with no design yet: add a revision first`, [found.id])
+        throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      }
       if (!FULFILLABLE.has(found.status)) {
         throw new Refused(SETTLED.has(found.status) ? 'item_not_open' : 'item_not_approved', `item ${found.id} is ${found.status}`, [found.id])
       }
       const attempts = attemptsOf(found.id)
-      const copies = found.quantity - attempts.filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
+      const open = printInFlight(found.id)
+      if (open) throw new Refused('print_in_flight', `item ${found.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [found.id])
+      const copies = found.quantity - productionOf(found.id).filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
       if (copies < 1) throw new Refused('item_made', `item ${found.id}'s attempts made its ${found.quantity} already: accept them`, [found.id])
       const quote = quotesOf(found.id).find((q) => q.accepted)
-      if (!quote || found.output_id === null) {
+      if (!quote || (!found.library_file && found.output_id === null)) {
         throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
       }
-      // §8.4: the registry printer the run used, as it was named then.
-      const printer = printersState().find((row) => row.id === body.printer || (body.printer_id != null && row.bambuddy_printer_id === body.printer_id))
+      // `printing.py` `_library_stands`: the file must still be in the library that serves.
+      if (found.library_file && !mockLibraryFile(found.library_file.id)) {
+        throw new Refused('library_file_gone', `item ${found.id}'s library file ${found.library_file.filename} (id ${found.library_file.id}) is no longer in the library`, [found.id])
+      }
+      // §8.4: the registry printer the run used (`run.printer`), as it was named then. The run
+      // has one only when the body names a row that is still there (`print_run.py`
+      // `_named_printer`): `printer_id` alone, or a row gone since, prints on no registry row.
+      const printer = body.printer == null ? undefined : printersState().find((row) => row.id === body.printer)
       const attempt: Fulfilment = {
         id: newId('f'),
         order_item_id: found.id,
@@ -911,6 +1299,8 @@ export const handlers = [
         accepted_at: null,
         created_by: BROWSER,
         created_at: now(),
+        purpose: 'production',
+        print_request_id: printRequestId(found.id, request.headers.get('Idempotency-Key')!),
         print_run_id: newId('run'),
         copies,
         sliced_sha256: quote.sliced_sha256,
@@ -955,8 +1345,9 @@ export const handlers = [
         .sort((a, b) => (a.accepted_at! < b.accepted_at! ? -1 : a.accepted_at! > b.accepted_at! ? 1 : a.attempt - b.attempt))
         .at(-1)!
       accepted.accepted_at = null
-      found.status = attempts.at(-1)!.outcome === 'failed' ? 'failed' : 'approved'
+      found.status = productionOf(found.id).at(-1)!.outcome === 'failed' ? 'failed' : 'approved'
       found.updated_at = now()
+      returnParts(order, found)
       event(order, 'item.unfulfilled', { item_id: found.id, fulfilment_id: accepted.id, attempt: accepted.attempt, to: found.status })
       rederive(order)
       return found

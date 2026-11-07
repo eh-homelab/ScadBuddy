@@ -93,8 +93,8 @@ covers the same ground more briefly.
   another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
   [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
-  beside it for one release, and #4868 removed it: every replica since then claims its
-  tabs in `ai_tab_owners`, so a call finds the owner there or answers "not connected".
+  beside it for one release, and #4868 removed it: every replica with the KEK since then
+  claims its tabs in `ai_tab_owners` (one without it claims none, #4949), so a call finds the owner there or answers "not connected".
   A new replica's tab has no row until its host worker polls, so for those first seconds
   of its start a call from another replica answers "not connected" (an old replica could
   reach it through the Postgres relay before).
@@ -271,6 +271,15 @@ main on 2026-11-01:
     with the whole registry went from 334,793 bytes (283 tool definitions) to 47,990. A remote
     plugin's tools are deferred too: the forwarder marks each `_meta['anthropic/alwaysLoad']:
     false`, while the server keeps `alwaysLoad: true` so the first turn waits for it.
+  - Each ScadBuddy tool's loading (#838) is set in Settings → Tools & plugins beside its
+    access, not in this section: **Sent every turn** (`base`, `alwaysLoad`) or **Found by
+    search** (`searchable`). `UPFRONT_TOOLS` are `base` by default, every other tool
+    `searchable`; a searchable tool is still callable by name. Off is the tool's access. The
+    loadings are the `ai_settings` key `tool_loading` (only those that differ from the
+    default), written through `PUT`/`DELETE /api/v1/ai/capabilities/:source/items/:item/loading`
+    as audited settings writes; like the keys above, each turn reads them and a write evicts.
+    Only the in-process server's tools (`builtin:scadbuddy`, `builtin:browser`) take one so
+    far: plugin tools are #5239, tool belts #5240.
   - `system_prompt_base` (`claude_code` or `minimal`; default `claude_code`, #5222): Claude
     Code's preset (29,033 bytes of `system` on 2.1.310), or the SDK's one-line default with
     ScadBuddy's text after it (2,400 bytes).
@@ -1050,6 +1059,16 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   unexpanded and the tool expands them after (measured on Claude Code 2.1.310,
   `agent/test/nativeBuiltins.sdk.test.ts`; `$HOME` and `~user` were not expanded). A turn
   with no working directory is offered none of the file tools, and the seam refuses them.
+  One directory outside it is open, to `Read` and `Grep` only (#5542): the session's own
+  `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<session id>/tool-results/`. Claude Code saves a
+  tool result too large to return inline there and tells the model to read it. The encoded
+  cwd is the real cwd with each character outside `[a-zA-Z0-9]` made `-`. A name over 200
+  characters is cut to 200, then gets `-` and the base-36 form of the absolute value of a
+  signed 32-bit hash of the whole cwd (read from the bundled Claude Code 2.1.314; `confine.ts` `projectDirName`). The
+  long-name value is measured on that binary and pinned in `agent/test/nativeBuiltins.test.ts`
+  (#5588). The target's real path must be
+  in that directory under the config dir's real path, so a link out, `..` and other sessions'
+  results are refused, and so are the config, the transcripts and the credentials.
   A link swapped in between the check and the
   tool's own open is still followed; only a process the session runs (a Monitor command, an
   allowed package's `Bash`) can make one.
@@ -1170,8 +1189,19 @@ activity after its worker died, and `resumeFromRunId`, answer the calls already 
 Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
 (interrupts and marks done) the ones an earlier attempt left open and no journal row names,
 since a worker that died never ran its agents' cleanup (#3395).
-The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
-which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
+The script is kept at `_claude/workflows/<name>-wf_<id>.js` in the session's working
+directory, the path the model is told (Claude Code's own Read and Edit reach it there),
+which the turn's write-back records in the workspace; without a working directory, in the
+workspace itself (#5162). `scriptPath` reads the directory's copy first, then the
+workspace's; `workflow({scriptPath})` inside a script runs on any worker and reads the
+workspace's, so it sees a native edit, and a script launched in the same turn, only once
+that turn wrote it back (at a park or its end): until then it fails "no workflow script".
+A copy the write-back refuses (the workspace caps) never reaches the workspace, so a later
+turn on another pod finds no script there, and the model is told to pass it inline. The
+copy is written only to the directory because a workspace copy written mid-turn would win
+over a later edit in that turn (`workspace/directory.ts` `writeBack`). A path relative to
+the directory, one in it (`sessionWorkDir`, the same on every replica), and an earlier
+build's `/workspace/…` are read; no other absolute path. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.
 `PushNotification` is not provided yet, and the session says so. Skill shell injection
 is off (`disableSkillShellExecution`, `harness/options.ts`) except for an allowed
@@ -1660,6 +1690,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
     `.git` or a large intermediate file while it runs. Claude Code's own file tools (§9) and
     a Monitor's command use the directory.
+  - The minute's write-back syncs only the files the workspace already holds (#5140). A new file
+    is offered at the next park or at the turn's end, so a scratch tree that the turn builds and
+    removes again never reaches the workspace. No write-back offers a new file under a
+    `node_modules` or `__pycache__` directory (`SCRATCH`); a pruning write-back removes those
+    files. A file that the workspace already holds there still syncs. `dist`, `build` and
+    `target` are not on the list, because a turn's deliverable can be there.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
@@ -1696,16 +1732,17 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   link, which `http_response_read` refuses to page.
 - Uploads send workspace files (#2329 part 2,
   [`agent/src/tools/workspaceUploads.ts`](../../agent/src/tools/workspaceUploads.ts)):
-  `upload_asset`, `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`,
+  `upload_asset`, `add_model_media`, `add_readme_image`, `set_model_thumbnail`, `set_output_thumbnail`,
   `create_model`, `import_model`, `write_source_file`, `write_file` and `set_readme` take
   `workspace_path` with its `workspace_sha256`. The text tools (`create_model`,
   `import_model`, `write_source_file`, `write_file`, `set_readme`) take it instead of
   their inline text (exactly one of the two); the binary ones (`upload_asset`,
-  `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`, and
+  `add_model_media`, `add_readme_image`, `set_model_thumbnail`, `set_output_thumbnail`, and
   `create_model_from_mesh`'s upload) take it only (#2510): no tool takes bytes as a
   base64 argument, and `workspace_write` writes text only. Binary reaches the workspace
-  by the user's upload in the panel (`routes/sessionFiles.ts`), `http_request`
-  `save_to_workspace` or `workspace_save`. The sha256 is the one the model read the file at; a file no longer at
+  by the user's upload in the panel (`routes/sessionFiles.ts`), an `/mcp` client's
+  `PUT /mcp/workspace/<path>` (#4550, below), `http_request` `save_to_workspace` or
+  `workspace_save`. The sha256 is the one the model read the file at; a file no longer at
   it is refused, so an approval card and an audit row (the call's input) name the path
   and the exact content, and never carry the bytes. Each tool keeps its tier
   (`import_model` from a file is still `outward`). A binary file is streamed from
@@ -1716,9 +1753,33 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
   redacts them, and an upload would otherwise carry them into a README, a source file,
   an asset or Bambuddy. The refusal names the upload, never the credential.
-- `workspace_read` redacts every saved Claude credential's secret from text (and the
-  turn's plugin tokens) before the model sees it
-  (`ToolServices.secrets`, `main.ts`).
+- `workspace_read` redacts every saved Claude credential's secret and every plugin
+  secret (each enabled plugin's header, each package server's header, each OAuth
+  sign-in's tokens and client secret) from text before the model sees it, in every
+  mode: an in-process turn, a ToolCall, `/mcp` and a background task read one list
+  (`ToolServices.secrets`, `main.ts`; `plugins/secrets.ts` `toolSecrets` over
+  `readPluginSecrets`, #5480, #5483). An in-process turn adds its loaded plugins' current
+  headers to it. One read of the plugin secrets serves every call for 30 s.
+- The list fails closed, in every mode. When the read of the plugin stores fails
+  (`ai_plugins`, `ai_plugin_packages`, `ai_plugin_oauth`), `workspace_read` and every
+  upload fail too, and the next call reads again. Before #5480 this happened only to a
+  ToolCall. An operator who sees these tools fail checks the agent's log and Postgres.
+  A package server's header values are literals in the package's pinned files (vetting
+  refuses a `$` in them), so they are read from the copy that hashes to the pin, not from
+  what a turn loaded (`install.ts` `headerSecrets`, #5485). A package that a turn cannot
+  load (vetting, the egress check of its endpoints, or the listing budget refuses it)
+  stays in the list, and the package's load check in Settings shows why it is not loaded
+  (`routes/pluginPackages.ts`, `packageLoadCheck`). When no verified copy is cached, the
+  read fetches the pin again without vetting it. When that fetch fails too (the git host
+  is down, the pinned commit is gone, or the files do not hash to the pin), the read
+  fails, and so do `workspace_read` and every upload until a fetch succeeds. For 30 s after
+  a failure (`PACKAGE_SECRETS_FAILURE_MS`) that pin is refused again at once, with no new
+  fetch, so the calls do not each wait for a fetch to time out. It is still a refusal,
+  never an empty list (#5488), and it covers the UI's pick too. A copy that hashes to the
+  pin ends it at once: a turn's load that fetches the package, or a copy already in the
+  cache, is read first (#5490). The operator fixes the fetch, or disables or
+  removes the package in Settings. On a fresh replica the first read can wait on that
+  fetch when the start-up warm-up has not finished (`plugin package warm-up` in the log).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. Claude Code's own file tools (§9) reach the workspace only
   through the session's directory, the copy below, which is written back by sha256.
@@ -1735,6 +1796,15 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     CSP and `Cache-Control: private, no-store`. The stored media type is sent, except
     HTML, SVG, XML and scripts, which go as `application/octet-stream`. The panel fetches
     it and saves it through `downloadBlob`, or previews an image through a blob URL.
+    With `?expected_sha256=` it is a pick (#4703): the file is about to go into
+    ScadBuddy, so a file that no longer has that sha256 is `409`. A file that holds a
+    saved Claude credential or a plugin secret is `422`. The plugin secrets are each
+    enabled remote plugin's and package http server's header value, and every OAuth
+    sign-in's access and refresh tokens and client secret
+    ([`agent/src/plugins/secrets.ts`](../../agent/src/plugins/secrets.ts)
+    `readPluginSecrets`). The same reader gives every tool, in every mode (an in-process
+    turn, a ToolCall, `/mcp` and a background task), the plugin secrets it redacts and
+    refuses to upload (`toolSecrets`, #5480).
   - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
     file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
     replaced one). A path that exists without it, or with a stale one, is `409`; past
@@ -1754,6 +1824,60 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.
+- **The workspace file picker** (#4703,
+  [`agent/src/routes/workspacePicker.ts`](../../agent/src/routes/workspacePicker.ts),
+  frontend `components/workspace/WorkspaceFilePicker.tsx`): wherever the UI takes a file
+  (a `// file` parameter, Media, the model and output thumbnails, a mesh import, a
+  library upload), the user can pick one from a session's workspace instead of the disk.
+  `GET /api/v1/ai/workspace-files[?resource_type=&resource_id=&q=&accept=&limit=]` lists
+  the sessions that touched the resource (archived ones left out), or with no resource
+  every session the browser user may see, archived ones too, with the files the target's
+  `accept` takes, searched by title and file name. `accept` and the search are matched in
+  the session list's own query, before its limit, so an older session that holds the
+  only file the target takes is found. It reads as the session routes do
+  (`uiReadProblem`, `SessionManager.list` as the browser user). A file whose bytes are a
+  sealed blob this agent cannot open is listed with `unavailable` and the reason. The
+  pick is the download above with `expected_sha256`; the browser then sends the bytes
+  through the target's own upload route.
+- **Uploads for `/mcp` clients** (#4550,
+  [`agent/src/mcp/uploads.ts`](../../agent/src/mcp/uploads.ts)): an external client (the
+  plugin in a user's own Claude Code) has no panel. It puts a local file into its own
+  principal workspace with `PUT /mcp/workspace/<path>[?expected_sha256=<hex>]`. The body is
+  the file's raw bytes (not multipart, never base64), for example
+  `curl -T thumb.png -H "Authorization: Bearer $TOKEN" "$URL/mcp/workspace/thumb.png"`.
+  `curl -T` (`--upload-file`) sends a PUT with no `Content-Type`; curl's `-d` and
+  `--data-binary` send `application/x-www-form-urlencoded`
+  ([curl manpage, `-d`](https://curl.se/docs/manpage.html#-d)), which is refused `415`.
+  The answer is `201 {name, mediaType, size, sha256}` (`200` when it replaced a file); a
+  later tool call passes `workspace_path: name` and `workspace_sha256: sha256`.
+  - The request passes the gates `/mcp` passes, in the same order (HTTPS, Origin, auth
+    mode, principal), with the same token or OIDC access token. It needs the `write`
+    tier. `disabled` auth mode is refused with `403`: there every caller is `anonymous`,
+    so no credential names one workspace across requests.
+  - The path is checked as every workspace path is (`400` otherwise), segment by segment
+    after percent-decoding, so `..`, an absolute path and a NUL never pass.
+  - The body is read as a stream and stopped at `workspace_file_max_bytes` (`413`); a
+    `Content-Length` over it is refused unread. The quota and the file count apply as to
+    any write (`413`). An empty body is `400`; a `Content-Length: 0` is refused before the
+    caps or the body are read. A `Content-Length` that is not a byte count is `400`:
+    Node's HTTP parser answers it with a bare `400` before the route runs, so the
+    route's own audited `400` is a second guard (measured on Node 24.21.0: a raw
+    `Content-Length: 12abc` request got `HTTP/1.1 400 Bad Request` and never reached the
+    handler; #5467). A form body (`multipart/form-data` or
+    `application/x-www-form-urlencoded`) or a `Content-Encoding` is `415`.
+  - The stored type is ScadBuddy's own guess (the image signature, then the extension,
+    then text or not), never the client's `Content-Type`. When the name's extension, the
+    `Content-Type` or the first bytes disagree about a raster image type (a `.png` that
+    is no PNG, a PNG named `.stl`), the upload is refused `415`. A declared `image/jpg`
+    counts as `image/jpeg`.
+  - A path that exists needs `expected_sha256`, the sha256 it has now (`409` otherwise).
+    The file's `source` is `{kind: "upload", by: "mcp"}`, and it is swept 24 h after its
+    last write, as every principal's file is. Each upload, and each refusal after auth
+    (every `400`, `403`, `409`, `413`, `415` and `503` above), is a `resource` audit row
+    `workspace_upload` on the `mcp` surface.
+  - The ingress routes `/mcp` as a prefix (§1.1), so the route needs no new rule. Its
+    `proxy-body-size` (8m, §1.1) caps an upload below the agent's own cap; raise it on
+    the `/mcp` path to upload larger files.
 
 ## 14. The slicer setting (#3822)
 
@@ -1825,3 +1949,55 @@ refresh token, and they can act only on the repositories the App is installed on
 ([GitHub docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
 Set the App's callback URL to the one the card shows, then give its client id and a
 client secret under **Use my own OAuth app**.
+
+## 16. Attention notifications (#815)
+
+When the assistant needs the person, these channels announce it. That covers a
+`request_user_attention` call, a `browser_*` call waiting for its tab, a plain question
+(`AskUserQuestion`, a durable `ask_user`), and a parked call's approval. A `done` summary
+waits for nothing, so it is not announced. The notice names the kind ("The assistant needs
+your approval", "The assistant has a question"), never the question or the call it would
+approve:
+
+- **The badge.** The shell reads `GET /api/v1/ai/pending-input`. It reads again as soon as
+  `GET /api/v1/ai/pending-input/changes` says something changed, and every 15 s
+  regardless. The change stream is fed by `NOTIFY scadbuddy_pending`, which a trigger sends
+  on every write to `ai_pending_input`, `ai_approvals` and `ai_questions`
+  ([`agent/src/gate/changes.ts`](../../agent/src/gate/changes.ts)).
+- **The page's own notification**, while a ScadBuddy tab is open but hidden
+  (`frontend/src/agent/attentionNotifications.ts`).
+- **Web Push**, with every tab closed ([`agent/src/notify/`](../../agent/src/notify/),
+  `frontend/public/push-sw.js`). The page subscribes once the person turns notifications
+  on. The agent pushes each request once to every subscribed browser of someone who may see
+  it. A push carries the request's id, its session's id and its reason, never the message.
+  The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
+  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. A subscription's endpoint comes
+  from the browser, so it is checked strictly
+  ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
+  stored and again at every push. It must use https, and its host must be on the push-service
+  allowlist (`push_service_hosts` in `ai_settings`, edited in Settings → Assistant →
+  Notifications). The default list is `fcm.googleapis.com`, `updates.push.services.mozilla.com`,
+  `*.notify.windows.com`, `*.push.apple.com` and `web.push.apple.com`. Every address the host
+  resolves to must be public: never loopback, RFC 1918 or ULA, CGNAT, link-local or multicast.
+  The push connects to the checked address and follows no redirect. An endpoint another person
+  holds is refused, and each person keeps at most five subscriptions (the oldest go). A pass has
+  at most four pushes in flight and stops starting them after 30 s. The pod must be able to
+  reach the allowed push services. The VAPID `sub` is `SCADBUDDY_PUBLIC_URL`.
+- **Notification channels** for when nobody is at a browser
+  ([`agent/src/notify/channels.ts`](../../agent/src/notify/channels.ts), Settings →
+  Assistant → Notifications, `ai_notify_channels`). The two kinds are an
+  [ntfy](https://docs.ntfy.sh/publish/) topic URL (`https://ntfy.sh/<topic>` or a self-hosted
+  server, with an optional access token) and a Home Assistant
+  [notify service](https://www.home-assistant.io/integrations/notify/) (its URL, the service
+  name such as `mobile_app_<device>`, and a long-lived access token, called through
+  `POST /api/services/notify/<service>` of the
+  [REST API](https://developers.home-assistant.io/docs/api/rest/)). Each enabled channel is
+  told of every such request once, with its kind as the title, a fixed line and a link
+  to `SCADBUDDY_PUBLIC_URL/?assistant-session=<id>`. Each token is sealed under the KEK, with
+  the channel's kind and URL in the AAD, so changing the URL drops the token. Only the person
+  sets channels: the routes take the UI's requests only, no tool reaches them, and every write
+  is audited. A channel URL follows the plugin endpoint rule: https anywhere, plain http only to
+  loopback or private addresses, never link-local or a metadata host. It is checked when saved
+  and at every send. Neither kind has been run against a real ntfy server or Home Assistant;
+  the tests use fakes. There is no email or Bambuddy channel.

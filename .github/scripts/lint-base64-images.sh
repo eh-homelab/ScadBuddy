@@ -31,10 +31,12 @@ agent-durable/src/scadbuddy_durable/codec.py	return base64.b64encode\(data\)	the
 backend/scadbuddy/workflows/payload_codec.py	return base64.b64encode\(data\)	the Temporal payload codec: sealed ciphertext, not images
 backend/scadbuddy/flows/operations.py	return base64.b64encode\(seal_bytes	a sealed answer, not an image
 backend/scadbuddy/library/settings_store.py	"(secret|dek)": base64.b64encode\(envelope	a sealed secret, not an image
+backend/scadbuddy/api/crud_projects.py	SealedKey\(dek_sealed=base64.b64encode	a sealed payload data key on the projects CRUD route (plan D10), not an image
 frontend/src/agent/tabId.ts	return btoa\(binary\)	the bridge tab id: random bytes as base64url, not an image
 backend/scadbuddy/activity/index.py	return base64.urlsafe_b64encode\(raw.encode\(\)\)	the activity list's opaque cursor (created_at|id), not an image
 backend/scadbuddy/orders/store.py	return base64.urlsafe_b64encode\(f"\{at.isoformat\(\)\}\|\{order_id\}".encode\(\)\)	the orders list's opaque cursor (created_at|id), not an image
 backend/scadbuddy/slicing/transfer_token.py	return base64.urlsafe_b64encode\(data\)	the slicer's transfer token (method, key, expiry and its HMAC) as base64url, not an image
+backend/scadbuddy/library/fetch_grants.py	return base64.urlsafe_b64encode\(data\)	the one-off asset fetch grant (host, URL hash, expiry, nonce and its HMAC) as base64url, not an image
 backend/scadbuddy/auth/login_state.py	return base64.urlsafe_b64encode\(digest\)	the login's PKCE S256 code challenge, base64url by RFC 7636 §4.2, not an image
 backend/scadbuddy/auth/login_state.py	return base64.urlsafe_b64encode\(sealed\)	the sealed login cookie (state, nonce, PKCE verifier) as base64url, not an image
 agent/src/plugins/oauth.ts	headers.authorization = .Basic 	RFC 6749 §2.3.1 client_secret_basic: an OAuth client id and secret, not an image

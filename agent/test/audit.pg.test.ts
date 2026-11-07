@@ -263,7 +263,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect(body.entries[0]).toMatchObject({
       actor: { kind: 'anonymous' },
       client_ip: '127.0.0.1',
-      input_summary: '{"slug":"keychain","force":false}',
+      input_summary: '{"slug":"keychain","force":false,"delete_inbox_copies":false}',
       detail: expect.stringContaining('waiting for approval'),
     })
   })

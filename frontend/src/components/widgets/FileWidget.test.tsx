@@ -6,6 +6,9 @@ import { ApiError, api } from '../../api/client'
 import type { Param, ParamValue } from '../../api/types'
 import { GALLERY_SLUG } from '../../mocks/fixtures'
 import { ASSET_REFUSAL, storeAsset } from '../../mocks/handlers'
+import { AssistantOpenerContext } from '../../agent/chat/opener'
+import { seedSessionFile } from '../../mocks/features/sessionFiles'
+import { seedPickerSession } from '../../mocks/features/workspacePicker'
 import { ParamWidget } from './ParamWidget'
 
 const SLUG = 'gridfinity-bin'
@@ -75,6 +78,53 @@ describe('file parameter (#204)', () => {
     vi.restoreAllMocks()
   })
 
+  it("shows a fetched file's viewBox, licence and source (#959)", async () => {
+    const id = 'f'.repeat(64)
+    vi.spyOn(api, 'getAsset').mockResolvedValue({
+      id,
+      name: 'unicorn.svg',
+      kind: 'svg',
+      size: 100,
+      view_box: [0, 0, 512, 512],
+      path_count: 3,
+      source_url: 'https://api.iconify.design/game-icons/unicorn.svg',
+      licence: { spdx: 'CC-BY-3.0', author: 'GameIcons' },
+    })
+    setup(id)
+    expect(await screen.findByText('SVG · viewBox 0 0 512 512')).toBeInTheDocument()
+    expect(screen.getByText('CC-BY-3.0 · GameIcons')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Source' })).toHaveAttribute(
+      'href',
+      'https://api.iconify.design/game-icons/unicorn.svg',
+    )
+  })
+
+  it("pictures a mesh by its preview and states its triangles and size (#959)", async () => {
+    const id = 'e'.repeat(64)
+    vi.spyOn(api, 'getAsset').mockResolvedValue({
+      id,
+      name: 'bracket.stl',
+      kind: 'stl',
+      size: 684,
+      triangles: 12,
+      bounds: [-5, -10, -15, 5, 10, 15],
+    })
+    setup(id, { ...param, accept: ['stl', '3mf'] })
+    expect(await screen.findByText('STL · 12 triangles · 10×20×30 mm')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Preview of bracket.stl' })).toHaveAttribute(
+      'src',
+      api.assetPreviewUrl(SLUG, id),
+    )
+    expect(screen.getByLabelText('Label artwork')).toHaveAttribute('accept', '.stl,model/stl,.3mf,model/3mf')
+  })
+
+  it('shows a mesh sample by its kind, never as a broken image (#959)', () => {
+    setup('', { ...param, accept: ['stl'], samples: ['bracket.stl'] })
+    const sample = screen.getByRole('radio', { name: 'Use sample bracket.stl' })
+    expect(sample.querySelector('img')).toBeNull()
+    expect(sample).toHaveTextContent('stl')
+  })
+
   it('starts empty, naming the kinds it takes', () => {
     setup()
     expect(screen.getByText('Label artwork')).toBeInTheDocument()
@@ -138,7 +188,7 @@ describe('file parameter (#204)', () => {
     )
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'only SVG and PNG files can be attached',
+      'only SVG, PNG, STL, 3MF and OBJ files can be attached',
     )
     expect(onChange).not.toHaveBeenCalled()
   })
@@ -357,5 +407,27 @@ describe('file parameter: the media picker', () => {
     const { user } = setup('', { ...param, accept: ['svg'] }, undefined, GALLERY_SLUG)
     const picker = await openPicker(user)
     expect(within(picker).queryByRole('region', { name: "Template's images" })).not.toBeInTheDocument()
+  })
+
+  it("takes a file from an assistant session's workspace (#4703)", async () => {
+    seedPickerSession({ id: 's-art', title: 'Label art', touched: [{ type: 'model', id: SLUG }] })
+    seedSessionFile('s-art', 'art/heart.svg', new TextEncoder().encode(HEART), 'image/svg+xml')
+    seedSessionFile('s-art', 'notes.txt', new TextEncoder().encode('no'), 'text/plain')
+    const onChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <Harness initial="" onChange={onChange} />
+      </AssistantOpenerContext.Provider>,
+    )
+    const picker = await openPicker(user)
+    await user.click(within(picker).getByRole('button', { name: 'From a session…' }))
+    const sessions = await screen.findByTestId('workspace-file-picker')
+    await user.click(await within(sessions).findByRole('button', { name: 'Use art/heart.svg' }))
+    expect(within(sessions).queryByRole('button', { name: 'Use notes.txt' })).toBeNull()
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/)))
+    expect(api.uploadAsset).toHaveBeenCalledWith(SLUG, expect.objectContaining({ name: 'heart.svg', type: 'image/svg+xml' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })

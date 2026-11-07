@@ -456,6 +456,35 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     chat.close()
   })
 
+  it("reads a tab as not connected once its replica's status answer is overdue, and still honours the caller's abort (#4950)", async () => {
+    const { rows, store } = sharedRows()
+    const logged: string[] = []
+    // A dead or slow owner: the forward only ends when its signal aborts.
+    const relay: TabRelay = {
+      serve: () => {},
+      attached: () => {},
+      detached: () => {},
+      forward: (_tab, _request, { signal }) =>
+        new Promise((_resolve, reject) => {
+          if (signal.aborted) return reject(new Error('aborted'))
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+        }),
+    }
+    const here = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: (m) => logged.push(m) })
+    rows.set('s-new', OTHER_TAB)
+    const started = Date.now()
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
+    expect(await here.status({ principal: browser, sessionId: 's-new' })).toMatchObject({ attached: false })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(logged.join('\n')).toMatch(/gave no status within 50 ms/)
+
+    const stop = new AbortController()
+    const slow = new TabHub({ sessionTabs: store, relay, statusProbeMs: 60_000, log: () => {} })
+    const status = slow.status({ principal: browser, sessionId: 's-new' }, { signal: stop.signal })
+    stop.abort()
+    await expect(status).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
   it('pairs the attaching tab when the relay fails, and logs the failure', async () => {
     const { rows, store } = sharedRows()
     const logged: string[] = []

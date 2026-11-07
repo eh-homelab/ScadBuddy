@@ -10,7 +10,9 @@ import type { Owner } from '../sessions/protocol.js'
 // write. The decision is bound to the call as it was parked (#2318): its `input_hash` is
 // inputHash (approvals/service.ts) of the tool and arguments the person approved, made
 // by the backend (flows/approval_hash.py), and it must equal the hash of the call being
-// run. Both tables are the backend's; this reads them and never writes.
+// run. A person's approval of a print_output call that names a registry printer binds to
+// the arguments plus the printer_id the row links (flows/print_binding.py, #4445). Both
+// tables are the backend's; this reads them and never writes.
 
 // Lowercase only, as the backend's run ids (uuid4) and the codec's subjects are.
 const FLOW_WORKFLOW = /^flow-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
@@ -40,6 +42,14 @@ export interface FlowRuns {
    * now revoked or expired: `approved` is false for it, and it is refused GrantRevoked.
    */
   lapsed?(requestId: string, inputHash?: string): Promise<boolean>
+  /**
+   * Whether `approved` holds for an approval that never saw what the call resolves to
+   * (#4445): a run grant's match, or a narrowing (`response.narrowed_by`). A person's own
+   * decision on the parked call binds the resolution, so it never counts here.
+   */
+  approvedUnresolved?(requestId: string, inputHash?: string): Promise<boolean>
+  /** Whether a person approved the call (responder `browser`), not the run's grant (#959). */
+  byPerson?(requestId: string, inputHash?: string): Promise<boolean>
 }
 
 /** `started_by` as the backend writes it (core/authorship.py `current_author()`). */
@@ -122,6 +132,29 @@ export class PgFlowRuns implements FlowRuns {
           SELECT 1 FROM flow_grants g
           WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
             AND g.revoked_at IS NULL AND now() < g.expires_at))`
+    return rows.length > 0
+  }
+
+  async approvedUnresolved(requestId: string, inputHash?: string): Promise<boolean> {
+    if (inputHash === undefined) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM workflow_run_decisions d
+      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
+        AND d.input_hash = ${inputHash}
+        AND (d.responder LIKE 'grant:%' OR d.response ? 'narrowed_by')
+        AND (d.responder NOT LIKE 'grant:%' OR EXISTS (
+          SELECT 1 FROM flow_grants g
+          WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
+            AND g.revoked_at IS NULL AND now() < g.expires_at))`
+    return rows.length > 0
+  }
+
+  async byPerson(requestId: string, inputHash?: string): Promise<boolean> {
+    if (inputHash === undefined) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM workflow_run_decisions d
+      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
+        AND d.input_hash = ${inputHash} AND d.responder = 'browser'`
     return rows.length > 0
   }
 

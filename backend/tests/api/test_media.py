@@ -117,6 +117,8 @@ def test_a_legacy_thumbnail_is_listed_as_one_image(
             "kind": "image",
             "caption": "",
             "poster": None,
+            "source_commit": None,
+            "source_revision_id": None,
             "missing": False,
             "readonly": False,
             "content_type": "image/png",

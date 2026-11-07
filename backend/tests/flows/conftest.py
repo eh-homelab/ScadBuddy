@@ -10,10 +10,10 @@ import pytest
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
-from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.projects_worker import projects_worker
+from tests.crud.crud_support import served_projects
 from tests.flows.fake_api import FakeApi, Outward, outward_worker
-from tests.flows.flows_support import Flows, Keys
+from tests.flows.flows_support import Flows
 from tests.support.temporal import temporal_available, temporal_server
 
 
@@ -37,11 +37,15 @@ def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
 
 @pytest.fixture
 async def flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flows]:
-    client = await connect_flows(temporal_address, "default", Keys())
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
-    async with projects_worker(client, queue, FlowActivities(store).all()):
-        flows = Flows(client, queue, store)
+    # The worker's store and payload keys are the CRUD routes', as the projects worker's
+    # (#5298).
+    async with (
+        served_projects(store, temporal_address) as (client, remote, worker_client),
+        projects_worker(worker_client, queue, FlowActivities(remote).all()),
+    ):
+        flows = Flows(client, queue, store, remote)
         try:
             yield flows
         finally:

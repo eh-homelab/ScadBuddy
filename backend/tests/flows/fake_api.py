@@ -15,16 +15,17 @@ from starlette.routing import Route
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
+from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.grants import GrantSpec
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes
-from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 from scadbuddy.workflows.projects_worker import projects_worker
-from tests.flows.flows_support import HASH_KEY, Flows, Keys, define
+from tests.crud.crud_support import served_projects
+from tests.flows.flows_support import HASH_KEY, Flows, define
 
 PROBLEM = "application/problem+json"
 STILL_ACCEPTING = "https://scadbuddy.dev/problems/command-still-accepting"
@@ -210,7 +211,9 @@ class Outward(Flows):
         return call_id
 
 
-def outward_activities(store: FlowStore, api: httpx.AsyncClient | None) -> list[Any]:
+def outward_activities(
+    store: FlowStore | RemoteFlowStore, api: httpx.AsyncClient | None
+) -> list[Any]:
     """The activities of `outward_worker`'s `projects` worker."""
     routes = FlowRoutes(api)
     grants = FlowGrants(store, api, HASH_KEY)
@@ -220,8 +223,12 @@ def outward_activities(store: FlowStore, api: httpx.AsyncClient | None) -> list[
 async def outward_worker(
     temporal_address: str, jobs: JobProjection, api: httpx.AsyncClient | None
 ) -> AsyncIterator[Outward]:
-    client = await connect_flows(temporal_address, "default", Keys())
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
-    async with projects_worker(client, queue, outward_activities(store, api)):
-        yield Outward(client, queue, store)
+    # The worker's store and payload keys are the CRUD routes', as the projects worker's
+    # (#5298).
+    async with (
+        served_projects(store, temporal_address) as (client, remote, worker_client),
+        projects_worker(worker_client, queue, outward_activities(remote, api)),
+    ):
+        yield Outward(client, queue, store, remote)

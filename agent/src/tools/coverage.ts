@@ -7,6 +7,46 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'POST /api/v1/parts',
+    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+  },
+  {
+    operation: 'PATCH /api/v1/parts/{part_id}',
+    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+  },
+  {
+    operation: 'POST /api/v1/parts/{part_id}/adjust',
+    reason: "A person's count of the shelf (#5543, job cost spec §11), with a note why it differs; the assistant cannot count stock.",
+  },
+  {
+    operation: 'GET /api/v1/parts/{part_id}/moves',
+    reason: "The Parts page's stock line (#5543); part_list gives each part's stock now.",
+  },
+  {
+    operation: 'GET /api/v1/parts/rules/{slug}',
+    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+  },
+  {
+    operation: 'PUT /api/v1/parts/rules/{slug}',
+    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+  },
+  {
+    operation: 'GET /api/v1/print/library-copies',
+    reason: "The Library page's list of recent copies between the libraries (#5355); an agent follows the copy it started with get_library_copy.",
+  },
+  {
+    operation: "POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
+    reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
+  },
+  {
+    operation: "POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model",
+    reason: "A person's choice in the Revisions panel (#5280, spec 2026-11-02 §4.6); add_model_media adds the agent's own photos.",
+  },
+  {
+    operation: "GET /api/v1/model-facets",
+    reason: "The Models page's filter counts beside a page of the list (#2290); list_models takes the same search and filters and says how many they select.",
+  },
+  {
     operation: "GET /api/v1/auth/delegated",
     reason: "A delegation link's sign-in (#4975, spec 2026-11-01 §7.4): opened by the browser the agent drives, the link browser_sign_in_link mints; never a call.",
   },
@@ -78,12 +118,38 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: "DELETE /api/v1/auth/service-credentials/{credential_id}",
     reason: "The services' credentials (#4975, spec 2026-11-01 §7.2): an agent must never mint, rotate or revoke the credentials it and the workers present.",
   },
+  ...([
+    'DELETE /api/v1/auth/service-credentials/pods/{pod_uid}',
+    'GET /api/v1/auth/service-callers',
+    'PUT /api/v1/auth/service-callers/{caller}/suspension',
+    'DELETE /api/v1/auth/service-callers/{caller}/suspension',
+  ] as const).map((operation) => ({
+    operation,
+    reason:
+      "Revoking a pod's credentials and suspending a caller (#5494, spec 2026-11-05 §6.5): a person's answer to " +
+      'a compromised service; an agent must never revoke or suspend the credentials it and the workers present.',
+  })),
+  {
+    operation: 'POST /api/v1/auth/service-token',
+    reason:
+      "The service-token exchange (#5494, spec 2026-11-05 §6.2): the agent's own credential source " +
+      '(`api/serviceCredential.ts` `ExchangeCredential`) calls it with its proof; never a tool.',
+  },
   {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +
       'Activity.',
   },
+  ...(['DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}', 'DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "Removing a time or cost entry (#5326) is the order page's: a person corrects the job's cost record, " +
+        'on the audit line. The agent records entries with order_time_add and order_cost_add, and reads them in ' +
+        'order_costs.',
+    }),
+  ),
   {
     operation: 'GET /api/v1/activity/facets',
     reason: "The UI's filter bar; activity_list's own filters say the same.",
@@ -440,6 +506,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   { route: 'GET /api/v1/ai/pending-input', tool: 'pending_input_list' },
   { route: 'GET /api/v1/ai/sessions/{id}/pending-input', tool: 'sessions_pending_input' },
   {
+    route: 'GET /api/v1/ai/pending-input/changes',
+    reason:
+      "The badge's wake-up (#815): an event stream that says only that pending_input_list may have changed, " +
+      'for a browser tab to re-read; an agent reads pending_input_list itself.',
+  },
+  {
     route: 'POST /api/v1/ai/pending-input/{request_id}',
     reason:
       'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +
@@ -451,6 +523,32 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
+  // Web Push (#815 §3, routes/push.ts).
+  ...['GET /api/v1/ai/push/key', 'PUT /api/v1/ai/push/subscription', 'DELETE /api/v1/ai/push/subscription'].map((route) => ({
+    route,
+    reason:
+      "A browser's own push subscription, made by the page once the person grants notifications from a click; " +
+      'an agent reaches the person through request_user_attention, which the push announces.',
+  })),
+  ...['GET /api/v1/ai/settings/push-services', 'PUT /api/v1/ai/settings/push-services'].map((route) => ({
+    route,
+    reason:
+      'Which push services the agent may POST to, a person\'s setting in Settings → Assistant → Notifications; ' +
+      'an agent must not widen where the service sends requests.',
+  })),
+  // Notification channels (#815 §3, routes/notifyChannels.ts).
+  ...[
+    'GET /api/v1/ai/notify/channels',
+    'POST /api/v1/ai/notify/channels',
+    'PUT /api/v1/ai/notify/channels/{id}',
+    'DELETE /api/v1/ai/notify/channels/{id}',
+    'POST /api/v1/ai/notify/channels/{id}/test',
+  ].map((route) => ({
+    route,
+    reason:
+      "Where the assistant's notifications go (ntfy, Home Assistant), set by the person in Settings → Assistant → " +
+      "Notifications; an agent must not choose where the service sends, or read the channels' tokens.",
+  })),
   // Settings → Tools & plugins (#2171).
   ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
     (route) => ({ route, reason: CAPABILITIES_READ }),
@@ -459,6 +557,9 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'PUT /api/v1/ai/capabilities/{source}',
     'PUT /api/v1/ai/capabilities/{source}/items/{item}',
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}',
+    // A ScadBuddy tool's loading (#838).
+    'PUT /api/v1/ai/capabilities/{source}/items/{item}/loading',
+    'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',

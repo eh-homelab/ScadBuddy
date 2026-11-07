@@ -3,12 +3,18 @@ import type { ModelSummary } from '../api/types'
 import { models } from '../mocks/fixtures'
 import {
   DEFAULT_QUERY,
+  MAX_SEARCH_CHARS,
+  MAX_TAG_CHARS,
+  MAX_TAG_FILTER_CHARS,
+  MAX_TAG_FILTERS,
+  MAX_TAGS,
   type CatalogueQuery,
   clearFilters,
   filterModels,
   parseQuery,
   tagCounts,
   toParams,
+  unmatchable,
 } from './catalogueQuery'
 
 function query(patch: Partial<CatalogueQuery>): CatalogueQuery {
@@ -49,6 +55,15 @@ describe('parseQuery / toParams', () => {
     expect(parseQuery(new URLSearchParams(`?${search}`))).toEqual(full)
   })
 
+  it('keeps every tag of a hand-edited URL, and cuts only the search to what GET /models takes (#5288 review)', () => {
+    const many = Array.from({ length: MAX_TAGS + 5 }, (_, n) => `tag=t${n}`).join('&')
+    const long = 'x'.repeat(MAX_TAG_CHARS + 1)
+    const parsed = parseQuery(new URLSearchParams(`${many}&tag=${long}&q=${'y'.repeat(MAX_SEARCH_CHARS + 9)}`))
+    expect(parsed.tags).toHaveLength(MAX_TAGS + 6)
+    expect(parsed.tags).toContain(long)
+    expect(parsed.q).toHaveLength(MAX_SEARCH_CHARS)
+  })
+
   it('ignores unknown values and repeated or empty tags', () => {
     expect(
       parseQuery(new URLSearchParams('origin=theirs&sort=size&view=grid&tag=a&tag=a&tag=')),
@@ -67,6 +82,7 @@ describe('filterModels', () => {
       'ui-demo',
       'builtin:keychain-template',
       'builtin:dollhouse-kit',
+      'bookmark',
       'ui-unmigrated',
     ])
   })
@@ -107,9 +123,10 @@ describe('filterModels', () => {
     )
   })
 
-  it('sorts by name, in locale order', () => {
+  it('sorts by name', () => {
     expect(slugs(filterModels(models, query({ sort: 'name' })))).toEqual([
       'builtin:maze-puzzle',
+      'bookmark',
       'creme-coaster',
       'builtin:dollhouse-kit',
       'gridfinity-bin',
@@ -118,6 +135,24 @@ describe('filterModels', () => {
       'ui-broken',
       'ui-demo',
       'ui-unmigrated',
+    ])
+  })
+
+  it('sorts names as the backend does: code points after folding (#5286 review)', () => {
+    const named = ['Zed', 'a-b', '_under', '2 bolt', 'A b', '10 bolt', 'Éclair'].map((name, n) => ({
+      ...(models[0] as ModelSummary),
+      slug: `e${n}`,
+      name,
+    }))
+    // backend/tests/api/test_list_paging.py::test_models_sort_names_by_folded_code_points
+    expect(filterModels(named, query({ sort: 'name' })).map((m) => m.name)).toEqual([
+      '10 bolt',
+      '2 bolt',
+      '_under',
+      'A b',
+      'a-b',
+      'Éclair',
+      'Zed',
     ])
   })
 
@@ -135,6 +170,7 @@ describe('tagCounts', () => {
       { tag: 'custom-ui', count: 4 },
       { tag: 'keychain', count: 2 },
       { tag: 'kitchen', count: 2 },
+      { tag: 'bookmark', count: 1 },
       { tag: 'gridfinity', count: 1 },
       { tag: 'storage', count: 1 },
       { tag: 'Tea & Coffee', count: 1 },
@@ -144,11 +180,30 @@ describe('tagCounts', () => {
     ])
   })
 
+  it('counts tags that fold alike as one, spelled as the first model spells it (#2290)', () => {
+    const first = { ...(models[0] as ModelSummary), slug: 'a', tags: ['Crème'] }
+    const second = { ...(models[0] as ModelSummary), slug: 'b', tags: ['creme', 'CREME'] }
+    expect(tagCounts([first, second])).toEqual([{ tag: 'Crème', count: 2 }])
+  })
+
   it('keeps a selected tag no model carries, at zero, so it can be unselected', () => {
     expect(tagCounts([], ['template'])).toEqual([{ tag: 'template', count: 0 }])
     expect(tagCounts(models.slice(0, 1), ['KEYCHAIN'])).not.toContainEqual(
       expect.objectContaining({ tag: 'KEYCHAIN' }),
     )
+  })
+})
+
+describe('unmatchable (#5305 review)', () => {
+  it('is true past what GET /models takes, as sent: too many tags, or one too long', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAG_FILTERS + 1 }, (_, n) => `t${n}`))).toBe(true)
+    expect(unmatchable(['x'.repeat(MAX_TAG_FILTER_CHARS + 1)])).toBe(true)
+  })
+
+  it('leaves tags past the caps of a model to the route, which answers none', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAGS + 1 }, (_, n) => `t${n}`))).toBe(false)
+    // In code points, as the backend counts: 400 of them, 800 UTF-16 units.
+    expect(unmatchable(['😀'.repeat(MAX_TAG_FILTER_CHARS)])).toBe(false)
   })
 })
 

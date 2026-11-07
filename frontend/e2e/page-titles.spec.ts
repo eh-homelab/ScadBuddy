@@ -28,6 +28,10 @@ const PAGES = [
   '/activity',
   // Orders (#4249), with the mock's fixtures (src/mocks/features/orders/state.ts).
   '/orders',
+  // The profit report (#5329): its tab is "Profit by model · ScadBuddy".
+  '/orders/profit',
+  // The parts inventory (#5543): its tab is "Parts · ScadBuddy".
+  '/orders/parts',
   '/orders/0e5a3c1e-1111-4222-8333-944455556661',
   '/customers',
   '/customers/c1a00000-0000-4000-8000-000000000001',
@@ -41,6 +45,16 @@ for (const path of PAGES) {
     await expect(page).toHaveTitle(/^\S.* · ScadBuddy$/)
   })
 }
+
+test('/orders/profit is the profit report, not an order', async ({ page }) => {
+  await page.goto('/orders/profit')
+  await expect(page).toHaveTitle('Profit by model · ScadBuddy')
+})
+
+test('/orders/parts is the parts inventory, not an order', async ({ page }) => {
+  await page.goto('/orders/parts')
+  await expect(page).toHaveTitle('Parts · ScadBuddy')
+})
 
 test('covers every route App.tsx declares', () => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')

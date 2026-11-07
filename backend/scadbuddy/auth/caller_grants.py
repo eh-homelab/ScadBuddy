@@ -13,8 +13,8 @@ A change to what a caller reads or writes changes its list in the same PR;
 its list.
 
 The `ai_*` tables are the agent's: its role creates and migrates them, so it owns them,
-and the agent grants what the API's role and `scadbuddy_projects` read of them
-(`agent/src/db/grants.ts`). The lists here hold the backend's relations only.
+and the agent grants what the API's role reads of them (`agent/src/db/grants.ts`). The
+lists here hold the backend's relations only.
 """
 
 from __future__ import annotations
@@ -96,29 +96,13 @@ PRINT_SEQUENCES = (
     "native_slices_id_seq",
 )
 
-#: What the projects worker (`--queue projects`, flow runs) touches of the backend's.
-PROJECTS_GRANTS: Grants = {
-    # The settings snapshot (operation retention, `workflows/operation_activities.py`).
-    "settings": _READ,
-    "model_print_choices": _READ,
-    "printer_bed_types": _READ,
-    "printers": _READ,
-    "scadbuddy_migrations": _READ,
-    "events": ("SELECT", "INSERT"),
-    "operations": _ALL,
-    # A run's row and its steps (`flows/store.py`; FOR UPDATE needs UPDATE).
-    "workflow_runs": ("SELECT", "INSERT", "UPDATE"),
-    "workflow_definitions": _READ,
-    "workflow_run_decisions": ("SELECT", "INSERT", "DELETE"),
-    "workflow_run_proposals": ("SELECT", "INSERT"),
-    # A run grant is read FOR SHARE, which needs UPDATE.
-    "flow_grants": ("SELECT", "UPDATE"),
-    # `FLOW_GRANT_CHECK` → `FlowStore.consume_grant` (`flows/store.py`): the use recorded
-    # (INSERT ... RETURNING) and, for a trigger-seeded run, its standing grant locked
-    # FOR UPDATE and its counters spent.
-    "flow_grant_uses": ("SELECT", "INSERT"),
-    "flow_trigger_grants": ("SELECT", "UPDATE"),
-}
+#: What the projects worker (`--queue projects`, flow runs) touches of the backend's:
+#: nothing. It holds no database (#5298): its flow runs, decisions, grants, operations
+#: and payload keys go through the API's CRUD routes (`crud/projects.py`,
+#: `crud/operations.py`). An existing role keeps the grants it held: they are never
+#: revoked from a live role here, but by the role's revoke (#5298, plan 2026-11-06
+#: Task 11).
+PROJECTS_GRANTS: Grants = {}
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads
 #: flow runs and their decisions, and its session files' trigger

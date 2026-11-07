@@ -256,3 +256,60 @@ describe('PreviewPane: the native slicer (plan 2026-10-16 Task 14)', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/^The slicer refused the plate: plate 99 is empty$/)
   })
 })
+
+describe('PreviewPane: the Reslice button (#4433)', () => {
+  function reslicePane(props: { canReslice: boolean; reslicing: boolean; stale: boolean; sliceError?: string | null; onReslice?: () => void }) {
+    render(
+      <PreviewPane
+        url={null}
+        thumbnailUrl={null}
+        slots={slots}
+        spools={[]}
+        plan={[]}
+        colors={new Map()}
+        slice={slice([{ slot_id: 1, grams: 14.5 }])}
+        stale={props.stale}
+        slicing={props.reslicing}
+        sliceError={props.sliceError ?? null}
+        onReslice={props.onReslice ?? (() => undefined)}
+        canReslice={props.canReslice}
+        reslicing={props.reslicing}
+      />,
+    )
+  }
+
+  it('reslices on a click', async () => {
+    let clicks = 0
+    reslicePane({ canReslice: true, reslicing: false, stale: false, onReslice: () => (clicks += 1) })
+
+    const button = screen.getByRole('button', { name: 'Reslice' })
+    expect(button).toBeEnabled()
+    await userEvent.click(button)
+
+    expect(clicks).toBe(1)
+  })
+
+  it('spins and is disabled while its slice runs, the old figures dimmed and stale', () => {
+    reslicePane({ canReslice: false, reslicing: true, stale: true })
+
+    const button = screen.getByRole('button', { name: 'Reslice' })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('aria-busy', 'true')
+    expect(button.querySelector('.animate-spin')).not.toBeNull()
+    expect(screen.getByTestId('slice-status')).toHaveTextContent('Reslicing…')
+    expect(screen.getByTestId('slice-time')).toBeInTheDocument()
+    expect(screen.getByTestId('slice-time').closest('dl')).toHaveAttribute('data-stale', 'true')
+  })
+
+  it('shows a failure next to it and stays clickable', () => {
+    reslicePane({ canReslice: true, reslicing: false, stale: false, sliceError: 'slice job not found or expired' })
+
+    expect(screen.getByRole('alert')).toHaveTextContent('slice job not found or expired')
+    expect(screen.getByRole('button', { name: 'Reslice' })).toBeEnabled()
+  })
+
+  it('is not offered without a reslice to start', () => {
+    pane(slice([]))
+    expect(screen.queryByRole('button', { name: 'Reslice' })).toBeNull()
+  })
+})

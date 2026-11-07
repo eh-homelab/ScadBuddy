@@ -40,7 +40,7 @@ from scadbuddy.store.content_models import (
     blob_digest,
 )
 from scadbuddy.store.download_cache import DownloadCache, TooLargeError
-from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.index import IndexesBlobs
 from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
@@ -73,7 +73,7 @@ class ContentStore:
     def __init__(
         self,
         backend: ContentBackend,
-        index: BlobIndex,
+        index: IndexesBlobs,
         *,
         max_total_bytes: int = 0,
         max_count: int = 0,

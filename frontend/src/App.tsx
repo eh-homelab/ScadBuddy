@@ -22,6 +22,8 @@ const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/His
 const LibraryPage = lazyRetry(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
 const OrderPage = lazyRetry(async () => ({ default: (await import('./pages/OrderPage')).OrderPage }))
 const OrdersPage = lazyRetry(async () => ({ default: (await import('./pages/OrdersPage')).OrdersPage }))
+const ProfitPage = lazyRetry(async () => ({ default: (await import('./pages/ProfitPage')).ProfitPage }))
+const PartsPage = lazyRetry(async () => ({ default: (await import('./pages/PartsPage')).PartsPage }))
 const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
 // Two pages of one module, so one chunk.
 const loadPrints = () => import('./pages/PrintsPage')
@@ -104,6 +106,8 @@ export function App() {
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="library/*" element={<LibraryPage />} />
         <Route path="orders" element={<OrdersPage />} />
+        <Route path="orders/profit" element={<ProfitPage />} />
+        <Route path="orders/parts" element={<PartsPage />} />
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />

@@ -22,8 +22,12 @@ HIDDEN_GROUP = "Hidden"
 GLOBAL_GROUP = "Global"
 
 #: What a `// file` parameter can take (#204): an SVG for `import()`, a PNG for
-#: `surface()`. The upload route accepts exactly these, sniffed from the content.
-FILE_KINDS: tuple[str, ...] = ("svg", "png")
+#: `surface()`, and (#959) an STL, 3MF or OBJ mesh for `import()`. The upload route
+#: accepts exactly these, sniffed from the content.
+FILE_KINDS: tuple[str, ...] = ("svg", "png", "stl", "3mf", "obj")
+#: What a bare `// file` takes: the images it always took, so no template's parameter
+#: starts taking meshes it was not written for. A mesh kind is named (`// file:stl`).
+DEFAULT_FILE_KINDS: tuple[str, ...] = ("svg", "png")
 
 #: What a `file` parameter may hand OpenSCAD: a bare name in the model's directory,
 #: never a path. Uploads are staged under names that match (#204), and a template's
@@ -120,7 +124,8 @@ class CustomizerSchema(BaseModel):
 
 #: Bumped when `build_schema` derives something new from the same source, so an entry
 #: written by an older derivation misses. 2: CSS-name colour defaults as hex (#187).
-SCHEMA_CACHE_VERSION = 2
+#: 3: `// file:stl`, `:3mf` and `:obj` typed as file (#959).
+SCHEMA_CACHE_VERSION = 3
 
 
 def source_sha256(source: str) -> str:
@@ -129,9 +134,10 @@ def source_sha256(source: str) -> str:
 
 def _accepted(raw: str | None) -> tuple[str, ...]:
     """The kinds a `// file` annotation names, in FILE_KINDS order. A bare `// file`
-    takes every kind; one that names only kinds ScadBuddy cannot take takes none."""
+    takes the images (`DEFAULT_FILE_KINDS`); one that names only kinds ScadBuddy cannot take
+    takes none."""
     if raw is None or not raw.strip():
-        return FILE_KINDS
+        return DEFAULT_FILE_KINDS
     named = {part.strip().lower().lstrip(".") for part in raw.split(",")}
     return tuple(kind for kind in FILE_KINDS if kind in named)
 
@@ -190,7 +196,7 @@ def _resolve_type(raw: dict[str, Any], annotation: Annotation | None) -> Paramet
             return "color"
         if kind == "font":
             return "font"
-        # An annotation naming no kind ScadBuddy can store (`// file:stl`) stays a
+        # An annotation naming no kind ScadBuddy can store (`// file:step`) stays a
         # plain string rather than a picker nothing can be dropped on.
         if kind == "file" and annotation is not None and annotation.accept:
             return "file"

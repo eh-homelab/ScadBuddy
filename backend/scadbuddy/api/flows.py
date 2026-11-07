@@ -26,6 +26,7 @@ from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.api.operations import (
     KEY_REQUIRED_DETAIL,
     KEY_REQUIRED_PROBLEM,
@@ -35,14 +36,22 @@ from scadbuddy.api.operations import (
     run_operation,
     still_accepting,
 )
+from scadbuddy.bambuddy.print_run import lan_printers
 from scadbuddy.core.authorship import by_a_person, current_author, requester_record
-from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
+from scadbuddy.core.gitrepo import (
+    COMMIT_ID_PATTERN,
+    MAX_BODY,
+    MAX_SUBJECT,
+    GitError,
+    RevisionNotFoundError,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flow_triggers.component import Triggers, TriggersDep
 from scadbuddy.flow_triggers.fire import pause_for_flow
 from scadbuddy.flow_triggers.models import RunTrigger
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
+from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
     FlowDeletedError,
@@ -70,6 +79,7 @@ from scadbuddy.flows.models import (
     TERMINAL,
     Definition,
     DefinitionSummary,
+    FlowDetails,
     FlowDiff,
     FlowState,
     FlowVersion,
@@ -84,9 +94,13 @@ from scadbuddy.flows.operations import (
     NOT_PARENT,
     seal_answer,
 )
+from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
 from scadbuddy.flows.store import GrantStateError
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
@@ -129,7 +143,22 @@ def _seconds(value: ApprovalTimeout | None) -> int | None:
     return check_approval_timeout(value, "approval_timeout")
 
 
-class DefinitionCreate(BaseModel):
+#: The longest display name and description a flow takes (#3186).
+MAX_DISPLAY_NAME = 120
+MAX_DESCRIPTION = 20_000
+
+
+class CommitMessage(BaseModel):
+    """What a save is called in the flow's history (#3186): its commit message."""
+
+    #: The commit's subject, flattened to one line; a default saying what the save did
+    #: when omitted.
+    message: str | None = Field(default=None, max_length=MAX_SUBJECT)
+    #: The commit message's body: longer notes, kept as written.
+    body: str | None = Field(default=None, max_length=MAX_BODY)
+
+
+class DefinitionCreate(CommitMessage):
     """A flow version to register."""
 
     #: Lower-case letters, digits and dashes; a new version of an existing name.
@@ -145,12 +174,27 @@ class DefinitionCreate(BaseModel):
     #: the script reads them with `inputs()`, type-checked against it. Omitted, its runs
     #: take no inputs.
     inputs_schema: dict[str, Any] | None = None
+    #: The flow's display name and Markdown description (#3186), committed as
+    #: `flow.json` beside the script in a commit of their own after the version's when
+    #: they change it. Omitted, each stays as it is; an empty string clears it.
+    display_name: str | None = Field(default=None, max_length=MAX_DISPLAY_NAME)
+    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION)
 
     @field_validator("approval_timeout")
     @classmethod
     def _timeout(cls, value: ApprovalTimeout | None) -> ApprovalTimeout | None:
         _seconds(value)
         return value
+
+
+class DetailsUpdate(CommitMessage):
+    """A flow's display name and description to change (#3186)."""
+
+    #: Free text, shown in place of the flow's name; its name stays its id. Omitted, it
+    #: stays as it is; an empty string clears it.
+    display_name: str | None = Field(default=None, max_length=MAX_DISPLAY_NAME)
+    #: Markdown. Omitted, it stays as it is; an empty string clears it.
+    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION)
 
 
 class RunCreate(BaseModel):
@@ -200,6 +244,12 @@ class PendingEntry(BaseModel):
     #: Whether the starting session narrowed it into a proposal the person may approve.
     proposed: bool = False
     hops: list[HopRecord] = []
+    #: What the call does, in ScadBuddy's own words, when it reads it from ScadBuddy's
+    #: own records: a `print_output` call's registry printer (#4445). Never the input.
+    summary: str | None = None
+    #: With `summary`: the input hash the approval binds (the printer the summary names),
+    #: which an approval sends back as `bound_hash` (#4445).
+    bound_hash: str | None = None
 
 
 class GrantUseView(BaseModel):
@@ -255,6 +305,8 @@ class RunView(BaseModel):
     definition_id: str
     version: int
     name: str
+    #: Its flow's display name now (#3186), None when it has none.
+    display_name: str | None = None
     run: Run | None = None
     #: The parked calls, from the running workflow when `live`, else from the row.
     pending: list[PendingEntry] = []
@@ -317,6 +369,10 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
             _started_by(),
             approval_timeout_s=_seconds(body.approval_timeout),
             inputs_schema=body.inputs_schema,
+            message=body.message,
+            body=body.body,
+            display_name=body.display_name,
+            description=body.description,
         )
 
 
@@ -432,17 +488,50 @@ async def get_flow_version_diff(
     response_model=Definition,
     summary="Restore a flow's script at one of its versions, as a new version",
 )
-async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsDep) -> Definition:
+async def restore_flow_version(
+    name: NamePath,
+    commit: CommitPath,
+    flows: FlowsDep,
+    body: Annotated[CommitMessage | None, Body()] = None,
+) -> Definition:
     """A new commit with the script as it was at `commit`, and a new version row with
     that version's approval timeout: never a rewrite. Type-checked first, as a
-    registration is."""
+    registration is. The flow's display name and description stay as they are, except
+    for a deleted flow, which comes back with the ones it had at `commit`, in the
+    version's own commit; the optional body names the commit (#3186)."""
     with _versioned():
         script = await flows.definitions.source(name, commit)
         inputs_schema = await flows.definitions.inputs_schema(name, commit)
     if problems := await check_script(script, inputs_schema):
         raise _script_problems(problems, "That version no longer type-checks.")
     with _versioned():
-        return await flows.definitions.restore(name, commit, _started_by())
+        return await flows.definitions.restore(
+            name,
+            commit,
+            _started_by(),
+            message=body.message if body else None,
+            body=body.body if body else None,
+        )
+
+
+@router.patch(
+    "/workflows/names/{name}",
+    response_model=FlowDetails,
+    summary="Change a flow's display name or description",
+)
+async def update_flow_details(name: NamePath, body: DetailsUpdate, flows: FlowsDep) -> FlowDetails:
+    """One commit of `<name>/flow.json` in `data/flows` (#3186), named by `message` (a
+    default saying what changed when omitted): a change of the flow, not a new version.
+    A field omitted stays as it is, an empty string clears it; nothing changed commits
+    nothing (`commit` null). A deleted flow is refused: 409 `flow-deleted`."""
+    with _versioned():
+        return await flows.definitions.update_details(
+            name,
+            display_name=body.display_name,
+            description=body.description,
+            message=body.message,
+            body=body.body,
+        )
 
 
 @router.post(
@@ -476,15 +565,25 @@ async def unarchive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
     response_model=FlowState,
     summary="Delete a flow: a commit removing its script; its history keeps every version",
 )
-async def delete_flow(name: NamePath, flows: FlowsDep, triggers: TriggersDep) -> FlowState:
+async def delete_flow(
+    name: NamePath,
+    flows: FlowsDep,
+    triggers: TriggersDep,
+    body: Annotated[CommitMessage | None, Body()] = None,
+) -> FlowState:
     """One commit in `data/flows` removing `<name>/` (#2485). Its versions stay in the
     history and their records stay: runs in progress keep running the version they
     started with, finished runs still show the script they ran, and nothing new starts.
     Restoring one of its versions, or registering the name again, brings it back as its
     next version. A flow deleted already is answered as it is. Its triggers are paused
-    (#2484)."""
+    (#2484). The optional body names the commit (#3186)."""
     with _versioned():
-        state = await flows.definitions.delete(name, _started_by())
+        state = await flows.definitions.delete(
+            name,
+            _started_by(),
+            message=body.message if body else None,
+            body=body.body if body else None,
+        )
     await _pause_triggers(triggers, name, "flow deleted")
     return state
 
@@ -619,7 +718,9 @@ async def list_flow_runs(
     session: Annotated[str | None, Query(description="The agent session that started it.")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[Run]:
-    return await flows.store.list_runs(definition_id=definition_id, session=session, limit=limit)
+    runs = await flows.store.list_runs(definition_id=definition_id, session=session, limit=limit)
+    names = await flows.definitions.display_names({run.name for run in runs})
+    return [run.model_copy(update={"display_name": names.get(run.name)}) for run in runs]
 
 
 async def _starting(client: Client, run_id: str) -> RunView | None:
@@ -648,9 +749,16 @@ async def _starting(client: Client, run_id: str) -> RunView | None:
     return None
 
 
-async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
+async def _pending(
+    client: Client,
+    run: Run,
+    lookup: PrinterLookup,
+    hash_key: bytes | None,
+    native: NativeCheck | None = None,
+) -> tuple[list[PendingEntry], bool]:
     """The run's parked calls: from the workflow's `agent_status`, joined with the row's
-    `waiting_on` for the prompt and the time; from the row alone if it does not answer."""
+    `waiting_on` for the prompt and the time; from the row alone if it does not answer.
+    A `print_output` call names the registry printer it prints on (#4445)."""
     waiting = {w.call_id: w for w in run.waiting_on}
     try:
         async with asyncio.timeout(_STATUS_SECONDS):
@@ -669,6 +777,18 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
                 fn=HOST_FN.get(approval.tool_name, approval.tool_name),
             )
         )
+        if (call := parked_call(approval.tool_name, approval.tool_input)) is not None:
+            _, tool, args = call
+            try:
+                bound = await bind_call(tool, args, lookup, native)
+            except Exception:
+                # Whatever failed, the page still shows the call; with no binding, an
+                # approval is refused until a read names the printer (`flow-printer-unbound`).
+                logger.warning("could not read the printer a parked print names", exc_info=True)
+                continue
+            entries[-1].summary = bound.summary
+            if bound.summary is not None and hash_key is not None and tool is not None:
+                entries[-1].bound_hash = input_hash(hash_key, tool, bound.args)
     for callback in status_.pending_callbacks:
         seen = waiting.get(callback.tool_id)
         entries.append(
@@ -684,8 +804,14 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
 
 
 @router.get("/workflow-runs/{run_id}", response_model=RunView, summary="Get a flow run")
-async def get_flow_run(run_id: str, flows: FlowsDep, triggers: TriggersDep) -> RunView:
-    view = await _run_view(run_id, flows)
+async def get_flow_run(
+    run_id: str,
+    flows: FlowsDep,
+    triggers: TriggersDep,
+    printers: PrintersDep,
+    settings: SettingsStoreDep,
+) -> RunView:
+    view = await _run_view(run_id, flows, printers, settings)
     if (fired := await triggers.store.fire_of_run(run_id)) is not None:
         fire, trigger = fired
         view.trigger = RunTrigger(
@@ -698,20 +824,26 @@ async def get_flow_run(run_id: str, flows: FlowsDep, triggers: TriggersDep) -> R
     return view
 
 
-async def _run_view(run_id: str, flows: Flows) -> RunView:
+async def _run_view(
+    run_id: str, flows: Flows, printers: Printers, settings: SettingsStore
+) -> RunView:
     run = await flows.store.get_run(run_id)
     if run is None:
         if flows.client is None or (view := await _starting(flows.client, run_id)) is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+        view.display_name = (await flows.definitions.display_names({view.name})).get(view.name)
         if (grant := await flows.store.get_grant(run_id)) is not None:
             view.grant = _grant_view(grant, [])
         return view
+    display_name = (await flows.definitions.display_names({run.name})).get(run.name)
+    run = run.model_copy(update={"display_name": display_name})
     view = RunView(
         id=run.id,
         status=run.status,
         definition_id=run.definition_id,
         version=run.version,
         name=run.name,
+        display_name=display_name,
         run=run,
         images=await run_images(flows.connect, run.id) if flows.connect is not None else [],
     )
@@ -722,8 +854,54 @@ async def _run_view(run_id: str, flows: Flows) -> RunView:
     if flows.client is None:
         view.pending = [PendingEntry.model_validate(w.model_dump()) for w in run.waiting_on]
         return view
-    view.pending, view.live = await _pending(flows.client, run)
+    view.pending, view.live = await _pending(
+        flows.client,
+        run,
+        _registry(printers),
+        approval_key(flows.settings),
+        _native(printers, settings),
+    )
     return view
+
+
+def _registry(printers: Printers) -> PrinterLookup:
+    """A lookup of the printer registry, which this process holds."""
+
+    async def lookup(printer: str) -> PrinterRow | None:
+        return await asyncio.to_thread(printers.store.get, printer)
+
+    return lookup
+
+
+def _native(printers: Printers, settings: SettingsStore) -> NativeCheck:
+    """Whether a run on a registry row goes over the LAN (`print_run.lan_printers`, as
+    the print dialog's choices name them), read once per page and only when a parked
+    print names a linked row. A read that fails is kept too, logged once: each later
+    linked entry on the page names no path, and reads nothing again (#5472).
+
+    The cache is a plain closure with no lock: "once per page" holds because
+    `_pending` binds its entries one at a time. Checks run at once (`asyncio.gather`)
+    could each find nothing read yet and each read (#5477)."""
+    native: frozenset[str] | None = None
+    failed = False
+
+    async def check(printer: str) -> bool | None:
+        nonlocal native, failed
+        if failed:
+            return None
+        if native is None:
+            try:
+                stored = await asyncio.to_thread(settings.load)
+                native = frozenset(await lan_printers(stored, printers.store, printers.reports))
+            except Exception:
+                failed = True
+                logger.warning(
+                    "could not read which printers a run reaches over the LAN", exc_info=True
+                )
+                return None
+        return printer in native
+
+    return check
 
 
 #: An image's bytes never change under its name (the name is their sha256).
@@ -819,6 +997,9 @@ class DecideBody(BaseModel):
     #: (`GET .../proposals/{call_id}`). Any other, or none, is refused: the person
     #: approves what they saw, never a proposal replaced since.
     proposal_hash: str | None = Field(default=None, max_length=128)
+    #: The pending entry's `bound_hash` the person was shown (#4445): an approval of a
+    #: print on a registry printer is refused (409) unless the row still links that pair.
+    bound_hash: str | None = Field(default=None, max_length=128)
 
 
 class ProposalView(BaseModel):

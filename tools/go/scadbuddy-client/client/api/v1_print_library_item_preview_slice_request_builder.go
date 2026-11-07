@@ -14,18 +14,26 @@ type V1PrintLibraryItemPreviewSliceRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
+// V1PrintLibraryItemPreviewSliceRequestBuilderPostQueryParameters as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433).
+type V1PrintLibraryItemPreviewSliceRequestBuilderPostQueryParameters struct {
+	// Slice again, even when a finished slice of the same choices exists.
+	Fresh *bool "uriparametername:\"fresh\""
+}
+
 // V1PrintLibraryItemPreviewSliceRequestBuilderPostRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
 type V1PrintLibraryItemPreviewSliceRequestBuilderPostRequestConfiguration struct {
 	// Request headers
 	Headers *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestHeaders
 	// Request options
 	Options []i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestOption
+	// Request query parameters
+	QueryParameters *V1PrintLibraryItemPreviewSliceRequestBuilderPostQueryParameters
 }
 
 // NewV1PrintLibraryItemPreviewSliceRequestBuilderInternal instantiates a new V1PrintLibraryItemPreviewSliceRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemPreviewSliceRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemPreviewSliceRequestBuilder {
 	m := &V1PrintLibraryItemPreviewSliceRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/preview-slice", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/preview-slice{?fresh*}", pathParameters),
 	}
 	return m
 }
@@ -37,7 +45,7 @@ func NewV1PrintLibraryItemPreviewSliceRequestBuilder(rawUrl string, requestAdapt
 	return NewV1PrintLibraryItemPreviewSliceRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169).
+// Post as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433).
 // returns a PreviewStartedable when successful
 // returns a V1PrintLibraryItemPreviewSlicePreviewStarted428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryItemPreviewSlicePreviewStarted4XXError error when the service returns a 4XX status code
@@ -66,11 +74,14 @@ func (m *V1PrintLibraryItemPreviewSliceRequestBuilder) Post(ctx context.Context,
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PreviewStartedable), nil
 }
 
-// ToPostRequestInformation as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169).
+// ToPostRequestInformation as “/print/outputs/{id}/preview-slice“, for a file in Bambuddy's library (#2169), “fresh“ included (#4433).
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemPreviewSliceRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintRunRequestable, requestConfiguration *V1PrintLibraryItemPreviewSliceRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
 	if requestConfiguration != nil {
+		if requestConfiguration.QueryParameters != nil {
+			requestInfo.AddQueryParameters(*(requestConfiguration.QueryParameters))
+		}
 		requestInfo.Headers.AddAll(requestConfiguration.Headers)
 		requestInfo.AddRequestOptions(requestConfiguration.Options)
 	}

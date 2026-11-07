@@ -2,16 +2,16 @@ import { useEffect, useRef } from 'react'
 import type { AttentionNotice } from './attention'
 
 /**
- * #815 §3 — an OS notification for each attention request (a `tab_disconnected` wait among
- * them) that opens while this page is hidden, from the badge's own read (`useAttention`'s
+ * #815 §3 — an OS notification for each request waiting on the person (an approval, a question
+ * or an attention request, a `tab_disconnected` wait among them) that opens while this page is hidden, from the badge's own read (`useAttention`'s
  * `notices`). Nothing is shown while the page is visible: the badge and the panel say it there.
  * Permission is asked only from a click (`requestAttentionNotifications`,
  * `components/assistant/NotificationsOffer.tsx`), never on load. A click on a notification
  * focuses this tab and opens the request's session in the panel.
  *
- * Only an open tab can notify: a closed one would need a service worker and Web Push, which
- * this does not add. Each notification is tagged with its request id, so several ScadBuddy
- * tabs raising the same request replace one another rather than stacking.
+ * Only an open tab can notify from here; with every tab closed, Web Push does (`webPush.ts`,
+ * `public/push-sw.js`). Each notification is tagged with its request id, so several ScadBuddy
+ * tabs, and the push worker, raising the same request replace one another rather than stacking.
  */
 
 export type NotificationsState = NotificationPermission | 'unsupported'
@@ -36,6 +36,8 @@ export function noticeTitle(reason: string): string {
       return 'The assistant has a question'
     case 'blocked':
       return 'The assistant is blocked'
+    case 'approval':
+      return 'The assistant needs your approval'
     default:
       return 'The assistant needs you'
   }

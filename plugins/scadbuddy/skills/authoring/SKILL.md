@@ -42,7 +42,7 @@ in `models/name-keychain/`:
 | `README.md`, `thumbnail.png` | Catalogue text and image. |
 | `ui/index.js` | Optional. The template's own customizer (`"ui": {"module": "ui/index.js", "slot": "panel" \| "page", "api": 1}` in `model.json`). Plain ES module, no build step, exporting `mount(root, host, ctx)`; see section 12, "Template UI" (template-pipelines spec `docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §4.1). |
 | `verify.sh` | The template's render checks (section 8 below). |
-| sample files | SVG or PNG files for `// file` parameters, e.g. `models/coaster-set/sample-overlay.svg` (main spec §5.5). |
+| sample files | SVG or PNG files (or STL, 3MF or OBJ, for a parameter that names the kind, `// file:stl`) for `// file` parameters, e.g. `models/coaster-set/sample-overlay.svg` (main spec §5.5). |
 
 On a running instance the same layout lives in the data volume's `models/` git
 repository, and every save is a commit (main spec §4.2 and §4.3).
@@ -160,7 +160,8 @@ overlay_file = ""; // file:svg,png
   (main spec §5.2).
 - `// font` gives a font field that lists the installed families (main spec §5.2
   and §5.4). See section 6.
-- `// file` takes both SVG and PNG; `// file:png` takes one kind. The value is an
+- `// file` takes both SVG and PNG; `// file:png` takes one kind. A mesh for
+  `import()` is named: `// file:stl`, `// file:stl,3mf,obj`. The value is an
   uploaded asset's id or a bundled sample's bare name, never a path (main spec
   §5.5).
 
@@ -215,11 +216,14 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
 - A source, README or picture you got from elsewhere goes through your workspace
   (#2329; `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`), not
   through the conversation. Save it there (`http_request` with `save_to_workspace`, or
-  `workspace_save` for a ScadBuddy file), view it with `workspace_read` or fix it with `workspace_edit`, then send it
+  `workspace_save` for a ScadBuddy file; over an external `/mcp` install, a local file
+  goes in by `PUT <scadbuddy_url>/mcp/workspace/<name>` with your token and the raw
+  bytes as the body, `curl -T <file>`, #4550, `agent/src/mcp/uploads.ts`), view it with `workspace_read` or fix it with `workspace_edit`, then send it
   with `workspace_path` and the `workspace_sha256` you read it at, in place of the
   inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
   `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image
-  or video for the gallery) or `set_output_thumbnail`. Text must be UTF-8. A file that
+  or video for the gallery), `add_readme_image` (an image the README links as
+  `![alt](images/<name>)`, #5475) or `set_output_thumbnail`. Text must be UTF-8. A file that
   changed since you read it is refused; read it again and resend.
 - If `apply_patch` answers `conflict`, someone saved since you read it. Read the
   source again and rebuild the patch against `current`; don't force your old text
@@ -669,8 +673,12 @@ Workflow:
    workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
    panel, or one saved by `http_request` `save_to_workspace` or `workspace_save`; bytes
    are never a tool argument, #2510, `agent/src/tools/workspaceUploads.ts`). Over an
-   external `/mcp` install there is no panel: `http_request` `save_to_workspace` and
-   `workspace_save` are the only ways in until #4550. Each object
+   external `/mcp` install there is no panel: put a local file in with
+   `PUT <scadbuddy_url>/mcp/workspace/<name>` and your token, the raw bytes as the body
+   (`curl -T part.stl -H "Authorization: Bearer $TOKEN" …`; not `-d` or
+   `--data-binary`, which send a form type that is refused); it
+   answers `{name, mediaType, size, sha256}`, which are the `workspace_path` and
+   `workspace_sha256` to pass (#4550, `agent/src/mcp/uploads.ts`). Each object
    in the file becomes a scene object.
 2. Read it with `get_scene`: object ids (`o1`, `o2`, ...), each object's colour parts
    (`p1`, ...), its ops in order, and its transform (translate, rotate in degrees X then

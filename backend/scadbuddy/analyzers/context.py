@@ -83,6 +83,9 @@ class AnalysisRequest(BaseModel):
     )
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
+    #: The path the print will take (#5352, `PrintRunRequest.path`): ``bambuddy`` reads
+    #: the printer, trays and spools through Bambuddy, as that run does.
+    path: Literal["bambuddy", "native"] | None = None
     #: What reading a library file's 3MF for the mesh checks may spend (#2087), each
     #: omitted budget the setting's; none past its ceiling.
     read_budget: ReadBudgetOverride | None = None

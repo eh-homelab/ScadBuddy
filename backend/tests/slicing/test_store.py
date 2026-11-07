@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -141,8 +142,147 @@ async def test_start_on_a_completed_row_returns_it(store: NativeSliceStore) -> N
     assert again.warnings == ["w"] and again.finished_at is not None
 
 
+async def _completed(store: NativeSliceStore, slice_id: int, key: str = "slice-abc") -> None:
+    await store.finish(
+        slice_id, status="completed", sliced_blob_key=key, failure=None, warnings=["w"]
+    )
+
+
+async def test_a_fresh_start_on_a_completed_row_starts_a_row_of_its_own(
+    store: NativeSliceStore,
+) -> None:
+    """#4433: the dialog's Reslice slices a completed row's choices again in a new row,
+    which reads running at once. The completed row stays completed and readable, so the
+    dialog's old figures and toolpath stay valid while the new slice runs."""
+    old = await _start(store)
+    await _completed(store, old)
+    fresh = await store.start(
+        workflow_id="slice-1-a",
+        subject="out-1",
+        library_file_id=1,
+        plate_id=1,
+        preset_key="k",
+        fresh=True,
+    )
+    assert fresh.id != old
+    assert fresh.workflow_id == f"slice-1-a-r{fresh.id}"
+    assert (fresh.status, fresh.failure, fresh.finished_at) == ("running", None, None)
+    found = await store.get(old, "out-1")
+    assert found is not None
+    assert (found.status, found.sliced_blob_key) == ("completed", "slice-abc")
+    # A second Reslice while the first runs joins it: one execution per key.
+    assert await _start(store, fresh=True) == fresh.id
+    # A run of the same choices joins the running fresh slice.
+    assert await _start(store) == fresh.id
+
+
+async def test_fresh_starts_at_once_on_a_completed_row_make_one_row(
+    store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
+) -> None:
+    """#5456: the key's starts take one lock, so Reslices that land together on a
+    completed row make one new row, and every one of them answers it."""
+    old = await _start(store)
+    await _completed(store, old)
+    ids = await asyncio.gather(*(_start(store, fresh=True) for _ in range(8)))
+    assert len(set(ids)) == 1
+    assert ids[0] != old
+    # And no stray insert that no start answered (#5464).
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM native_slices WHERE reslice_of = %s", ("slice-1-a",)
+        ).fetchall()
+    assert [row["id"] for row in rows] == [ids[0]]
+
+
+async def test_a_failed_fresh_slice_leaves_the_completed_row(store: NativeSliceStore) -> None:
+    """#4433 review: a fresh slice that fails never touches the completed row. A start
+    that is not fresh then answers the completed row again, and another Reslice starts
+    another new row."""
+    old = await _start(store)
+    await _completed(store, old)
+    fresh = await _start(store, fresh=True)
+    await store.finish(
+        fresh, status="failed", sliced_blob_key=None, failure="The slicer failed: x", warnings=[]
+    )
+    found = await store.get(old, "out-1")
+    assert found is not None
+    assert (found.status, found.sliced_blob_key) == ("completed", "slice-abc")
+    again = await store.start(
+        workflow_id="slice-1-a", subject="out-1", library_file_id=1, plate_id=1, preset_key="k"
+    )
+    assert (again.id, again.status) == (old, "completed")
+    retried = await _start(store, fresh=True)
+    assert retried not in (old, fresh)
+
+
+async def test_a_start_after_a_completed_fresh_slice_answers_it(store: NativeSliceStore) -> None:
+    """#4433: a run of the same choices uses the newest completed slice, and the reuse
+    lookup answers it too."""
+    old = await _start(store)
+    await store.prepared(old, "sha")
+    await _completed(store, old)
+    fresh = await _start(store, fresh=True)
+    await store.prepared(fresh, "sha")
+    await _completed(store, fresh, "slice-new")
+    again = await store.start(
+        workflow_id="slice-1-a", subject="out-1", library_file_id=1, plate_id=1, preset_key="k"
+    )
+    assert (again.id, again.sliced_blob_key) == (fresh, "slice-new")
+    reused = await store.reusable("sha", "k")
+    assert reused is not None and reused.id == fresh
+    old_row = await store.get(old, "out-1")
+    assert old_row is not None and old_row.status == "completed"
+
+
+async def test_a_fresh_start_with_no_completed_row_restarts_the_first(
+    store: NativeSliceStore,
+) -> None:
+    """With no completed row, a fresh start acts as any start: the failed first row
+    reads running again, and no new row is made."""
+    first = await _start(store)
+    await store.finish(first, status="failed", sliced_blob_key=None, failure="x", warnings=[])
+    again = await store.start(
+        workflow_id="slice-1-a",
+        subject="out-1",
+        library_file_id=1,
+        plate_id=1,
+        preset_key="k",
+        fresh=True,
+    )
+    assert (again.id, again.status, again.failure) == (first, "running", None)
+
+
+async def test_a_lost_fresh_row_is_listed_on_its_own(store: NativeSliceStore) -> None:
+    """The lost-row sweep reads each row by its own workflow id."""
+    old = await _start(store)
+    await _completed(store, old)
+    fresh = await store.start(
+        workflow_id="slice-1-a",
+        subject="out-1",
+        library_file_id=1,
+        plate_id=1,
+        preset_key="k",
+        fresh=True,
+    )
+    lost = await store.lost(timedelta(0))
+    assert [(row.id, row.workflow_id) for row in lost] == [(fresh.id, fresh.workflow_id)]
+
+
+async def test_a_fresh_start_leaves_another_subjects_row_alone(store: NativeSliceStore) -> None:
+    slice_id = await _start(store)
+    await store.finish(
+        slice_id, status="completed", sliced_blob_key="slice-abc", failure=None, warnings=[]
+    )
+    with pytest.raises(SliceSubjectError):
+        await _start(store, subject="out-2", fresh=True)
+    found = await store.get(slice_id, "out-1")
+    assert found is not None and found.status == "completed"
+
+
 async def test_a_completed_row_answered_again_is_kept_from_the_ttl_sweep(
     store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
 ) -> None:
     """Task 12 review M5: the grace runs from its last use, so a dialog reopened on it
     past `PREVIEW_GRACE` does not lose it to the next sweep."""
@@ -150,7 +290,7 @@ async def test_a_completed_row_answered_again_is_kept_from_the_ttl_sweep(
     await store.finish(
         slice_id, status="completed", sliced_blob_key="slice-abc", failure=None, warnings=[]
     )
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         conn.execute(
             "UPDATE native_slices SET finished_at = now() - interval '2 days' WHERE id = %s",
             (slice_id,),
@@ -269,9 +409,12 @@ async def test_a_stop_of_a_lost_row_spares_a_newer_execution(
     assert refs.referenced() == set()
 
 
-async def test_lost_reads_the_executions_start_not_the_rows(store: NativeSliceStore) -> None:
+async def test_lost_reads_the_executions_start_not_the_rows(
+    store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
+) -> None:
     slice_id = await _start(store)
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         conn.execute(
             "UPDATE native_slices SET created_at = now() - interval '1 day' WHERE id = %s",
             (slice_id,),
@@ -287,10 +430,11 @@ async def test_running_a_row_swept_away_says_so(store: NativeSliceStore) -> None
 
 async def test_a_restart_of_a_finished_row_keeps_it_from_the_ttl_sweep(
     store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
 ) -> None:
     slice_id = await _start(store)
     await store.finish(slice_id, status="failed", sliced_blob_key=None, failure="x", warnings=[])
-    with store._pool.connection() as conn:
+    with pool.connection() as conn:
         conn.execute(
             "UPDATE native_slices SET finished_at = now() - interval '2 days' WHERE id = %s",
             (slice_id,),

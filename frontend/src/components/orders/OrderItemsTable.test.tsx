@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -269,16 +269,27 @@ describe('OrderItemsTable · unit price', () => {
     ])
     const followed = vi.spyOn(api, 'followQuote')
     const running = vi.spyOn(api, 'runningQuotes')
+    const reads = vi.spyOn(api, 'order')
     render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     expect(await within(row(ITEM_DRAFT)).findByText('Quoting…')).toBeInTheDocument()
-    const reload = vi.spyOn(api, 'order')
+    // #5599 — the page reads the order at mount and again on its realtime subscription's
+    // resync (`useAsync`, the socket not yet open). Each read of the items looks for
+    // running quotes, so the looks before the landing are one or two, as the two reads'
+    // answers render apart or together. Count from once both have landed.
+    await waitFor(() => expect(reads).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await Promise.allSettled(reads.mock.results.map((r) => r.value))
+    })
+    const looks = running.mock.calls.length
+    reads.mockClear()
+    const reload = reads
     const landed = manual('q-landed', 900, at)
     state.quotes.push({ ...landed, source: 'slice' })
     seedOperation({ id: 'op-landing', kind: 'order_item_quote', subject, status: 'succeeded', created_at: at, finished_at: at, result: { ...landed } })
     await waitFor(() => expect(within(row(ITEM_DRAFT)).queryByText('Quoting…')).not.toBeInTheDocument(), { timeout: 5000 })
     // The reload it brought looks again, lists the stale row, and does not follow it.
-    await waitFor(() => expect(running).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(looks + 1))
     expect(reload).toHaveBeenCalledTimes(1)
     expect(followed).toHaveBeenCalledTimes(1)
   })
@@ -297,6 +308,57 @@ describe('OrderItemsTable · unit price', () => {
   })
 })
 
+// #5554 — the row and the drawer say when each quote was made and when a slice ran. The
+// cases run in New York (EDT in October): 13:04Z reads 09:04 in a 12- or 24-hour locale.
+describe('OrderItemsTable · times (#5554)', () => {
+  const zone = process.env.TZ
+  beforeEach(() => {
+    resetMockState()
+    process.env.TZ = 'America/New_York'
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    if (zone === undefined) delete process.env.TZ
+    else process.env.TZ = zone
+  })
+
+  it('names the newest quote and the accepted one, with their times', async () => {
+    state.quotes.push({ ...manual('q-accepted', 900, '2026-10-29T12:00:00Z'), accepted: true })
+    state.quotes.push(manual('q-newer', 950, '2026-10-30T13:04:00Z'))
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(within(row(ITEM_DRAFT)).getByTestId(`item-quoted-${ITEM_DRAFT}`)).toHaveTextContent(/Newest quote Oct 30, 09:04/)
+    expect(within(row(ITEM_DRAFT)).getByTestId(`item-accepted-${ITEM_DRAFT}`)).toHaveTextContent(/Accepted quote Oct 29, 08:00/)
+  })
+
+  it('shows a slice quote that failed over MCP, read from the activity index, with its times and error', async () => {
+    const subject = `order_item:${ITEM_DRAFT}`
+    const created = '2026-10-30T13:04:00Z'
+    const finished = '2026-10-30T13:06:00Z'
+    seedOperation({
+      id: 'op-failed',
+      kind: 'order_item_quote',
+      subject,
+      status: 'failed',
+      created_at: created,
+      finished_at: finished,
+      error: { type: 'about:blank', title: 'Unprocessable', status: 422, detail: 'No printer takes this plate.' },
+    })
+    seedActivity([
+      { id: 'operation:op-failed', kind: 'operation.order_item_quote', principal: 'mcp', session: null, via_tool: 'order_item_quote', subject, status: 'failed', title: `Order item quote ${subject}`, parent_id: null, detail: {}, created_at: created, updated_at: finished, finished_at: finished },
+    ])
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const failed = await within(row(ITEM_DRAFT)).findByTestId(`item-quote-failed-${ITEM_DRAFT}`)
+    expect(failed).toHaveTextContent(/Quote failed Oct 30, 09:06/)
+    expect(failed).toHaveAttribute('title', expect.stringContaining('No printer takes this plate.'))
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('quote-error')).toHaveTextContent('No printer takes this plate.')
+    expect(within(drawer).getByTestId('quote-error-times')).toHaveTextContent(/Started Oct 30, 09:04.*ended Oct 30, 09:06/)
+  })
+})
+
 // #4952 review: a fulfilled row's menu offers Unfulfil, disabled with the backend's reason.
 describe('OrderItemsTable · row menu', () => {
   beforeEach(() => {
@@ -304,6 +366,7 @@ describe('OrderItemsTable · row menu', () => {
     state.fulfilments.push({
       id: 'f-made',
       order_item_id: ITEM_APPROVED,
+      purpose: 'production',
       attempt: 1,
       quantity: 2,
       outcome: 'succeeded',
@@ -352,5 +415,20 @@ describe('OrderItemsTable · row menu', () => {
 
   it('offers Unfulfil, not disabled, when nothing is in the way', async () => {
     expect(await openMenu()).not.toHaveAttribute('data-disabled')
+  })
+})
+
+// #5544 — a library file item names its file under its title, by its name when it was added.
+describe('OrderItemsTable · library file items', () => {
+  beforeEach(() => resetMockState())
+
+  it('shows the library file an item prints', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 1, title: 'Drawer label' })
+    render(ORDER_DRAFT)
+    const source = await screen.findByTestId('item-library-file')
+    expect(source).toHaveTextContent('Library file in Bambuddy: drawer-label.3mf')
+    expect(within(row(added.id)).getByRole('button', { name: 'Drawer label' })).toBeInTheDocument()
+    // A template's item names no file.
+    expect(within(row(ITEM_DRAFT)).queryByTestId('item-library-file')).toBeNull()
   })
 })

@@ -19,7 +19,10 @@ one idempotent pass that brings the registry up to what Bambuddy knows.
 The pass runs in the API, from ``POST /printers/sync-bambuddy`` and from the housekeeping
 sweep ``housekeeping_sync_bambuddy_printers`` on the ``library`` worker (the API's own
 process), so the code never crosses a process. ``dry_run`` plans the same steps and
-writes nothing."""
+writes nothing. That sweep obeys the sweeps' switch, so each API boot also runs the
+virtual-printer part alone (`read_virtual_printers`, then `apply_virtual_printers`)
+while `boot_adoption_due` (#5236: prod's hand-made row for its VP, with the sweeps
+off)."""
 
 from __future__ import annotations
 
@@ -208,6 +211,28 @@ def may_adopt(vp: VirtualPrinter, physical_serials: set[str]) -> bool:
     (its serial is its target's, `VirtualPrinter`), nor when a Bambuddy printer reports
     that serial (security review of the sync)."""
     return vp.mode != "proxy" and vp.serial not in physical_serials
+
+
+def may_be_virtual(row: PrinterRow) -> bool:
+    """Whether a virtual printer could still adopt ``row`` (`adopts_for_virtual` with no
+    VP in hand): a physical row with a real serial and no Bambuddy link now or before."""
+    return adopts_for_virtual(row, may_adopt=True) and not is_synthetic_serial(row.serial)
+
+
+def boot_adoption_due(rows: list[PrinterRow]) -> bool:
+    """Whether the boot's virtual-printer pass asks Bambuddy (#5236): some row
+    `may_be_virtual`, and the registry already follows Bambuddy's printers (a row linked to
+    one, or a VP's row). A registry of LAN-only rows (a native deployment that uses
+    Bambuddy for spools alone, `e2e-stack`'s recorder pass) asks Bambuddy nothing. Nothing
+    records that a row was checked: while both hold, every boot of every replica makes the
+    pass's two list reads, which then change nothing. A hand-made VP row beside only
+    LAN-only printers is therefore never adopted at boot: Settings > Printers' import
+    (``POST /printers/sync-bambuddy``) adopts it. A row unlinked from its Bambuddy
+    printer by hand (only ``bambuddy_unlinked_id`` set) does not count as following
+    Bambuddy (#5260): a registry whose only Bambuddy link was removed is not asked at
+    boot, and that import is again the way to adopt."""
+    follows = any(r.bambuddy_printer_id is not None or r.kind != "physical" for r in rows)
+    return follows and any(may_be_virtual(r) for r in rows)
 
 
 def plan_virtual(
@@ -569,11 +594,34 @@ async def sync_virtual_printers(registry: VirtualRegistry, client: BambuddyClien
     followed too. No LAN link is made here (a VP gets none), so no probe runs. Bambuddy's
     printer list is read only for its serials (`may_adopt`); if that list grows slow, it is
     the first thing to cache. Not a dry run, so a target is there only when its row is."""
-    now = datetime.now(UTC)
+    await apply_virtual_printers(registry, await read_virtual_printers(client))
+
+
+class VirtualListing(BaseModel):
+    """What `apply_virtual_printers` needs from Bambuddy: its two list reads."""
+
+    physical_serials: set[str]
+    vps: list[VirtualPrinter]
+
+
+async def read_virtual_printers(client: BambuddyClient) -> VirtualListing:
+    """The virtual-printer pass's Bambuddy calls alone, so a caller can tell Bambuddy's
+    errors from the registry's (#5259)."""
     active = [printer for printer in await client.printers() if printer.is_active]
     vps = (await client.virtual_printers()).printers
+    return VirtualListing(
+        physical_serials={p.serial_number for p in active if p.serial_number is not None},
+        vps=vps,
+    )
+
+
+async def apply_virtual_printers(registry: VirtualRegistry, listing: VirtualListing) -> None:
+    """The virtual-printer pass's registry writes, from `read_virtual_printers`' listing;
+    no Bambuddy call."""
+    now = datetime.now(UTC)
+    vps = listing.vps
+    physical_serials = listing.physical_serials
     rows = await asyncio.to_thread(registry.store.list)
-    physical_serials = {p.serial_number for p in active if p.serial_number is not None}
     for vp in vps:
         await _sync_virtual(registry, vp, rows, physical_serials, set(), now, dry_run=False)
     # A VP the write deleted is marked here, not only by the next full sync (#4889).

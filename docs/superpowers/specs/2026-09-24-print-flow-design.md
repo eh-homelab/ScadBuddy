@@ -82,6 +82,72 @@ Escalating is visible in the dialog before the click ("Bambuddy will slice this 
 *printer*, then queue it"), because it changes which printer the copies land on: a
 class-targeted pipeline fans out, a queued item does not.
 
+**As built: the request picks the path (#5352).** A run reaches its printer through
+Bambuddy's queue or over the LAN (`PrintRunResult.path`). Before #5352 only the stored
+backends and the printer row chose it (`printers/hot_path.py`, `print_run.run_path`).
+`PrintRunRequest.path` now lets the caller choose for one print:
+
+- Omitted: the choice as before. The run key does not change (`runs.run_key` leaves the
+  field out when it is not sent).
+- `bambuddy`: Bambuddy's queue, even where the run would go over the LAN.
+  `run_route(..., asked=)` and `ensured_route` return a route that is not native. They read
+  no LAN report, so a stale or missing report refuses nothing. `prepare_run` does not read
+  the path again. The printer must link a Bambuddy printer, or the run is refused as on
+  Bambuddy's path today (`_not_on_bambuddy`). The run then takes a project and every
+  `PrintOptions` field. The calibrations (`bed_levelling`, `flow_cali`,
+  `nozzle_offset_cali`, `vibration_cali`) and `timelapse` go to `POST /queue/` as before
+  (`dispatch.enqueue_plate`). `QueueItemCreate` already names each of them as Bambuddy's
+  `PrintQueueItemCreate` does (recorded in
+  `backend/tests/bambuddy/recordings/openapi/scadbuddy-routes.json`). No field is new.
+- `native`: the LAN. If the run would not go over the LAN, the check and the run refuse it
+  (`print_run.LAN_PATH_REFUSAL`, 422). They never send it through Bambuddy instead.
+
+The LAN start (`printers/lan.py` `project_file_command`, line 173) has no field for
+`bed_levelling`, `nozzle_offset_cali` or `vibration_cali`, so the printer applies its own
+default. It always sends `flow_cali: false` (`lan_models.ProjectFile.flow_cali`, which
+`print_activities._command` never sets). So a native run refuses only a value the LAN
+cannot honour, with a 422 (`options.lan_calibration_refusal`, `LAN_CALIBRATIONS`):
+`flow_cali` `"on"` or `"auto"`, `bed_levelling` or `nozzle_offset_cali` `"on"` or `"off"`,
+and `vibration_cali` either way (a plain bool, with no "the printer decides"). What the
+LAN does passes: `flow_cali` `"off"`, and `"auto"` for bed levelling and nozzle offset.
+The dialog offers only those values on a native route, with a hint. Before #5352 the LAN
+start dropped them without a word. `timelapse` and `layer_inspect` are LAN fields and still pass. A remembered option
+(global, printer or model scope) is not judged: it stays a Bambuddy queue option, as
+before. The refusal is in `prepare_run`, in the dialog's check (`check_print`,
+`asked_path_refusal`) and in the run's `print_check` activity, before anything is
+recorded.
+
+The refusal's problem type is `options.LAN_CALIBRATION_PROBLEM` (#5602). Its extension
+`bambuddy_linked` says whether the row links a Bambuddy printer
+(`print_run.lan_calibration_problem`). Its text names the Settings > Printers control,
+which the dialog shows as it is. For a caller of the API or the agent, on a row that links
+a Bambuddy printer, the print route adds one sentence, `LAN_CALIBRATION_API_HINT`: send
+`path: "bambuddy"` for this one print (`api/printing.py` `_answered`). A row that links
+none refuses that path too (`_not_on_bambuddy`), so its refusal names no path. The route
+tells the two callers apart with `asked_by_api`: an agent's call names its author
+(`core/authorship.py`), and the page sends `X-ScadBuddy-Request: 1` on every request
+(`frontend/src/lib/requestHeader.ts`). An order print's routes record that as the
+operation's `api`, because the print starts later, with no request. The background slice
+keeps the plain text. When the route turns native, the dialog shows which values it
+cleared ("Flow calibration On was cleared: the LAN cannot set it."). If the user then
+picks another printer that is not native, each value comes back, unless the user set that
+option again in the meantime. The same printer that reads as not native for a moment
+puts nothing back (`frontend/src/lib/useLanCleared.ts`). A flow's
+approval line for a `path: "native"` call on a printer that prints through Bambuddy
+says "Refused" (`flows/print_binding.py` `bind_call`).
+
+Every reader that takes the request judges the route as the run does. The dialog's
+checks (`POST /print/outputs/{id}/check`, `POST /print/library/{id}/check`) pass `path` to
+`dialog_route`: with `bambuddy` it answers `None`, so the check builds a client and is
+Bambuddy's check. The background slice (`preview_slice`) and a quote's slice
+(`SliceQuoteRequest.path`, `orders/operations.py` `PreviewSlicer`) pass it to
+`slice_route`, so a `bambuddy` print finds the slice made on its own route. The analyzers
+(`AnalysisRequest.path`) pass it to `run_route`, and a flow's approval line
+(`flows/print_binding.py`) names Bambuddy for a call that asks for it. No workflow code changed, so the replays need no patch. The tier is
+unchanged: `print_output` and `order_item_print` stay `outward`. The agent's
+`print_output` and `order_item_print` take `path`, and `order_item_print` takes `options`.
+The print dialog has no control for it yet.
+
 ## 3. What each step reads
 
 One aggregation route, `GET /api/v1/print/outputs/{id}/filaments?printer_id&plate_id`,
@@ -186,6 +252,75 @@ two places:
   process instead of a new preset. A download serves the saved file byte for byte
   (#2652), so it carries the settings the template had when the output was saved; it
   no longer re-plates for the default printer or asks Bambuddy for preset names.
+
+### Settings per part (#5571)
+
+A print can set a few process settings on the parts of one filament slot: more top
+layers on raised letters, say. The print run's request and the slice quote's take
+`part_settings`, a map from the slot (`slot_id`, from 1, as `filament_plan` numbers
+it) to a bounded set of keys (`bambuddy/part_settings.py`): `top_shell_layers`,
+`bottom_shell_layers` and `wall_loops` (0-1000), `sparse_infill_density` (0-100,
+written `N%`), `sparse_infill_pattern` and `ironing_type` (Bambu Studio's
+`enum_values`). The limits are Bambu Studio v02.08.02.61's `PrintConfig.cpp` (lines
+5954, 1363, 4596, 3085, 3102 and 4069): the shell layers have a minimum of 0 and no
+maximum there, so they take `wall_loops`' maximum, 1000. An unknown key, a value out of
+range or slot 0 is a 422 from the request's validation. A slot that no printed part of
+the output is made in is a 422 from `prepare_run` (`part_settings_refusal`, which reads the
+output's `model_settings.config` with `printed_part_slots`), so the dialog's check lists
+it too. A slot only painted on another part's faces is among them: it has no part of its
+own to carry the settings. Only an output takes them: a library file keeps its author's
+parts, and a sliced file prints as it was sliced.
+
+They are written into the laid-out copy, not the process. `send._laid_out_for` adds
+each slot's settings to every printed `<part>` of that slot in
+`Metadata/model_settings.config` (`render/bambu3mf.py` `set_part_settings`), as
+`<metadata key="top_shell_layers" value="8"/>`, after the layout. A part's slot is its
+`extruder` metadata, else its object's. A negative part or a modifier gets none. A
+self-closing `<part …/>` becomes an open and a close tag around them. A painted part
+takes the settings of the slot it is made in, not those of its painted faces. In an
+author's file they are written even when its layout falls back to the file as it is
+(`ArchiveTooLargeError`). A 3MF nothing can be written into (`layout_of` `as_is`: past
+the size caps, sliced, or with no `project_settings.config`) prints as it is, so it
+cannot carry them: `part_settings_refusal` refuses it before anything is uploaded (422,
+`send.PART_SETTINGS_AS_IS`), and `_laid_out_for` refuses a target with settings for one
+too. So the copy's key never names settings its bytes lack. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
+colours, so a copy with settings is never reused for one without, nor the other way
+round; a copy without settings keeps the key it had. `plan_run` builds the copy for the
+run, the dialog's background slice and the quote alike. A slice quote records the
+settings it sliced with (`order_item_quotes.part_settings`, `part_settings.dumped`). An
+item's print that sends none prints with its quote's (`orders/operations.py`
+`print_body`, from what `print_check` returns), so it slices the bytes the quote priced;
+one that sends others is `requote_needed` (`printing.py` `_same_part_settings`).
+`PrintRunRequest.part_settings` is in `run_key` only when it sets something, so every
+older run keeps its key.
+
+Bambu Studio honours them. Its 3MF loader reads every `<part>` metadata key that is not
+one of its own (name, subtype, source, matrix …) into the volume's config
+(`src/libslic3r/Format/bbs_3mf.cpp` lines 5464-5471 in `_generate_volumes_new`, tag
+v02.08.02.61, commit `5b34346`), and each volume's region is sliced with that config over
+the process (`src/libslic3r/PrintApply.cpp` `region_config_from_model_volume`). The CLI
+replaces an object's config only for `--orient` (`src/BambuStudio.cpp` line 5216), which
+ScadBuddy never passes.
+
+Measured on 2026-11-07 with the native slicer image
+`ghcr.io/eh-homelab/scadbuddy-slicer:sha-5de2c80` (Bambu Studio 02.08.02.61). The input was
+a two-colour file from ScadBuddy's own writer (`write_bambu_3mf`): slot 1 a 40 x 40 x 4 mm
+base, slot 2 a 20 x 20 x 6 mm block on it (z 4 to 10). It was laid out with
+`replate_3mf` for the H2C, then copied once more with `with_part_settings` and slot 2's
+`top_shell_layers` 8. Each file was sliced with the CLI's argv as the slicer worker builds
+it (`workers/rust/crates/sb-slicer/src/runner.rs`, without `--pipe`): `--load-settings`
+with the flattened `Bambu Lab H2C 0.4 nozzle` and `0.20mm Standard @BBL H2C` (whose
+`top_shell_layers` is 5), `--load-filaments` with `Bambu PLA Basic @BBL H2C` twice,
+`--filament-colour`, `--arrange 0 --slice 1 --export-3mf`. The G-code's `; Z_HEIGHT:` and
+`; FEATURE:` lines were then counted per layer. Above z 4 only the block prints (and the
+prime tower). Without the setting the block's top shell was a `Bridge` layer at z 9.2 and
+`Internal solid infill`/`Top surface` on 4 layers (z 9.4 to 10.0): 5 layers. With it, the
+`Bridge` moved to z 8.6 and the solid layers were 7 (z 8.8 to 10.0): 8 layers. The base's
+solid layers (z 4 and below) were 6 in both slices. Bambuddy's slicer runs the same
+02.08.02.61 CLI on the uploaded copy, but it was not measured with part settings.
+
+Not yet: a template's own settings per part (#5626), the print dialog's controls for
+them (#5627) and settings per part for a library file (#5628).
 
 ### The two warnings
 

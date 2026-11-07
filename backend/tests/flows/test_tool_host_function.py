@@ -5,10 +5,12 @@ the agent's names on a test queue. An outward tool waits for a person's approval
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import timedelta
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
+import psycopg
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity, workflow
@@ -17,9 +19,19 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer, Worker
 
+from scadbuddy.api.flows import _pending
+from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
+from scadbuddy.flows.operations import (
+    FLOW_DECIDE,
+    PRINTER_CHANGED,
+    PRINTER_REFUSED,
+    PRINTER_UNBOUND,
+    flow_kinds,
+    request_id,
+)
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.flow_tools import (
     FLOW_BEATLESS_CALL_PATCH,
     FLOW_BEATLESS_TIER_PATCH,
@@ -76,7 +88,12 @@ class Tools:
             # As the agent answers a flow call that returned images (#2477): pointers only.
             return {"text": f"a view\n[image {IMAGE['name']}]", "images": [IMAGE]}
 
-        return [get_model, send_to_bambuddy, make_thing, broken, snapshot]
+        @activity.defn(name="print_output")
+        async def print_output(args: dict[str, Any]) -> str:
+            self._record("print_output", args)
+            return "printing"
+
+        return [get_model, send_to_bambuddy, make_thing, broken, snapshot, print_output]
 
 
 @pytest.fixture
@@ -89,6 +106,7 @@ def agent() -> AgentTiers:
             "make_thing": "write",
             "broken": "read",
             "snapshot": "read",
+            "print_output": "outward",
         }
     )
 
@@ -130,7 +148,7 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     assert served.calls == []
     preview = await outward_since(outward.client, parked, 1)
     assert preview.calls == []
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -156,6 +174,156 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     )
     again = await outward_since(outward.client, run, point)
     assert [(c.fn, c.call_id) for c in again.calls] == [("tool:send_to_bambuddy", call_id)]
+
+
+PRINTER = "00000000-0000-4000-8000-0000000000aa"
+
+
+def _printer(bambuddy: int | None) -> PrinterRow:
+    now = datetime.now(UTC)
+    return PrinterRow(
+        id=PRINTER,
+        serial="01P00A0000000AA",
+        name="Garage",
+        bambuddy_printer_id=bambuddy,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _api(linked: int) -> Callable[[], httpx.AsyncClient]:
+    """The API's printer route, as the projects worker reads it: the row links `linked`."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/v1/printers/{PRINTER}"
+        return httpx.Response(200, json=_printer(linked).model_dump(mode="json"))
+
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
+
+
+def _api_away(code: int | None) -> Callable[[], httpx.AsyncClient]:
+    """The API's printer route failing: it cannot be reached (None), or it answers `code`."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if code is None:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(code, json={"detail": "no"})
+
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="http://api")
+
+
+async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_links(
+    outward: Outward, tools: tuple[Tools, str]
+) -> None:
+    """#4445: the run page names the printer, and the approval binds the pair the row
+    links when the person decides, as the agent's gate hashes it again when it runs."""
+    served, queue = tools
+    call = {"output_id": "o1", "printer": PRINTER}
+    run_id = await outward.run(
+        script(f"return await tool('print_output', {call!r})"), tools_queue=queue
+    )
+    call_id = await outward.approval(run_id)
+    parked = await outward.store.get_run(run_id)
+    assert parked is not None
+
+    async def lookup(printer: str) -> PrinterRow | None:
+        assert printer == PRINTER
+        return _printer(2)
+
+    async def away(printer: str) -> PrinterRow | None:
+        raise psycopg.OperationalError("the database is away")
+
+    async def malformed(printer: str) -> PrinterRow | None:
+        # #5466: any failure, not only the database's (here a row that does not validate).
+        return PrinterRow.model_validate({"id": printer})
+
+    # A failed printer read leaves the call shown, unnamed and unbound: never a failed page.
+    for failing in (away, malformed):
+        pending, live = await _pending(outward.client, parked, failing, HASH_KEY)
+        assert live
+        assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [(call_id, None, None)]
+
+    def path(lan: bool) -> Callable[[str], Awaitable[bool]]:
+        async def native(printer: str) -> bool:
+            assert printer == PRINTER
+            return lan
+
+        return native
+
+    bound = input_hash(HASH_KEY, "print_output", {**call, "printer_id": 2})
+    # #5466: the line names the path the run takes, as the agent's line does; the binding
+    # is the same either way.
+    for lan, line in [
+        (False, "Prints on Garage (Bambuddy printer 2)"),
+        (True, "Prints on Garage over the LAN"),
+    ]:
+        pending, live = await _pending(outward.client, parked, lookup, HASH_KEY, path(lan))
+        assert live
+        assert [(p.call_id, p.summary, p.bound_hash) for p in pending] == [(call_id, line, bound)]
+    request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": bound}
+    env = ActivityEnvironment(client=outward.client)
+    # Without the API to read the row from, nothing is approved.
+    blind = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    with pytest.raises(ApiError) as refused:
+        await env.run(blind.run, request, await env.run(blind.check, request))
+    assert refused.value.status == 503
+    assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    # The printer's row cannot be read: a 503 that asks the person to try again.
+    for code in (None, 408, 429, 503):
+        kind = next(
+            k
+            for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api_away(code))
+            if k.name == FLOW_DECIDE
+        )
+        with pytest.raises(ApiError) as unread:
+            await env.run(kind.run, request, await env.run(kind.check, request))
+        assert unread.value.status == 503
+        assert "Try again" in unread.value.detail
+        assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    # #5466: the API refuses the worker's read (its credential): a fault no retry mends,
+    # so the person is not told to try again.
+    for code in (401, 403):
+        kind = next(
+            k
+            for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api_away(code))
+            if k.name == FLOW_DECIDE
+        )
+        with pytest.raises(ApiError) as refused_read:
+            await env.run(kind.run, request, await env.run(kind.check, request))
+        assert (refused_read.value.status, refused_read.value.type) == (500, PRINTER_REFUSED)
+        assert f"HTTP {code}" in refused_read.value.detail
+        assert "Try again" not in refused_read.value.detail
+        assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    # Re-linked since the page showed it, or an approval that names no binding: a 409,
+    # and nothing is recorded, so the person sees the printer that would print and decides again.
+    moved = next(
+        k
+        for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api(5))
+        if k.name == FLOW_DECIDE
+    )
+    decide = next(
+        k
+        for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api(2))
+        if k.name == FLOW_DECIDE
+    )
+    unbound = {k: v for k, v in request.items() if k != "bound_hash"}
+    for kind, sent, problem in [
+        (moved, request, PRINTER_CHANGED),
+        # A page that could not name the printer sends none: refused, and says so.
+        (decide, unbound, PRINTER_UNBOUND),
+    ]:
+        with pytest.raises(ApiError) as stale:
+            await env.run(kind.run, sent, await env.run(kind.check, sent))
+        assert (stale.value.status, stale.value.type) == (409, problem)
+        assert await outward.store.get_decision(request_id(parked, call_id)) is None
+    await env.run(decide.run, request, await env.run(decide.check, request))
+    decision = await outward.store.get_decision(request_id(parked, call_id))
+    assert decision is not None
+    assert decision.input_hash == bound
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'printing'"
+    # The workflow sends the script's arguments: the agent adds the pair and checks it.
+    assert served.calls == [("print_output", f"tool-{call_id}", call)]
 
 
 async def test_an_unknown_tool_is_a_script_error_and_sends_nothing(
@@ -351,7 +519,7 @@ async def test_tooled(outward: Outward, tools: tuple[Tools, str]) -> None:
         tool_tiers={"get_model": "read", "send_to_bambuddy": "outward"},
     )
     call_id = await outward.approval(run_id)
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -426,6 +594,63 @@ async def test_a_read_tool_from_an_agent_that_does_not_say_its_declared_tier_run
     assert [c[0] for c in served.calls] == ["make_thing"]
 
 
+#: How long `_outlast_heartbeat` waits for the server to time an attempt out (#5506): well
+#: above the 1 s heartbeat timeout the tests set, plus WSL2's clock jumps.
+_HEARTBEAT_TIMEOUT_WAIT_S = 30
+
+#: Each attempt whose heartbeat timeout never fired. The failure is raised inside the
+#: activity, where the run may only see a failed attempt, so `_heartbeat_timeouts_fired`
+#: fails the test on it.
+_HEARTBEAT_NEVER_FIRED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _heartbeat_timeouts_fired() -> Iterator[None]:
+    _HEARTBEAT_NEVER_FIRED.clear()
+    yield
+    never_fired = list(_HEARTBEAT_NEVER_FIRED)
+    _HEARTBEAT_NEVER_FIRED.clear()
+    if never_fired:
+        pytest.fail("; ".join(never_fired))
+
+
+async def _outlast_heartbeat() -> None:
+    """Send no beat, and answer only once Temporal has timed this attempt out (#5474).
+
+    A fixed sleep longer than the heartbeat timeout raced the server's timer: under load,
+    or when WSL2's wall clock jumped back, the timer fired late and the attempt answered
+    first. Here the attempt waits until the server no longer runs it (the next attempt,
+    or the call's end), so its answer always comes too late. An attempt with no heartbeat
+    timeout answers at once. The wait stops after `_HEARTBEAT_TIMEOUT_WAIT_S` (#5506): the
+    attempt then fails, not retried, and the test fails with it."""
+    info = activity.info()
+    if not info.heartbeat_timeout:
+        return
+    assert info.workflow_id is not None
+    handle = activity.client().get_workflow_handle(info.workflow_id, run_id=info.workflow_run_id)
+    deadline = asyncio.timeout(_HEARTBEAT_TIMEOUT_WAIT_S)
+    try:
+        async with deadline:
+            while True:
+                described = await handle.describe()
+                if not any(
+                    pending.activity_id == info.activity_id and pending.attempt == info.attempt
+                    for pending in described.raw_description.pending_activities
+                ):
+                    return
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        # Only the deadline's own expiry; a TimeoutError from describe() keeps its traceback.
+        if not deadline.expired():
+            raise
+        message = (
+            f"heartbeat timeout never fired for activity {info.activity_id}"
+            f" (attempt {info.attempt}) within {_HEARTBEAT_TIMEOUT_WAIT_S} s"
+        )
+        _HEARTBEAT_NEVER_FIRED.append(message)
+        raise ApplicationError(message, non_retryable=True) from None
+
+
 class TurnTools:
     """The agent's turn tools (#2320): `turn_tool_tier` on the tools queue, and each call
     the activity `turn:<server>__<tool>`, here on a replica's own queue, as a pinned
@@ -439,10 +664,11 @@ class TurnTools:
         self.tier_fails: str | None = None
         #: The replicas later tiers name, one a tier, as a deploy replaces them.
         self.next_hosts: list[str] = []
-        #: Seconds each tier takes, with no beat: an agent replica from before #4200.
-        self.tier_delay_s = 0.0
+        #: True: each tier sends no beat and outlasts its heartbeat timeout, as an agent
+        #: replica from before #4200 does.
+        self.tier_beatless = False
         #: The same for each call.
-        self.call_delay_s = 0.0
+        self.call_beatless = False
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         #: Set: http_request's access in Settings, its tier whatever the method (#2171).
@@ -457,7 +683,8 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
-            await asyncio.sleep(self.tier_delay_s)
+            if self.tier_beatless:
+                await _outlast_heartbeat()
             if self.next_hosts:
                 self.host = self.next_hosts.pop(0)
             if self.tier_fails is not None:
@@ -483,7 +710,8 @@ class TurnTools:
             info = activity.info()
             fields = activity.payload_converter().from_payload(args[0].payload, dict)
             self.calls.append((info.activity_type, info.activity_id, fields))
-            await asyncio.sleep(self.call_delay_s)
+            if self.call_beatless:
+                await _outlast_heartbeat()
             if self.call_fails is not None:
                 raise ApplicationError(self.call_fails)
             return f"{fields['method']} done"
@@ -560,7 +788,7 @@ async def test_an_outward_turn_tool_waits_for_approval(
         ("tool:scadbuddy_http__http_request", "approval")
     ]
     assert served.calls == []
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -603,7 +831,7 @@ async def test_an_approved_turn_tool_runs_on_the_replica_live_once_approved(
 
 
 async def _approve(outward: Outward, run_id: str, call_id: str) -> None:
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
@@ -715,7 +943,7 @@ async def test_an_approved_turn_tool_in_a_run_from_before_2937_runs_on_the_live_
     served = TurnTools(f"{tools_queue}.gone")
     live = f"{tools_queue}.live"
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
-    activities = outward_activities(outward.store, None)
+    activities = outward_activities(outward.remote, None)
     patched = workflow.patched
 
     def before_2937(patch_id: str) -> bool:
@@ -800,7 +1028,7 @@ async def test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_b
     heartbeat timeout to answer. The tier is asked once more without one, and the call
     runs, instead of the run's tier check failing."""
     served, queue = turn_tools
-    served.tier_delay_s = 2.5
+    served.tier_beatless = True
     run_id = await outward.run(
         script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
         tools_queue=queue,
@@ -826,9 +1054,9 @@ async def test_a_beatless_tier_in_a_run_from_before_4262_still_fails_and_replays
     on this code: the timeout reaches the script again, and no second tier is asked."""
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
     served = TurnTools(f"{queue}.host-1")
-    served.tier_delay_s = 2.5
+    served.tier_beatless = True
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
-    activities = outward_activities(outward.store, None)
+    activities = outward_activities(outward.remote, None)
     # The workflow sandbox passes `temporalio` through, so the run sees this stand-in
     # (as `before_2937` above); were it not, the run would fall back and the assertions
     # on the timeout below would fail.
@@ -872,7 +1100,7 @@ async def test_a_read_on_agent_replicas_that_never_beat_is_asked_again_without_b
     sends no beats and takes longer than the heartbeat timeout to answer. The read is
     asked once more without one, as the tier is (#4262), and the run gets its answer."""
     served, queue = turn_tools
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     run_id = await outward.run(
         script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
         tools_queue=queue,
@@ -899,7 +1127,7 @@ async def test_a_pinned_read_whose_replica_goes_after_its_missed_beats_moves_to_
     gone = f"{queue}.gone"
     live = f"{queue}.live"
     served = TurnTools(gone)
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     # Tiered once for the call, and once more when nothing picked up its last attempt.
     served.next_hosts = [gone, live]
     answered = TurnTools(live)
@@ -939,7 +1167,7 @@ async def test_a_write_that_missed_its_beats_is_not_sent_again_and_says_it_may_h
     heartbeat timeout. It may still land there, so it is not sent again, and the script
     is told it may have run, not only that it timed out."""
     served, queue = turn_tools
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     run_id = await outward.run(
         script(
             "try:",
@@ -967,9 +1195,9 @@ async def test_a_beatless_read_in_a_run_from_before_4281_still_fails_and_replays
     this code: the timeout reaches the script again, and the read is not asked again."""
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
     served = TurnTools(f"{queue}.host-1")
-    served.call_delay_s = 2.5
+    served.call_beatless = True
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
-    activities = outward_activities(outward.store, None)
+    activities = outward_activities(outward.remote, None)
     # As `before_4262` above: the sandbox passes `temporalio` through to the run.
     patched = workflow.patched
 

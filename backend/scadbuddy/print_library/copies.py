@@ -27,6 +27,7 @@ import hashlib
 import io
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import psycopg
 from fastapi import status
@@ -40,6 +41,10 @@ from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads, NativeCopies
 from scadbuddy.store.bambuddy import folder_name
+
+if TYPE_CHECKING:
+    # A cycle at run time: `bambuddy.runs` reaches this module through `print_source`.
+    from scadbuddy.bambuddy.runs import PrintRunStore
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +260,26 @@ async def trash_copies(
         if not keep_slices:
             ids.extend(s.id for s in copy.sliced)
     return [f.id for f in await native.trash(ids)] if ids else []
+
+
+async def open_runs_on_copies(
+    uploads: BambuddyUploadStore, runs: PrintRunStore, output_id: str
+) -> list[str]:
+    """The output's print runs still open when it has native per-print copies, which
+    `trash_copies` would trash with their slices (#4312 re-review I-a): a delete that
+    trashes them refuses while one is open, and keeps the slices for one opened since."""
+    return (await open_runs_on_outputs_copies(uploads, runs, [output_id]))[output_id]
+
+
+async def open_runs_on_outputs_copies(
+    uploads: BambuddyUploadStore, runs: PrintRunStore, output_ids: list[str]
+) -> dict[str, list[str]]:
+    """:func:`open_runs_on_copies` for several outputs, each id a key: one read of their
+    copies and one of their runs, not two per output (#5403)."""
+    copies = await uploads.for_outputs(output_ids, native=True)
+    with_copies = [output_id for output_id in output_ids if copies[output_id]]
+    running = await runs.running_for_outputs(with_copies) if with_copies else {}
+    return {output_id: [run.id for run in running.get(output_id, [])] for output_id in output_ids}
 
 
 async def release_moved(

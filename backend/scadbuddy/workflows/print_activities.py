@@ -47,6 +47,7 @@ from scadbuddy.bambuddy.print_run import (
     QueuedPlate,
     ResolvedProject,
     RunPath,
+    asked_path_problem,
     ensured_route,
     finish_run,
     plan_run,
@@ -309,6 +310,7 @@ class PrintActivities:
                 printer=request.printer,
                 printer_id=request.printer_id,
                 decide=self.d.native_run,
+                asked=request.path,
             )
             if route.row is None and route.printer_id is not None and native_backends(settings):
                 # A printer the registry has no row for yet: its row is made (or a
@@ -321,8 +323,14 @@ class PrintActivities:
                         self.d.reports,
                         route,
                         decide=self.d.native_run,
+                        asked=request.path,
                     )
             native = route.native
+            # #5352: a request that asked for the LAN and would not go over it, or that
+            # sets a calibration the LAN cannot, refused before anything is recorded.
+            refusal = asked_path_problem(request, native, linked=route.printer_id is not None)
+            if refusal is not None:
+                raise refusal
             if native:
                 # D6: refused before anything is read or recorded.
                 if request.project_id is not None:
@@ -686,9 +694,14 @@ class PrintActivities:
     async def succeed(self, input: SucceedInput) -> PrintRun:
         """The result recorded (retried without limit: every plate is queued, so a
         Postgres blip must not turn the run into a failure, review #1061), then the
-        print followed (an output's)."""
+        print followed (an output's).
+
+        The observer is told which print this run started (#5521): a progress read of
+        it can land between the end and `started`, and is kept, so the next read that
+        finds nothing new publishes nothing."""
         spec = input.input.source
         run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
+        queued = frozenset(input.result.queue_item_ids)
         if spec.kind == "output" and spec.output_id is not None and input.result.lan:
             await self._record_lan(spec.output_id, run, input.result)
         if spec.kind == "output" and spec.output_id is not None:
@@ -697,13 +710,15 @@ class PrintActivities:
             # The workflow then starts its `FollowPrint` (#1053).
             try:
                 meta = await require(self.d.outputs, spec.output_id)
-                self.d.observer.started(meta)
+                self.d.observer.started(meta, run_id=run.id, queue_item_ids=queued)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
         elif spec.kind == "library" and spec.file_id is not None:
             # As an output's (#1751): its progress, on `print:library:<file id>`, is new.
             subject = PrintSubject.library(spec.file_id)
-            self.d.observer.started_subject(subject.run_subject, library_slug(subject))
+            self.d.observer.started_subject(
+                subject.run_subject, library_slug(subject), run_id=run.id, queue_item_ids=queued
+            )
         return run
 
     async def _record_lan(self, output_id: str, run: PrintRun, result: PrintRunResult) -> None:

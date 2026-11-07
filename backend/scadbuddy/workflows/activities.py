@@ -18,7 +18,7 @@ from concurrent.futures import Executor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Concatenate
+from typing import TYPE_CHECKING, Any, Concatenate
 
 import psycopg
 from temporalio import activity
@@ -61,14 +61,16 @@ from scadbuddy.render.projection import (
 )
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
-from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
+from scadbuddy.store import BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.refs import HoldsBlobs
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
+    ACCEPT_ATTEMPTS,
     ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
     QUEUE_FULL,
@@ -80,6 +82,10 @@ from scadbuddy.workflows.models import (
     Projection,
     RenderMainResult,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.crud.render import RemoteGeometryIndex, RemoteJobProjection
+    from scadbuddy.store.index import Pool
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +99,10 @@ class WorkerDeps:
     paths: DataPaths
     assets: AssetStore
     blobs: BlobStore
-    refs: BlobRefs
-    projection: JobProjection
+    #: The render worker's ``refs``, ``projection`` and ``geometry`` are the API's CRUD
+    #: routes (#5298); the in-process worker's, SQL.
+    refs: HoldsBlobs
+    projection: JobProjection | RemoteJobProjection
     history: ModelHistory | None = None
     checkouts: CheckoutGate | None = None
     fetcher: CheckoutFetcher | None = None
@@ -105,13 +113,16 @@ class WorkerDeps:
     remote_assets: RemoteAssets | None = None
     #: Where a piece's geometry is found for a later piece in other colours; None turns
     #: that reuse off.
-    geometry: GeometryIndex | None = None
+    geometry: GeometryIndex | RemoteGeometryIndex | None = None
+    #: The render worker's own SQL pool (its stores still on SQL), closed when it
+    #: stops; None on the API's in-process worker, whose pool is the API's.
+    pool: Pool | None = None
     #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
     revision: str = ""
     openscad_version: str = ""
     #: The interpreter template activities run under: this worker's own (§5.2).
     template_python: str = sys.executable
-    #: `solid_concurrency` as it is now (the `render_settings` view, re-read on its
+    #: `solid_concurrency` as it is now (the store settings, re-read on their source's
     #: TTL), asked by every solids stage; None keeps `config`'s, read at start.
     stored_solid_concurrency: Callable[[], Awaitable[int]] | None = None
 
@@ -795,6 +806,9 @@ class RenderActivities:
                 )
             )
         )
+        # Here, not at the top: `crud.client` imports the API, which imports this module.
+        from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
+
         if d.geometry is not None and prepared.geometry_key is not None:
             # A cache's hint, after the piece is published: losing it costs a later
             # recolour its shortcut, never this render. A recoloured piece comes with
@@ -814,7 +828,15 @@ class RenderActivities:
                     prepared.colours,
                     main.model_dump(mode="json"),
                 )
-            except (psycopg.Error, OSError, ValueError, KeyError, TypeError) as error:
+            except (
+                psycopg.Error,
+                CrudUnavailableError,
+                CrudRefusedError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+            ) as error:
                 logger.warning(
                     "could not record the piece's geometry",
                     extra={"piece_key": req.piece_key, "error": type(error).__name__},
@@ -877,6 +899,9 @@ class RenderActivities:
             created_at=now(),
             traceparent=start.traceparent,
         )
+        # Here, not at the top: `crud.client` imports the API, which imports this module.
+        from scadbuddy.crud.client import CrudUnavailableError
+
         try:
             return await asyncio.to_thread(
                 self.deps.projection.accept,
@@ -894,6 +919,17 @@ class RenderActivities:
         except psycopg.OperationalError as error:
             # Postgres out of reach (a pool timeout is one too): a state that passes
             # (review #1066 (11)).
+            raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
+        except CrudUnavailableError as error:
+            # A state that passes passes here too: the API out of reach, its database out
+            # of reach, a credential refused until the exchange's hold-off ends (or the
+            # caller is resumed). A 5xx of the route (an unexpected SQL error there) fails
+            # the attempt. So does a read timeout (the write may have run) but on the last
+            # attempt, where a slow API passes too (`pipelines.ACCEPT_RETRY`): the others
+            # retry in this run, where the row is found by its workflow ids.
+            slow = error.failure == "transport" and activity.info().attempt >= ACCEPT_ATTEMPTS
+            if not (error.passes or slow):
+                raise
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)

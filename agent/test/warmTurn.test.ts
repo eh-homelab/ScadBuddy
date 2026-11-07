@@ -32,6 +32,7 @@ function assembly(): AssembledTurn {
       systemAppend: '',
       systemPromptBase: 'claude_code',
       toolSearch: 'off',
+      toolLoadings: [],
       disabledTools: [],
       raisedTiers: [],
       httpRequest: false,

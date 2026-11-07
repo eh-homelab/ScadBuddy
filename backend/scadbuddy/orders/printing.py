@@ -23,17 +23,29 @@ print's outcome (``print_outcomes``, #2665, which the follow of every path write
 native LAN print's too, so a native print settles by itself), heard on the event bus
 (``print.run``, ``print.outcome``, and ``print.progress``, which makes a `queued` item
 `printing`) and reconciled on start and on every ``bus.resync``
-(``Lifecycle.follow_print``, idempotent). A print whose outcome is never recorded (its
-subject printed again before it settled, so the outcome went to the newer run) is
-settled by hand, ``PATCH``ing the attempt.
+(``Lifecycle.follow_print``, idempotent). A print whose outcome is never recorded (an
+``unknown`` end, or a follow that stopped before the print settled) is settled by hand,
+``PATCH``ing the attempt.
 
 What it does not do yet: print the quote's sliced file itself. A slice quote is checked
 (its file still there, its digest the quote's, else ``requote_needed``) and the attempt
 records and holds that file, but the run slices the item's output with the request's
 choices, as the dialog's run does; when those are the quote's, the run reuses the
 quote's own background slice (``bambuddy/preview.py``), otherwise it is a slice of the
-same output. A spool chosen per slot from the quote's filaments (``needs_spool_choice``,
-``spool_not_filament``) waits on §8.3's spool-to-filament match.
+same output. Each slot's spool is filled from the item's filaments in the operation's
+check (``orders/spools.py``, #4251): ``needs_spool_choice``, ``spool_not_filament``.
+
+A library file item (#5544) prints its file as ``POST /print/library/{file_id}/run``
+does (``api/library_print.py`` ``start_library_run``), on the run subject
+``library:<file id>``. The check reads the file from the library that serves, as that
+route does: one deleted, or of the other library, is 409 ``library_file_gone``.
+Every print of one file shares that subject. The follow reads the subject's newest run,
+and each older run still open by its own run (#5613, ``bambuddy/follow.py``
+``Follower.read_run``, ``bambuddy/progress.py`` ``run_reader``: the run's own sends on
+Bambuddy's queue, or its LAN start), and records each outcome against its run
+(``bambuddy/outcomes.py`` ``record_run``). So two items of one file printing at once
+(two items of one order, the file on two orders, or a dialog print of it) each settle by
+themselves. An older run is read for ``OPEN_RUN_WINDOW`` (3 days) after it started.
 """
 
 from __future__ import annotations
@@ -67,9 +79,16 @@ from scadbuddy.orders.lifecycle import (
     Lifecycle,
     LifecycleError,
 )
-from scadbuddy.orders.models import Actor, Fulfilment, OrderItem, Quote, Reference
+from scadbuddy.orders.models import Actor, Fulfilment, Order, OrderItem, Quote, Reference
 from scadbuddy.orders.problems import PROBLEMS, refused
-from scadbuddy.orders.quote import SLICED_NAME, OutputsRead, output_matches, reference_of
+from scadbuddy.orders.quote import (
+    SLICED_NAME,
+    LibraryFiles,
+    OutputsRead,
+    library_file_gone,
+    output_matches,
+    reference_of,
+)
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.store import BlobStore
@@ -135,24 +154,27 @@ async def print_check(
     order_id: str,
     item_id: str,
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
+    library: LibraryFiles | None = None,
+    part_settings: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
     unknown order or item; 409 ``order_<status>`` for an ended order,
     ``order_not_accepted`` before it is accepted, ``order_on_hold``, ``item_custom``,
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
-    `failed` (one already printing among them), ``item_made`` when its attempts made its
-    quantity already, and ``requote_needed`` when the accepted quote no longer stands
+    `failed` (one already printing among them), ``print_in_flight`` while a test print of
+    it is open, ``item_made`` when its attempts made its quantity already, and
+    ``requote_needed`` when the accepted quote no longer stands
     for what would print: no accepted quote, the item's output gone or no longer its
     reference's, or a slice quote whose sliced file is gone or reads to another digest.
     What the run needs: the output, the template, ``copies`` and the quote's file.
     ``schema_of`` is the reference commit's schema, as the quote's ``output_matches``
-    reads it."""
-    order = await asyncio.to_thread(store.order, order_id)
-    if order is None:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
-    item = await asyncio.to_thread(store.item, item_id)
-    if item is None or item.order_id != order.id:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
+    reads it. A library file item (#5544) is checked against its file in ``library``
+    instead of an output: ``library_file_gone`` once it is not there; what the run needs
+    is then ``library_file_id`` in place of ``output_id``. ``part_settings`` are the
+    request's settings per slot (#5571, ``part_settings.dumped``): sent and not the
+    quote's, they are ``requote_needed``; what the run needs then carries the quote's
+    ``part_settings``, which a request that sends none prints with."""
+    order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
         raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
     if order.status not in DERIVED:
@@ -161,13 +183,14 @@ async def print_check(
         )
     if order.on_hold:
         raise _refused("order_on_hold", f"order {order.number} is on hold")
-    reference = reference_of(item)
+    reference = None if item.library_file is not None else reference_of(item)
     if item.status not in FULFILLABLE:
         raise _refused(
             "item_not_open" if item.status in SETTLED else "item_not_approved",
             f"item {item.id} is {item.status}",
             items=[item.id],
         )
+    await _none_in_flight(store, item)
     attempts = await asyncio.to_thread(store.fulfilments, item.id)
     copies = item.quantity - made(attempts)
     if copies < 1:
@@ -179,10 +202,177 @@ async def print_check(
     quote = accepted_quote(await asyncio.to_thread(store.quotes, item.id))
     if quote is None:
         raise requote(item, "it has no accepted quote")
+    _same_part_settings(item, quote, part_settings)
+    if reference is None:
+        return await _library_stands(library, blobs, item, quote, copies)
+    return await _stands(outputs, blobs, item, reference, quote, copies, schema_of)
+
+
+async def test_print_check(
+    lifecycle: Lifecycle,
+    outputs: OutputsRead,
+    blobs: BlobStore,
+    order_id: str,
+    item_id: str,
+    revision_id: str,
+    schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
+    *,
+    by: Actor,
+    part_settings: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A test print's refusals (storefront spec §4.4), writing nothing: one copy of the
+    item's output, on an order accepted or not and an item in any open state. 404 for an
+    unknown order, item or revision (``revision_not_found``); 409 ``order_<status>`` for
+    an ended order, ``order_on_hold``, ``item_custom`` and ``item_has_no_design``,
+    ``item_not_open`` for a settled item, ``print_in_flight`` while a print of the item,
+    of either purpose, is open, ``revision_not_newest`` for a revision that is
+    not the item's current one (the print prints the item's output, which is the current
+    revision's render), and ``requote_needed`` when no `slice` quote of the revision
+    stands: none, its sliced file gone or another digest, or the output gone or no longer
+    the reference's render. A quote that names no revision (recorded before revisions)
+    is the current revision's. What the run needs, as ``print_check`` returns it.
+
+    Its one write is the rollout's repair (``Lifecycle.ensure_revision``), first: an item
+    whose copy is not its current revision's is checked against the revision made from
+    the copy."""
+    store = lifecycle.store
+    order, item = await _order_and_item(store, order_id, item_id)
+    try:
+        item = await asyncio.to_thread(lifecycle.ensure_revision, order_id, item_id, by)
+    except LifecycleError as error:
+        raise refused(error) from None
+    if order.status in ENDED:
+        raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
+    if order.on_hold:
+        raise _refused("order_on_hold", f"order {order.number} is on hold")
+    reference = reference_of(item)
+    if item.status in SETTLED:
+        raise _refused("item_not_open", f"item {item.id} is {item.status}", items=[item.id])
+    revisions = await asyncio.to_thread(store.revisions, item.id)
+    if not any(revision.id == revision_id for revision in revisions):
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            f"no revision {revision_id!r} of item {item.id}",
+            type_=PROBLEMS + "revision_not_found",
+        )
+    if revision_id != item.current_revision_id:
+        raise _refused(
+            "revision_not_newest",
+            f"revision {revision_id} of item {item.id} is not its current design: only the"
+            " current one prints",
+            items=[item.id],
+        )
+    await _none_in_flight(store, item)
+    # `store.quotes` is in the order they were made: the newest slice quote of the
+    # revision is the one printed.
+    quotes = [
+        quote
+        for quote in await asyncio.to_thread(store.quotes, item.id)
+        if quote.source == "slice"
+        and (quote.revision_id or item.current_revision_id) == revision_id
+    ]
+    if not quotes:
+        raise requote(item, "it has no slice quote of its current revision")
+    _same_part_settings(item, quotes[-1], part_settings)
+    return await _stands(outputs, blobs, item, reference, quotes[-1], 1, schema_of)
+
+
+def _same_part_settings(
+    item: OrderItem, quote: Quote, asked: dict[str, dict[str, Any]] | None
+) -> None:
+    """``requote_needed`` when a print sends settings per slot (#5571) that are not the
+    ones ``quote`` sliced with: it would print what was not priced. None sent is the
+    quote's own."""
+    if asked is not None and asked != (quote.part_settings or None):
+        raise requote(
+            item,
+            "its print sends part_settings the quote was not sliced with: quote with them,"
+            " or send none to print with the quote's",
+        )
+
+
+async def _none_in_flight(store: OrderStore, item: OrderItem) -> None:
+    """409 ``print_in_flight`` while a print of the item, of either purpose, is still
+    open (``Lifecycle._none_in_flight``)."""
+    open_attempt = await asyncio.to_thread(store.print_in_flight, item.id)
+    if open_attempt is not None:
+        raise _refused(
+            "print_in_flight",
+            f"item {item.id}'s attempt {open_attempt.attempt} ({open_attempt.purpose}) is"
+            " still printing: settle it first",
+            items=[item.id],
+        )
+
+
+async def _order_and_item(
+    store: OrderStore, order_id: str, item_id: str
+) -> tuple[Order, OrderItem]:
+    order = await asyncio.to_thread(store.order, order_id)
+    if order is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    item = await asyncio.to_thread(store.item, item_id)
+    if item is None or item.order_id != order.id:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
+    return order, item
+
+
+async def _stands(
+    outputs: OutputsRead,
+    blobs: BlobStore,
+    item: OrderItem,
+    reference: Reference,
+    quote: Quote,
+    copies: int,
+    schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None,
+) -> dict[str, Any]:
+    """``requote_needed`` unless ``quote`` still stands for what would print: the item's
+    output the reference's render, and a slice quote's file there and the file it priced.
+    Then what the run needs."""
     schema = await schema_of(reference) if schema_of is not None else None
     if not await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         raise requote(item, "its output is gone or is no longer its reference's render")
     assert item.output_id is not None
+    await _quoted_file_stands(blobs, item, quote)
+    return {
+        "output_id": item.output_id,
+        "slug": reference.slug,
+        "copies": copies,
+        "quote_id": quote.id,
+        "sliced_sha256": quote.sliced_sha256,
+        "sliced_blob_key": quote.sliced_blob_key,
+        "part_settings": quote.part_settings,
+    }
+
+
+async def _library_stands(
+    library: LibraryFiles | None,
+    blobs: BlobStore,
+    item: OrderItem,
+    quote: Quote,
+    copies: int,
+) -> dict[str, Any]:
+    """A library file item's (#5544): its file still in the library that serves
+    (``library_file_gone``), and a slice quote's file as :func:`_stands` checks it."""
+    file = item.library_file
+    assert file is not None
+    if library is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this check cannot read the library")
+    if not await library.exists(file.id):
+        raise library_file_gone(item.id, file)
+    await _quoted_file_stands(blobs, item, quote)
+    return {
+        "library_file_id": file.id,
+        "copies": copies,
+        "quote_id": quote.id,
+        "sliced_sha256": quote.sliced_sha256,
+        "sliced_blob_key": quote.sliced_blob_key,
+        "part_settings": quote.part_settings,
+    }
+
+
+async def _quoted_file_stands(blobs: BlobStore, item: OrderItem, quote: Quote) -> None:
+    """``requote_needed`` unless a slice quote's file is there and is the file it
+    priced."""
     if quote.source == "slice":
         if quote.sliced_blob_key is None or quote.sliced_sha256 is None:
             raise requote(item, "its quote names no sliced file")
@@ -191,14 +381,6 @@ async def print_check(
             raise requote(item, "its quote's sliced file is gone")
         if digest != quote.sliced_sha256:
             raise requote(item, "its quote's sliced file is not the file it priced")
-    return {
-        "output_id": item.output_id,
-        "slug": reference.slug,
-        "copies": copies,
-        "quote_id": quote.id,
-        "sliced_sha256": quote.sliced_sha256,
-        "sliced_blob_key": quote.sliced_blob_key,
-    }
 
 
 # -- the follow ------------------------------------------------------------------------------
@@ -229,35 +411,42 @@ def _work(lifecycle: Lifecycle, event: Event) -> Callable[[], Any] | None:
 
 
 def listen_for_prints(
-    events: EventBus, lifecycle: Lifecycle
+    events: EventBus,
+    lifecycle: Lifecycle,
+    on_outcome: Callable[[str], Awaitable[None]] | None = None,
 ) -> Callable[[], Coroutine[Any, Any, None]]:
     """Follow every open print attempt (§5.4): reconciled once now, then on each print
     event heard and each resync, off the listener's thread, as ``flow_triggers/events.py``
     fires its triggers. Every replica hears each event; ``follow_print`` writes under the
-    order's lock and only what is still open, so they record it once. Returns the
-    remover, which stops hearing events and waits for the follows in flight."""
+    order's lock and only what is still open, so they record it once. ``on_outcome`` is
+    then given the run of each print outcome heard (§8.2: the attempt copies its
+    archives). Returns the remover, which stops hearing events and waits for the follows
+    in flight."""
     loop = asyncio.get_running_loop()
     pending: set[asyncio.Task[None]] = set()
     stopped = False
 
-    async def run(work: Callable[[], Any]) -> None:
+    async def run(work: Callable[[], Any], then: str | None) -> None:
         try:
             await asyncio.to_thread(work)
         except Exception:
             logger.exception("could not follow an order item's print")
+        if then is not None and on_outcome is not None:
+            await on_outcome(then)
 
-    def schedule(work: Callable[[], Any]) -> None:
+    def schedule(work: Callable[[], Any], then: str | None = None) -> None:
         if stopped:
             return
-        task = loop.create_task(run(work))
+        task = loop.create_task(run(work, then))
         pending.add(task)
         task.add_done_callback(pending.discard)
 
     def on_event(event: Event) -> None:
         work = _work(lifecycle, event)
         if work is not None:
+            then = event.run_id if isinstance(event, PrintOutcome) else None
             with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(schedule, work)
+                loop.call_soon_threadsafe(schedule, work, then)
 
     remove_listener = events.add_listener(on_event)
     schedule(lambda: reconcile(lifecycle))
@@ -286,6 +475,8 @@ async def print_item(
     request_id: str,
     sliced_sha256: str | None,
     sliced_blob_key: str | None,
+    project_id: int | None = None,
+    revision_id: str | None = None,
 ) -> Fulfilment:
     """``order_item_print``'s run: the item claimed (``Lifecycle.claim_print``, refused
     as the check would be when the rows moved since), then its print started with the
@@ -297,7 +488,8 @@ async def print_item(
     already starts nothing. A retry whose claim may no longer print (``ClaimRefusedError``: a
     hold, a cancel since) asks ``existing`` for the run its request made with the claim's
     ``copies``: one there is attached and followed, and without one the claim is
-    released and the retry refused."""
+    released and the retry refused. With ``revision_id`` the claim is a test print of
+    that revision (``Lifecycle.claim_print``)."""
     try:
         claim = await to_thread_to_end(
             lambda: lifecycle.claim_print(
@@ -307,6 +499,8 @@ async def print_item(
                 request_id=request_id,
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
+                project_id=project_id,
+                revision_id=revision_id,
             )
         )
     except ClaimRefusedError as error:
@@ -331,6 +525,14 @@ async def print_item(
     except ApiError as error:
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
+            # Its project may be one just deleted in Bambuddy (#5276): the next print,
+            # a new claim, asks again. A 5xx keeps the claim, whose retry keys the run
+            # with the project it recorded, so forgetting there changes nothing.
+            # Best-effort: the refusal is the answer, never this write's failure.
+            try:
+                await asyncio.to_thread(lifecycle.store.forget_projects_seen, order_id)
+            except Exception:
+                logger.warning("could not forget the order's projects", exc_info=True)
         raise
     return await _attached(lifecycle, claim, run)
 

@@ -5,6 +5,7 @@ import { listedTool, toStoredTools, type ListedTool, type PluginListingPut, type
 import { type AccessRow, BUILTIN_SOURCES, registrySource, remoteSource, SOURCE_ITEM, type ToolAccess } from '../src/access/model.js'
 import { pluginOverrides, sourceEnabled } from '../src/access/resolve.js'
 import { createApp } from '../src/app.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { PluginPatch, PluginRepo, PluginSummary } from '../src/plugins/registry.js'
 import { PluginError } from '../src/plugins/registry.js'
@@ -105,8 +106,29 @@ const listing = (entries: Record<string, unknown>[], truncated = false): Listing
 
 const okTest = (stored: StoredTool[] = []): PluginTest => ({ ok: true, detail: 'connected', duration_ms: 1, server: { name: 'hs', version: '1' }, tools: [], truncated: false, stored })
 
+/** A memory ai_settings with SettingsStore's compare-and-set; each write's context, as the audit row gets it. */
+function memorySettings() {
+  const values = new Map<string, unknown>()
+  const writes: { values: Record<string, unknown>; context: unknown }[] = []
+  const get = <T>(key: string) => Promise.resolve(values.get(key) as T | undefined)
+  return {
+    values,
+    writes,
+    settings: { get, set: () => Promise.reject(new Error('not called')) },
+    aiSettings: {
+      setMany: async (next: Record<string, unknown>, check: ((current: { get: typeof get }) => Promise<boolean>) | undefined, context: unknown) => {
+        if (check && !(await check({ get }))) return false
+        for (const [k, v] of Object.entries(next)) values.set(k, v)
+        writes.push({ values: next, context })
+        return true
+      },
+    },
+  }
+}
+
 function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; packages?: boolean; testPlugin?: () => Promise<PluginTest> } = {}) {
   const mem = memoryAccess()
+  const stored = memorySettings()
   const plugins = memoryPlugins(['hs', 'other'])
   const listings = memoryListings({
     'remote:hs': listing([{ name: 'files.list', description: 'Lists files' }, { name: 'a.b' }, { name: 'a_b' }], true),
@@ -126,8 +148,10 @@ function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; packa
     remoteAddress: () => '10.0.0.7',
     origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
     resolveHost: () => Promise.resolve(['203.0.113.10']),
+    settings: stored.settings,
+    aiSettings: stored.aiSettings,
   })
-  return { app, ...mem, plugins, testPlugin }
+  return { app, ...mem, plugins, testPlugin, stored }
 }
 
 type App = ReturnType<typeof rig>['app']
@@ -385,5 +409,76 @@ describe('/api/v1/ai/capabilities', () => {
     await put(app, itemPath(OWN, outwardTool.name), { access: 'write' })
     const row = rows.find((r) => r.item === outwardTool.name)!
     expect(row.updated_by).toBe('browser:browser')
+  })
+
+  describe('a ScadBuddy tool\'s loading (#838)', () => {
+    const loadingPath = (source: string, item: string) => `${itemPath(source, item)}/loading`
+    const itemOf = (view: SourceView, id: string) => view.items.find((i) => i.id === id)!
+
+    it('shows each ScadBuddy and browser tool its loading and default, and every other item none', async () => {
+      const { app } = rig()
+      const { sources } = (await (await get(app)).json()) as { sources: SourceView[] }
+      const own = sources.find((s) => s.id === OWN)!
+      expect(itemOf(own, 'list_models')).toMatchObject({ loading: 'base', default_loading: 'base' })
+      expect(itemOf(own, 'list_outputs')).toMatchObject({ loading: 'searchable', default_loading: 'searchable' })
+      const browserTools = sources.find((s) => s.id === BUILTIN_SOURCES.browser)!
+      expect(browserTools.items.every((i) => i.loading === 'searchable')).toBe(true)
+      for (const id of [BUILTIN_SOURCES.http, BUILTIN_SOURCES.claudeCode, 'remote:hs']) {
+        const source = sources.find((s) => s.id === id)!
+        expect(source.items.every((i) => i.loading === null && i.default_loading === null), id).toBe(true)
+      }
+    })
+
+    it('sets one, stores only what differs from the default, and resets it, each write with the UI context', async () => {
+      const { app, stored } = rig()
+      let res = await put(app, loadingPath(OWN, 'list_outputs'), { loading: 'base' })
+      expect(res.status).toBe(200)
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs').loading).toBe('base')
+      res = await put(app, loadingPath(OWN, 'list_models'), { loading: 'searchable' })
+      expect(itemOf((await res.json()) as SourceView, 'list_models').loading).toBe('searchable')
+      expect(stored.values.get('tool_loading')).toEqual({ list_outputs: 'base', list_models: 'searchable' })
+      // Back to its default by its own value or by DELETE: the entry goes.
+      await put(app, loadingPath(OWN, 'list_outputs'), { loading: 'searchable' })
+      res = await del(app, loadingPath(OWN, 'list_models'))
+      expect(itemOf((await res.json()) as SourceView, 'list_models').loading).toBe('base')
+      expect(stored.values.get('tool_loading')).toEqual({})
+      expect(stored.writes.map((w) => w.context)).toEqual(
+        Array(4).fill({ actor: UI_ACTOR, surface: 'http', clientIp: '10.0.0.7' }),
+      )
+      // A write that changes nothing writes nothing.
+      await del(app, loadingPath(OWN, 'list_models'))
+      expect(stored.writes).toHaveLength(4)
+      const browserTool = ALL_TOOLS.find((t) => t.name.startsWith('browser_'))!
+      res = await put(app, loadingPath(BUILTIN_SOURCES.browser, browserTool.name), { loading: 'base' })
+      expect(res.status).toBe(200)
+    })
+
+    it('keeps a loading across the tool being switched off and on again', async () => {
+      const { app } = rig()
+      await put(app, loadingPath(OWN, 'list_outputs'), { loading: 'base' })
+      let res = await put(app, itemPath(OWN, 'list_outputs'), { access: 'off' })
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs')).toMatchObject({ access: 'off', loading: 'base' })
+      res = await del(app, itemPath(OWN, 'list_outputs'))
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs')).toMatchObject({ access: 'read', loading: 'base' })
+    })
+
+    it('takes a loading for a tool that is already off', async () => {
+      const { app, stored } = rig()
+      await put(app, itemPath(OWN, 'list_outputs'), { access: 'off' })
+      const res = await put(app, loadingPath(OWN, 'list_outputs'), { loading: 'base' })
+      expect(res.status).toBe(200)
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs')).toMatchObject({ access: 'off', loading: 'base' })
+      expect(stored.values.get('tool_loading')).toEqual({ list_outputs: 'base' })
+    })
+
+    it('refuses an item with no loading, an unknown item and a bad body', async () => {
+      const { app, stored } = rig()
+      expect((await put(app, loadingPath(BUILTIN_SOURCES.http, 'http_request'), { loading: 'base' })).status).toBe(409)
+      expect((await put(app, loadingPath('remote:hs', 'files.list'), { loading: 'base' })).status).toBe(409)
+      expect((await put(app, loadingPath(OWN, 'no_such_tool'), { loading: 'base' })).status).toBe(404)
+      expect((await put(app, loadingPath(OWN, 'list_models'), { loading: 'off' })).status).toBe(400)
+      expect((await put(app, loadingPath(OWN, 'list_models'), { loading: 'base' }, READ)).status).toBe(403)
+      expect(stored.writes).toHaveLength(0)
+    })
   })
 })

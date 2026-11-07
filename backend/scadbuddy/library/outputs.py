@@ -43,7 +43,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 
 if TYPE_CHECKING:
-    from scadbuddy.library.output_prints import OutputPrintStore
+    from scadbuddy.library.output_prints import LastPrint, OutputPrintStore
     from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -201,6 +201,9 @@ class OutputMeta(BaseModel):
     #: Whether ``print_stage`` is final: nothing changes without another print. ``None``
     #: when the last print was not over the LAN.
     print_settled: bool | None = None
+    #: Whether a print of it ever reached Bambuddy's queue (#5143): the last print's ids
+    #: say so, but a later print over the LAN clears them, and this stays.
+    sent_to_bambuddy: bool = False
     #: The library pins the render read (#169): each checkout's name, ref and exact
     #: commit, so an output names what it was built from beyond ``model_version``.
     #: Empty for a model with none, and on records written before the field existed.
@@ -219,6 +222,21 @@ class OutputMeta(BaseModel):
         if route == "pipeline" or (route is None and data.get("pipeline_run_id") is not None):
             return {key: value for key, value in data.items() if key not in _LAST_PRINT_FIELDS}
         return data
+
+
+def _with_last_print(meta: OutputMeta, row: LastPrint | None) -> OutputMeta:
+    """``row``, the output's recorded last print (#1060), over its file's; with no row
+    the file's own. Either way ``sent_to_bambuddy`` (#5143) also counts the ids the file
+    names, which a LAN print's row lays nulls over."""
+    queued = (
+        meta.sent_to_bambuddy
+        or meta.queue_item_id is not None
+        or bool(meta.plates)
+        or meta.print_route == "slice_queue"
+    )
+    fields = row.fields() if row is not None else {}
+    sent = queued or (row is not None and row.sent_to_bambuddy)
+    return meta.model_copy(update={**fields, "sent_to_bambuddy": sent})
 
 
 @dataclass(frozen=True)
@@ -343,10 +361,7 @@ class OutputStore:
         if self.prints is None:
             return metas
         rows = self.prints.for_outputs([meta.id for meta in metas])
-        return [
-            meta.model_copy(update=rows[meta.id].fields()) if meta.id in rows else meta
-            for meta in metas
-        ]
+        return [_with_last_print(meta, rows.get(meta.id)) for meta in metas]
 
     async def model_3mf(self, output_id: str) -> bytes | None:
         return await asyncio.to_thread(self._model_3mf, output_id)
@@ -419,6 +434,18 @@ class OutputStore:
             if entry.is_dir() and re.fullmatch(OUTPUT_ID_PATTERN, entry.name)
         ]
 
+    def claim(self, slug: str, output_id: str) -> bool:
+        """Make the output's directory, only if it is not there yet (#5390): whether this
+        call made it. A caller that names an id another may also name (a quote's
+        attempts, `orders/quote.py` `operation_output_id`) saves under it only once it
+        holds the claim, so it never writes into, or removes on a failure, a directory
+        another save made."""
+        try:
+            self.paths.output_dir(slug, output_id).mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            return False
+        return True
+
     def create(
         self,
         job: Job,
@@ -435,7 +462,9 @@ class OutputStore:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
         files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
-        that holds the output's Parts first name the output before it exists.
+        that holds the output's Parts first name the output before it exists: a fresh id,
+        or one the caller holds the :meth:`claim` of, since a failed write removes the
+        directory.
         ``print_settings`` are the template's (#770), written into the saved 3MF."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
@@ -942,12 +971,14 @@ def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
         )
 
 
-def _live_outputs(root: Path) -> dict[str, set[str]]:
+def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     """Every slug directory under ``root``, with the ids of its outputs that have a
-    meta.json. Unlike ``glob``, a slug or output directory that cannot be listed raises
-    instead of being skipped. Symlinks are followed, as ``OutputStore``'s own globs
-    follow them: an output it serves must not look deleted."""
+    meta.json, and every output directory without one. Unlike ``glob``, a slug or output
+    directory that cannot be listed raises instead of being skipped. Symlinks are
+    followed, as ``OutputStore``'s own globs follow them: an output it serves must not
+    look deleted."""
     live: dict[str, set[str]] = {}
+    bare: list[Path] = []
     with os.scandir(root) as slugs:
         for slug in slugs:
             if not slug.is_dir(follow_symlinks=True):
@@ -955,11 +986,13 @@ def _live_outputs(root: Path) -> dict[str, set[str]]:
             ids = live.setdefault(slug.name, set())
             with os.scandir(slug.path) as entries:
                 for entry in entries:
-                    if entry.is_dir(follow_symlinks=True) and os.path.isfile(
-                        os.path.join(entry.path, META_NAME)
-                    ):
+                    if not entry.is_dir(follow_symlinks=True):
+                        continue
+                    if os.path.isfile(os.path.join(entry.path, META_NAME)):
                         ids.add(entry.name)
-    return live
+                    else:
+                        bare.append(Path(entry.path))
+    return live, bare
 
 
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
@@ -968,10 +1001,12 @@ ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 
 def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
-    """Remove a released orphan's directory (#1815): no read sees it (they glob for
-    meta.json), but its bytes stay. Only an output's own directory, still without
-    meta.json, and untouched for ``grace``: a save writes its files before meta.json.
-    Best effort: its holds are already gone, so a failure costs only the bytes."""
+    """Remove a released orphan's directory (#1815), or one that never held anything
+    (#5448, `_remove_unheld_directories`): no read sees it (they glob for meta.json),
+    but its bytes stay. Only an output's own directory, still without meta.json, and
+    untouched for ``grace``: a save writes its files before meta.json. Best effort: it
+    holds nothing (its holds are gone, or it never had any), so a failure costs only
+    the bytes."""
     if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or directory.is_symlink():
         return
     try:
@@ -989,6 +1024,15 @@ def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
         )
 
 
+def _remove_unheld_directories(bare: list[Path], holding: set[str], grace: timedelta) -> None:
+    """Remove each output directory with no meta.json and no hold at all (#5448): a
+    save that claimed its id (`OutputStore.claim`) and stopped before it held its
+    Parts. A held one waits for its holds' release instead."""
+    for directory in bare:
+        if directory.name not in holding:
+            _remove_orphan_directory(directory, grace)
+
+
 def reap_orphan_holds(
     refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
 ) -> int:
@@ -996,28 +1040,49 @@ def reap_orphan_holds(
     (#1007): a save that failed between holding its Parts and writing meta.json, or a
     hold taken after a delete's release, leaves holds that nothing else ever drops.
     Returns how many outputs' holds it released. Each released output's directory, if
-    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815).
+    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815), as
+    does an output directory with no meta.json and no hold at all, past the same grace
+    (#5448: a save that claimed its id and stopped before it held its Parts).
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
     listed that slug's directory. A slug directory that is missing (not yet copied onto
-    a new volume, say) releases nothing for that slug and is logged. A directory it
-    cannot list (permissions, a stale NFS handle) raises and ends the pass, since
-    ``Path.glob`` would skip it. An unmounted or empty volume lists no slug at all, so
+    a new volume, say) releases nothing for that slug and is logged. With a hold
+    past the grace, a directory it cannot list (permissions, a stale NFS handle)
+    raises and ends the pass, since ``Path.glob`` would skip it; with none, only the
+    unheld-directory pass walks, and a listing that fails is logged and ends it
+    (#5453). An unmounted or empty volume lists no slug at all, so
     releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
     and with no live output to learn it from) is never released here. The cost of all
     this: holds orphaned by a model's whole deletion stay until a person drops them."""
     root = store.paths.outputs
     with refs.pool.connection() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT holder_id FROM blob_refs"
-            " WHERE holder_kind = %s AND created_at < now() - %s",
-            (OUTPUT_HOLDER, grace),
+            "SELECT holder_id, min(created_at) < now() - %s AS aged FROM blob_refs"
+            " WHERE holder_kind = %s GROUP BY holder_id",
+            (grace, OUTPUT_HOLDER),
         ).fetchall()
-    held = {row["holder_id"] for row in rows}
+    held = {row["holder_id"] for row in rows if row["aged"]}
+    holding = {row["holder_id"] for row in rows}
     if not held:
+        # Only the bare-directory pass is left. A directory it cannot list is logged,
+        # not raised, so a listing that fails does not fail every tick (#5453); with a
+        # hold to release, the walk below raises as before.
+        try:
+            _, bare = _live_outputs(root) if root.is_dir() else ({}, [])
+        except OSError as error:
+            # It repeats on every tick while the directory stays unlistable, so it names
+            # the path to fix (#5462).
+            logger.warning(
+                "could not list the outputs to remove unheld directories",
+                exc_info=True,
+                extra={"root": str(root), "path": error.filename},
+            )
+            return 0
+        _remove_unheld_directories(bare, holding, grace)
         return 0
-    live = _live_outputs(root) if root.is_dir() else {}
+    live, bare = _live_outputs(root) if root.is_dir() else ({}, [])
+    _remove_unheld_directories(bare, holding, grace)
     live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
     # Holds taken before slugs were recorded: a live output tells its own slug.
     _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})

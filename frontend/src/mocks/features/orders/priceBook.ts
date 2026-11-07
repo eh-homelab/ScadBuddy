@@ -3,7 +3,8 @@ import type { Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdat
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
-import { FilamentsRefused, event, itemOf, lock, notEnded, OPEN_FOR_EDITS, quotesOf, rederive, refused, SETTLED, withFilaments } from './orders'
+import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
+import { pushRevision } from './revisions'
 import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
 
 /**
@@ -259,7 +260,9 @@ export const handlers = [
       const order = lock(String(params.id))
       const found = itemOf(order, String(params.item))
       // The check (Ruling 8): the rows alone, nothing written.
-      if (!OPEN_FOR_EDITS.has(order.status)) {
+      // `lifecycle.py` `requote_open` (#5349, #5350): past `quoted`, an item with no accepted
+      // quote, or one revised after acceptance, is quoted too.
+      if (!requoteOpen(order, found)) {
         throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is quoted while it is draft or quoted`)
       }
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
@@ -283,14 +286,14 @@ export const handlers = [
       // The run: the filaments first (a change drops the accepted quote), then the quote.
       notEnded(order)
       if (changed) {
-        found.colours = colours
-        for (const q of quotesOf(found.id)) q.accepted = false
-        found.status = 'draft'
+        // A slot's filament is the item's next revision (#5280), which drops the accepted quote.
+        pushRevision(order, found, found.reference, colours, '')
         event(order, 'item.updated', { item_id: found.id, repinned: true })
       }
       const made: Quote = {
         id: newId('q'),
         order_item_id: found.id,
+        revision_id: found.current_revision_id,
         created_at: now(),
         accepted: false,
         quantity: found.quantity,

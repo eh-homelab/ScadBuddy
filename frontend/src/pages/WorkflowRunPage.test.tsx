@@ -13,6 +13,8 @@ import {
   setFlowRunStarting,
   childEntries,
   setFlowRunChildren,
+  setFlowDetails,
+  setFlowPendingSummary,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -68,6 +70,12 @@ describe('WorkflowRunPage', () => {
     expect(await screen.findByText(/through a schedule, fired/)).toBeInTheDocument()
   })
 
+  it("heads the run with its flow's display name (#3186)", async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap' })
+    render('run-ask')
+    expect(await screen.findByRole('link', { name: 'Nightly swap v1' })).toBeInTheDocument()
+  })
+
   it('shows no inputs for a run of a flow with none', async () => {
     render('run-done')
     expect(await screen.findByRole('region', { name: 'Result' })).toBeInTheDocument()
@@ -119,6 +127,27 @@ describe('WorkflowRunPage', () => {
       key: expect.stringMatching(KEY),
       body: { call_id: 'call-1', approved: true },
     })
+  })
+
+  // #4445 — a print_output call says which registry printer prints, as the backend resolved it.
+  it("names the printer an outward call prints on, and approves exactly the pair it named", async () => {
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 2)', 'b'.repeat(64))
+    const { user } = render('run-print')
+    const card = await screen.findByRole('region', { name: /^Waiting for approval/ })
+    expect(card).toHaveTextContent('Prints on Garage (Bambuddy printer 2)')
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-1', approved: true, bound_hash: 'b'.repeat(64) })
+  })
+
+  it('says so when the printer was re-linked since the card named it', async () => {
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 2)', 'b'.repeat(64))
+    const { user } = render('run-print')
+    const card = await screen.findByRole('region', { name: /^Waiting for approval/ })
+    // The backend's binding moved on: the row now links another printer.
+    setFlowPendingSummary('run-print', 'call-1', 'Prints on Garage (Bambuddy printer 5)', 'c'.repeat(64))
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    expect(await screen.findByText(/not the one you were shown/)).toBeInTheDocument()
   })
 
   // #2482 — a call outside the run's grant: where it waits, why, and its way up.

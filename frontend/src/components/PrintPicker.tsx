@@ -46,6 +46,7 @@ import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
+import { useLanCleared } from '../lib/useLanCleared'
 import {
   attachPrintToProject,
   optionsSubject,
@@ -519,6 +520,14 @@ export function PrintPicker({
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  // #5352, #5602 — what the LAN cannot set is dropped on a native route, named in a
+  // notice and put back on another printer (`useLanCleared`).
+  const { notice: lanClearedText, clear: clearLanCleared } = useLanCleared(
+    native,
+    `${registryPrinter ?? ''}:${printerId ?? ''}`,
+    options,
+    setOptions,
+  )
   /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
   // Memoised: it is a dependency of the run and of the background analysis.
   // Seeded only while it was never chosen. `null` is the user handing it back to the
@@ -925,10 +934,11 @@ export function PrintPicker({
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
+    clearLanCleared()
     setSupports(null)
     setPrimeTower(null)
     resetProfiles()
-  }, [currentKey, carry, resetProfiles])
+  }, [currentKey, carry, resetProfiles, clearLanCleared])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
   async function rearrange(backfill: boolean) {
@@ -1276,6 +1286,7 @@ export function PrintPicker({
       changeQuality({ tier: seedChoices.tier ?? null, processName: seedChoices.process_name ?? null })
     }
     setOptions(seed.options ?? {})
+    clearLanCleared()
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
     // A step's own seed is its sequence, Default included; another step's names one only
     // when it has one, and otherwise leaves the subject's remembered one (#4970).
@@ -1307,6 +1318,7 @@ export function PrintPicker({
     setPlate,
     setPrintSequence,
     restoreProfiles,
+    clearLanCleared,
   ])
 
   /** #2672 — this step's run request, what the review lists, and what the check refuses. */
@@ -1408,6 +1420,7 @@ export function PrintPicker({
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
+    clearLanCleared()
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
@@ -1956,6 +1969,11 @@ export function PrintPicker({
                     </p>
                   )}
 
+                  {!handing && lanClearedText !== null && (
+                    <p className="text-sm text-muted-foreground" role="status" data-testid="print-lan-cleared">
+                      {lanClearedText}
+                    </p>
+                  )}
                   {/* #3635 — Simple mode shows no Options, but never hides a remembered
                       one that holds the job. */}
                   {!handing && !picker.advanced && (
@@ -1965,6 +1983,7 @@ export function PrintPicker({
                       subject={subject}
                       printerId={printerId}
                       registryPrinter={registryPrinter}
+                      native={native}
                       value={sentOptions}
                       toRemember={rememberOptions}
                       onChange={editOptions}
@@ -2063,6 +2082,7 @@ export function PrintPicker({
                             subject={subject}
                             printerId={printerId}
                             registryPrinter={registryPrinter}
+                            native={native}
                             value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
                             toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
                             onChange={({ quantity, ...rest }) => {
@@ -2121,6 +2141,9 @@ export function PrintPicker({
                 slicing={previewSlice.slicing}
                 progress={previewSlice.progress}
                 sliceError={previewSlice.error}
+                onReslice={sliced ? null : previewSlice.reslice}
+                canReslice={previewSlice.canReslice}
+                reslicing={previewSlice.reslicing}
               />
             </div>
             </div>

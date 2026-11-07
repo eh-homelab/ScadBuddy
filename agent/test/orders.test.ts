@@ -1,4 +1,5 @@
 import { http, HttpResponse } from 'msw'
+import { z } from 'zod'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
@@ -46,10 +47,14 @@ describe('order tools (#4249)', () => {
       'customer_get',
       'customer_upsert',
       'order_list',
+      'orders_profit_report',
       'order_get',
       'order_create',
       'order_update',
       'order_item_add',
+      'order_item_add_after_acceptance',
+      'order_charges_update_after_acceptance',
+      'order_item_revision_add_after_acceptance',
       'order_item_update',
       'order_item_quote',
       'order_item_accept_quote',
@@ -67,10 +72,14 @@ describe('order tools (#4249)', () => {
       customer_get: 'read',
       customer_upsert: 'write',
       order_list: 'read',
+      orders_profit_report: 'read',
       order_get: 'read',
       order_create: 'write',
       order_update: 'write',
       order_item_add: 'write',
+      order_item_add_after_acceptance: 'outward',
+      order_charges_update_after_acceptance: 'outward',
+      order_item_revision_add_after_acceptance: 'outward',
       order_item_update: 'write',
       order_item_quote: 'write',
       order_item_accept_quote: 'outward',
@@ -121,6 +130,87 @@ describe('order tools (#4249)', () => {
     await expect(tool('customer_upsert').execute({ archive: true }, ctx())).rejects.toThrow('customer_id')
   })
 
+  it('reads an order’s real cost (#4251 §6.4)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/costs`, () =>
+        HttpResponse.json({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false }),
+      ),
+    )
+    expect(tool('order_costs').risk).toBe('read')
+    const result = await tool('order_costs').execute({ order_id: ORDER }, ctx())
+    expect(firstText(result)).toEqual({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false })
+  })
+
+  it('logs time and adds costs as writes, leaving their removal to the page (#5326)', async () => {
+    const sent: { path: string; body: unknown }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/time-entries`, async ({ request }) => {
+        sent.push({ path: 'time', body: await request.json() })
+        return HttpResponse.json({ id: 't1', minutes: 25 }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/cost-entries`, async ({ request }) => {
+        sent.push({ path: 'cost', body: await request.json() })
+        return HttpResponse.json({ id: 'c1', amount_minor: 120 }, { status: 201 })
+      }),
+    )
+    expect([tool('order_time_add').risk, tool('order_cost_add').risk]).toEqual(['write', 'write'])
+
+    const time = await tool('order_time_add').execute({ order_id: ORDER, order_item_id: ITEM, kind: 'post_processing', minutes: 25 }, ctx())
+    const cost = await tool('order_cost_add').execute({ order_id: ORDER, kind: 'assistant', amount_minor: 120, source: 'ai_session:s1' }, ctx())
+
+    expect(firstText(time)).toEqual({ id: 't1', minutes: 25 })
+    expect(firstText(cost)).toEqual({ id: 'c1', amount_minor: 120 })
+    expect(sent).toEqual([
+      { path: 'time', body: { order_item_id: ITEM, kind: 'post_processing', minutes: 25, note: '' } },
+      { path: 'cost', body: { kind: 'assistant', amount_minor: 120, note: '', source: 'ai_session:s1' } },
+    ])
+    expect(() => tool('order_cost_add').execute({ order_id: ORDER, kind: 'material', amount_minor: 0 }, ctx())).toThrow('amount_minor')
+    const removals = NOT_A_TOOL.map((n) => n.operation)
+    expect(removals).toContain('DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}')
+    expect(removals).toContain('DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}')
+  })
+
+  it('lists parts, adds stock and sets an item\'s parts through their routes (#5543)', async () => {
+    const sent: { path: string; body?: unknown; query?: string }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/parts`, ({ request }) => {
+        sent.push({ path: 'list', query: new URL(request.url).search })
+        return HttpResponse.json([{ id: 'p1', on_hand: 2, low: true }])
+      }),
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/parts`, () => {
+        sent.push({ path: 'order' })
+        return HttpResponse.json({ order_id: ORDER, items: [], needs: [], short: [] })
+      }),
+      http.post(`${BACKEND}/api/v1/parts/p1/stock`, async ({ request }) => {
+        sent.push({ path: 'stock', body: await request.json() })
+        return HttpResponse.json({ id: 'p1', on_hand: 102 })
+      }),
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/parts`, async ({ request }) => {
+        sent.push({ path: 'item', body: await request.json() })
+        return HttpResponse.json([{ part_id: 'p1', per_unit: 2, used: 0 }])
+      }),
+    )
+    expect([tool('part_list').risk, tool('part_stock_add').risk, tool('order_item_parts_set').risk]).toEqual([
+      'read',
+      'write',
+      'write',
+    ])
+
+    await tool('part_list').execute({ low: true }, ctx())
+    await tool('part_list').execute({ order_id: ORDER }, ctx())
+    const stock = await tool('part_stock_add').execute({ part_id: 'p1', packs: 1 }, ctx())
+    await tool('order_item_parts_set').execute({ order_id: ORDER, item_id: ITEM, parts: [{ part_id: 'p1', per_unit: 2 }] }, ctx())
+
+    expect(firstText(stock)).toEqual({ id: 'p1', on_hand: 102 })
+    expect(sent).toEqual([
+      { path: 'list', query: '?low=true' },
+      { path: 'order' },
+      { path: 'stock', body: { packs: 1, note: '' } },
+      { path: 'item', body: { parts: [{ part_id: 'p1', per_unit: 2 }] } },
+    ])
+    expect(() => tool('part_stock_add').execute({ part_id: 'p1', packs: 0 }, ctx())).toThrow('packs')
+  })
+
   it('passes the list filters and the cursor through to the backend', async () => {
     let url = ''
     server.use(
@@ -133,6 +223,32 @@ describe('order tools (#4249)', () => {
     expect(firstText(result)).toEqual({ items: [{ id: ORDER, number: 'ORD-2026-1' }], next_cursor: 'abc' })
     const query = new URL(url).searchParams
     expect(Object.fromEntries(query)).toEqual({ status: 'quoted', customer_id: CUSTOMER, cursor: 'xyz', limit: '5' })
+
+    // #5327: "Loss or thin" is `margin_state` repeated.
+    await tool('order_list').execute({ margin_state: ['loss', 'thin'] }, ctx())
+    expect(new URL(url).searchParams.getAll('margin_state')).toEqual(['loss', 'thin'])
+
+    // #5329: a profit report row's orders.
+    const row = { product: 'sku:DES-1', accepted_from: '2026-08-08T00:00:00Z', accepted_to: '2026-11-06T00:00:00Z', currency: 'USD' }
+    await tool('order_list').execute(row, ctx())
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual(row)
+    expect(() => tool('order_list').execute({ product: 'nope' }, ctx())).toThrow()
+  })
+
+  it('reads the profit report for a period (#5329)', async () => {
+    let url = ''
+    const report = { group: 'model', rows: [{ group: 'model', key: 'demo', product: 'model:demo', currency: 'USD' }], complete: true }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/reports/profit`, ({ request }) => {
+        url = request.url
+        return HttpResponse.json(report)
+      }),
+    )
+    const period = { from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z' }
+    expect(firstText(await tool('orders_profit_report').execute(period, ctx()))).toEqual(report)
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual(period)
+    await tool('orders_profit_report').execute({}, ctx())
+    expect(new URL(url).search).toBe('')
   })
 
   it('edits, holds and records a payment through their own routes', async () => {
@@ -200,6 +316,83 @@ describe('order tools (#4249)', () => {
       'Rush fee',
     )
     expect(firstText(gone)).toEqual({ deleted: ITEM })
+  })
+
+  it('adds a library file as an item, its tier unchanged (#5544)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'library_file', status: 'draft' }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'library_file', status: 'draft' }, { status: 201 })
+      }),
+    )
+    const add = tool('order_item_add')
+    expect(add.risk).toBe('write')
+    await add.execute({ order_id: ORDER, library_file_id: 89, quantity: 2 }, ctx())
+    await tool('order_item_add_after_acceptance').execute(
+      { order_id: ORDER, kind: 'library_file', library_file_id: 89, title: 'Bracket' },
+      ctx(),
+    )
+    // The body is sent as given: no `accept`, which only a custom item takes.
+    expect(sent).toEqual([
+      { library_file_id: 89, quantity: 2, notes: '' },
+      { kind: 'library_file', library_file_id: 89, title: 'Bracket', quantity: 1, notes: '' },
+    ])
+    expect(add.summarize({ order_id: ORDER, library_file_id: 89 })).toContain('"library_file_id":89')
+    expect(() => z.object(add.shape).parse({ order_id: ORDER, library_file_id: 0 })).toThrow()
+  })
+
+  it('adds an item after acceptance on its own route, as an outward step (#5349)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, status: 'quoted' }, { status: 201 })
+      }),
+    )
+    const added = tool('order_item_add_after_acceptance')
+    expect(added.risk).toBe('outward')
+    expect(added.routes).toEqual(['POST /api/v1/orders/{order_id}/items/after-acceptance'])
+    // The plain add keeps its own route and stays `write`.
+    expect(tool('order_item_add').routes).toEqual(['POST /api/v1/orders/{order_id}/items'])
+    const result = await added.execute(
+      { order_id: ORDER, kind: 'custom', title: 'Tag 49', unit_price_minor: 300, quantity: 2 },
+      ctx(),
+    )
+    // No accept: the route leaves the price for order_item_accept_quote.
+    expect(sent).toEqual([{ kind: 'custom', title: 'Tag 49', unit_price_minor: 300, quantity: 2, notes: '' }])
+    expect(firstText(result)).toEqual({ id: ITEM, status: 'quoted' })
+    expect(added.summarize({ order_id: ORDER, kind: 'custom', title: 'Tag 49' })).toBe(
+      `Add Tag 49 to order ${ORDER}, after its acceptance`,
+    )
+  })
+
+  it('changes the charges after acceptance on its own route, as an outward step (#5351)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/charges/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER, status: 'accepted' })
+      }),
+    )
+    const changed = tool('order_charges_update_after_acceptance')
+    expect(changed.risk).toBe('outward')
+    expect(changed.routes).toEqual(['PUT /api/v1/orders/{order_id}/charges/after-acceptance'])
+    // order_update keeps the plain PATCH and stays `write`.
+    expect(tool('order_update').risk).toBe('write')
+    expect(tool('order_update').routes).not.toContain('PUT /api/v1/orders/{order_id}/charges/after-acceptance')
+    const charges = [
+      { kind: 'shipping', label: 'Post', amount_minor: 500 },
+      { kind: 'discount', label: 'Agreed cap', amount_minor: -300 },
+    ]
+    const result = await changed.execute({ order_id: ORDER, charges }, ctx())
+    expect(sent).toEqual([{ charges }])
+    expect(firstText(result)).toEqual({ id: ORDER, status: 'accepted' })
+    expect(changed.summarize({ order_id: ORDER, charges })).toBe(`Set 2 charges on accepted order ${ORDER}`)
   })
 
   it('cancels the order or one item, each through its own route', async () => {
@@ -410,6 +603,13 @@ describe('pricing tools (#4250)', () => {
       filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
+    // #5352: the quote slices on the route its print will take.
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, path: 'bambuddy' } }, ctx())
+    expect(body).toMatchObject({ path: 'bambuddy' })
+    // #5571: the quote slices with the settings per slot its print will send.
+    const part_settings = { '2': { top_shell_layers: 8 } }
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, part_settings } }, ctx())
+    expect(body).toMatchObject({ part_settings })
   })
 
   it('answers a slice quote still running past the follow window', async () => {
@@ -454,6 +654,61 @@ describe('pricing tools (#4250)', () => {
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
       'on Bambuddy printer 1',
     )
+    // #5571: the quote's settings per slot go to the print, and its approval line names them.
+    const part_settings = { '1': { wall_loops: 4 } }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings }, ctx())
+    expect(body).toMatchObject({ part_settings })
+    expect(
+      tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings } as never),
+    ).toContain("slot 1's parts at wall_loops 4")
+  })
+
+  it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/print`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'succeeded', result: { id: 'f1' } }),
+      ),
+    )
+    const { filaments: _priced, ...dialog } = SLICE
+    const options = { bed_levelling: 'on', flow_cali: 'on', nozzle_offset_cali: 'on', vibration_cali: true, timelapse: true }
+    const args = { order_id: ORDER, item_id: ITEM, ...dialog, options, path: 'bambuddy' }
+    await tool('order_item_print').execute(args, ctx())
+    expect(body).toMatchObject({ options, path: 'bambuddy' })
+    expect(tool('order_item_print').summarize?.(args as never)).toContain("through Bambuddy's queue")
+    // An unknown option is refused by the schema, as the backend would refuse it.
+    expect(z.object(tool('order_item_print').shape).safeParse({ ...args, options: { flow_calibration: 'on' } }).success).toBe(false)
+    expect(z.object(tool('order_item_print').shape).safeParse({ ...args, path: 'cloud' }).success).toBe(false)
+  })
+
+  it("reads an attempt's archives and copies one's finish photo with a key (#4253 §8.2)", async () => {
+    expect([tool('order_attempt_archives').risk, tool('order_attempt_copy').risk]).toEqual(['read', 'write'])
+    const keys: (string | null)[] = []
+    let body: unknown
+    const FILE = { id: 'a1', role: 'finished', kind: 'image' }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/archives`, () =>
+        HttpResponse.json({ linked: true, attempt: { id: 'f1' }, archives: [{ archive_id: 81, finish_photos: ['finish_1.jpg'], timelapse: false }] }),
+      ),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/archives/81/copy`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        body = await request.json()
+        return HttpResponse.json(FILE)
+      }),
+    )
+    const read = await tool('order_attempt_archives').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1' }, ctx())
+    expect(firstText(read)).toMatchObject({ linked: true, archives: [{ archive_id: 81 }] })
+    const copied = await tool('order_attempt_copy').execute(
+      { order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1', archive_id: 81, what: 'finished_photo' },
+      ctx(),
+    )
+    expect(firstText(copied)).toEqual(FILE)
+    expect(body).toEqual({ what: 'finished_photo' })
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
   })
 
   it('records a typed price in manual mode, and takes exactly one mode', async () => {
@@ -477,6 +732,68 @@ describe('pricing tools (#4250)', () => {
         ctx(),
       ),
     ).rejects.toThrow('exactly one')
+  })
+
+  // #5328, job cost spec §6.3: the quote warning in the result, advice only.
+  it("adds a price warning when the quote is below the model's real cost, or above it with a thin margin", async () => {
+    const quote = { id: 'q3', order_item_id: ITEM, source: 'manual', unit_price_minor: 800 }
+    const asked: Record<string, string>[] = []
+    const history = (warning: boolean, price = 800) => ({
+      slug: 'tag',
+      currency: 'EUR',
+      jobs: 4,
+      units: 6,
+      unit_cost_minor: 900,
+      estimated: false,
+      main_reason: 'failed_prints',
+      main_reason_minor: 250,
+      markup_percent: '0',
+      thin_margin_percent: '15',
+      suggested_unit_price_minor: 1059,
+      unit_price_minor: price,
+      margin_percent: price === 800 ? -12.5 : 10,
+      warning,
+      below_cost: price < 900,
+      minor_exponent: 2,
+    })
+    let warn = true
+    let price = 800
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, () => HttpResponse.json(quote, { status: 201 })),
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({ order: { id: ORDER, currency: 'EUR' }, items: [{ id: ITEM, reference: { slug: 'tag' } }] }),
+      ),
+      http.get(`${BACKEND}/api/v1/orders/history/unit-cost`, ({ request }) => {
+        asked.push(Object.fromEntries(new URL(request.url).searchParams))
+        return HttpResponse.json(history(warn, price))
+      }),
+    )
+    const input = { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 800 } }
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual({
+      ...quote,
+      price_warning: {
+        jobs: 4,
+        unit_cost_minor: 900,
+        main_reason: 'failed_prints',
+        main_reason_minor: 250,
+        suggested_unit_price_minor: 1059,
+        margin_percent: -12.5,
+        below_cost: true,
+        estimated: false,
+      },
+    })
+    expect(asked).toEqual([{ slug: 'tag', currency: 'EUR', unit_price_minor: '800' }])
+    // 10.00 over a cost of 9.00 is a 10 % margin: above the cost, and still thin.
+    price = 1000
+    const thin = { ...quote, unit_price_minor: 1000 }
+    server.use(http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, () => HttpResponse.json(thin, { status: 201 })))
+    const answer = firstText(await tool('order_item_quote').execute(input, ctx())) as { price_warning: Record<string, unknown> }
+    expect(answer.price_warning).toMatchObject({ below_cost: false, margin_percent: 10, unit_cost_minor: 900 })
+    warn = false
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(thin)
+    // A lookup that fails leaves the recorded quote as it is.
+    server.use(http.get(`${BACKEND}/api/v1/orders/history/unit-cost`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(thin)
   })
 
   it('reads the book, and sets the policy over what it was', async () => {
@@ -637,6 +954,24 @@ describe('order attachment tools (#4722)', () => {
     expect(fields).toEqual({})
   })
 
+  it('attaches to a fulfilment attempt of an item (#4251)', async () => {
+    const ATTEMPT = 'f0000000-1111-4222-8333-944455556666'
+    let hit = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/${ATTEMPT}/attachments`, () => {
+        hit = true
+        return HttpResponse.json({ id: ATTACHMENT, order_id: ORDER, item_id: ITEM, fulfilment_id: ATTEMPT })
+      }),
+    )
+    const { ctx: c, ref } = withWorkspace({ 'done.png': Buffer.from('png bytes') })
+    await tool('order_attach').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: ATTEMPT, ...ref('done.png') }, c)
+    expect(hit).toBe(true)
+    const { ctx: c2, ref: ref2 } = withWorkspace({ 'done.png': Buffer.from('png bytes') })
+    await expect(tool('order_attach').execute({ order_id: ORDER, fulfilment_id: ATTEMPT, ...ref2('done.png') }, c2)).rejects.toThrow(
+      'item_id',
+    )
+  })
+
   it('refuses a file that changed since it was read, before anything is sent', async () => {
     const { ctx: c } = withWorkspace({ 'a.png': Buffer.from('x') })
     await expect(
@@ -685,5 +1020,153 @@ describe('order attachment tools (#4722)', () => {
     await expect(
       tool('order_attachment_update').execute({ order_id: ORDER, attachment_id: ATTACHMENT, delivered: true }, ctx()),
     ).rejects.toThrow('item_id')
+  })
+})
+
+describe('design revisions (#5280)', () => {
+  const C = 'a'.repeat(40)
+  const REVISION = '5e0f1a2b-3c4d-4e5f-8a6b-7c8d9e0f1a2b'
+  const ATT = 'ad000000-1111-4222-8333-944455556666'
+  const OPERATION = 'op000000-1111-4222-8333-944455556666'
+
+  function withWorkspace(files: Record<string, Buffer>) {
+    const ws = memoryWorkspace(files, 'image/png')
+    return { ...ws, ctx: { ...ctx(), workspace: ws.workspace } as ToolContext }
+  }
+
+  it('order_item_revision_add posts the reference and note', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: REVISION, status: 'draft' }, { status: 201 })
+      }),
+    )
+    await tool('order_item_revision_add').execute(
+      { order_id: ORDER, item_id: ITEM, reference: { slug: 'demo', commit: C, inputs: {} }, note: 'v2' },
+      ctx(),
+    )
+    expect(body).toEqual({ reference: { slug: 'demo', commit: C, inputs: {} }, note: 'v2' })
+  })
+
+  it('revises an accepted item on its own route, as an outward step (#5350)', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/after-acceptance`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: REVISION, number: 2 }, { status: 201 })
+      }),
+    )
+    const revise = tool('order_item_revision_add_after_acceptance')
+    expect(revise.risk).toBe('outward')
+    expect(revise.routes).toEqual(['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/after-acceptance'])
+    // order_item_revision_add keeps the plain route and stays `write`.
+    expect(tool('order_item_revision_add').routes).toEqual(['POST /api/v1/orders/{order_id}/items/{item_id}/revisions'])
+    const result = await revise.execute(
+      { order_id: ORDER, item_id: ITEM, output_id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', filaments: { '0': null }, note: 'v3' },
+      ctx(),
+    )
+    expect(body).toEqual({ note: 'v3', output_id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', filaments: { '0': null } })
+    expect(firstText(result)).toEqual({ id: REVISION, number: 2 })
+    expect(revise.summarize?.({ order_id: ORDER, item_id: ITEM } as never)).toBe(
+      `Revise the design of accepted item ${ITEM} of order ${ORDER}`,
+    )
+  })
+
+  it('names item_partly_fulfilled in the after-acceptance revision, and order_get passes `stale` through (#5592, #5598)', async () => {
+    const revise = tool('order_item_revision_add_after_acceptance')
+    expect(revise.description).toContain('`item_partly_fulfilled` once an attempt of it is accepted')
+    expect(revise.description).toContain('cancel the item and add one with the new design')
+    // order_item_fulfil tells the model that order_get marks an attempt of the old design.
+    expect(tool('order_item_fulfil').description).toContain('order_get marks such an attempt `stale: true`')
+    const attempts = [
+      { id: 'f1', attempt: 1, purpose: 'production', accepted_at: null, stale: true },
+      { id: 'f2', attempt: 2, purpose: 'production', accepted_at: null, stale: false },
+    ]
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({ order: { id: ORDER }, items: [{ id: ITEM, fulfilments: attempts }] }),
+      ),
+    )
+    const read = firstText(await tool('order_get').execute({ order_id: ORDER }, ctx())) as {
+      items: { fulfilments: { id: string; stale: boolean }[] }[]
+    }
+    expect(read.items[0]!.fulfilments.map((f) => [f.id, f.stale])).toEqual([
+      ['f1', true],
+      ['f2', false],
+    ])
+  })
+
+  it('tiers the revision tools', () => {
+    expect(tool('order_item_revision_send').risk).toBe('outward')
+    expect(tool('order_item_revision_add').risk).toBe('write')
+    expect(
+      tool('order_item_revision_send').summarize?.({ order_id: ORDER, item_id: ITEM, revision_id: REVISION } as never),
+    ).toBe(`Send revision ${REVISION} of item ${ITEM} (order ${ORDER}) to the customer`)
+  })
+
+  it('order_item_revision_send posts the send', async () => {
+    let hit = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/send`, () => {
+        hit = true
+        return HttpResponse.json({ id: REVISION, status: 'sent' })
+      }),
+    )
+    await tool('order_item_revision_send').execute({ order_id: ORDER, item_id: ITEM, revision_id: REVISION }, ctx())
+    expect(hit).toBe(true)
+  })
+
+  it('order_item_print with test_revision_id posts the test print', async () => {
+    let path = ''
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/test-print`, ({ request }) => {
+        path = new URL(request.url).pathname
+        return HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'succeeded', result: { id: 'f1' } }),
+      ),
+    )
+    await tool('order_item_print').execute(
+      {
+        order_id: ORDER,
+        item_id: ITEM,
+        test_revision_id: REVISION,
+        printer_id: 1,
+        filament_plan: { slots: [] },
+        choices: { nozzles: [{ size: '0.4' }] },
+      },
+      ctx(),
+    )
+    expect(path).toBe(`/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/test-print`)
+  })
+
+  it('order_attach with revision_id posts to the revision, with the attempt as a field', async () => {
+    let fields: Record<string, string> = {}
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/attachments`, async ({ request }) => {
+        const form = await request.formData()
+        fields = Object.fromEntries([...form.entries()].filter(([, v]) => typeof v === 'string')) as Record<string, string>
+        return HttpResponse.json({ id: ATT })
+      }),
+    )
+    const bytes = Buffer.from('png bytes')
+    const { ctx: c, ref } = withWorkspace({ 'render.png': bytes })
+    await tool('order_attach').execute(
+      { order_id: ORDER, item_id: ITEM, revision_id: REVISION, fulfilment_id: 'f1', role: 'render', ...ref('render.png') },
+      c,
+    )
+    expect(fields).toEqual({ role: 'render', fulfilment_id: 'f1' })
+    const { ctx: c2, ref: ref2 } = withWorkspace({ 'render.png': bytes })
+    await expect(
+      tool('order_attach').execute({ order_id: ORDER, revision_id: REVISION, ...ref2('render.png') }, c2),
+    ).rejects.toThrow('item_id')
+  })
+
+  it('leaves the answer and to-model to the people', () => {
+    const left = NOT_A_TOOL.map((n) => n.operation)
+    expect(left).toContain('POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer')
+    expect(left).toContain('POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model')
   })
 })

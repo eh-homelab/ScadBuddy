@@ -5,9 +5,18 @@ prints one nested under it (``parent_id``, #930); ``order_projects`` keeps the m
 item's print ensures its project again (an accept whose ensure failed, Bambuddy down) and
 sets it as the run's ``project_id``, so the 3MF lands in the item's project folder and the
 queue item carries the project, as any print filed under a project does. Nothing here
-deletes a project. A cancel keeps the mapping too (the spec dropped it): a retried print
-of a cancelled item must key its run as its first try did (``existing_run``), and a
-reopened order goes on in the projects it had rather than making a second of each name.
+deletes a project; one deleted in Bambuddy is made again by the next ensure, and the
+mapping names the new one (#5263). A project made or found there within the last
+``EXISTS_TTL_SECONDS`` is not asked for again (#5273), so a deletion is seen by the
+first ensure after that. When it was is ``order_projects.seen_at`` (#5276), which every
+replica shares, so no replica keeps a cache of its own; a print of the order that fails
+(``Lifecycle.follow_print``, or a start the print path refused, ``print_item``) clears it,
+so the retry asks again rather than filing under a project just deleted there. A print's
+claim records the project its run is keyed
+with, so a retry keys it the same whatever the mapping says since. A cancel keeps the
+mapping too (the spec dropped it): a retried print of a cancelled item must key its run
+as its first try did (``existing_run``), and a reopened order goes on in the projects it
+had rather than making a second of each name.
 
 Every Bambuddy call goes through the seam (``OrderIntegrations.ensure_project``), so
 without ``bambuddy_url`` nothing here is asked and nothing is recorded.
@@ -21,6 +30,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from scadbuddy.orders.integrations import OrderIntegrations
+from scadbuddy.orders.lifecycle import has_design
 from scadbuddy.orders.models import Order, OrderItem, OrderProject
 from scadbuddy.orders.store import OrderStore, item_subject, order_subject
 
@@ -38,12 +48,18 @@ def item_project_name(order: Order, item: OrderItem) -> str:
 
 
 def prints(item: OrderItem) -> bool:
-    """Whether the item is one a print makes: a template's, not a custom item's."""
-    return item.reference is not None and item.status != "cancelled"
+    """Whether the item is one a print makes: a template's or a library file's (#5544),
+    not a custom item's."""
+    return has_design(item) and item.status != "cancelled"
 
 
 #: How long one Bambuddy project create may take while the order's lock is held.
 ENSURE_TIMEOUT_SECONDS = 30.0
+
+#: How long a project made or found in Bambuddy is taken to stand without asking again
+#: (#5273): an accept and the prints after it, or a run of prints, ask once. One deleted
+#: in Bambuddy within it is made again by the first ensure after.
+EXISTS_TTL_SECONDS = 60.0
 
 
 @asynccontextmanager
@@ -87,6 +103,28 @@ async def _ensure(integrations: OrderIntegrations, name: str, parent_id: int | N
         return await integrations.ensure_project(name, parent_id)
 
 
+async def _kept(
+    store: OrderStore,
+    integrations: OrderIntegrations,
+    subject: str,
+    known: tuple[int, bool] | None,
+) -> int | None:
+    """The subject's recorded project while Bambuddy still has it; None for one deleted
+    there (#5263), which the caller makes again. One made or found within
+    ``EXISTS_TTL_SECONDS`` (``known``'s flag) is not asked of Bambuddy again (#5273)."""
+    if known is None:
+        return None
+    project_id, fresh = known
+    if fresh:
+        return project_id
+    async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
+        exists = await integrations.project_exists(project_id)
+    if not exists:
+        return None
+    await asyncio.to_thread(store.project_seen, subject, project_id)
+    return project_id
+
+
 async def ensure_projects(
     store: OrderStore,
     integrations: OrderIntegrations,
@@ -103,15 +141,14 @@ async def ensure_projects(
         order = await asyncio.to_thread(store.order, order_id)
         if order is None:
             return []
-        known = {
-            project.subject: project.project_id
-            for project in await asyncio.to_thread(store.projects, order_id)
-        }
+        known = await asyncio.to_thread(store.projects_seen, order_id, EXISTS_TTL_SECONDS)
         top_subject = order_subject(order_id)
-        top = known.get(top_subject)
+        top = await _kept(store, integrations, top_subject, known.get(top_subject))
         if top is None:
             made = await _ensure(integrations, order.number, None)
-            top = await asyncio.to_thread(store.set_project, order_id, top_subject, made)
+            top = await asyncio.to_thread(
+                store.set_project, order_id, top_subject, made, top_subject in known
+            )
         items = await asyncio.to_thread(store.items, order_id)
         wanted = (
             [item for item in items if prints(item)]
@@ -120,10 +157,10 @@ async def ensure_projects(
         )
         for item in wanted:
             subject = item_subject(item.id)
-            if subject in known:
+            if await _kept(store, integrations, subject, known.get(subject)) is not None:
                 continue
             made = await _ensure(integrations, item_project_name(order, item), top)
-            await asyncio.to_thread(store.set_project, order_id, subject, made)
+            await asyncio.to_thread(store.set_project, order_id, subject, made, subject in known)
     return await asyncio.to_thread(store.projects, order_id)
 
 

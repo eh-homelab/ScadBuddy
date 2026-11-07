@@ -52,8 +52,17 @@ describe.skipIf(skip !== '')(`the backend roles' ai_* grants${skip}`, () => {
     for (const [table, privileges] of Object.entries(PROJECTS_AI_GRANTS)) {
       for (const p of privileges) expect(await can(roles.projects, table, p), `${roles.projects} ${p} ${table}`).toBe(true)
     }
-    expect(await can(roles.projects, 'ai_payload_keys', 'DELETE')).toBe(false)
+    // ScadBuddy#5298: a run's payload keys come through the API, sealed.
+    for (const p of ['SELECT', 'INSERT', 'DELETE']) {
+      expect(await can(roles.projects, 'ai_payload_keys', p), `${roles.projects} ${p} ai_payload_keys`).toBe(false)
+    }
+    expect(await can(roles.projects, 'ai_forgotten_subjects', 'SELECT')).toBe(false)
     expect(await can(roles.projects, 'ai_operations', 'SELECT')).toBe(false)
+    // ScadBuddy#5298: a session's tiers and the approval timeout come through the API.
+    for (const table of ['ai_sessions', 'ai_mcp_tokens', 'ai_settings']) {
+      expect(await can(roles.api, table, 'SELECT'), `${roles.api} SELECT ${table}`).toBe(true)
+      expect(await can(roles.projects, table, 'SELECT'), `${roles.projects} SELECT ${table}`).toBe(false)
+    }
   })
 
   it('grants nobody on one shared role', async () => {

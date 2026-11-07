@@ -939,6 +939,10 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
                 "folder_id",
                 "printer",
                 "accepted_fixes",
+                # #5352: a field the old model did not have, so not in its dump.
+                "path",
+                # #5571: nor this one.
+                "part_settings",
             },
         ),
         sort_keys=True,

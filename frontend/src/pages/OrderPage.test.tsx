@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
+import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
-import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -42,6 +44,27 @@ describe('OrderPage (#4249)', () => {
     expect(totals).toHaveTextContent('30.00')
     expect(totals).toHaveTextContent('35.00')
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
+  })
+
+  it('shows the money view before accept, and a Loss badge in the header (#5326)', async () => {
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    // Design time and test prints come before an accept: the card is there to log them.
+    const card = await screen.findByRole('region', { name: 'Cost' })
+    expect(within(card).getByRole('form', { name: 'Log time on the order' })).toBeInTheDocument()
+    expect(screen.queryByText('Loss')).toBeNull()
+
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 5000 })
+    render(ORDER_ACCEPTED)
+    const heading = await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(await within(heading.parentElement!).findByText('Loss')).toBeInTheDocument()
+  })
+
+  it('says so when the cost cannot be read, rather than dropping the card (#5326)', async () => {
+    server.use(http.get('/api/v1/orders/:id/costs', () => HttpResponse.json({ detail: 'Bambuddy timed out' }, { status: 500 })))
+    render(ORDER_ACCEPTED)
+    expect(await screen.findByText(/The order's cost could not be read/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
   })
 
   it("shows the lifecycle's refusal naming the items in the way", async () => {
@@ -99,6 +122,19 @@ describe('OrderPage (#4249)', () => {
     expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
   })
 
+  it('points an empty accepted order at Add item and the custom item row (#5349, #5541)', async () => {
+    const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
+    const row = state.orders.find((o) => o.id === order.id)
+    if (row) row.status = 'accepted'
+    render(order.id)
+    await screen.findByRole('heading', { name: order.number })
+    expect(screen.getByText('No items yet. Add one with Add item above, or type a custom item below.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add item' })).toBeInTheDocument()
+    // The custom row adds on the after-acceptance route, after a confirm.
+    expect(screen.getByRole('button', { name: 'Add custom item' })).toBeInTheDocument()
+    expect(screen.getByTestId('custom-item-row')).toBeInTheDocument()
+  })
+
   it('points an empty table at Add item only where there is one', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     await api.cancelOrder(order.id)
@@ -108,9 +144,53 @@ describe('OrderPage (#4249)', () => {
     expect(screen.queryByText(/Add one with Add item above/)).not.toBeInTheDocument()
   })
 
-  it('offers no Add item once the order is accepted', async () => {
+  it('offers Add item on an accepted order, which asks first and quotes the new item (#5349)', async () => {
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Design request' }))
+    await user.type(within(dialog).getByLabelText('Title'), 'Tag 49')
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is accepted\. Adding an item changes what the customer gets/)
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, { kind: 'request', title: 'Tag 49', quantity: 1, notes: '' }))
+    const added = (await api.order(ORDER_ACCEPTED)).items.find((i) => i.title === 'Tag 49')
+    expect(added?.status).toBe('draft')
+    // The new item has no accepted price: it still takes a revision, as on a draft order.
+    await user.click(within(await screen.findByTestId(`order-item-${added?.id}`)).getByRole('button', { name: 'Tag 49' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Tag 49' })
+    expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeInTheDocument()
+  })
+
+  it('offers the design and filament edits of an item revised after acceptance, never its quantity (#5582)', async () => {
+    const approved = state.items.find((i) => i.order_id === ORDER_ACCEPTED && i.status === 'approved')!
+    const first = render(ORDER_ACCEPTED, `?item=${approved.id}`)
+    let drawer = await screen.findByRole('dialog', { name: approved.title })
+    // Accepted: the price is pinned, and a new design goes through the confirm.
+    expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
+    expect(within(drawer).queryByRole('button', { name: 'Quote from a slice…' })).toBeNull()
+    expect(within(drawer).queryByRole('button', { name: 'Record and accept' })).toBeNull()
+    first.unmount()
+
+    await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, approved.id, { note: 'loop' })
+    render(ORDER_ACCEPTED, `?item=${approved.id}`)
+    drawer = await screen.findByRole('dialog', { name: approved.title })
+    await within(drawer).findByTestId('revised-after-acceptance')
+    // `priceOpen`: the new design takes a quote (its filaments with it) and more revisions, as the backend allows.
+    expect(within(drawer).getByRole('button', { name: 'Quote from a slice…' })).toBeEnabled()
+    expect(within(drawer).getByRole('button', { name: 'Record and accept' })).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeEnabled()
+    // The quantity stays pinned: it would reprice the old quote.
+    expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
+  })
+
+  it('offers no Add item on an accepted order on hold', async () => {
+    await api.holdOrder(ORDER_ACCEPTED)
     render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(await screen.findByRole('button', { name: 'Release hold' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Add item' })).not.toBeInTheDocument()
   })
 

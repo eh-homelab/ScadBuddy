@@ -10,18 +10,35 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from fastapi import Response
 from fastapi.testclient import TestClient
 
+import scadbuddy.orders.projects as projects_module
+from scadbuddy.activity.component import ACTIVITY
+from scadbuddy.api import orders as orders_api
+from scadbuddy.api import printing as printing_api
+from scadbuddy.api.printing import accept_run
+from scadbuddy.bambuddy.part_settings import dumped
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.core.events import PrintOutcome
+from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import FULFILMENT_HOLDER
-from scadbuddy.orders.operations import existing_run, print_body
+from scadbuddy.orders.operations import ORDER_ITEM_PRINT, existing_run, print_body
+from scadbuddy.orders.printing import print_request_id
+from scadbuddy.workflows.print_models import SourceSpec
 from tests.api.conftest import follow_operation
 from tests.api.test_customers import create as create_customer
 from tests.api.test_order_quote import COPY, BambuddySlices, sliced_plate, two_colours
@@ -29,10 +46,19 @@ from tests.api.test_order_quote import Shop as QuoteShop
 from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item, problem, quote_and_accept
 from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_preview_native import kek_file  # noqa: F401
 from tests.api.test_print_run_choices import body, follow_run, run_routes
+from tests.api.test_print_run_native import (
+    FakeLibrary,
+    _app,
+    _lan_routed,
+    library,  # noqa: F401
+)
 from tests.api.test_send import API, configure, make_output, upload_route
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG, upload
+from tests.orders.test_lifecycle import BY
+from tests.support.fake_slicer import fake_slicer_worker
 from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
@@ -43,16 +69,31 @@ class Projects:
 
     def __init__(self) -> None:
         self.made: list[dict[str, Any]] = []
+        #: Projects deleted in Bambuddy (#5263).
+        self.deleted: set[int] = set()
+        #: Creates that fail with a 500 before one succeeds.
+        self.failing = 0
         respx.post(f"{API}/projects/").mock(side_effect=self.create)
+        respx.get(url__regex=rf"{API}/projects/\d+$").mock(side_effect=self.read)
         respx.get(url__regex=rf"{API}/library/folders/by-project/\d+").mock(
             side_effect=self.folders
         )
 
     def create(self, request: httpx.Request) -> httpx.Response:
+        if self.failing:
+            self.failing -= 1
+            return httpx.Response(500, json={"detail": "down"})
         body = json.loads(request.content)
         project = {"id": 700 + len(self.made), "status": "active", **body}
         self.made.append(project)
         return httpx.Response(200, json=project)
+
+    def read(self, request: httpx.Request) -> httpx.Response:
+        project_id = int(request.url.path.rsplit("/", 1)[1])
+        found = next((p for p in self.made if p["id"] == project_id), None)
+        if found is None or project_id in self.deleted:
+            return httpx.Response(404, json={"detail": "Project not found"})
+        return httpx.Response(200, json=found)
 
     def folders(self, request: httpx.Request) -> httpx.Response:
         project_id = int(request.url.path.rsplit("/", 1)[1])
@@ -225,6 +266,24 @@ def test_a_slice_quote_prints_and_holds_its_sliced_file(bambuddy: TestClient) ->
     problem(bambuddy.post(f"{shop.path}/print", json=body(), headers=press()), "requote_needed")
     sliced.write_bytes(kept)
 
+    # #4251 §5.4 "Spools": spools 9 and 5 are not the red PLA and green PETG it was
+    # quoted with, so the print is refused before anything starts.
+    refused = problem(
+        bambuddy.post(f"{shop.path}/print", json=body(), headers=press()), "spool_not_filament"
+    )
+    assert refused["slots"] == [0, 1]
+    # The book's records made the recorded spools' filaments (a bookkeeping fix, which
+    # moves no quote): now they are the slots'.
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = bambuddy.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+
     queue_route()
     attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=body(), headers=press()))
     assert attempt["sliced_sha256"] == quote["sliced_sha256"]
@@ -287,3 +346,444 @@ def test_a_retry_finds_the_run_its_request_made(bambuddy: TestClient) -> None:
     other = {**request, "request_id": request["request_id"][:-4] + "beef"}
     assert other["request_id"] != request["request_id"]
     assert _lookup(bambuddy, item, other, attempt["copies"]) is None
+
+
+def test_a_deleted_project_is_made_again_and_a_failed_make_is_tried_again(
+    client: TestClient, fake_openscad: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5263: the item's project was deleted in Bambuddy, and its first make again
+    fails (a 500): the operation tries the print again, which makes it and files the
+    print under the new one."""
+    # Past the time the accept's projects are taken to stand unasked (#5273).
+    monkeypatch.setattr(projects_module, "EXISTS_TTL_SECONDS", 0.0)
+    with respx.mock as router:
+        router.route(host="testserver").pass_through()
+        two_colours(fake_openscad)
+        configure(client)
+        upload_route(COPY)
+        run_routes()
+        slice_routes()
+        queued = queue_route()
+        projects = Projects()
+        item = Item(client)
+        projects.deleted.add(701)
+        projects.failing = 1
+        attempt = printed(item, key="print-remade")
+        assert follow_run(client, attempt["print_run_id"])["status"] == "succeeded"
+        assert projects.failing == 0
+        assert json.loads(queued.calls.last.request.content)["project_id"] == 702
+        detail = client.get(f"/api/v1/orders/{item.order['id']}").json()
+        assert [p["project_id"] for p in detail["projects"] if p["item_id"]] == [702]
+
+
+def test_a_claim_from_before_finds_the_run_its_start_made(bambuddy: TestClient) -> None:
+    """#5263: a claim from before claims recorded their project, whose run was keyed
+    with no project (before #5231), is retried after the deploy: the retry attaches the
+    run its start made, never a second print under the item's project's key."""
+    slice_routes()
+    queue_route()
+    item = Item(bambuddy)
+    state = _state(bambuddy)
+    kind = state.components.get(OPERATIONS).kinds[ORDER_ITEM_PRINT]
+    request = {
+        "order_id": item.order["id"],
+        "item_id": item.item["id"],
+        "request": body(),
+        "request_id": print_request_id(item.item["id"], "legacy"),
+        "by": BY.model_dump(mode="json"),
+    }
+    assert bambuddy.portal is not None
+    checked = bambuddy.portal.call(kind.check, request)
+    claim = state.components.get(ORDERS).lifecycle.claim_print(
+        item.order["id"],
+        item.item["id"],
+        BY,
+        request_id=request["request_id"],
+        sliced_sha256=checked["sliced_sha256"],
+        sliced_blob_key=checked["sliced_blob_key"],
+    )
+    copies = claim.copies
+    assert copies is not None
+    with state.projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET print_project_keyed = false WHERE id = %s",
+            (claim.id,),
+        )
+
+    async def start_before() -> PrintRun:
+        run = await accept_run(
+            state.print_runs,
+            Response(),
+            subject=PrintSubject.output(item.output_id),
+            slug=checked["slug"],
+            request=print_body(request, copies),
+            source=SourceSpec(kind="output", output_id=item.output_id),
+            activity=state.components.get(ACTIVITY),
+        )
+        assert isinstance(run, PrintRun)
+        return run
+
+    before = bambuddy.portal.call(start_before)
+    attempt = bambuddy.portal.call(kind.run, request, checked)
+
+    assert attempt["id"] == claim.id
+    assert attempt["print_run_id"] == before.id
+    with state.projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM print_runs WHERE output_id = %s",
+            (item.output_id,),
+        ).fetchone()
+    assert row is not None and row["n"] == 1
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"j" * 1024
+
+
+def test_an_attempts_archive_offers_its_finish_photo_as_a_copy(bambuddy: TestClient) -> None:
+    """§8.2: the attempt's run's archive (``print_links`` by its queue item) is read from
+    Bambuddy and its ``finish_`` photo copied into the item's files, once."""
+    slice_routes()
+    queue_route()
+    item = Item(bambuddy)
+    attempt = printed(item, key="print-archive")
+    assert follow_run(bambuddy, attempt["print_run_id"])["status"] == "succeeded"
+    with _state(bambuddy).projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, queue_item_id)"
+            " VALUES (%s, 81, 'queue_item', 51) ON CONFLICT DO NOTHING",
+            (f"output:{item.output_id}",),
+        )
+    respx.get(f"{API}/archives/81").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 81,
+                "status": "completed",
+                "photos": ["a1b2c3d4.jpg", "finish_20261101_ab12.jpg"],
+                "timelapse_path": None,
+                "actual_time_seconds": 3600,
+                "filament_used_grams": 9.5,
+            },
+        )
+    )
+    photo = respx.get(f"{API}/archives/81/photos/finish_20261101_ab12.jpg").mock(
+        return_value=httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})
+    )
+    base = f"{item.path}/fulfilments/{attempt['id']}/archives"
+    read = bambuddy.get(base)
+    assert read.status_code == 200, read.text
+    offers = read.json()
+    assert offers["linked"] is True
+    assert [(a["archive_id"], a["finish_photos"], a["timelapse"]) for a in offers["archives"]] == [
+        (81, ["finish_20261101_ab12.jpg"], False)
+    ]
+    # Not settled yet: nothing is copied onto the attempt.
+    assert offers["attempt"]["archive_ids"] == []
+
+    copied = answered(
+        bambuddy,
+        bambuddy.post(f"{base}/81/copy", json={"what": "finished_photo"}, headers=press()),
+    )
+    assert (copied["role"], copied["kind"], copied["item_id"]) == (
+        "finished",
+        "image",
+        item.item["id"],
+    )
+    assert photo.call_count == 1
+    refused = bambuddy.post(f"{base}/81/copy", json={"what": "timelapse"}, headers=press())
+    problem(refused, "no_timelapse")
+    elsewhere = bambuddy.post(f"{base}/99/copy", json={"what": "timelapse"}, headers=press())
+    problem(elsewhere, "archive_not_attempts")
+    detail = bambuddy.get(f"/api/v1/orders/{item.order['id']}").json()
+    assert [a["id"] for a in detail["attachments"]] == [copied["id"]]
+
+
+# -- test prints (storefront spec §4.4) -------------------------------------------------------
+
+
+def _books_spools(shop: QuoteShop) -> None:
+    """The book's records made the dialog's spools' filaments, so the slots match."""
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = shop.client.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+
+
+def test_a_test_print_runs_from_a_slice_quote_of_its_revision(bambuddy: TestClient) -> None:
+    shop = QuoteShop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    item = shop.get_item()
+    revision = item["current_revision_id"]
+    assert quote["revision_id"] == revision
+    _books_spools(shop)
+    queued = queue_route()
+    answer = bambuddy.post(
+        f"{shop.path}/revisions/{revision}/test-print",
+        json=body(),
+        headers={"Idempotency-Key": "test-print-1"},
+    )
+    attempt = answered(bambuddy, answer)
+    assert attempt["purpose"] == "test" and attempt["revision_id"] == revision
+    assert attempt["copies"] == 1 and attempt["sliced_blob_key"] == quote["sliced_blob_key"]
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["status"] == "succeeded", run
+    assert json.loads(queued.calls.last.request.content)["quantity"] == 1
+    # The item and the order stay where they were.
+    assert shop.get_item()["status"] == item["status"]
+    detail = bambuddy.get(f"/api/v1/orders/{shop.order['id']}").json()
+    assert detail["order"]["status"] == "draft"
+
+
+def test_a_test_print_without_a_slice_quote_is_requote_needed(bambuddy: TestClient) -> None:
+    item = Item(bambuddy, accept=False)
+    revision = item.item["current_revision_id"]
+    answer = bambuddy.post(
+        f"{item.path}/revisions/{revision}/test-print", json=body(), headers=press()
+    )
+    assert answer.status_code == 409 and answer.json()["type"].endswith("/requote_needed")
+    store = _state(bambuddy).components.get(ORDERS).store
+    assert store.fulfilments(item.item["id"], purpose=None) == []
+
+
+#: #5352: the calibrations and timelapse a print sets on Bambuddy's queue.
+CALIBRATIONS = {
+    "bed_levelling": "on",
+    "flow_cali": "on",
+    "nozzle_offset_cali": "off",
+    "vibration_cali": False,
+    "timelapse": True,
+}
+
+
+def test_an_item_prints_through_bambuddys_queue_with_its_calibrations(
+    bambuddy: TestClient,
+) -> None:
+    """#5352: asked through Bambuddy's queue, the item's print is filed under the item's
+    project in the order's and carries the calibrations and timelapse to the queue item.
+    The quote's own slice is printed: nothing is sliced or uploaded again."""
+    shop = QuoteShop(bambuddy)
+    slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    # The book's records are made the spools' filaments (as in the slice quote test).
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = bambuddy.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+    queued = queue_route()
+
+    def uploads() -> int:
+        return sum(
+            1
+            for call in respx.calls
+            if call.request.method == "POST" and call.request.url.path == "/api/v1/library/files"
+        )
+
+    sliced_before, uploaded_before = slices.posted.call_count, uploads()
+    attempt = answered(
+        bambuddy,
+        bambuddy.post(
+            f"{shop.path}/print",
+            json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+            headers=press(),
+        ),
+    )
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["status"] == "succeeded", run
+
+    item_project = next(
+        p["project_id"]
+        for p in bambuddy.get(f"/api/v1/orders/{shop.order['id']}").json()["projects"]
+        if p["item_id"] == shop.item["id"]
+    )
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["project_id"] == item_project
+    assert {name: sent[name] for name in CALIBRATIONS} == CALIBRATIONS
+    # The queue item is the quote's own sliced file (`BambuddySlices`: 300 + plate): no
+    # second slice, and no sliced file uploaded. The one upload is the unsliced copy
+    # filed in the item's project folder (#79).
+    assert sent["library_file_id"] == 301
+    assert slices.posted.call_count == sliced_before
+    assert uploads() == uploaded_before + 1
+
+
+def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,  # noqa: F811
+    tmp_path: Path,
+    fake_openscad: str,
+    library: FakeLibrary,  # noqa: F811
+) -> None:
+    """#5352: a quote made on the native route (no `path`) still stands for an item
+    printed with `path: "bambuddy"`: never `requote_needed`, since the quote's file and
+    digest are unchanged. The run cannot queue the LAN's slice (it is planned for the
+    LAN start and the printer's trays), so it slices the output again on Bambuddy's
+    route. A quote asked with `path: "bambuddy"` is the one whose slice the print reuses."""
+    two_colours(fake_openscad)
+    Projects()
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        configure(client)
+        with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
+            slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
+            row = _lan_routed(client)
+            shop = QuoteShop(client)
+            # The report's PLA tray for both slots: the test tree has no 0.4 PETG preset.
+            lan_plan = {
+                "slots": [
+                    {"slot_id": 1, "spool_id": tray_spool_id(0, 1)},
+                    {"slot_id": 2, "spool_id": tray_spool_id(0, 1)},
+                ]
+            }
+            started = shop.post(
+                printer=row,
+                printer_id=None,
+                filament_plan=lan_plan,
+                choices={"nozzles": [{"size": "0.4"}], "tier": "standard"},
+            )
+            assert started.status_code == 202, started.text
+            op = follow_operation(client, started.json(), timeout=120, poll=0.2)
+            assert op["status"] == "succeeded", op
+            quote = op["result"]
+            assert slicer.calls == 1
+            assert client.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+            assert client.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+            # Bambuddy's spools 9 and 5 are of the item's filaments, as in the test above.
+            for record, (material, subtype, colour) in (
+                (shop.pla, ("PETG", "Basic", "#688197")),
+                (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+            ):
+                fixed = client.patch(
+                    f"/api/v1/orders/price-book/filaments/{record}",
+                    json={
+                        "material": material,
+                        "subtype": subtype,
+                        "brand": "Bambu Lab",
+                        "colour": colour,
+                    },
+                )
+                assert fixed.status_code == 200, fixed.text
+
+            attempt = answered(
+                client,
+                client.post(
+                    f"{shop.path}/print",
+                    json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+                    headers=press(),
+                ),
+            )
+            run = follow_run(client, attempt["print_run_id"], timeout=120)
+            assert run["status"] == "succeeded", run
+            assert slicer.calls == 2
+            (queued,) = library.queue_bodies
+            assert {name: queued[name] for name in CALIBRATIONS} == CALIBRATIONS
+
+
+@pytest.mark.parametrize("path", ["print", "revisions/r1/test-print"])
+def test_a_print_records_whether_a_caller_of_the_api_asked(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """#5602 review: the operation's run has no request of its own, so the route records
+    a caller that is not the page (`asked_by_api`), and the print's refusal is worded
+    for it. The page's request (``X-ScadBuddy-Request: 1``) records nothing."""
+    sent: list[dict[str, Any]] = []
+
+    async def recorded(*args: Any, request: dict[str, Any], **kwargs: Any) -> Any:
+        sent.append(request)
+        raise ApiError(418, "recorded")
+
+    monkeypatch.setattr(orders_api, "run_operation", recorded)
+    url = f"/api/v1/orders/o1/items/i1/{path}"
+    assert client.post(url, json=body(), headers=press()).status_code == 418
+    page = {**press(), "X-ScadBuddy-Request": "1"}
+    assert client.post(url, json=body(), headers=page).status_code == 418
+    assert [request.get("api") for request in sent] == [True, None]
+
+
+def test_a_print_that_sends_no_part_settings_prints_with_the_quotes(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5571 review: the quote sliced with settings per slot, so a print that sends none
+    (the order page's) prints with them, and one that sends others wants a new quote."""
+    sent: list[PrintRunRequest] = []
+
+    async def recorded(*args: Any, request: PrintRunRequest, **kwargs: Any) -> Any:
+        sent.append(request)
+        return await accept_run(*args, request=request, **kwargs)
+
+    monkeypatch.setattr(printing_api, "accept_run", recorded)
+    shop = QuoteShop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    settings = {"2": {"top_shell_layers": 8}}
+    started = shop.post(part_settings=settings)
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert quote["part_settings"] == settings
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    _books_spools(shop)
+
+    other = {**body(), "part_settings": {"2": {"top_shell_layers": 9}}}
+    problem(bambuddy.post(f"{shop.path}/print", json=other, headers=press()), "requote_needed")
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=body(), headers=press()))
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+    [request] = sent
+    assert dumped(request.part_settings) == settings
+
+
+def test_a_test_print_takes_its_slice_quotes_part_settings(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5571 review: a test print (`test_print_check`, the revision's newest slice quote)
+    refuses settings per slot its quote was not sliced with, and one that sends none
+    prints with the quote's."""
+    sent: list[PrintRunRequest] = []
+
+    async def recorded(*args: Any, request: PrintRunRequest, **kwargs: Any) -> Any:
+        sent.append(request)
+        return await accept_run(*args, request=request, **kwargs)
+
+    monkeypatch.setattr(printing_api, "accept_run", recorded)
+    shop = QuoteShop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    settings = {"1": {"wall_loops": 4}}
+    started = shop.post(part_settings=settings)
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    assert op["result"]["part_settings"] == settings
+    revision = shop.get_item()["current_revision_id"]
+    _books_spools(shop)
+    url = f"{shop.path}/revisions/{revision}/test-print"
+
+    other = {**body(), "part_settings": {"1": {"wall_loops": 5}}}
+    problem(bambuddy.post(url, json=other, headers=press()), "requote_needed")
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(url, json=body(), headers=press()))
+    assert attempt["purpose"] == "test"
+    [request] = sent
+    assert dumped(request.part_settings) == settings

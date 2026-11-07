@@ -175,6 +175,6 @@ export class ApprovalActions implements OutwardActions {
         reason: `The approval of ${what} is no longer usable (already used, withdrawn or out of time); nothing was sent.`,
       }
     }
-    return { status: 'approved', action: asAction(used) }
+    return { status: 'approved', action: asAction(used), byPerson: used.decidedBy?.kind === 'browser' }
   }
 }

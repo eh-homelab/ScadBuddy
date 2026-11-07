@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from psycopg import Connection
 from psycopg.errors import DeadlockDetected
@@ -26,7 +26,7 @@ _KEEP_COPY = ", ".join(
     f"{column} = CASE WHEN (sha256, backend, backend_id) = (%s, %s, %s) THEN {column} END"
     for column in _MIGRATED
 )
-#: Attempts at an index write that Postgres picks as a deadlock's victim (`_retrying`).
+#: Attempts at an index write that Postgres picks as a deadlock's victim (`retrying`).
 _DEADLOCK_ATTEMPTS = 3
 #: `BlobIndex.copied_refs`: read in order from `store_blobs_backend_migrated_touched`
 #: (#4117), not sorted.
@@ -56,7 +56,57 @@ def _stat(row: DictRow) -> BlobStat:
     )
 
 
+class IndexesBlobs(Protocol):
+    """What `ContentStore` and its callers ask of the blob index: `BlobIndex` over SQL
+    in the API, `crud/render.py` `RemoteBlobIndex` over the API's routes in the render
+    worker (#5298). Each answers as `BlobIndex` does."""
+
+    def get(self, key: str) -> BlobStat | None: ...
+    def by_sha(self, sha256: str, kind: str, backend: str) -> BlobRef | None: ...
+    def put(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> BlobRef | None: ...
+    def swap(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        expected: str | None,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> bool: ...
+    def now(self) -> datetime: ...
+    def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None: ...
+    def touch(self, key: str) -> None: ...
+    def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None: ...
+    def delete_if_stale(
+        self, key: str, cutoff: datetime, *, backend: str | None = None
+    ) -> BlobStat | None: ...
+    def shares_backend_id(self, backend: str, backend_id: str) -> bool: ...
+    def recorded(self, backend: str, backend_id: str) -> bool: ...
+    def stats(
+        self,
+        kinds: Sequence[str] | None,
+        slug: str | None = None,
+        *,
+        backend: str | None = None,
+    ) -> list[BlobStat]: ...
+    def usage(self, backend: str) -> tuple[int, int, dict[str, int]]: ...
+
+
 class BlobIndex:
+    """Each write has a ``*_in`` form that runs on the caller's connection, in its
+    transaction when it has one (its own transactions are then savepoints), so the API's
+    CRUD route commits its idempotency ledger row with the write (#5298, plan D5);
+    `retrying` runs either form again when Postgres picks it as a deadlock's victim."""
+
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
 
@@ -97,7 +147,7 @@ class BlobIndex:
         (#1605). That deadlock was retried, but the victim's retry could re-take its
         key before the winner took it and deadlock again. Only a hold that moved on
         between the two steps is taken out of order, and that rare deadlock is what
-        `_retrying` is still for. The hold is never ``key``'s own row FOR SHARE, so two
+        `retrying` is still for. The hold is never ``key``'s own row FOR SHARE, so two
         re-puts of one key cannot both share it and then deadlock on the upgrade.
 
         On the local backend the caller's own copy is the same path (`kind/sha`), so a
@@ -130,11 +180,12 @@ class BlobIndex:
             raise ReuseLostError(f"{ref.backend}:{ref.backend_id} was freed while being reused")
         return own
 
-    def _retrying[T](self, key: str, write: Callable[[Connection[DictRow]], T]) -> T:
+    def retrying[T](self, key: str, write: Callable[[Connection[DictRow]], T]) -> T:
         """Run ``write`` (its own transactions) on one pooled connection, again when
         Postgres breaks a deadlock with it. `_locked` takes its rows in key order, so
         only a hold it had to take out of order can deadlock. The last attempt's
-        `DeadlockDetected` propagates."""
+        `DeadlockDetected` propagates. A ``write`` that opens one transaction around
+        all it does (a CRUD route's, with its ledger row) is retried whole."""
         with self._pool.connection() as conn:
             for attempt in range(1, _DEADLOCK_ATTEMPTS + 1):
                 try:
@@ -162,30 +213,41 @@ class BlobIndex:
         object the other one replaced. A key another put created meanwhile is retried
         as an update: a single upsert would not see that row's object. With ``reuse``,
         ``ref`` names an existing object (`_locked`)."""
+        return self.retrying(
+            key, lambda conn: self.put_in(conn, key, ref, slug=slug, meta=meta, reuse=reuse)
+        )
+
+    def put_in(
+        self,
+        conn: Connection[DictRow],
+        key: str,
+        ref: BlobRef,
+        *,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> BlobRef | None:
+        """`put` on ``conn``."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
-
-        def write(conn: Connection[DictRow]) -> BlobRef | None:
-            while True:
-                with conn.transaction():
-                    row = self._locked(conn, key, ref, reuse=reuse, columns=_COLUMNS)
-                    if row is not None:
-                        conn.execute(
-                            f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
-                            " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
-                            " touched_at = now() WHERE key = %s",
-                            (*_kept_copy(ref), *values, key),
-                        )
-                        return _stat(row).ref
-                    inserted = conn.execute(
-                        "INSERT INTO store_blobs"
-                        " (sha256, kind, backend, backend_id, size, slug, meta, key)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
-                        (*values, key),
+        while True:
+            with conn.transaction():
+                row = self._locked(conn, key, ref, reuse=reuse, columns=_COLUMNS)
+                if row is not None:
+                    conn.execute(
+                        f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
+                        " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
+                        " touched_at = now() WHERE key = %s",
+                        (*_kept_copy(ref), *values, key),
                     )
-                    if inserted.rowcount == 1:
-                        return None
-
-        return self._retrying(key, write)
+                    return _stat(row).ref
+                inserted = conn.execute(
+                    "INSERT INTO store_blobs"
+                    " (sha256, kind, backend, backend_id, size, slug, meta, key)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
+                    (*values, key),
+                )
+                if inserted.rowcount == 1:
+                    return None
 
     def swap(
         self,
@@ -199,28 +261,43 @@ class BlobIndex:
     ) -> bool:
         """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row).
         With ``reuse``, ``ref`` names an existing object (`_locked`)."""
+        return self.retrying(
+            key,
+            lambda conn: self.swap_in(
+                conn, key, ref, expected=expected, slug=slug, meta=meta, reuse=reuse
+            ),
+        )
+
+    def swap_in(
+        self,
+        conn: Connection[DictRow],
+        key: str,
+        ref: BlobRef,
+        *,
+        expected: str | None,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> bool:
+        """`swap` on ``conn``."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
-
-        def write(conn: Connection[DictRow]) -> bool:
-            with conn.transaction():
-                self._locked(conn, key, ref, reuse=reuse, columns="backend, backend_id")
-                if expected is None:
-                    cursor = conn.execute(
-                        "INSERT INTO store_blobs"
-                        " (sha256, kind, backend, backend_id, size, slug, meta, key)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
-                        (*values, key),
-                    )
-                else:
-                    cursor = conn.execute(
-                        f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
-                        " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
-                        " touched_at = now() WHERE key = %s AND sha256 = %s",
-                        (*_kept_copy(ref), *values, key, expected),
-                    )
-                return cursor.rowcount == 1
-
-        return self._retrying(key, write)
+        with conn.transaction():
+            self._locked(conn, key, ref, reuse=reuse, columns="backend, backend_id")
+            if expected is None:
+                cursor = conn.execute(
+                    "INSERT INTO store_blobs"
+                    " (sha256, kind, backend, backend_id, size, slug, meta, key)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
+                    (*values, key),
+                )
+            else:
+                cursor = conn.execute(
+                    f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
+                    " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
+                    " touched_at = now() WHERE key = %s AND sha256 = %s",
+                    (*_kept_copy(ref), *values, key, expected),
+                )
+            return cursor.rowcount == 1
 
     def now(self) -> datetime:
         """The database's clock, which every `touched_at` is stamped with."""
@@ -233,21 +310,30 @@ class BlobIndex:
     def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
         """Merge ``meta`` into the rows of ``keys`` on ``backend`` not touched since
         ``cutoff``. A later `put` rewrites `meta`, which clears the mark."""
+        self.retrying(
+            ",".join(sorted(keys)),
+            lambda conn: self.mark_in(conn, keys, backend=backend, cutoff=cutoff, meta=meta),
+        )
+
+    @staticmethod
+    def mark_in(
+        conn: Connection[DictRow],
+        keys: Sequence[str],
+        *,
+        backend: str,
+        cutoff: datetime,
+        meta: dict[str, Any],
+    ) -> None:
+        """`mark` on ``conn``."""
         where = "key = ANY(%s) AND backend = %s AND touched_at <= %s"
         args = (list(keys), backend, cutoff)
-
-        def write(conn: Connection[DictRow]) -> None:
-            with conn.transaction():
-                # Keys first, in key order, as every other index write locks them; an
-                # UPDATE over many rows would take them in scan order.
-                conn.execute(
-                    f"SELECT 1 FROM store_blobs WHERE {where} ORDER BY key FOR UPDATE", args
-                )
-                conn.execute(
-                    f"UPDATE store_blobs SET meta = meta || %s WHERE {where}", (Jsonb(meta), *args)
-                )
-
-        self._retrying(",".join(sorted(keys)), write)
+        with conn.transaction():
+            # Keys first, in key order, as every other index write locks them; an
+            # UPDATE over many rows would take them in scan order.
+            conn.execute(f"SELECT 1 FROM store_blobs WHERE {where} ORDER BY key FOR UPDATE", args)
+            conn.execute(
+                f"UPDATE store_blobs SET meta = meta || %s WHERE {where}", (Jsonb(meta), *args)
+            )
 
     def touch(self, key: str) -> None:
         with self._pool.connection() as conn:
@@ -256,11 +342,18 @@ class BlobIndex:
     def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
         """Drop ``key``'s row; with ``backend``, only a row on that backend."""
         with self._pool.connection() as conn:
-            row = conn.execute(
-                f"DELETE FROM store_blobs WHERE key = %s"
-                f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
-                (key, backend, backend),
-            ).fetchone()
+            return self.delete_in(conn, key, backend=backend)
+
+    @staticmethod
+    def delete_in(
+        conn: Connection[DictRow], key: str, *, backend: str | None = None
+    ) -> BlobStat | None:
+        """`delete` on ``conn``."""
+        row = conn.execute(
+            f"DELETE FROM store_blobs WHERE key = %s"
+            f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
+            (key, backend, backend),
+        ).fetchone()
         return _stat(row) if row is not None else None
 
     def delete_if_stale(
@@ -269,11 +362,18 @@ class BlobIndex:
         """Atomic against a concurrent `touch`: a blob claimed after the sweep's snapshot
         has a fresh `touched_at` and is not matched. With ``backend``, only a row on it."""
         with self._pool.connection() as conn:
-            row = conn.execute(
-                f"DELETE FROM store_blobs WHERE key = %s AND touched_at <= %s"
-                f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
-                (key, cutoff, backend, backend),
-            ).fetchone()
+            return self.delete_if_stale_in(conn, key, cutoff, backend=backend)
+
+    @staticmethod
+    def delete_if_stale_in(
+        conn: Connection[DictRow], key: str, cutoff: datetime, *, backend: str | None = None
+    ) -> BlobStat | None:
+        """`delete_if_stale` on ``conn``."""
+        row = conn.execute(
+            f"DELETE FROM store_blobs WHERE key = %s AND touched_at <= %s"
+            f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
+            (key, cutoff, backend, backend),
+        ).fetchone()
         return _stat(row) if row is not None else None
 
     def shares_backend_id(self, backend: str, backend_id: str) -> bool:
@@ -287,6 +387,17 @@ class BlobIndex:
                 (backend, backend_id, backend, backend_id),
             ).fetchone()
         return bool(row and row["shared"])
+
+    def recorded(self, backend: str, backend_id: str) -> bool:
+        """Whether a row names the object as its own: not a migrated copy
+        (`BambuddyContentBackend.sweep_unrecorded`'s default)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
+                " AS recorded",
+                (backend, backend_id),
+            ).fetchone()
+        return bool(row and row["recorded"])
 
     def stats(
         self,

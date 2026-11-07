@@ -7,7 +7,7 @@ import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { type ApprovalNeeds, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
-import { page, PAGED, pageInput } from './pagination.js'
+import { backendPage, page, PAGED, pageInput, totalCount } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { errorName } from '../telemetry/scrub.js'
 
@@ -258,7 +258,7 @@ function runOutcome(run: PrintRun, ctx: ToolContext) {
 const calibration = z.enum(['off', 'on', 'auto'])
 
 /** `PrintOptions` in backend/openapi.json: sparse, and the backend refuses unknown fields. */
-export const printOptions = z
+export const printOptionFields = z
   .object({
     auto_off_after: nullable(z.boolean()),
     bed_levelling: nullable(calibration),
@@ -276,7 +276,84 @@ export const printOptions = z
     vibration_cali: nullable(z.boolean()),
   })
   .strict()
-  .default({})
+export const printOptions = printOptionFields.default({})
+
+/**
+ * `PrintRunRequest.path` (#5352): how the print reaches its printer, over the printer row's own
+ * choice. Omitted is the backend's own choice (`run_route`).
+ */
+export const printPath = z
+  .enum(['bambuddy', 'native'])
+  .optional()
+  .describe(
+    "How the print reaches its printer. Omit for the backend's choice (the stored backends and the printer's " +
+      "row). 'bambuddy' queues it through Bambuddy's queue even where it would go over the LAN: it files " +
+      'under a Bambuddy project and takes every `options` field, the calibrations (bed_levelling, flow_cali, ' +
+      "nozzle_offset_cali, vibration_cali) and timelapse among them; the printer must link a Bambuddy printer. " +
+      "'native' asks for the LAN and is refused when the run would not go over it. Over the LAN only what the " +
+      "LAN start does passes (flow_cali 'off', bed_levelling and nozzle_offset_cali 'auto', no vibration_cali); " +
+      "any other calibration value in `options` is refused (422): only Bambuddy's queue takes it.",
+  )
+
+/**
+ * `PrintRunRequest.part_settings` (#5571): Bambu Studio process settings for the parts of one
+ * filament slot, written into the laid-out 3MF as per-part overrides. The bounds are the
+ * backend's (`bambuddy/part_settings.py`, from Bambu Studio's PrintConfig.cpp).
+ */
+const shellLayers = z.number().int().min(0).max(1000)
+const SLOT_KEY = /^[1-9][0-9]*$/
+export const partSettings = z
+  .object({})
+  .catchall(
+    z
+      .object({
+        top_shell_layers: shellLayers.optional(),
+        bottom_shell_layers: shellLayers.optional(),
+        wall_loops: shellLayers.optional(),
+        sparse_infill_density: z.number().int().min(0).max(100).optional().describe('Percent'),
+        sparse_infill_pattern: z
+          .enum([
+            'concentric', 'zig-zag', 'grid', 'line', 'cubic', 'triangles', 'tri-hexagon', 'gyroid', 'honeycomb',
+            'adaptivecubic', 'alignedrectilinear', '3dhoneycomb', 'hilbertcurve', 'archimedeanchords',
+            'octagramspiral', 'supportcubic', 'lightning', 'crosshatch', 'zigzag', 'crosszag', 'lockedzag', '2dlattice',
+          ])
+          .optional()
+          .describe("Bambu Studio's names: 'zig-zag' is Rectilinear"),
+        ironing_type: z.enum(['no ironing', 'top', 'topmost', 'solid']).optional(),
+      })
+      .strict(),
+  )
+  // A slot id from 1, as the backend's `SlotId` (1-64); `catchall`, not `z.record`, as
+  // `params` in common.ts says, so the key is checked here.
+  .refine((slots) => Object.keys(slots).every((slot) => SLOT_KEY.test(slot) && Number(slot) <= 64), {
+    message: 'part_settings is keyed by slot id, a whole number from 1 to 64 (as filament_plan numbers slots)',
+  })
+  .optional()
+  .describe(
+    'Slicer settings for the parts of one filament slot (#5571), keyed by slot id (from 1, as `filament_plan`), ' +
+      'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Each omitted setting is the ' +
+      "process's. Only a ScadBuddy output takes them; a slot no printed part of the output is made in (one only painted " +
+      'on faces among them), an unknown key or a value out of range is refused (422). A painted part takes the ' +
+      'settings of the slot it is made in, not of its painted faces. An output whose 3MF prints as it is (sliced, ' +
+      "another slicer's, or past the size caps) takes none (422).",
+  )
+
+/** `part_settings`' phrase in an approval line. */
+export function partSettingsPhrase(settings: Record<string, Record<string, unknown>> | undefined): string {
+  const slots = Object.entries(settings ?? {}).filter(([, values]) => Object.keys(values).length > 0)
+  if (slots.length === 0) return ''
+  return (
+    ', with ' +
+    slots
+      .map(
+        ([slot, values]) =>
+          `slot ${slot}'s parts at ${Object.entries(values)
+            .map(([key, value]) => `${key} ${String(value)}`)
+            .join(', ')}`,
+      )
+      .join('; ')
+  )
+}
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
 export const presetRef = z.object({
@@ -346,6 +423,7 @@ const PRINT_OUTPUT_INPUT = withSource({
   project_id: nullable(z.number().int()).describe('Omit for the default project; null for "No project"'),
   folder_id: z.number().int().optional().describe('A library folder of no project, in place of a project'),
   options: printOptions,
+  path: printPath,
   print_sequence: z
     .enum(['by layer', 'by object'])
     .optional()
@@ -394,6 +472,7 @@ const PRINT_OUTPUT_INPUT = withSource({
       "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
         'else the process (on whenever a plate uses more than one filament).',
     ),
+  part_settings: partSettings,
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
     .max(32)
@@ -441,6 +520,12 @@ async function printerOf(
             'the LAN. Send only `printer`.',
         )
       }
+      if (args.path === 'bambuddy') {
+        throw new ToolError(
+          `${row.name} links no Bambuddy printer, so it cannot print through Bambuddy's queue: omit path, or ` +
+            'link it to Bambuddy in Settings > Printers.',
+        )
+      }
       refuseProject(row.name, args)
       return { name: row.name, lan: true }
     }
@@ -475,10 +560,11 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
     `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
     `${printerName !== undefined ? ` on printer ${JSON.stringify(printerName)}` : printer_id !== undefined ? ` on printer ${printer_id}` : printer !== undefined ? ` on printer ${printer}` : ''}` +
-    `${lan ? ' over the LAN' : ''}` +
+    `${lan ? ' over the LAN' : args.path === 'bambuddy' ? " through Bambuddy's queue" : ''}` +
     `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
+    `${partSettingsPhrase(args.part_settings)}` +
     `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
@@ -766,21 +852,52 @@ export const printTools: Tool[] = [
     name: 'list_library',
     label: 'Browse the Bambuddy library',
     description:
-      "Bambuddy's library, one folder at a time: the folder tree, and the files of `folder_id` (the top level " +
+      "The print library, one folder at a time: the folder tree, and the files of `folder_id` (the top level " +
       'without it). Without `all` only unsliced 3MFs, the files print_output takes as `library_file_id`; with ' +
-      'it every file, each flagged `printable`. A file ScadBuddy uploaded names its `output_id`.' +
+      'it every file, each flagged `printable`. A file ScadBuddy uploaded names its `output_id`. On ' +
+      "library_backend native this is ScadBuddy's own library; `source: 'bambuddy'` then browses Bambuddy's instead " +
+      '(the source of a bb_to_sb copy_library_files), every file type, unpaged.' +
       PAGED,
-    input: z.object({ folder_id: z.number().int().optional(), all: z.boolean().optional(), ...pageInput }),
+    input: z.object({
+      folder_id: z.number().int().optional(),
+      all: z.boolean().optional(),
+      source: z
+        .enum(['bambuddy'])
+        .optional()
+        .describe("Browse Bambuddy's library itself while ScadBuddy's own serves the page (library_backend native): the source side of a bb_to_sb copy_library_files. Every file type, unpaged."),
+      ...pageInput,
+    }),
     risk: 'read',
     source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Library'],
-    routes: ['GET /api/v1/print/library'],
+    routes: ['GET /api/v1/print/library', 'GET /api/v1/print/bambuddy-library'],
+    // The backend pages the folder's files (#2290), so only this page's files are read
+    // for the outputs they came from (#5291 review); the tree comes with every page.
     handler: async (args, { backend }) => {
-      const { files, ...listing } = await ok(
-        backend.GET('/api/v1/print/library', { params: { query: { folder_id: args.folder_id, all: args.all } } }),
-        'list the library',
+      if (args.source === 'bambuddy') {
+        return json(
+          await ok(
+            backend.GET('/api/v1/print/bambuddy-library', { params: { query: { folder_id: args.folder_id } } }),
+            "list Bambuddy's library",
+          ),
+        )
+      }
+      let listing = {}
+      const { items, ...rest } = await backendPage(
+        args,
+        (file: { id: number }) => String(file.id),
+        'list_library',
+        async ({ limit, after }) => {
+          const pending = backend.GET('/api/v1/print/library', {
+            params: {
+              query: { folder_id: args.folder_id, all: args.all, limit, ...(after === undefined ? {} : { after: Number(after) }) },
+            },
+          })
+          const { files, ...rest } = await ok(pending, 'list the library')
+          listing = rest
+          return { items: files ?? [], total: totalCount((await pending).response) }
+        },
       )
-      const { items, ...rest } = page(files ?? [], args, (file) => String(file.id), 'list_library')
       return json({ ...listing, files: items, ...rest })
     },
   }),
@@ -806,6 +923,28 @@ export const printTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/print/library/search', { params: { query: { q: query, all, fresh } } }),
           'search the library',
+        ),
+      ),
+  }),
+
+  // #5321 — one file by id, whatever its type, with where it is.
+  defineTool({
+    name: 'get_library_file',
+    label: 'Read a library file',
+    description:
+      "One file of the print library by id, as list_library gives it with `all` (a sliced file or an STL " +
+      "too), plus `folder_path`, its folder's names from the top. `output_id` names the ScadBuddy output " +
+      'it was made from, if any. An id the library does not have is an error.',
+    input: z.object({ file_id: libraryFileId }),
+    risk: 'read',
+    source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/print/library/{file_id}'],
+    handler: async ({ file_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/library/{file_id}', { params: { path: { file_id } } }),
+          'read the library file',
         ),
       ),
   }),
@@ -1238,6 +1377,7 @@ export const printTools: Tool[] = [
       'Bambuddy call, as the print dialog sends it: spools are its loaded trays, by the negative `spool_id`s ' +
       'get_print_filaments gives them, there is no project (a `project_id` is refused; `folder_id` names one ' +
       "of ScadBuddy's own folders, list_print_projects with `native`) and no queue item. " +
+      '`path: "bambuddy"` queues such a print through Bambuddy instead, with a project, calibrations and timelapse. ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids; over the LAN, `path: "native"` and a `follow` handle instead), or ' +
       'hands back the still-running run to poll with get_print_run. Then follow the print with ' +
@@ -1271,13 +1411,22 @@ export const printTools: Tool[] = [
     // two reads, a project the line approved can still be refused when the run starts.
     prepareApproval: async (args, ctx, needs) => {
       const { printerId, name, lan } = await printerOf(args, ctx.backend, ctx.signal, needs)
+      // #5352: a print asked through Bambuddy's queue never goes over the LAN.
       const native =
         lan === true ||
-        (needs.summary && args.printer !== undefined && (await linkedNative(ctx, sourceOf(args), args.printer, printerId)))
+        (args.path !== 'bambuddy' &&
+          needs.summary &&
+          args.printer !== undefined &&
+          (await linkedNative(ctx, sourceOf(args), args.printer, printerId)))
       if (native && !lan) refuseProject(name ?? `printer ${args.printer}`, args)
       const input = args.printer === undefined || lan ? args : { ...args, printer_id: printerId }
       return { input, summary: printSummary(input, name, native) }
     },
+    // #4445: a flow's call that names only `printer` binds the printer_id the row links, or
+    // null for a row only the LAN reaches, so a re-link since the approval never matches.
+    // As backend flows/print_binding.py binds a person's approval.
+    flowBinding: (args, resolved) =>
+      args.printer === undefined || args.printer_id !== undefined ? {} : { printer_id: resolved.printer_id ?? null },
     // Its own wait for the print run, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async (args, ctx) => {
@@ -1318,7 +1467,9 @@ export const printTools: Tool[] = [
         (chosenTier === undefined && processName === undefined)
       ) {
         const view = await getChoices(ctx, source, { printer_id: printerId, printer: args.printer })
-        if (args.printer !== undefined && view.lan_printers?.includes(args.printer)) native = true
+        // #5352: asked through Bambuddy's queue, it never goes over the LAN.
+        if (args.path !== 'bambuddy' && args.printer !== undefined && view.lan_printers?.includes(args.printer))
+          native = true
         // A LAN-only row's view names no Bambuddy printer, and the run must send none.
         if (!lanOnly) printerId ??= view.printer_id ?? undefined
         bedType ??= view.bed_type
@@ -1379,6 +1530,7 @@ export const printTools: Tool[] = [
         // #3651 — a library folder in place of a project; the backend refuses both.
         ...(args.folder_id === undefined ? {} : { folder_id: args.folder_id }),
         options: args.options,
+        ...(args.path === undefined ? {} : { path: args.path }),
         // The same for a library file as for an output (#907, #1756).
         ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
         ...(args.filament_profiles?.length ? { filament_profiles: args.filament_profiles } : {}),
@@ -1402,6 +1554,7 @@ export const printTools: Tool[] = [
             }),
         // As given: the backend drops No sparse layers with the tower off (#3648 review).
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
+        ...(args.part_settings === undefined ? {} : { part_settings: args.part_settings }),
         ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }

@@ -30,11 +30,28 @@ export const UNTRUSTED = '192.168.1.50'
 /** SCADBUDDY_PUBLIC_URL and SCADBUDDY_AGENT_TRUSTED_PROXIES as the tests deploy them. */
 export const ORIGINS = originPolicy('https://scadbuddy.test', '10.0.0.0/24')
 
+/**
+ * The global fetch (msw's patch), on a new connection for every request (#5180).
+ * @mswjs/interceptors 0.45 intercepts Node's fetch at the socket, and gives a request to
+ * msw only when it can tie the socket's traffic to a `fetch` call. Undici keeps the
+ * mocked sockets alive and sends later requests on them; now and then such a request is
+ * tied to no `fetch`, so msw never sees it and it goes to the real network: `fetch
+ * failed` (ENOTFOUND backend.test), with no "[MSW]" message. A tool read with no
+ * re-send then fails (CI run 41351745307, `repin_library`). `Connection: close` makes
+ * undici close each socket after its response. Measured on tools.test.ts, 48 runs each:
+ * 6 sent a request to the real network and 2 failed; with this header, 0 and 0.
+ */
+export const mswFetch: typeof fetch = (input, init) => {
+  const request = new Request(input, init)
+  request.headers.set('connection', 'close')
+  return fetch(request)
+}
+
 export function services(overrides: Partial<ToolServices> = {}): ToolServices {
   return {
     // Created per test, after msw is listening, and calling the global fetch
     // at request time so msw's patch is the one used.
-    backend: createBackendClient(BACKEND, (request) => fetch(request)),
+    backend: createBackendClient(BACKEND, mswFetch),
     pending: new PendingActionStore(),
     pollIntervalMs: 5,
     renderWaitMs: 5000,

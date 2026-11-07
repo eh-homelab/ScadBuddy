@@ -20,8 +20,11 @@ import {
   presetInputs,
   presetTagsProblem,
 } from '../lib/presets'
+import { copyText } from '../lib/clipboard'
+import { presetPath } from '../lib/deeplink'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
+import { useLatest } from '../lib/useLatest'
 import { useFillable } from '../agent/useFillable'
 import { Hint } from './Hint'
 import { Spinner } from './ui/spinner'
@@ -91,6 +94,27 @@ interface Props {
   selected?: SelectedElsewhere | null
   /** #1660 — told the preset selected now, or null for none, whenever that changes. */
   onSelected?: (preset: ParamPreset | null) => void
+  /**
+   * #1022 — a preset a link asks to apply, taken as a pick here is: over unsaved edits
+   * (with `ask`) it asks first, and a Cancel calls `onDeclined`. A new object each time.
+   */
+  offered?: OfferedPreset | null
+}
+
+export interface OfferedPreset {
+  /**
+   * Its `inputs` are already migrated to the template's version: the pick runs `migrate`
+   * again, which must pass inputs at the current version through as they are.
+   */
+  preset: ParamPreset
+  /**
+   * The values changed since the page opened, by an edit or by a preset put on screen.
+   * Without it the values on screen are what the page opened on (an output reopened,
+   * say), which the link replaces without asking.
+   */
+  ask: boolean
+  /** The question was declined, or never answered: the picker went while it asked. */
+  onDeclined: () => void
 }
 
 export interface SelectedElsewhere {
@@ -167,6 +191,7 @@ export function PresetPicker({
   resetKey,
   selected: elsewhere = null,
   onSelected,
+  offered = null,
 }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
@@ -205,6 +230,8 @@ export function PresetPicker({
   const [pending, setPending] = useState<ParamPreset | null>(null)
   /** #358 — an Update would drop the skipped values for good, so it asks first. */
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
+  /** #1022 — the link Copy link copied, or offered to copy by hand where it could not. */
+  const [copied, setCopied] = useState<{ id: string; url: string; ok: boolean } | null>(null)
 
   /**
    * #357 — the presets changed elsewhere (another tab, the assistant): read them again.
@@ -310,11 +337,39 @@ export function PresetPicker({
     if (pending) return
     const preset = presets.find((candidate) => candidate.id === id)
     if (preset && unsaved) {
+      declineOffer.current = null
       setPending(preset)
       return
     }
     void pick(preset)
   }
+
+  /** #1022 — what a Cancel of the question tells the link that asked it, if one did. */
+  const declineOffer = useRef<(() => void) | null>(null)
+  /** A link is answered as a pick is; the latest link replaces a question still open. */
+  const offer = useLatest((next: OfferedPreset) => {
+    declineOffer.current?.()
+    declineOffer.current = null
+    if (next.ask && unsaved) {
+      declineOffer.current = next.onDeclined
+      setPending(next.preset)
+      return
+    }
+    setPending(null)
+    void pick(next.preset)
+  })
+  useEffect(() => {
+    if (offered) offer.current(offered)
+  }, [offered, offer])
+  // Unmounted while it asks (a remount after a template UI's save, the form taking over
+  // from a failed UI): the question is gone, so the link is let go, not left pending.
+  useEffect(
+    () => () => {
+      declineOffer.current?.()
+      declineOffer.current = null
+    },
+    [],
+  )
 
   /** The latest pick: a migration answering after another pick is dropped. */
   const picking = useRef(0)
@@ -342,6 +397,16 @@ export function PresetPicker({
     setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
     setSettling(true)
     onApply(applied.values, applied.extra)
+  }
+
+  /**
+   * #1022 — copies the link that opens this model with the preset applied: under the
+   * configured public URL when the server has one, else this page's own origin.
+   */
+  async function copyLink() {
+    if (!selected) return
+    const url = selected.url ?? `${window.location.origin}${presetPath(slug, selected.id)}`
+    setCopied({ id: selected.id, url, ok: await copyText(url) })
   }
 
   function openSaveAs() {
@@ -644,13 +709,17 @@ export function PresetPicker({
         {selected && (
           // #3672 — the preset's own actions, in one menu beside Save as. Each dialog opens
           // once the menu has closed and put the focus back on its button.
-          <DropdownMenu modal={false}>
+          // The menu opened again: a status from an earlier Copy link may no longer hold.
+          <DropdownMenu modal={false} onOpenChange={(open) => open && setCopied(null)}>
             <DropdownMenuTrigger asChild>
               <Button type="button" variant="outline" size="icon-sm" disabled={busy} aria-label={`More for preset ${selected.name}`}>
                 <MoreHorizontalIcon />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-auto min-w-44">
+              <DropdownMenuItem onSelect={() => void copyLink()} aria-label={`Copy link to preset ${selected.name}`}>
+                Copy link
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
                 Duplicate
               </DropdownMenuItem>
@@ -675,6 +744,18 @@ export function PresetPicker({
           </DropdownMenu>
         )}
       </div>
+
+      {copied && copied.id === selected?.id && (
+        <p role="status" data-testid="preset-link-copy" className="min-w-0 text-xs text-muted-foreground">
+          {copied.ok ? (
+            'Link copied.'
+          ) : (
+            <>
+              Copy this link: <code className="break-all select-all">{copied.url}</code>
+            </>
+          )}
+        </p>
+      )}
 
       {pinned && (
         <p data-testid="preset-pinned" className="text-xs text-muted-foreground">
@@ -798,7 +879,15 @@ export function PresetPicker({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={pending !== null} onOpenChange={(open) => !open && setPending(null)}>
+      <AlertDialog
+        open={pending !== null}
+        onOpenChange={(open) => {
+          if (open) return
+          setPending(null)
+          declineOffer.current?.()
+          declineOffer.current = null
+        }}
+      >
         <AlertDialogContent
           // Opened from the select's list, which is gone by now: back to the select (#1457).
           onCloseAutoFocus={(event) => {
@@ -830,6 +919,7 @@ export function PresetPicker({
               // Not USER_ONLY: replacing the values on screen stays in the page, so the
               // assistant may confirm a pick it made (spec §8.1).
               onClick={() => {
+                declineOffer.current = null
                 void pick(pending ?? undefined)
                 setPending(null)
               }}

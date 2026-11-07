@@ -39,12 +39,14 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
     FilamentMap,
+    PartOverrides,
     hint_painted_slots,
     layout_of,
     plate_origin,
     replate_3mf,
     rezipped,
     state_nozzles,
+    with_part_settings,
 )
 from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
@@ -166,11 +168,32 @@ _SLOT_HINTS = ";slots"
 #: before has none: Bambu Studio's CLI takes it for a 200 x 200 bed, so every plate past
 #: the first slices empty, and a reused one kept failing after the fix (#4638).
 _BED_STATED = "#bed"
+#: Follows :data:`_BED_STATED` in every :attr:`Target.key` of a copy laid out since the
+#: prime tower's place reserves the brim the slicer draws for the plate's height
+#: (:func:`~scadbuddy.render.plate.tower_brim`, #5545). A copy recorded before can have
+#: its tower at ``wipe_tower_y`` 5 (3 mm reserved for its brim), which a tall plate's
+#: brim passes, and reusing it kept every quote failing after the fix (#5566).
+_TOWER_BRIM = "#brim"
+#: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
+#: written into (``layout_of`` ``as_is``): it prints as it is, so it cannot carry them.
+PART_SETTINGS_AS_IS = (
+    "This output's 3MF prints as it is (it is sliced, from another slicer, or past the size"
+    " caps), so it cannot take settings per part."
+)
+#: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),
+#: followed by :func:`part_settings_digest`.
+_PART_SETTINGS = "&parts:"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
 #: the slicer's default.
 _STANDARD = VOLUME_TYPE["standard"]
+
+
+def part_settings_digest(overrides: PartOverrides) -> str:
+    """A short, stable name for ``overrides`` in a :attr:`Target.key` (#5571)."""
+    canonical = json.dumps([[slot, list(map(list, pairs))] for slot, pairs in overrides])
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _hinted(key: str, filaments: int) -> str:
@@ -203,15 +226,19 @@ class Target:
     #: ScadBuddy's filament→extruder map (#2166), written in Manual mode. ``None`` leaves
     #: the file's own.
     filament_map: FilamentMap | None = None
+    #: Process settings for each slot's parts (#5571), written into
+    #: ``model_settings.config``. ``None`` writes none.
+    part_settings: PartOverrides | None = None
 
     @property
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        It starts with the plate's own key and :data:`_BED_STATED`, so a copy recorded
-        before #4638, whose file states no bed, is never reused.
+        It starts with the plate's own key, :data:`_BED_STATED` and :data:`_TOWER_BRIM`,
+        so a copy recorded before #4638, whose file states no bed, or before #5545, whose
+        tower leaves no room for a tall plate's brim, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}"
+        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}"
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
@@ -232,6 +259,10 @@ class Target:
             if self.filament_map.pinned:
                 # A file the slicer must follow is not one it may regroup (#3955).
                 key = f"{key}!"
+        if self.part_settings:
+            # A file with settings on its parts must not be reused for one without, nor
+            # for other settings. Before the colours, so the uncoloured key has it too.
+            key = f"{key}{_PART_SETTINGS}{part_settings_digest(self.part_settings)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -253,6 +284,7 @@ class Target:
             nozzle_stats=self.nozzle_stats,
             nozzle_volume_type=self.nozzle_volume_type,
             filament_map=self.filament_map,
+            part_settings=self.part_settings,
         ).key
 
 
@@ -267,6 +299,7 @@ async def target_for(
     nozzle_volume_type: Sequence[str] | None = None,
     filament_map: FilamentMap | None = None,
     model: str | None = None,
+    part_settings: PartOverrides | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -282,12 +315,22 @@ async def target_for(
     ``model`` is the printer's model when the caller knows it (a native run's printer
     row, #3818 tier A Task 4): the plate is then read from it, and Bambuddy's printer
     list is not. Without a ``client`` a printer's plate needs it.
+
+    ``part_settings`` are the print's settings per slot (#5571), only the print run's.
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
     flows = tuple(nozzle_volume_type) if nozzle_volume_type is not None else None
     if model is not None:
-        return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
+        return Target(
+            _plate_for_model(model),
+            nozzle_diameter,
+            chosen,
+            stats,
+            flows,
+            filament_map,
+            part_settings,
+        )
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
         # An `ApiError`, so an activity that reaches it refuses once (#4312 review M6).
@@ -297,10 +340,20 @@ async def target_for(
         )
     if printer_id is None or client is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)
+        return Target(
+            _plate_for_model(None),
+            nozzle_diameter,
+            chosen,
+            stats,
+            flows,
+            filament_map,
+            part_settings,
+        )
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
+    return Target(
+        _plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map, part_settings
+    )
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -324,15 +377,21 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     keeps its placement and every plate it lays out; only the nozzles and colours are
     stated (:func:`state_nozzles`). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
-    unchanged.
+    unchanged, and so takes no settings per part: a ``target`` with some is refused
+    (422, :data:`PART_SETTINGS_AS_IS`), as the run refuses it first
+    (``print_run.part_settings_refusal``), so no copy's key names settings its bytes
+    lack. Otherwise the print's settings per part (#5571) are written last, into whatever
+    the file's own layout came to (:func:`with_part_settings`).
     """
     layout = layout_of(payload)
     if layout == "as_is":
+        if target.part_settings:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_AS_IS)
         return payload
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return hint_painted_slots(
+            laid = hint_painted_slots(
                 towers_within_reach(
                     state_nozzles(
                         payload,
@@ -348,7 +407,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             # layout_of has bounded it already, so this is a defence in depth: the file
             # prints as it is.
             logger.warning("the 3MF inflates past the cap; printing it as it is")
-            return payload
+            laid = payload
+        # Outside the guard: a copy keyed with its part settings always carries them.
+        return with_part_settings(laid, target.part_settings)
     try:
         payload = replate_3mf(
             payload,
@@ -365,7 +426,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
-    return hint_painted_slots(payload)
+    return with_part_settings(hint_painted_slots(payload), target.part_settings)
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
@@ -391,7 +452,8 @@ def _tower_value(value: float) -> str:
 def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
     reach moved beside that plate's objects, by #105's rule (:func:`tower_beside`),
-    else unchanged (#4014).
+    else unchanged (#4014). The brim judged round each tower is the one the slicer
+    draws for its plate's height (:func:`tower_brim`, #5545).
 
     An author's file keeps the tower where its printer put it: library file 2440, laid
     out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
@@ -415,6 +477,8 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
     except (TypeError, ValueError):
         side = PRIME_TOWER_SIDE
+    # The widest brim first (#5545): a tower that clears the plate's edges with it
+    # needs no read of the objects. The rest are judged by their plate's height below.
     unreachable = [
         index
         for index, tower in enumerate(towers, start=1)
@@ -439,10 +503,14 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         if index > count or index not in boxes:
             continue
         low, high = boxes[index]
+        height = float(high[2] - low[2])
+        if tower_reaches(towers[index - 1], plate, side, height):
+            continue
         ox, oy = plate_origin(index, count, source)
         corner = tower_beside(
             Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)),
             plate,
+            height,
         )
         if corner is not None:
             moved[index - 1] = corner
@@ -1084,6 +1152,30 @@ async def _raw_left_unrecorded(
 RAW_TARGET = "raw"
 
 
+async def upload_raw(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    folder: int | None,
+    *,
+    filename: str,
+    media_type: str,
+    write: Callable[[Sink], Awaitable[None]],
+) -> LibraryFile:
+    """The one way bytes ScadBuddy holds go into Bambuddy's library as they are: a
+    native file printed through Bambuddy (:func:`ensure_raw_copy`) and a library copy
+    (#5355, `print_library/copy.py`). ``write`` spools the bytes, hashed as they go, and
+    they are uploaded into ``folder`` (the top level for ``None``) as ``filename``; an
+    upload an earlier attempt left unrecorded is taken rather than uploaded again
+    (:func:`_raw_left_unrecorded`, #1145). Nothing here records the upload: the caller
+    does, or deliberately does not."""
+    with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+        hashed = _Hashing(spool)
+        await write(hashed)
+        return await _raw_left_unrecorded(
+            client, uploads, folder, filename, hashed.size, hashed.digest.hexdigest()
+        ) or await upload_into(client, filename, spool, folder_id=folder, media_type=media_type)
+
+
 async def ensure_raw_copy(
     client: BambuddyClient,
     uploads: BambuddyUploadStore,
@@ -1111,12 +1203,9 @@ async def ensure_raw_copy(
                 continue
             if await _still_there(client, uploads, key, copy, tolerate_errors=True) is not None:
                 return copy.id
-        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
-            hashed = _Hashing(spool)
-            await write(hashed)
-            uploaded = await _raw_left_unrecorded(
-                client, uploads, folder, filename, hashed.size, hashed.digest.hexdigest()
-            ) or await upload_into(client, filename, spool, folder_id=folder, media_type=media_type)
+        uploaded = await upload_raw(
+            client, uploads, folder, filename=filename, media_type=media_type, write=write
+        )
         await uploads.record(
             key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET)
         )

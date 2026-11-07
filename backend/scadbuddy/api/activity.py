@@ -24,6 +24,7 @@ from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
+    MAX_SUBJECTS,
     ActivityFilter,
     Count,
     decode_cursor,
@@ -115,6 +116,9 @@ def _plain(detail: Mapping[str, Any]) -> dict[str, Any]:
 class ActivityPage(BaseModel):
     items: list[ActivityItem]
     next_cursor: str | None
+    #: #5596 — with several ``subject``: by subject as sent, the ``cursor`` of its next
+    #: page for a list of that one subject; a subject with no more rows is not named.
+    subject_cursors: dict[str, str] | None = None
 
 
 class FacetOption(BaseModel):
@@ -236,7 +240,7 @@ async def list_activity(
     principal: str | None = None,
     session: str | None = None,
     via_tool: str | None = None,
-    subject: str | None = None,
+    subject: Annotated[list[str] | None, Query()] = None,
     since: datetime | None = None,
     until: datetime | None = None,
     parent: str | None = None,
@@ -247,8 +251,17 @@ async def list_activity(
 ) -> ActivityPage:
     """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. Filter
     by any field, and by ``facet.<name>=<value>`` for a filterable facet of a selected
-    ``kind``."""
+    ``kind``. #5596 — ``subject`` repeated (up to 200) reads each subject's newest
+    ``limit`` rows in one request, newest first over all, with no ``cursor`` and
+    ``next_cursor`` null; ``subject_cursors`` pages each subject on its own."""
     _no_nul(request)
+    subjects = subject or []
+    if len(subjects) > MAX_SUBJECTS:
+        raise ApiError(422, f"at most {MAX_SUBJECTS} subjects", type_=BAD_VALUE)
+    if len(subjects) > 1 and cursor is not None:
+        raise ApiError(
+            400, "a cursor pages one subject: send it with that subject alone", type_=BAD_CURSOR
+        )
     kinds = await asyncio.to_thread(activity.kinds)
     facets = _facet_filters(request, kinds, kind or [])
     position = None
@@ -257,23 +270,27 @@ async def list_activity(
             position = decode_cursor(cursor)
         except ValueError:
             raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
-    rows, next_cursor = await activity.index.list(
-        ActivityFilter(
-            kinds=tuple(kind or ()),
-            statuses=tuple(status or ()),
-            principal=principal,
-            session=session,
-            via_tool=via_tool,
-            subject=subject,
-            parent=parent,
-            q=q,
-            since=since,
-            until=until,
-            facets=facets,
-        ),
-        cursor=position,
-        limit=limit,
+    filters = ActivityFilter(
+        kinds=tuple(kind or ()),
+        statuses=tuple(status or ()),
+        principal=principal,
+        session=session,
+        via_tool=via_tool,
+        subject=subjects[0] if len(subjects) == 1 else None,
+        parent=parent,
+        q=q,
+        since=since,
+        until=until,
+        facets=facets,
     )
+    if len(subjects) > 1:
+        found, cursors = await activity.index.list_per_subject(filters, subjects, limit=limit)
+        return ActivityPage(
+            items=[_item(r, advanced) for r in found],
+            next_cursor=None,
+            subject_cursors=cursors,
+        )
+    rows, next_cursor = await activity.index.list(filters, cursor=position, limit=limit)
     return ActivityPage(items=[_item(r, advanced) for r in rows], next_cursor=next_cursor)
 
 

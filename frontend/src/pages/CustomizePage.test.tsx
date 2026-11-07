@@ -190,6 +190,28 @@ describe('CustomizePage', () => {
     expect(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
   })
 
+  it('says in the delete dialog why the inbox-copies choice is missing when the settings did not load (#5438)', async () => {
+    server.use(http.get('/api/v1/settings', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })
+    expect(
+      await within(dialog).findByText(/The settings did not load, so the choice to also delete the inbox copies/),
+    ).toBeInTheDocument()
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('offers the inbox-copies choice, and no note, once the settings load on the native library (#5438)', async () => {
+    server.use(http.get('/api/v1/settings', () => HttpResponse.json({ ...settingsFixture, library_backend: 'native' })))
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })
+    expect(
+      await within(dialog).findByRole('checkbox', { name: "Also delete the inbox copies in ScadBuddy's library" }),
+    ).toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent('The settings did not load')
+  })
+
   it('manages the template media from a Media dialog (#279)', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Media' }))

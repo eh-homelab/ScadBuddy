@@ -1,13 +1,18 @@
-"""Files for `// file` parameters (#204): an SVG or PNG attached to one render, and
+"""Files for `// file` parameters (#204, #959): an SVG, PNG, STL, 3MF or OBJ attached
+to one render, and
 the sample files a template ships beside its source."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+import logging
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import Annotated, cast
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, File, Path, Query, Response, UploadFile, status
+import httpx
+from fastapi import APIRouter, File, Header, Path, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -37,13 +42,16 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.versions import CommitQuery, require_history
+from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.asset_fetch import fetch_file, parse_fetch_url
+from scadbuddy.library.asset_credits import credit_line, known_licence, with_credit
+from scadbuddy.library.asset_fetch import ascii_host, fetch_file, parse_fetch_url
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
     MAX_ASSET_BYTES,
     MEDIA_TYPES,
     AssetKind,
+    AssetLicence,
     AssetMeta,
     AssetNotFoundError,
     AssetQuotaError,
@@ -52,8 +60,22 @@ from scadbuddy.library.assets import (
     AssetUsage,
     sample_files,
 )
+from scadbuddy.library.catalogue import (
+    ModelNotFoundError,
+    SidecarNotFoundError,
+    StaleVersionError,
+)
+from scadbuddy.library.fetch_grants import (
+    FETCH_GRANT_HEADER,
+    FETCH_GRANT_TTL_SECONDS,
+    FetchGrantError,
+    fetch_grant_key,
+)
+from scadbuddy.library.fetch_grants import verify as verify_fetch_grant
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.library.icon_search import COLLECTIONS, MAX_LIMIT, IconSearch, search_icons
+from scadbuddy.library.meshes import MESH_KINDS, preview_png
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
@@ -65,6 +87,8 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
 from scadbuddy.store.content import StoreFullError, template_title
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["assets"])
 
@@ -108,11 +132,14 @@ def _require_asset(store: AssetStore, asset_id: str) -> AssetMeta:
     status_code=status.HTTP_201_CREATED,
     summary="Upload a file for a file parameter",
     description=(
-        "Stores an SVG or PNG for a `// file` parameter and answers its id, the "
-        "SHA-256 of the stored bytes, which is the value the render takes. The "
+        "Stores an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter and answers its "
+        "id, the SHA-256 of the stored bytes, which is the value the render takes. The "
         "content is sniffed, not trusted by its name: an SVG is stripped of scripts "
         "and external references, a PNG is re-encoded and downscaled to at most "
-        "256 px on its long side. Anything else is a 422. A file not already stored "
+        "256 px on its long side, and a mesh is read with bounded readers and stored "
+        "as its triangles alone (a binary STL with a blank header, an OBJ of `v` and "
+        "`f` lines, a 3MF of one object), at most 500,000 triangles; a 3MF must place "
+        "exactly one object. Anything else is a 422. A file not already stored "
         "that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or "
         "SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries "
         "the store's `usage`; re-uploading stored content is never refused."
@@ -124,7 +151,7 @@ async def upload_asset(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
-    file: Annotated[UploadFile, File(description="An SVG or PNG")],
+    file: Annotated[UploadFile, File(description="An SVG, PNG, STL, 3MF or OBJ")],
     idempotency_key: IdempotencyKey = None,
 ) -> AssetMeta | JSONResponse:
     data = await file.read(MAX_ASSET_BYTES + 1)
@@ -149,13 +176,22 @@ async def upload_asset(
 
 
 async def store_asset(
-    slug: str, data: bytes, filename: str | None, *, assets: AssetStore, state: AppState
+    slug: str,
+    data: bytes,
+    filename: str | None,
+    *,
+    assets: AssetStore,
+    state: AppState,
+    source_url: str | None = None,
+    licence: AssetLicence | None = None,
 ) -> AssetMeta:
     """An upload's bytes into the store, and mirrored where workers read them: the
     ``asset_upload`` and ``asset_fetch`` operations' runs (#1054)."""
     try:
         # Decoding a PNG and parsing an SVG are CPU work; keep them off the loop.
-        meta = await asyncio.to_thread(assets.put, data, filename)
+        meta = await asyncio.to_thread(
+            partial(assets.put, data, filename, source_url=source_url, licence=licence)
+        )
     except AssetRejectedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except AssetQuotaError as error:
@@ -178,7 +214,25 @@ async def store_asset(
 
 
 class AssetFetch(BaseModel):
-    url: str = Field(max_length=2048, description="An https URL to an SVG or PNG")
+    url: str = Field(max_length=2048, description="An https URL to an SVG, PNG, STL, 3MF or OBJ")
+    allow_host: str | None = Field(
+        default=None,
+        max_length=253,
+        description=(
+            "Let this host through for this one fetch although it is not on the asset "
+            "allowlist (#959): it must be the URL's own host exactly (its IDNA form, "
+            "lower case), not a subdomain, and covers redirects within it. The allowlist "
+            "is left as it was. Refused without the `X-ScadBuddy-Fetch-Grant` the agent "
+            "mints for a `fetch_asset` call a person approved, which serves one fetch"
+        ),
+    )
+    licence: AssetLicence | None = Field(
+        default=None,
+        description=(
+            "The licence the file is under, as the source states it (`search_icons` "
+            "answers it per icon); kept on the asset as given, never checked"
+        ),
+    )
 
 
 class FetchedAsset(AssetMeta):
@@ -187,6 +241,9 @@ class FetchedAsset(AssetMeta):
     #: Not capped: it is the parsed form, which percent-encodes what the request's 2048
     #: characters allowed, and can be longer.
     source_url: str
+    #: Whether the model's README credits this source (#959): a line was added to its
+    #: Credits section, or one was already there.
+    credited: bool = False
 
 
 @router.post(
@@ -195,20 +252,38 @@ class FetchedAsset(AssetMeta):
     status_code=status.HTTP_201_CREATED,
     summary="Fetch a file for a file parameter from a URL",
     description=(
-        "Fetches an SVG or PNG on the server and stores it exactly as an upload: the "
+        "Fetches an SVG, PNG, STL, 3MF or OBJ on the server and stores it exactly as an "
+        "upload: the "
         "answer's `id` is the value a `// file` parameter takes. The URL's host, and "
         "every redirect's, must be on the asset allowlist (`asset_fetch_domains` in "
-        "Settings, each domain with its subdomains). Otherwise as the URL import: "
+        "Settings, each domain with its subdomains), or be the body's `allow_host`: one "
+        "fetch from that host alone, which needs the single-use grant a person's approval "
+        "of this fetch minted in the `X-ScadBuddy-Fetch-Grant` header, bound to that host "
+        "and URL. The allowlist is left as it is. Otherwise as the URL import: "
         f"https only, public internet addresses only, at most {MAX_ASSET_BYTES} bytes, "
-        f"within {IMPORT_TIMEOUT:.0f} seconds. Every refusal is a 422; a full store is "
-        "the upload's 413."
+        f"within {IMPORT_TIMEOUT:.0f} seconds; a URL with a backslash, a control "
+        "character or a user name or password is refused. Every refusal of the URL or "
+        "its content is a 422, as is an `allow_host` that is not the URL's host; a "
+        "missing, forged, expired, other-host, other-URL or spent grant is a 403, and a "
+        "one-off with no secret key configured to check it is a 503. A full store is "
+        "the upload's 413. The asset keeps the URL and its licence: the body's `licence`, "
+        "else the one known for its catalogue (Material Design Icons, Tabler, game-icons, "
+        "OpenMoji). The model's README gets a line in its Credits section naming the "
+        "file, the source and the licence, once per source URL, as a revision of its own."
     ),
     responses={
         **OPERATION_RESPONSES,
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "an `allow_host` fetch whose `X-ScadBuddy-Fetch-Grant` is missing, forged, "
+                "expired, for another host or URL, or already spent"
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "the replica's fetch budget (shared with imports) or its resolver threads "
-                "are all in use; retry after `Retry-After` seconds"
+                "are all in use; retry after `Retry-After` seconds. Also an `allow_host` "
+                "fetch on a server with no secret key to check its grant"
             )
         },
     },
@@ -220,14 +295,21 @@ async def fetch_asset(
     ops: OperationsDep,
     imports: ImportsDep,
     paths: PathsDep,
+    assets: AssetsDep,
+    settings: SettingsStoreDep,
     idempotency_key: IdempotencyKey = None,
+    fetch_grant: Annotated[str | None, Header(alias=FETCH_GRANT_HEADER)] = None,
 ) -> FetchedAsset | JSONResponse:
     pasted = body.url.strip()
     try:
         # Refusals that quote the URL whole: here, so no operation records them.
-        parse_fetch_url(pasted)
+        parsed = parse_fetch_url(pasted)
     except ImportRefusedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    if body.allow_host is not None:
+        await _spend_grant(
+            body.allow_host, parsed, pasted, fetch_grant, idempotency_key, assets, settings
+        )
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history (as an import's, review 3c 1.5).
     claims = ClaimStore(paths.claims)
@@ -244,12 +326,60 @@ async def fetch_asset(
         kind=ops.kinds["asset_fetch"],
         # The host, never the URL: the subject is a search attribute.
         subject=urlsplit(pasted).hostname or "url",
-        request={"slug": slug, "url": url.name, "shown": shown_url(pasted)},
+        request={
+            "slug": slug,
+            "url": url.name,
+            "shown": shown_url(pasted),
+            "licence": None if body.licence is None else body.licence.model_dump(),
+            "allow_host": body.allow_host,
+        },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [url]),
         before_start=permit,
     )
     return operation_answer(result, FetchedAsset)
+
+
+async def _spend_grant(
+    allow_host: str,
+    parsed: httpx.URL,
+    pasted: str,
+    grant: str | None,
+    idempotency_key: str | None,
+    assets: AssetStore,
+    settings: SettingsStore,
+) -> None:
+    """A one-off host's checks (#959): the host is the one this route fetches from, by
+    its own parse, and the grant is a person's approval of this very fetch, spent now."""
+    host = ascii_host(parsed)
+    if allow_host != host:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"allow_host is {allow_host!r}, but the URL's host is {host!r}; nothing was fetched",
+        )
+    if grant is None:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "a host off the asset allowlist is fetched only with the grant of a person's "
+            "approval (the assistant's fetch_asset sends one); add the domain in Settings instead",
+        )
+    kek = settings.kek
+    if kek is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "a one-off host needs the secret key (SCADBUDDY_SECRET_KEY_FILE) to check its grant",
+        )
+    now = datetime.now(UTC)
+    try:
+        nonce = verify_fetch_grant(fetch_grant_key(kek), grant, host=host, url=pasted, now=now)
+    except FetchGrantError as error:
+        raise ApiError(status.HTTP_403_FORBIDDEN, str(error)) from None
+    expires = now + timedelta(seconds=FETCH_GRANT_TTL_SECONDS)
+    if not await asyncio.to_thread(assets.spend_fetch_grant, nonce, idempotency_key, expires):
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "this fetch grant was already used; each approval serves one fetch",
+        )
 
 
 def _require_fetch_permit(imports: ImportPermits) -> None:
@@ -261,7 +391,14 @@ def _require_fetch_permit(imports: ImportPermits) -> None:
         )
 
 
-async def fetch_run(slug: str, url: str, state: AppState) -> FetchedAsset:
+async def fetch_run(
+    slug: str,
+    url: str,
+    state: AppState,
+    *,
+    licence: AssetLicence | None = None,
+    allow_host: str | None = None,
+) -> FetchedAsset:
     """The ``asset_fetch`` operation's run (#1054): the fetch, then the store."""
     # Off the loop: `load` is blocking psycopg I/O.
     domains = (await asyncio.to_thread(state.settings_store.load)).allowed_asset_domains()
@@ -269,16 +406,84 @@ async def fetch_run(slug: str, url: str, state: AppState) -> FetchedAsset:
     _require_fetch_permit(imports)
     with imports.hold():
         try:
-            fetched = await fetch_file(url, domains=domains, limit=MAX_ASSET_BYTES)
+            fetched = await fetch_file(
+                url, domains=domains, limit=MAX_ASSET_BYTES, allow_host=allow_host
+            )
         except ImportRefusedError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except ResolverBusyError:
             raise fetch_busy(
                 "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
             ) from None
-    meta = await store_asset(slug, fetched.data, fetched.filename, assets=state.assets, state=state)
-    # Never the URL as given: its query may carry a token, and this answer is recorded.
-    return FetchedAsset(**meta.model_dump(), source_url=shown_url(fetched.source_url))
+    # Never the URL as given: its query may carry a token, and the row and this answer
+    # are kept.
+    source_url = shown_url(fetched.source_url)
+    # The body's licence, else the one its catalogue is known by: stored, credited and
+    # answered alike.
+    licence = licence or known_licence(source_url)
+    meta = await store_asset(
+        slug,
+        fetched.data,
+        fetched.filename,
+        assets=state.assets,
+        state=state,
+        source_url=source_url,
+        licence=licence,
+    )
+    # This fetch's URL and licence, even when the content was stored from elsewhere
+    # first: they are what the README credits.
+    credited = await _credit(slug, meta.name, source_url, licence, state)
+    return FetchedAsset(
+        **{**meta.model_dump(), "source_url": source_url, "licence": licence, "credited": credited}
+    )
+
+
+#: How often a credit is tried again when the model moved under it.
+CREDIT_ATTEMPTS = 3
+
+
+async def _credit(
+    slug: str, name: str, source_url: str, licence: AssetLicence | None, state: AppState
+) -> bool:
+    """Add ``source_url``'s credit to the model's README, once (#959). The README is read
+    and written at one revision, so an edit landing in between is never overwritten:
+    the credit is made again on top of it. False when the README cannot be written
+    (no model history): the file is stored all the same, and the answer says so."""
+    line = credit_line(name, source_url, licence)
+    catalogue = state.catalogue
+
+    def attempt() -> bool:
+        version = catalogue.record(slug).version
+        try:
+            readme = catalogue.read_readme(slug)
+        except SidecarNotFoundError:
+            readme = ""
+        text = with_credit(readme, source_url, line)
+        if text is None:
+            return False
+        catalogue.write_readme(
+            slug, text, message=f"Credit {name} in the README", expected_version=version
+        )
+        return True
+
+    for _ in range(CREDIT_ATTEMPTS):
+        try:
+            written = await asyncio.to_thread(attempt)
+        except StaleVersionError:
+            continue
+        except ModelNotFoundError:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+        except GitError as error:
+            logger.warning("asset credit for %s not written: %s", slug, type(error).__name__)
+            return False
+        if written:
+            emit(state.events, ModelEvent(kind="model.updated", slug=slug))
+        return True
+    raise ApiError(
+        status.HTTP_409_CONFLICT,
+        f"the file is stored, but {slug} kept changing while its README was credited; "
+        "fetch it again to credit it",
+    )
 
 
 @router.get(
@@ -352,7 +557,7 @@ def get_asset(
 @router.get(
     "/models/{slug}/assets/{asset_id}/content",
     response_class=FileResponse,
-    responses={200: {"content": {"image/svg+xml": {}, "image/png": {}}}},
+    responses={200: {"content": {media: {} for media in MEDIA_TYPES.values()}}},
     summary="An uploaded file's bytes",
 )
 def get_asset_content(
@@ -366,12 +571,36 @@ def get_asset_content(
 
 
 @router.get(
+    "/models/{slug}/assets/{asset_id}/preview",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+    summary="A picture of an uploaded mesh",
+    description=(
+        "A PNG of an uploaded STL, 3MF or OBJ, drawn from the stored mesh in the plate "
+        "thumbnails' iso view, for the customizer's file field. An SVG or PNG is its "
+        "own picture (`/content`): asking for its preview is a 404."
+    ),
+)
+async def get_asset_preview(
+    slug: SlugPath, asset_id: AssetIdPath, catalogue: CatalogueDep, assets: AssetsDep
+) -> Response:
+    require_model_exists(catalogue, slug)
+    meta = _require_asset(assets, asset_id)
+    if meta.kind not in MESH_KINDS:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{asset_id!r} is an image: it has no preview")
+    data = await asyncio.to_thread(assets.blob_path(meta).read_bytes)
+    picture = await asyncio.to_thread(preview_png, meta.kind, data)
+    return Response(picture, media_type="image/png", headers=CONTENT_HEADERS)
+
+
+@router.get(
     "/models/{slug}/samples/{name}",
     response_class=FileResponse,
-    responses={200: {"content": {"image/svg+xml": {}, "image/png": {}}}},
+    responses={200: {"content": {media: {} for media in MEDIA_TYPES.values()}}},
     summary="A sample file the template ships",
     description=(
-        "Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG "
+        "Serves one of the files a `file` parameter's `samples` lists: an SVG, PNG, STL, "
+        "3MF or OBJ "
         "directly in the template's directory, by its bare name. `version` reads the "
         "template as it was at that revision. Any other name is a 404."
     ),
@@ -402,5 +631,5 @@ async def get_sample_content(
     # a file parameter takes. Nothing else in the directory is reachable here.
     if name not in await asyncio.to_thread(sample_files, directory):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} ships no sample {name!r}")
-    kind: AssetKind = "svg" if name.lower().endswith(".svg") else "png"
+    kind = cast(AssetKind, name.rsplit(".", 1)[-1].lower())
     return FileResponse(directory / name, media_type=MEDIA_TYPES[kind], headers=SAMPLE_HEADERS)

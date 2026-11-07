@@ -292,10 +292,16 @@ let definitions = defaultDefinitions()
 let started = 0
 /** #2485: each archived or deleted flow's state, by name. */
 const states = new Map<string, FlowState>()
+/** #3186: each flow's display name and description (`<name>/flow.json`), by name. */
+const details = new Map<string, { display_name: string | null; description: string | null }>()
+/** #3186: each version's commit message and body, by version id; a default without one. */
+const messages = new Map<string, { message: string; body: string | null }>()
 /** Runs whose next Reset is refused: outward calls landed since the preview. */
 const moved = new Set<string>()
 /** Runs whose view says the workflow did not answer (`live: false`). */
 const offline = new Set<string>()
+/** #4445: each parked call's line from ScadBuddy's records and its bound hash, by `<run>:<call>`. */
+const summaries = new Map<string, { summary: string; bound_hash: string }>()
 /** Runs that exist only as an accepted start (`starting`, no row yet). */
 const starting = new Set<string>()
 let requests: { path: string; key: string | null; body: Record<string, unknown> }[] = []
@@ -338,6 +344,15 @@ export function setFlowRunChildren(id: string, next: Extract<FlowQueueEntry, { s
   children.set(id, next)
 }
 
+/**
+ * Tests: the line the view gives a run's parked call (#4445: a print's registry printer) and
+ * the hash an approval must send back; an approval with another is refused 409, as the
+ * backend refuses one whose printer was re-linked since the card showed it.
+ */
+export function setFlowPendingSummary(id: string, callId: string, summary: string, boundHash: string): void {
+  summaries.set(`${id}:${callId}`, { summary, bound_hash: boundHash })
+}
+
 /** #2477: each run's images, as the view lists them. */
 const images = new Map<string, FlowRunView['images']>()
 /** One grey pixel, what every image route answers. */
@@ -351,11 +366,30 @@ export function reset(): void {
   moved.clear()
   offline.clear()
   starting.clear()
+  summaries.clear()
   images.clear()
   children.clear()
   defaultChildren()
   states.clear()
+  details.clear()
+  messages.clear()
   requests = []
+}
+
+/** Tests: a flow's display name and description (#3186). */
+export function setFlowDetails(name: string, next: { display_name?: string | null; description?: string | null }): void {
+  details.set(name, { display_name: next.display_name ?? null, description: next.description ?? null })
+}
+
+/** A flow's details as every read of it carries them. */
+function detailsOf(name: string): { display_name: string | null; description: string | null } {
+  return details.get(name) ?? { display_name: null, description: null }
+}
+
+/** #3186: a save's commit message and body, kept for the version it made. */
+function remember(id: string, body: Record<string, unknown>): void {
+  const message = typeof body['message'] === 'string' && body['message'].trim() ? body['message'] : null
+  if (message) messages.set(id, { message, body: typeof body['body'] === 'string' && body['body'] ? body['body'] : null })
 }
 
 /** Tests: a flow archived or deleted, as `GET /workflows?archived=true` lists it. */
@@ -449,6 +483,8 @@ function view(id: string): FlowRunView | undefined {
     reason,
     proposed,
     hops,
+    summary: summaries.get(`${id}:${call_id}`)?.summary ?? null,
+    bound_hash: summaries.get(`${id}:${call_id}`)?.bound_hash ?? null,
   }))
   return {
     id,
@@ -456,7 +492,8 @@ function view(id: string): FlowRunView | undefined {
     definition_id: found.definition_id,
     version: found.version,
     name: found.name,
-    run: found,
+    display_name: detailsOf(found.name).display_name,
+    run: { ...found, display_name: detailsOf(found.name).display_name },
     pending,
     live: !offline.has(id),
     images: images.get(id) ?? [],
@@ -496,11 +533,21 @@ function resolve(id: string, callId: string): boolean {
   return true
 }
 
+/** #4445: backend flows/operations.py PRINTER_CHANGED. */
+const PRINTER_CHANGED = 'https://scadbuddy.dev/problems/flow-printer-changed'
+
 function respond(outcome: (body: Record<string, unknown>) => string) {
   return async ({ request, params }: { request: Request; params: Record<string, string | readonly string[] | undefined> }) => {
     const id = String(params['id'])
     const body = (await request.json()) as Record<string, unknown>
     requests.push({ path: new URL(request.url).pathname, key: request.headers.get('Idempotency-Key'), body })
+    const bound = summaries.get(`${id}:${String(body['call_id'])}`)?.bound_hash
+    if (bound !== undefined && body['approved'] && body['bound_hash'] !== bound) {
+      return HttpResponse.json(
+        { type: PRINTER_CHANGED, title: 'Conflict', status: 409, detail: 'The printer this call prints on is not the one you were shown. Reload it.' },
+        { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
     if (!resolve(id, String(body['call_id']))) {
       return HttpResponse.json(
         { type: STALE, title: 'Conflict', status: 409, detail: 'That question or approval is no longer waiting: the run moved on. Reload it.' },
@@ -656,6 +703,17 @@ function addVersion(
   return { ...created, ...flags(name) }
 }
 
+/** A display name or description given: an empty string clears it. Whether either changed. */
+function changeDetails(name: string, body: { display_name?: string | null; description?: string | null }): boolean {
+  const was = detailsOf(name)
+  const field = (given: string | null | undefined, kept: string | null) =>
+    given === undefined || given === null ? kept : given.trim() || null
+  const now = { display_name: field(body.display_name, was.display_name), description: field(body.description, was.description) }
+  if (now.display_name === was.display_name && now.description === was.description) return false
+  details.set(name, now)
+  return true
+}
+
 const newestFirst = (name: string) =>
   definitions.filter((d) => d.name === name).sort((a, b) => b.version - a.version)
 
@@ -708,7 +766,7 @@ export const handlers = [
         .sort()
         .map((name) => {
           const { script: _script, ...summary } = newestFirst(name)[0]!
-          return { ...summary, ...flags(name) }
+          return { ...summary, ...detailsOf(name), ...flags(name) }
         }),
     )
   }),
@@ -746,7 +804,8 @@ export const handlers = [
         commit: commitOf(d),
         short: `c0ffee${d.version}`,
         version: d.version,
-        message: `flow ${d.name} v${d.version}`,
+        message: messages.get(d.id)?.message ?? `flow ${d.name} v${d.version}`,
+        body: messages.get(d.id)?.body ?? null,
         created_by: d.created_by,
         created_at: d.created_at,
         current: i === 0,
@@ -759,11 +818,25 @@ export const handlers = [
       script: string
       approval_timeout?: number | 'never' | null
       inputs_schema?: FlowDefinition['inputs_schema']
+      display_name?: string | null
+      description?: string | null
     }
     const problems = [...checkInputsSchema(body.inputs_schema), ...checkFlowScript(body.script)]
     if (problems.length > 0) return scriptProblems(problems, 'The script does not type-check.')
     const timeout = body.approval_timeout === 'never' ? 0 : (body.approval_timeout ?? null)
-    return HttpResponse.json(addVersion(body.name, body.script, timeout, body.inputs_schema ?? null), { status: 201 })
+    const created = addVersion(body.name, body.script, timeout, body.inputs_schema ?? null)
+    remember(created.id, body)
+    changeDetails(body.name, body)
+    return HttpResponse.json({ ...created, ...detailsOf(body.name) }, { status: 201 })
+  }),
+  // #3186: as `FlowHistory.set_details`: an omitted field stays, an empty one clears.
+  http.patch('/api/v1/workflows/names/:name', async ({ request, params }) => {
+    const body = (await keep(request)) as { display_name?: string | null; description?: string | null }
+    const name = String(params['name'])
+    if (newestFirst(name).length === 0) return notFound('No such flow.')
+    if (stateOf(name).deleted_at) return conflict('flow-deleted', 'This flow was deleted. Restore one of its versions first.')
+    const changed = changeDetails(name, body)
+    return HttpResponse.json({ name, ...detailsOf(name), commit: changed ? 'de7a115'.padEnd(40, '0') : null })
   }),
   http.post('/api/v1/workflow-script/check', async ({ request }) => {
     const { script, inputs_schema } = (await request.json()) as { script: string; inputs_schema?: unknown }
@@ -794,19 +867,18 @@ export const handlers = [
       : notFound('No such version of this flow.')
   }),
   http.post('/api/v1/workflows/names/:name/versions/:commit/restore', async ({ request, params }) => {
-    await keep(request)
+    const body = await keep(request)
     const found = newestFirst(String(params['name'])).find((d) => commitOf(d) === params['commit'])
     if (!found) return notFound('No such version of this flow.')
     const problems = checkFlowScript(found.script)
     if (problems.length > 0) return scriptProblems(problems, 'That version no longer type-checks.')
-    return HttpResponse.json(
-      addVersion(found.name, found.script, found.approval_timeout_s ?? null, found.inputs_schema ?? null),
-      { status: 201 },
-    )
+    const restored = addVersion(found.name, found.script, found.approval_timeout_s ?? null, found.inputs_schema ?? null)
+    remember(restored.id, body)
+    return HttpResponse.json({ ...restored, ...detailsOf(found.name) }, { status: 201 })
   }),
   http.get('/api/v1/workflows/:id', ({ params }) => {
     const found = definitions.find((d) => d.id === params['id'])
-    return found ? HttpResponse.json({ ...found, ...flags(found.name) }) : notFound('No such flow.')
+    return found ? HttpResponse.json({ ...found, ...detailsOf(found.name), ...flags(found.name) }) : notFound('No such flow.')
   }),
   http.post('/api/v1/workflows/:id/runs', async ({ request, params }) => {
     const body = await keep(request)
@@ -889,7 +961,8 @@ export const handlers = [
   }),
   http.get('/api/v1/workflow-runs', ({ request }) => {
     const session = new URL(request.url).searchParams.get('session')
-    return HttpResponse.json(session ? runs.filter((r) => r.started_by['session'] === session) : runs)
+    const listed = session ? runs.filter((r) => r.started_by['session'] === session) : runs
+    return HttpResponse.json(listed.map((r) => ({ ...r, display_name: detailsOf(r.name).display_name })))
   }),
   http.get('/api/v1/workflow-runs/:id', ({ params }) => {
     const found = view(String(params['id']))

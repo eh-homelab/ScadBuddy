@@ -88,7 +88,7 @@ describe('undoing an archive, a close and a cancel', () => {
     expect(screen.queryByTestId('order-unpriced')).not.toBeInTheDocument()
   })
 
-  it('says why a cancelled item without an accepted price stays out of an accepted order', async () => {
+  it('takes an unpriced item back into an accepted order, and says why a shipped one does not (#5349)', async () => {
     const { user } = order(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     // Price it but leave the quote unaccepted, cancel it, then accept the order without it.
@@ -109,7 +109,19 @@ describe('undoing an archive, a close and a cancel', () => {
     await user.click(screen.getByRole('button', { name: 'Release hold' }))
     await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))
     const again = await screen.findByRole('dialog', { name: 'Name Keychain' })
-    expect(await within(again).findByTestId('reopen-unpriced')).toBeInTheDocument()
-    expect(within(again).queryByRole('button', { name: 'Reopen item' })).not.toBeInTheDocument()
+    // An accepted order takes an unpriced item, so it takes this one back, still not accepted.
+    await user.click(await within(again).findByRole('button', { name: 'Reopen item' }))
+    await waitFor(() => expect(state.items.find((i) => i.id === ITEM_DRAFT)?.status).toBe('quoted'))
+    // Cancelled again on a shipped order, it stays out, and the drawer says why.
+    await user.click(await within(again).findByRole('button', { name: 'Cancel item' }))
+    await waitFor(() => expect(state.items.find((i) => i.id === ITEM_DRAFT)?.status).toBe('cancelled'))
+    if (target) target.status = 'shipped'
+    await user.click(within(again).getByRole('button', { name: 'Close' }))
+    await user.click(screen.getByRole('button', { name: 'Put on hold' }))
+    await user.click(screen.getByRole('button', { name: 'Release hold' }))
+    await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))
+    const shipped = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(await within(shipped).findByTestId('reopen-unpriced')).toHaveTextContent(/shipped order/)
+    expect(within(shipped).queryByRole('button', { name: 'Reopen item' })).not.toBeInTheDocument()
   })
 })

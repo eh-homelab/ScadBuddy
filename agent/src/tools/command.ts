@@ -25,6 +25,9 @@ const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
  */
 export const ACCEPTING_MS = 240_000
 
+/** The clock `ACCEPTING_MS` is spent on: monotonic, as the wall clock can step mid-wait (review #1066 (10)). */
+const now = (ctx: ToolContext) => ctx.now?.() ?? performance.now()
+
 function stillAccepting(result: FetchResult<unknown>): boolean {
   const { error, response } = result
   const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown }) : {}
@@ -61,13 +64,12 @@ export async function answered<T>(
   send: () => Promise<FetchResult<T>>,
   what: string,
   gaveUp = '',
-  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
-  began = performance.now(),
+  began = now(ctx),
 ): Promise<FetchResult<T>> {
   const budget = ctx.acceptingMs ?? ACCEPTING_MS
   // A pause that would end past the budget is not taken, whatever it waits on.
   const pause = async (ms: number, why: string) => {
-    if (performance.now() - began + ms >= budget) throw new ToolError(`${what}: ScadBuddy did not answer (${why}).${gaveUp}`)
+    if (now(ctx) - began + ms >= budget) throw new ToolError(`${what}: ScadBuddy did not answer (${why}).${gaveUp}`)
     await sleep(ms, undefined, { signal: ctx.signal })
   }
   // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
@@ -83,7 +85,7 @@ export async function answered<T>(
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? performance.now() - began >= budget : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? now(ctx) - began >= budget : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
       // The backend's Retry-After paces a re-send it answered (review #1061 4a).
@@ -134,11 +136,11 @@ export async function answeredFollowing<T>(
   what: string,
   gaveUp = '',
 ): Promise<FetchResult<T>> {
-  const began = performance.now()
+  const began = now(ctx)
   // Neither a follow, a pause nor a re-send starts past the budget (#3039, #3571):
   // one check, one error.
   const within = (extra = 0) => {
-    if (performance.now() - began + extra >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
+    if (now(ctx) - began + extra >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
       throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
     }
   }

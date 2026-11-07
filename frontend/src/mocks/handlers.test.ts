@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
 import { DEFAULT_NOZZLES } from '../lib/printChoices'
+import { MAX_TAG_FILTER_CHARS, MAX_TAG_FILTERS, MAX_TAGS } from '../lib/catalogueQuery'
 import { verifiedFixDiagnostic } from './analyzers'
 import { setMockAnalyzerDiagnostics } from './features/analyzers'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
@@ -639,6 +640,34 @@ describe('mock API: delete a template duplicates track (#223)', () => {
     await api.deleteModel('name-keychain', true)
     const gone: unknown = await api.getModel('name-keychain').catch((caught: unknown) => caught)
     expect(gone).toMatchObject({ status: 404 })
+  })
+})
+
+describe('mock API: a model delete\'s library copies (#5371)', () => {
+  beforeEach(() => resetMockState())
+
+  const rootFiles = async () =>
+    ((await api.listLibrary({ folderId: null, all: true })).files ?? [])
+      .filter((file) => file.id === 89 || file.id === 91)
+      .map((file) => ({ id: file.id, output_id: file.output_id }))
+
+  it('leaves its outputs\' copies naming no output', async () => {
+    await api.deleteModel('name-keychain')
+    expect(await rootFiles()).toEqual([
+      { id: 89, output_id: null },
+      { id: 91, output_id: null },
+    ])
+  })
+
+  it('trashes them with delete_inbox_copies', async () => {
+    await api.deleteModel('name-keychain', false, true)
+    expect(await rootFiles()).toEqual([])
+  })
+
+  it('keeps a copy moved out of the folder, naming no output (#5422)', async () => {
+    await api.moveLibraryFiles([91], null)
+    await api.deleteModel('name-keychain', false, true)
+    expect(await rootFiles()).toEqual([{ id: 91, output_id: null }])
   })
 })
 
@@ -1472,5 +1501,98 @@ describe('mock template UI files and outputs, as the backend holds them (#425)',
     await expect(
       api.createOutput('name-keychain', job.id, undefined, { params: { name: 'Ada' }, v: 0 }),
     ).rejects.toMatchObject({ status: 422 })
+  })
+})
+
+describe('mock GET /models and /model-facets search, filter and page as the backend does (#2290)', () => {
+  const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+
+  it('pages a sorted selection with limit and after, and calls a gone after a conflict', async () => {
+    const every = await api.listModelsPage(filters)
+    expect(every.total).toBe(every.items.length)
+    const names = every.items.map((m) => m.name)
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))
+    const first = await api.listModelsPage(filters, { limit: 2 })
+    expect(first.items.map((m) => m.slug)).toEqual(every.items.slice(0, 2).map((m) => m.slug))
+    expect(first.total).toBe(every.total)
+    const next = await api.listModelsPage(filters, { limit: 2, after: first.items[1]?.slug })
+    expect(next.items.map((m) => m.slug)).toEqual(every.items.slice(2, 4).map((m) => m.slug))
+    const gone = await api.listModelsPage(filters, { after: 'no-such-model' }).catch((cause: unknown) => cause)
+    expect(gone).toBeInstanceOf(ApiError)
+    expect((gone as ApiError).status).toBe(409)
+  })
+
+  it('counts what the filters select, of every model, with their tags', async () => {
+    const all = await api.listModels()
+    const keychains = await api.listModelsPage({ ...filters, tags: ['keychain'] })
+    const facets = await api.modelFacets({ q: '', tags: ['keychain'], origin: 'all' })
+    expect(facets.total).toBe(all.length)
+    expect(facets.matched).toBe(keychains.total)
+    expect(facets.tags).toContainEqual({ tag: 'keychain', count: keychains.total })
+  })
+})
+
+describe('mock GET /models/{slug}/outputs pages as the backend does (#2290)', () => {
+  it('answers newest first, a window after an id, and the whole count', async () => {
+    const all = await api.listOutputsPage('name-keychain')
+    expect(all.total).toBe(all.items.length)
+    const created = all.items.map((o) => Date.parse(o.created_at))
+    expect(created).toEqual([...created].sort((a, b) => b - a))
+    const first = await api.listOutputsPage('name-keychain', { limit: 1 })
+    expect(first).toEqual({ items: [all.items[0]], total: all.total })
+    const second = await api.listOutputsPage('name-keychain', { limit: 1, after: all.items[0]!.id })
+    expect(second.items).toEqual(all.items.slice(1, 2))
+  })
+
+  it('refuses to page after an output that is not listed', async () => {
+    const caught = await api.listOutputsPage('name-keychain', { after: 'f'.repeat(32) }).catch((cause: unknown) => cause)
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).status).toBe(409)
+  })
+})
+
+describe('mock GET /models refuses a page past the backend cap (#5289 review)', () => {
+  it('answers 422 for limit over 500', async () => {
+    const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+    const refused = await api.listModelsPage(filters, { limit: 501 }).catch((cause: unknown) => cause)
+    expect((refused as ApiError).status).toBe(422)
+  })
+
+  it('answers 422 for limit under 1, as the backend does', async () => {
+    const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+    const refused = await api.listModelsPage(filters, { limit: 0 }).catch((cause: unknown) => cause)
+    expect((refused as ApiError).status).toBe(422)
+  })
+})
+
+describe("the mock refuses the tags TagFilter refuses, as sent (#5309, #5310 reviews)", () => {
+  it('refuses an empty tag, as the route does (#5309 review)', async () => {
+    const query = new URLSearchParams([['tag', ''], ['sort', 'name']])
+    expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
+    expect((await fetch(`/api/v1/model-facets?${query}`)).status).toBe(422)
+  })
+
+  it('refuses a tag longer than the route takes, as the backend does (#5305 review)', async () => {
+    const query = new URLSearchParams([['tag', 'x'.repeat(MAX_TAG_FILTER_CHARS + 1)], ['sort', 'name']])
+    expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
+    expect((await fetch(`/api/v1/model-facets?${query}`)).status).toBe(422)
+  })
+
+  it('refuses more tags than the route takes, as sent', async () => {
+    const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+    const query = new URLSearchParams([...Array.from({ length: MAX_TAG_FILTERS + 1 }, (_, n) => ['tag', `t${n}`]), ['sort', filters.sort]])
+    expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
+  })
+})
+
+describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review)', () => {
+  // 51 tags as typed, 50 once folded: the backend counts the list as sent.
+  const tags = [...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0']
+
+  it('reads the models and the facets without a 422', async () => {
+    const filters = { q: '', tags, origin: 'all' as const, sort: 'name' as const }
+    await expect(api.listModelsPage(filters, { limit: 24 })).resolves.toEqual({ items: [], total: 0 })
+    const facets = await api.modelFacets({ q: '', tags, origin: 'all' })
+    expect(facets.matched).toBe(0)
   })
 })

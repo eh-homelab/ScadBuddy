@@ -14,7 +14,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, unquote
 
 import httpx
@@ -42,6 +42,9 @@ from scadbuddy.workflows.flow_models import (
     GrantVerdict,
     HopRecord,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.crud.projects import RemoteFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,10 @@ class FlowGrants:
     lookup fails, so every call asks) and the approvals' hash key."""
 
     def __init__(
-        self, store: FlowStore, client: httpx.AsyncClient | None, hash_key: bytes | None
+        self,
+        store: "FlowStore | RemoteFlowStore",
+        client: httpx.AsyncClient | None,
+        hash_key: bytes | None,
     ) -> None:
         self._store = store
         self._client = client

@@ -486,7 +486,65 @@ and each caller reads its current one from a view of its own and unseals it with
 KEK, so **each caller needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. Settings → System →
 Service credentials lists, rotates and revokes them.
 
-**Each caller's own database role (#5210).** Like the render worker's
+**The service-token exchange (#5494).** A caller can prove who it is instead, and get a
+15-minute credential with no sealed copy and no database read
+(`docs/superpowers/specs/2026-11-05-service-credentials-without-db-design.md`, PR #5332).
+It presents its proof at `POST /api/v1/auth/service-token` (RFC 8693 form fields
+`grant_type`, `subject_token`, `subject_token_type`) and renews the credential at half-life
+and at once after a 401. Each caller picks its proof with one variable; setting both is a
+start error, and setting neither reads the view as above:
+
+| Proof | On the caller | On the API |
+|---|---|---|
+| Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, and reads the cluster's issuer discovery and JWKS. The API needs two roles: `system:auth-delegator` (TokenReview) and `system:service-account-issuer-discovery` (the discovery and the JWKS). A default ClusterRoleBinding [gives the second to every ServiceAccount](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#service-account-issuer-discovery) (`system:serviceaccounts`); an explicit binding to the API's ServiceAccount (eh-homelab/clusters#3246) keeps the JWKS read from depending on that default |
+| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named `render`, `print`, `projects` or `agent`; only the hashes are kept |
+
+The API takes a proof only when its own variable is set. The ServiceAccounts it maps are
+`scadbuddy-render` (caller `render`), `scadbuddy-print`, `scadbuddy-projects`,
+`scadbuddy-agent-worker` and `scadbuddy` (both `agent`); `default`, any other
+ServiceAccount and any other namespace are refused, and so is a token bound to no pod.
+Each Kubernetes credential is bound to its pod's name and uid. The route answers at most 6
+exchanges a minute per pod and 30 per caller, then `429` with `Retry-After`. Before any
+TokenReview the API checks a token offline against the cluster's JWKS, fetched from the
+apiserver with its own token and kept an hour; an unknown `kid` refetches it at most
+every 30 s. When the hourly refresh fails, the last good JWKS still serves for up to 24 h
+after the first failure (TokenReview still decides every token, an unknown `kid` is still
+refused), the refresh is retried at most every 30 s, and each such use is logged and
+counted in `scadbuddy_service_jwks_stale_uses_total`; after 24 h every Kubernetes exchange
+answers `503`. The check covers the signature (RS256 or ES256 only), `iss` (from the
+apiserver's `/.well-known/openid-configuration`), `aud` containing `scadbuddy`,
+`exp`/`nbf` with 30 s of skew, a `kubernetes.io.pod` claim with a `name` and `uid` (a
+token bound to no pod is refused), and a `sub` that names a caller above. A token that fails
+is refused `401` with no TokenReview and spends nothing, so forged or junk tokens never
+hold a real caller back. Each API process sends at most 60 TokenReviews a minute, then
+answers `429` (`result="limited"`). A bootstrap secret is checked locally against its
+hash, with no budget; a `client_id` sent beside any proof must name the caller it proves.
+The counter
+`scadbuddy_service_token_exchanges_total{caller, proof, result}` counts them. An exchange
+the API answers `404` (an older API pod during a roll) falls back to the view while the
+caller still has a database URL. The API's own in-process `projects` worker gets its
+credential minted in memory. `GET /api/v1/auth/service-credentials` returns each
+credential's `proof`, `pod_name` and `pod_uid` (the Settings page does not show them, or the
+`render` caller, yet), and the API also revokes every credential of a pod
+(`DELETE /api/v1/auth/service-credentials/pods/{pod_uid}`) and suspends a caller
+(`PUT`/`DELETE /api/v1/auth/service-callers/{caller}/suspension`), which refuses its
+exchanges and revokes what it holds until it is resumed.
+
+**The CRUD port (#5298).** The API process also listens on `SCADBUDDY_CRUD_PORT`
+(default `8082`), started by the app itself, so the image's one `uvicorn` command serves
+both ports. That port answers only the workers' CRUD routes
+(`/api/v1/internal/crud/<caller>/…`, each refused without that caller's service
+credential in every `SCADBUDDY_AUTH_MODE`), `POST /api/v1/auth/service-token` and
+`/healthz`; every other path is a plain `404` there. The exchange stays on `8080` too. A
+pod admitted only to `8082` (the render worker's) reaches nothing else of the API. A
+second dev API on one host must set `SCADBUDDY_CRUD_PORT` (`0` picks a free port).
+`GET /api/v1/internal/crud/<caller>/areas` lists the CRUD areas the pod serves to that
+caller. A write that is not idempotent by itself takes an `Idempotency-Key`; its reply is
+kept 24 h in `crud_requests`, written in the write's own transaction, and a retry with the
+same key gets it back (another body under the same key is `422`).
+
+**Each caller's own database role (#5210).** This is today's state, not the target
+(see the next paragraph). Like the render worker's
 `scadbuddy_render` (below), each caller should connect as a role of its own, so it holds
 exactly the tables it touches and its credential's view, never the API's settings
 store or another caller's credential:
@@ -495,7 +553,7 @@ store or another caller's credential:
 |---|---|---|
 | render worker | `scadbuddy_render` | `scadbuddy-render.yaml` |
 | print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
-| flow runs' worker | `scadbuddy_projects` | `scadbuddy-projects.yaml` |
+| flow runs' worker | `scadbuddy_projects`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-projects.yaml` |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
@@ -505,8 +563,18 @@ role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, an
 render worker's `RENDER_GRANTS`) and its credential's view; a role created after the
 API started is granted on the API's next start. A worker on its own role never
 migrates: it waits until the API has migrated and granted it. The agent's role owns the
-`ai_*` tables it migrates and grants what the API's role and `scadbuddy_projects` read
-of them (`agent/src/db/grants.ts`).
+`ai_*` tables it migrates and grants what the API's role reads of them
+(`agent/src/db/grants.ts`).
+
+On 2026-11-05 the render, print and projects workers connected as their own roles, and
+the agent sidecar and the agent workers still connected as the owner. **The target
+(#5295) replaces these roles.** A role per caller in one database is not a boundary, so
+only the CRUD service (the API) will hold a database secret. Every other caller becomes an
+HTTP client of it with its service credential, and loses its role and grant list: the
+workers in #5298, the agent in #5299. Then #5297 authenticates `/api/v1/internal/*`,
+#5296 moves untrusted template code out of pods with a database secret, and
+eh-homelab/clusters#3182 limits Postgres to the CRUD service. Who holds what today, and
+the zones: [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
 
 **The rollout** (spec §9.1), each step its own manifest change in
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters):
@@ -588,13 +656,18 @@ Both call `deploy.reusable.yml`, which:
    the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   closes an older open one and replaces the branch; this one job carries a
-   concurrency group shared by both paths, so only the branch/PR handling
-   serialises — a release's image wait never holds up a main deploy. GitHub
+   first waits up to 45 minutes for an older open one to land, and closes it and
+   replaces the branch only when it cannot (a failed CI run, a conflict,
+   auto-merge off) or is still open after the wait (#5168: the PR's
+   checks take 15 to 40 minutes, and closing it at every merge kept prod on one
+   build for hours during a run of merges). This one job carries a concurrency
+   group shared by both paths, so only the wait and the branch/PR handling
+   serialise — a release's image wait never holds up a main deploy. GitHub
    keeps one running and one queued job per group and drops the queued one
-   when a third arrives, so the **newest** request always runs; an overtaken
-   deploy is reported (⚠️ on the commit or release) rather than lost, and
-   re-running it deploys that build anyway.
+   when a third arrives, so the **newest** request always runs, and a burst of
+   merges deploys its first and its last build; an overtaken deploy is
+   reported (⚠️ on the commit or release) rather than lost, and re-running it
+   deploys that build anyway.
 
 The clusters ruleset (`CI Summary` + `claude-review`) gates the merge; the
 merge is the deploy. ArgoCD then syncs the `scadbuddy` Application, and
@@ -659,10 +732,21 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
   the jobs.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
-  role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
+  role, below), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
-  `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
-  id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
+  `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
+  id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
+  (`http://scadbuddy:8082`; the worker reads the store settings and writes its jobs'
+  `render_jobs` rows, their `job.*` events and activity rows, their `blob_refs`, the
+  `piece_geometry` rows and the blob index `store_blobs` through its CRUD routes, and the
+  API finds the Bambuddy store's folders `store_folders` for it, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
+  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
+  credential. The proof is required: without one the worker refuses to start, since
+  it has no other source of a credential. It needs no KEK
+  (`SCADBUDDY_SECRET_KEY_FILE`): the API opens the stored keys before it answers.
+  The store fields seeded from the environment (`SCADBUDDY_STORE_BACKEND`, the
+  Bambuddy and S3 settings, `SCADBUDDY_SOLID_CONCURRENCY` while no row is saved) come
+  from the API's environment, not the worker's. Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
@@ -672,19 +756,31 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (`CREATE ROLE scadbuddy_render LOGIN PASSWORD '…'`; on CNPG a `managed.roles`
   entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
   up by hand. At every start the API grants that role exactly
-  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `render_jobs`,
-  `events`, `blob_refs`, the blob index `store_blobs` and `store_folders`, `assets`,
+  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `assets`,
   the library leases (`library_leases`, `library_pin_holds`,
-  `library_install_slots`), the migrations ledger (read only) and the
-  `render_settings` view. It gets nothing on `settings`: the view shows only the
-  store's settings (backend, Bambuddy URL, library folder, render key), plus the full
-  Bambuddy key **only while no render key is saved** in Settings, the fallback
-  `/healthz` reports as `render_key_fallback`. Save a render key and the worker
-  cannot read the full key at all. A role created after the API started is granted
+  `library_install_slots`) and the migrations ledger (read only). It gets nothing
+  on `settings`: it reads the store's settings (backend, Bambuddy URL, library
+  folder, render key, S3 keys) from the API's CRUD route
+  `/api/v1/internal/crud/render/settings` (#5298), which answers the full Bambuddy
+  key **only while no render key is saved** in Settings, the fallback `/healthz`
+  reports as `render_key_fallback`. Save a render key and the worker cannot read the
+  full key at all. It gets nothing on `render_jobs`, `events`, `activity`, `blob_refs`,
+  `piece_geometry`, `store_blobs` or `store_folders` either: the API writes a job's row,
+  its events and its activity row for it, through the routes under
+  `/api/v1/internal/crud/render/jobs`, holds a done job's blobs and records a piece's
+  geometry for it, through `/api/v1/internal/crud/render/blob-refs` and
+  `…/render/geometry`, reads and writes the blob index for it, through
+  `…/render/blob-index`, and finds a template's Bambuddy folder for it, through
+  `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
+  render key in Settings, under the folder's lock, and refuses a worker whose URL or
+  library folder is not that one yet (it tries again). A role granted the older
+  `render_settings` view or those tables keeps them until #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
-  until the API has applied every migration its build has and its role holds
-  `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
+  until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
+  `store-folders`) and answers its first read of
+  the store settings, then until the API has applied every migration its build has
+  and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
   worker comes up first, it starts once the API has. On the API's own role (the
   same `SCADBUDDY_DATABASE_URL`) the grants are there already.
 - **Versioning:** workflows are pinned to the build that started them. At start
@@ -785,7 +881,7 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Each of those route groups takes only the
   service credential whose scope names it (#4975: the print worker's covers
-  `internal.outputs` and `internal.library`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
+  `internal.outputs`, `internal.library` and `crud.print`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
   and `observe` they still serve anyone who reaches the API, so until `enforce` they are
   internal by path only. The agent's workspace blob routes
   (`/api/v1/internal/workspace-blobs/…`, #4789) are the agent's credential's
@@ -898,11 +994,22 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 `python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
 `applications/scadbuddy/scadbuddy-projects.yaml`, same image.
 
-- **What it needs:** `SCADBUDDY_DATABASE_URL`, the KEK (`SCADBUDDY_SECRET_KEY_FILE`: a
-  flow's payloads are sealed per run, and the worker refuses to start without it),
-  `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and `SCADBUDDY_API_INTERNAL_URL`: a flow's
+- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations
+  and payload keys go through the API's CRUD routes, and it starts only once the API
+  lists the `flows`, `operations` and `payload-keys` areas. A `SCADBUDDY_DATABASE_URL`
+  that is still set is logged once and ignored. It needs the KEK
+  (`SCADBUDDY_SECRET_KEY_FILE`: a flow's payloads are sealed per run, and the worker
+  refuses to start without it), `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and
+  `SCADBUDDY_API_INTERNAL_URL`: the CRUD routes and the exchange are there, and a flow's
   `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
-  (`workflows/flow_routes.py`). No data volume
+  (`workflows/flow_routes.py`). It also needs `SCADBUDDY_SERVICE_TOKEN_FILE` (its
+  projected ServiceAccount token), or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` outside
+  Kubernetes: it exchanges that proof for its service credential, and with neither it
+  refuses to start. Its service credential holds `flow.host` and
+  `crud.projects`, not `api` (#5298). So in `SCADBUDDY_AUTH_MODE=enforce` it reaches only
+  the public routes those calls, its grant checks and its printer reads use
+  (`auth/routes.py` `FLOW_HOST_ENDPOINTS`); those routes still take everyone an `api`
+  route takes. No data volume
   and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
 - **Scripts are git** (#2503): each flow version is one commit in `/data/flows`
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
@@ -1252,10 +1359,11 @@ worker, which opens the same store) seals any key still stored in plaintext, onc
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the **same** file into the API, the render worker and the print worker, in one
-  rollout. They all read the keys from the database; a process without the key (or with
-  another one) cannot open a sealed key, logs `ignoring a stored secret this process
-  cannot open` and falls back to its own `SCADBUDDY_<FIELD>`.
+- Mount the **same** file into the API and the print worker, in one rollout. Both read the
+  keys from the database; a process without the key (or with another one) cannot open a
+  sealed key, logs `ignoring a stored secret this process cannot open` and falls back to
+  its own `SCADBUDDY_<FIELD>`. The render worker needs no key: the API opens its store
+  keys and answers them on its CRUD route (#5298).
 - Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
@@ -1624,8 +1732,10 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
   details are always one `{"exit_code", "stderr_tail", "errors"}` object, `errors`
-  being the last three `[error]` lines of the CLI's log on stdout, which is the only
-  place it says a plate is empty (exit 206); exit 192, a
+  being the reason in the `result.json` the CLI writes in its working directory with
+  its return code (such as "Found G-code outside of the printable area. ... (return
+  code -104)", #5545), then the last three `[error]` lines of the CLI's log on stdout,
+  which is the only place it says a plate is empty (exit 206); exit 192, a
   validation failure, and exit 0 without the sliced 3MF are non-retryable),
   `SlicerWorkerError` (the worker's own failure, such as its temp directory or
   starting the CLI: retryable, a message and no details),

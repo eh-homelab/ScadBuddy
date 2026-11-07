@@ -272,6 +272,8 @@ describe('the capabilities tree', () => {
       allowed: null,
       fixed: null,
       reason: null,
+      loading: null,
+      default_loading: null,
     })
     expect(item(own, 'subagent:model-author')).toMatchObject({
       kind: 'subagent',

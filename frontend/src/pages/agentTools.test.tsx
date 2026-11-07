@@ -4,7 +4,7 @@ import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../agent/bridge'
 import { api } from '../api/client'
-import { BUILTIN_SLUG, keychainSource } from '../mocks/fixtures'
+import { BUILTIN_SLUG, keychainSource, models } from '../mocks/fixtures'
 import { useGlobalAgentTools } from '../agent/global'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
@@ -88,7 +88,7 @@ describe('catalogue filters through navigate (#276)', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toEqual(['Keychain Template', 'Name Keychain'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 9')
+    expect(screen.getByTestId('result-count')).toHaveTextContent(`2 of ${models.length}`)
   })
 
   it('answers with the route the page settles on, even when asked between its two commits (#761)', async () => {

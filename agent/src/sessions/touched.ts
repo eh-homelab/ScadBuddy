@@ -284,6 +284,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   archive_flow: () => [],
   unarchive_flow: () => [],
   delete_flow: () => [],
+  update_flow_details: () => [],
   // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
   revoke_flow_grant: () => [],
   // A flow's triggers (#2484) are the flow's: its page lists them, with who made each.
@@ -302,13 +303,25 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_create: () => [],
   order_update: () => [],
   order_item_add: () => [],
+  order_item_add_after_acceptance: () => [],
+  order_charges_update_after_acceptance: () => [],
   order_item_update: () => [],
+  order_item_revision_add: () => [],
+  order_item_revision_add_after_acceptance: () => [],
+  order_item_revision_send: () => [],
   order_item_quote: () => [],
   order_item_accept_quote: () => [],
   order_accept: () => [],
   order_item_print: () => [],
+  order_attempt_archives: () => [],
+  order_attempt_copy: () => [],
   order_item_fulfil: () => [],
   order_item_unfulfil: () => [],
+  order_time_add: () => [],
+  order_cost_add: () => [],
+  // Parts (#5543): a part's stock line and the order's audit line record them.
+  part_stock_add: () => [],
+  order_item_parts_set: () => [],
   order_ship: () => [],
   order_close: () => [],
   order_cancel: () => [],
@@ -363,6 +376,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   set_model_thumbnail: revision,
   delete_model_thumbnail: revision,
   add_model_media: revision,
+  // Its answer wraps the ModelRecord with the stored `path` (#5475).
+  add_readme_image: (input, result) => revision(input, field(result, 'model')),
   // Presets.
   save_preset: (input, result) => {
     const id = str(field(result, 'id'))
@@ -467,6 +482,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const source = str(input.source)
     const target = str(input.target)
     return source && target ? setting(`store_migration:${source}:${target}`) : []
+  },
+  // #5355: a copy between the libraries is one job row; what it copies lands later, server-side.
+  copy_library_files: (_input, result) => {
+    const id = str(field(result, 'copy_id'))
+    return id ? setting(`library_copy:${id}`) : []
   },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),

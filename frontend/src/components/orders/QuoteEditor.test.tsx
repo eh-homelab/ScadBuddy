@@ -1,13 +1,18 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError } from '../../api/client'
-import type { SliceQuoteRequest } from '../../api/types'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api, ApiError } from '../../api/client'
+import type { Quote, SliceQuoteRequest } from '../../api/types'
+import { reset, seedUnitCost } from '../../mocks/features/orders/history'
 import { printersState } from '../../mocks/features/printers'
-import { resetMockState } from '../../mocks/handlers'
+import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
-import { QuoteEditor } from './QuoteEditor'
+import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
+import type { SliceQuoteRun } from './useSliceQuotes'
+
+/** Long enough for a debounced price check to be sent and its answer to land. */
+const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEBOUNCE_MS))
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
@@ -46,6 +51,37 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     const linked = printersState().find((row) => row.bambuddy_printer_id === body?.printer_id)
     expect(linked).toBeDefined()
     expect(body?.printer).toBe(linked?.id)
+  })
+
+  // #5544, the PR #5610 review: a library file item before its first quote has no output
+  // and no colours, so the dialog opens on the file with an empty filaments map.
+  it('slices a library file item with no colours yet, on its file (#5544)', async () => {
+    const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockResolvedValue(undefined)
+    const plates = vi.spyOn(api, 'getLibraryPlates')
+    const library = {
+      ...item(ITEM_DRAFT, ORDER_DRAFT, 'draft'),
+      kind: 'library_file' as const,
+      reference: null,
+      output_id: null,
+      colours: [],
+      library_file: { id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' as const },
+    }
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={library} slice={{ start, dismiss: vi.fn() }} />,
+    )
+    expect(screen.queryByText(/Render the item first/)).toBeNull()
+    await user.click(screen.getByTestId('quote-from-slice'))
+    const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    const slots = await within(dialog).findAllByRole('combobox', { name: /^Filament for slot/ })
+    expect(slots.length).toBeGreaterThan(0)
+    expect(plates).toHaveBeenCalledWith(120)
+    const quote = within(dialog).getByTestId('run-quote')
+    expect(quote).toBeDisabled()
+    for (const slot of slots) await selectOption(user, slot, /^Bambu PLA/)
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1))
+    expect(start.mock.calls[0]?.[0].filaments).toEqual(Object.fromEntries(slots.map((_, index) => [String(index), FILAMENT_PLA])))
   })
 
   it('keeps the dialog and its choices open when the check refuses the quote (#4693)', async () => {
@@ -169,5 +205,240 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
       'Rounding Rounded up to a whole unit$0.18',
     ])
     expect(screen.getByText(/abcdef012345/)).toBeInTheDocument()
+  })
+})
+
+// #5328, job cost spec §6.3: the quote warning, advice only, and one click to its price.
+describe('QuoteEditor · the quote warning (#5328)', () => {
+  beforeEach(() => {
+    resetMockState()
+    // 9.00 a unit over 4 jobs, failed prints the main reason; no markup, thin below 15 %.
+    setMockSettings({ ...mockSettings(), pricing_markup_percent: '0', orders_thin_margin_percent: '15' })
+    seedUnitCost('name-keychain', { jobs: 4, units: 6, unit_cost_minor: 900, estimated: false, main_reason: 'failed_prints', main_reason_minor: 250 })
+  })
+
+  function editor(quotes: Quote[] = []) {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    return renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={quotes}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ start: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+  }
+
+  it('warns on a typed price below the real cost, and one click uses the suggested price', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    await user.type(field, '8')
+    const warning = await screen.findByTestId('quote-warning')
+    expect(warning).toHaveTextContent("$8.00 a unit is below this model's real cost: $9.00 a unit over its last 4 jobs.")
+    expect(warning).toHaveTextContent('Main reason: failed prints, $2.50 a unit.')
+    // 9.00 / 0.85 = 10.588…, up to 10.59: the lowest price that is not thin.
+    await user.click(within(warning).getByRole('button', { name: 'Use $10.59' }))
+    expect(field).toHaveValue('10.59')
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    // Advice only: the quote can still be recorded.
+    expect(screen.getByRole('button', { name: 'Record only' })).toBeEnabled()
+  })
+
+  // A slice quote not yet accepted, at 6.00 a unit: below the 9.00 real cost.
+  const lowSlice = (): Quote => ({
+    id: 'q-low',
+    order_item_id: ITEM_DRAFT,
+    created_at: '2026-11-05T10:00:00Z',
+    source: 'slice',
+    accepted: false,
+    sliced_sha256: null,
+    sliced_blob_key: null,
+    plates: [],
+    lines: [],
+    unit_cost_minor: 500,
+    unit_price_minor: 600,
+    quantity: 1,
+    total_minor: 600,
+    created_by: { kind: 'browser', principal: null, session: null },
+  })
+
+  it("reads the history again when the item's parts change (#5549 review)", async () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    const view = (parts: string) => (
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} parts={parts} slice={{ start: vi.fn(), dismiss: vi.fn() }} />
+    )
+    const { user, rerender } = renderPage(view(''))
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '8')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('real cost: $9.00 a unit')
+    // Two hooks saved in the Parts editor: the page passes the item's new parts.
+    seedUnitCost('name-keychain', { jobs: 4, units: 6, unit_cost_minor: 1100, estimated: false, main_reason: 'other', main_reason_minor: 200 })
+    rerender(view('hook:2'))
+    await waitFor(() => expect(screen.getByTestId('quote-warning')).toHaveTextContent('real cost: $11.00 a unit'))
+  })
+
+  it('warns on a slice quote not yet accepted, and says nothing on a price that is not thin', async () => {
+    const { user } = editor([lowSlice()])
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '12')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+  })
+
+  it('warns about nothing while the typed price does not parse, and about the pending quote once the field is empty (#5533)', async () => {
+    const { user } = editor([lowSlice()])
+    const field = screen.getByLabelText('Price per unit (USD)')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+    await user.type(field, 'abc')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+    // The pending quote's answer does not come back while the field holds 'abc'.
+    await settled()
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    await user.clear(field)
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+  })
+
+  it('calls a price above the cost but under the thin threshold a thin margin, not a loss', async () => {
+    const { user } = editor()
+    // 10.00 over 9.00: a 10 % margin, under 15 %, and above the cost.
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '10')
+    const warning = await screen.findByTestId('quote-warning')
+    expect(warning).toHaveTextContent("$10.00 a unit leaves a thin margin, below 15 %, over this model's real cost: $9.00 a unit over its last 4 jobs.")
+    expect(warning).not.toHaveTextContent('is below')
+  })
+
+  it('follows the route on the thin boundary and sends it the price', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    // 9.00 / 0.85 = 10.588…: 10.58 is a 14.9 % margin, thin; 10.59 is 15.0 %, not thin.
+    await user.type(field, '10.58')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$10.58 a unit leaves a thin margin')
+    await user.clear(field)
+    await user.type(field, '10.59')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+    // Nothing shows for 10.59 once its own answer has landed either.
+    await settled()
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+  })
+
+  it('reads the history again after a quote is recorded', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    await user.type(field, '8')
+    // The first read has landed: 8.00 is below its 9.00.
+    await screen.findByTestId('quote-warning')
+    await user.clear(field)
+    await user.type(field, '11')
+    // 11.00 over the 9.00 read at first is an 18 % margin: no warning.
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    // A job fulfilled while the editor is open: the real cost is now 12.00.
+    seedUnitCost('name-keychain', { jobs: 5, units: 7, unit_cost_minor: 1200, estimated: false, main_reason: null, main_reason_minor: null })
+    await user.click(screen.getByRole('button', { name: 'Record only' }))
+    await waitFor(() => expect(field).toHaveValue(''))
+    await user.type(field, '11')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$11.00 a unit is below this model')
+  })
+
+  it('shows nothing for a model with no history', async () => {
+    reset()
+    const { user } = editor()
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '1')
+    await settled()
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+  })
+})
+
+// #5554 — a quote, a running slice and a failed one each say when, in the viewer's local
+// time, with the full timestamp on hover. The cases run in New York (EST in November), so
+// 14:04Z reads 09:04 whether the locale writes 12 or 24 hours.
+describe('QuoteEditor · times (#5554)', () => {
+  const zone = process.env.TZ
+  const NOW = Date.parse('2026-11-06T14:07:00Z')
+  beforeEach(() => {
+    resetMockState()
+    process.env.TZ = 'America/New_York'
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    if (zone === undefined) delete process.env.TZ
+    else process.env.TZ = zone
+  })
+
+  const at = (iso: string) => Date.parse(iso)
+
+  function quote(id: string, createdAt: string, accepted: boolean): Quote {
+    return {
+      id,
+      order_item_id: ITEM_DRAFT,
+      created_at: createdAt,
+      source: 'manual',
+      accepted,
+      sliced_sha256: null,
+      sliced_blob_key: null,
+      plates: [],
+      lines: [{ kind: 'manual', label: 'Quoted by hand', quantity: 1, unit_minor: 900, amount_minor: 900 }],
+      unit_cost_minor: 900,
+      unit_price_minor: 900,
+      quantity: 1,
+      total_minor: 900,
+      created_by: { kind: 'browser', principal: null, session: null },
+    }
+  }
+
+  function editor(quotes: Quote[], run?: SliceQuoteRun) {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    return renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={quotes}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run, start: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+  }
+
+  it('shows when a running slice started and how long it has run', () => {
+    editor([], { startedAt: at('2026-11-06T14:04:00Z'), error: null, known: [] })
+    const running = screen.getByTestId('quote-running')
+    expect(running).toHaveTextContent(/Started 09:04/)
+    expect(screen.getByTestId('quote-elapsed')).toHaveTextContent('3m')
+    const time = within(running).getByText(/09:04/)
+    expect(time.tagName).toBe('TIME')
+    expect(time).toHaveAttribute('dateTime', '2026-11-06T14:04:00.000Z')
+    expect(time.getAttribute('title')).toMatch(/2026.*9:04:00.*(EST|GMT-5)/)
+  })
+
+  it('shows when a failed slice started and ended, with its error', () => {
+    editor([], { startedAt: at('2026-11-06T14:04:00Z'), finishedAt: at('2026-11-06T14:06:00Z'), error: 'No printer.', known: [] })
+    expect(screen.getByTestId('quote-error')).toHaveTextContent('The slice quote failed: No printer.')
+    expect(screen.getByTestId('quote-error-times')).toHaveTextContent(/Started 09:04.*ended 09:06/)
+  })
+
+  it('shows when each quote was made, and marks the newest and the accepted one', () => {
+    editor([quote('q-old', '2026-11-05T13:00:00Z', true), quote('q-new', '2026-11-06T14:00:00Z', false), quote('q-mid', '2026-11-06T13:30:00Z', false)])
+    const old = screen.getByTestId('quote-q-old')
+    const fresh = screen.getByTestId('quote-q-new')
+    // Another day carries its date.
+    expect(old).toHaveTextContent(/Quoted Nov 5, 08:00/)
+    expect(old).toHaveTextContent('Accepted')
+    expect(within(old).queryByTestId('quote-newest')).toBeNull()
+    expect(fresh).toHaveTextContent(/Quoted 09:00/)
+    expect(within(fresh).getByTestId('quote-newest')).toHaveTextContent('Newest')
+    expect(screen.getAllByTestId('quote-newest')).toHaveLength(1)
+  })
+
+  it('marks no newest quote when there is only one', () => {
+    editor([quote('q-only', '2026-11-06T14:00:00Z', false)])
+    expect(screen.queryByTestId('quote-newest')).toBeNull()
   })
 })

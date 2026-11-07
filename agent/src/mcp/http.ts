@@ -30,6 +30,7 @@ import type { Tool, ToolServices } from '../tools/registry.js'
 import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
 import { type McpSessionRelay, type RelayedRequest, sessionHash } from './sessionRelay.js'
+import { mountMcpUploads } from './uploads.js'
 
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
 // (spec D5, §8.3–§8.4; https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
@@ -437,6 +438,10 @@ export function mountMcp(
   }
   app.get(RESOURCE_METADATA_PATH, metadata)
   app.get(`${RESOURCE_METADATA_PATH}/mcp`, metadata)
+
+  // PUT /mcp/workspace/<path> (#4550, mcp/uploads.ts): a file into the caller's own
+  // workspace, behind the same gates and auth as /mcp.
+  mountMcpUploads(app, { workspace: deps.services.workspace, audit: deps.audit, resolveAuth, oidc }, http)
 
   app.all('/mcp', async (c) => {
     const request = c.req.raw

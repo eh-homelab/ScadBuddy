@@ -17,12 +17,14 @@ from typing import Any
 
 import httpx
 import numpy as np
+import psycopg
 import pytest
 import respx
 import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.api import models as models_api
 from scadbuddy.api.deps import STATE_ATTR, get_render
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.bambuddy.print_run import PrintRunRequest
@@ -34,6 +36,7 @@ from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
@@ -48,6 +51,7 @@ from tests.api.test_analyzers import SILK_REQUEST
 from tests.api.test_analyzers import bambuddy_routes as analysis_routes
 from tests.api.test_analyzers import library_routes as analysis_library_routes
 from tests.api.test_arrange_api import Arranger
+from tests.api.test_events import Recorded, published
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import flow_copy_routes, run_library, uploaded_name
 from tests.api.test_print_run_choices import body as run_body
@@ -184,6 +188,27 @@ def test_file_id_lists_its_folder(native_client: TestClient, in_folder: NativeFi
     )
 
 
+def test_a_native_folder_is_paged_as_bambuddy_s_is(
+    native_client: TestClient, tmp_path: Path
+) -> None:
+    """#2290: `limit`/`after` page ScadBuddy's own library too, in name order."""
+    folder = _native(native_client).rows.create_folder("Parts", None)
+    made = [
+        _upload(native_client, _three_mf(tmp_path / f"part-{n}.3mf"), folder.id) for n in (2, 0, 1)
+    ]
+    order = [file.id for file in sorted(made, key=lambda file: file.name)]
+
+    first = native_client.get("/api/v1/print/library", params={"folder_id": folder.id, "limit": 2})
+    rest = native_client.get(
+        "/api/v1/print/library",
+        params={"folder_id": folder.id, "limit": 2, "after": order[1]},
+    )
+
+    assert [row["id"] for row in first.json()["files"]] == order[:2]
+    assert [row["id"] for row in rest.json()["files"]] == order[2:]
+    assert first.headers["X-Total-Count"] == rest.headers["X-Total-Count"] == "3"
+
+
 def test_a_bambuddy_range_id_is_404_on_native(native_client: TestClient) -> None:
     assert native_client.get("/api/v1/print/library/42/file").status_code == 404
     assert native_client.get("/api/v1/print/library/42/plates").status_code == 404
@@ -263,6 +288,39 @@ def test_an_entry_names_its_live_output(
     )
     hits = native_client.get("/api/v1/print/library/search", params={"q": "bracket"}).json()
     assert hits["files"][0]["output_id"] == uploaded_with_output.output_id
+    # #5321: and so does the read of the file alone.
+    one = native_client.get(f"/api/v1/print/library/{uploaded_with_output.id}").json()
+    assert one["output_id"] == uploaded_with_output.output_id
+    assert one["folder_path"] == []
+
+
+def test_one_native_file_is_read_with_where_it_is(
+    native_client: TestClient, in_folder: NativeFile
+) -> None:
+    """#5321: one file by id, as the listing gives it, with its folder's path."""
+    body = native_client.get(f"/api/v1/print/library/{in_folder.id}").json()
+    assert body | {"created_at": None} == {
+        "id": in_folder.id,
+        "filename": "bracket.3mf",
+        "file_type": "3mf",
+        "folder_id": in_folder.folder_id,
+        "has_thumbnail": True,
+        "print_count": 0,
+        "printable": True,
+        "sliced": False,
+        "file_size": in_folder.size,
+        "created_at": None,
+        "output_id": None,
+        "is_external": False,
+        "folder_path": ["Dinos"],
+    }
+    # #5333 review: an id in the native range, so the router's `check_served` lets it
+    # through and the native library's own not-found answers.
+    missing = in_folder.id + 1000
+    assert is_native_id(missing)
+    gone = native_client.get(f"/api/v1/print/library/{missing}")
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == f"library file {missing} not found"
 
 
 # writes (Task 5)
@@ -1128,6 +1186,139 @@ def test_output_delete_trashes_only_unmoved_copies(native_client: TestClient, wi
         assert r.status_code == 204, r.text
     # The moved file stays, with no live output to name.
     assert [f["output_id"] for f in _all_files(native_client)] == [None]
+
+
+def _filed_and_moved(client: TestClient, slug: str) -> tuple[int, int]:
+    """Two saved outputs of ``slug``: the id of one's copy still filed, and of the
+    other's copy moved out of the template's folder."""
+    filed = _save(client, slug, "One").json()
+    moved = _save(client, slug, "Two").json()
+    by_output = {f["output_id"]: f["id"] for f in _all_files(client)}
+    r = client.post(
+        "/api/v1/print/library/move", json={"file_ids": [by_output[moved["id"]]]}, headers=press()
+    )
+    assert r.status_code == 200, r.text
+    return by_output[filed["id"]], by_output[moved["id"]]
+
+
+@pytest.mark.requires_git
+def test_model_delete_with_inbox_copies_trashes_its_outputs_filed_copies(
+    native_client: TestClient, widget: str
+) -> None:
+    """#5117: as an output delete with the flag does, for every output of the model."""
+    filed, moved = _filed_and_moved(native_client, widget)
+
+    r = native_client.delete(f"/api/v1/models/{widget}?delete_inbox_copies=true", headers=press())
+
+    assert r.status_code == 204, r.text
+    assert _native(native_client).rows.file(filed) is None
+    assert _all_files(native_client) == [{"id": moved, "output_id": None, "folder_id": None}]
+
+
+@pytest.mark.requires_git
+def test_model_delete_keeps_its_outputs_copies_naming_no_output(
+    native_client: TestClient, widget: str
+) -> None:
+    """#5117: without the flag every copy stays, and none names a deleted output."""
+    filed, moved = _filed_and_moved(native_client, widget)
+
+    r = native_client.delete(f"/api/v1/models/{widget}", headers=press())
+
+    assert r.status_code == 204, r.text
+    files = {f["id"]: f["output_id"] for f in _all_files(native_client)}
+    assert files == {filed: None, moved: None}
+    still_filed = _native(native_client).rows.file(filed)
+    assert still_filed is not None and still_filed.output_id is None
+
+
+@pytest.mark.requires_git
+def test_a_failed_library_read_still_finishes_the_model_delete(
+    native_client: TestClient,
+    widget: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#5117 review: the model is gone once the library is asked which one is in use, so
+    a failed read is logged and the rest of the cleanup still runs."""
+    _save(native_client, widget, "One")
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    events = Recorded(state.events)
+    state.events.add_listener(events.record)
+    forgotten: list[str] = []
+    forget = state.settings_store.forget_model_projects
+
+    def spy(slug: str) -> None:
+        forgotten.append(slug)
+        forget(slug)
+
+    async def away() -> NativeLibrary | None:
+        raise psycopg.OperationalError("database is away")
+
+    monkeypatch.setattr(state.settings_store, "forget_model_projects", spy)
+    monkeypatch.setattr(state.components.get(PRINT_LIBRARY), "serving_native", away)
+
+    r = native_client.delete(f"/api/v1/models/{widget}", headers=press())
+
+    assert r.status_code == 204, r.text
+    assert forgotten == [widget]
+    assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": widget}]
+    assert any("could not tell which library" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.requires_git
+@pytest.mark.parametrize("failing", ["trash_filed", "trash_copies"])
+def test_a_failed_trash_of_one_output_still_finishes_the_model_delete(
+    native_client: TestClient,
+    widget: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failing: str,
+) -> None:
+    """#5403: a trash that fails for one output is logged; that output is still
+    forgotten, the other's copies are still trashed, and the upload rows and
+    ``model.deleted`` still go through."""
+    failed = _save(native_client, widget, "One").json()["id"]
+    trashed = _save(native_client, widget, "Two").json()["id"]
+    by_output = {f["output_id"]: f["id"] for f in _all_files(native_client)}
+    native = _native(native_client)
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    portal = native_client.portal
+    assert portal is not None
+    copies: dict[str, int] = {}
+    for output_id in (failed, trashed):
+        copy = portal.call(native.upload, f"{output_id}.3mf", io.BytesIO(b"c"), None)
+        portal.call(
+            state.uploads.record,
+            output_id,
+            LibraryCopy(id=copy.id, folder_id=None, target_key="t"),
+        )
+        copies[output_id] = copy.id
+    events = Recorded(state.events)
+    state.events.add_listener(events.record)
+    real = getattr(models_api, failing)
+
+    async def flaky(native: NativeLibrary, *args: Any, **kwargs: Any) -> Any:
+        output_id = args[1] if failing == "trash_copies" else args[0]
+        if output_id == failed:
+            raise psycopg.OperationalError("database is away")
+        return await real(native, *args, **kwargs)
+
+    monkeypatch.setattr(models_api, failing, flaky)
+
+    r = native_client.delete(f"/api/v1/models/{widget}?delete_inbox_copies=true", headers=press())
+
+    assert r.status_code == 204, r.text
+    live = {f.id: f.output_id for f in native.rows.files(None, every_folder=True)}
+    assert by_output[trashed] not in live
+    assert copies[trashed] not in live
+    # The failed output's filed copy, or its per-print copy, stays, naming no output.
+    kept = by_output[failed] if failing == "trash_filed" else copies[failed]
+    assert live[kept] is None
+    assert all(output_id is None for output_id in live.values())
+    found = portal.call(partial(state.uploads.for_outputs, [failed, trashed], native=True))
+    assert found == {failed: [], trashed: []}
+    assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": widget}]
+    assert any("could not trash" in rec.getMessage() for rec in caplog.records)
 
 
 @pytest.mark.requires_git

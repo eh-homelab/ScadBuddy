@@ -22,6 +22,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows import operation, operation_activities
@@ -281,6 +282,26 @@ BAMBUDDY_500 = ApiError(
     502, "Bambuddy answered 500", type_=UNAVAILABLE_PROBLEM, bambuddy_status=500
 )
 SCOPE = ApiError(409, "Bambuddy refused the API key", type_=SCOPE_PROBLEM, bambuddy_status=403)
+
+
+async def test_a_crud_refusal_fails_the_run_for_good() -> None:
+    """#5298: a CRUD route's 4xx comes back the same on every attempt."""
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        raise CrudRefusedError(409, {"detail": "This run was reset already."})
+
+    _, activity_run = _kind_activities(
+        OperationKind(name="k", check=check, run=run, run_attempts=3)
+    )
+    with pytest.raises(ApplicationError) as caught:
+        await ActivityEnvironment().run(activity_run, RunOp(request={}, checked={}))
+    assert caught.value.type == FAILED
+    assert caught.value.non_retryable
+    assert problem_of(caught.value).status == 409
+    assert problem_of(caught.value).detail == "This run was reset already."
 
 
 @pytest.mark.parametrize(

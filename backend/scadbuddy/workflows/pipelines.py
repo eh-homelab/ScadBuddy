@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.template import Blob, Part
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
+        ACCEPT_ATTEMPTS,
         ACCEPT_TRANSIENT,
         ARRANGE_VERSION,
         CLAIMS_ACTIVITY,
@@ -103,7 +104,8 @@ SHORT = timedelta(seconds=60)
 #: moves the row's state back (`projection.py` settles only from pending or running),
 #: but a late `steps` write is last-writer-wins while the row is open: it can show
 #: older progress until the next progress write or the final projection replaces it.
-#: Its statements wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection.
+#: Its statements wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection; on the
+#: render worker each request to the API's CRUD routes waits as long (`crud/render.py`).
 PROJECT_TIMEOUT = timedelta(seconds=10)
 #: A row write's attempts as a local activity, before it goes to Temporal's own retries
 #: as a regular activity (`_row_write`). A local activity's retries run inside the
@@ -136,10 +138,26 @@ LOOKUP_RETRY = RetryPolicy(
 #: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
 #: them answers still-accepting) answers the request rather than holding its render key
 #: with no row (review #1066 (10) 1). A failing attempt is answered within the route's
-#: 10 s deadline; a slow one is not cut short (each has `SHORT`), so a loaded database
-#: delays a render, as `command-still-accepting`, rather than refusing it.
+#: 10 s deadline. On the API's in-process worker a slow one is not cut short (each has
+#: `SHORT`), so a loaded database delays a render, as `command-still-accepting`, rather
+#: than refusing it. On the render worker the accept is a CRUD call bounded inside that
+#: deadline (`crud/render.py`). A state that passes is transient
+#: (`command-still-accepting`, and the client sends the request again): the API out of
+#: reach, its database out of reach (503 `database-unavailable`), or the worker's
+#: credential refused, as inside the exchange's hold-off; a suspended render caller is
+#: answered so until it is resumed, by design. A 5xx of the route spends these attempts
+#: in the run. A read timeout (the write may have run) fails the first attempts, which
+#: retry in this run and find the row by its workflow ids; on the last it passes too, so
+#: a persistently slow API is answered still-accepting, not render-unstartable. Its cost,
+#: accepted: a row the API committed after the client stopped waiting on that last
+#: attempt stays pending under this run, which completes, until the unsettled sweep
+#: (`RenderService.settle_closed`, every housekeeping prune) fails it as closed; until
+#: then it counts against `max_pending`, and watchers see its `job.pending` event with
+#: no progress after it.
 ACCEPT_RETRY = RetryPolicy(
-    maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
+    maximum_attempts=ACCEPT_ATTEMPTS,
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
 )
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")

@@ -25,6 +25,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
@@ -88,7 +89,12 @@ def _build(core: Core, components: Components) -> OrdersComponent:
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
     # The print path's follow (#4719): an item follows the print its attempt started.
-    remove = listen_for_prints(orders.core.events, orders.lifecycle)
+    # §8.2: a settled print's attempt copies its Bambuddy archives.
+    remove = listen_for_prints(
+        orders.core.events,
+        orders.lifecycle,
+        lambda run_id: mirror_run(orders.lifecycle, orders.integrations, run_id),
+    )
     try:
         yield
     finally:

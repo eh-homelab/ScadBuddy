@@ -16,9 +16,11 @@ and the offending ids, with no HTTP shape: ``api/orders.py`` maps each to a 409 
 On hold (§7.2 as plan Ruling 14 narrows it): every transition that advances the order
 (``accept_order``, ``accept_quote``, ``record_fulfilment``, ``claim_print``,
 ``update_fulfilment``, ``accept_fulfilment``, ``unfulfil_item``, ``add_shipment``,
-``update_shipment``, ``close_order``) is refused with ``order_on_hold``; ``release``, the
-cancels, a payment and the plain edits go through, so a person can fix what the hold was
-for. The print follow (``follow_print``) records what a printer did, on hold too.
+``update_shipment``, ``close_order``, an item added after acceptance, #5349, the
+charges changed after acceptance, #5351, and an accepted item revised after acceptance,
+#5350) is refused with ``order_on_hold``; ``release``,
+the cancels, a payment and the plain edits go through, so a person can fix what the hold
+was for. The print follow (``follow_print``) records what a printer did, on hold too.
 """
 
 from __future__ import annotations
@@ -27,23 +29,32 @@ import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
+    OPEN_FOR_EDITS,
+    REVISION_ROLES,
     SHOWN_IMAGES,
+    TAKES_ITEMS,
     Actor,
     AddressSnapshot,
+    Approval,
     Attachment,
     AttachmentKind,
     AttachmentPatch,
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    CostEntry,
+    CostEntryInput,
     Fulfilment,
+    FulfilmentPurpose,
     ItemStatus,
+    LibraryFileRef,
     Money,
     Order,
     OrderItem,
@@ -52,26 +63,40 @@ from scadbuddy.orders.models import (
     Payment,
     Quote,
     QuoteLine,
+    Reference,
+    Revision,
     Shipment,
     ShipmentItem,
+    TimeEntry,
+    TimeEntryInput,
 )
-from scadbuddy.orders.pricing import Plate, Priced
+from scadbuddy.orders.parts import (
+    ItemPart,
+    ItemPartRow,
+    PartNotFoundError,
+    PartStore,
+    rule_parts,
+    use_amount,
+)
+from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
+from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
     UNSET,
     Conn,
     OrderNotFoundError,
     OrderStore,
     UnsetType,
+    fulfilment_subject,
     item_subject,
     order_subject,
+    quote_file_keys,
+    revision_subject,
 )
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
-#: The states an order's items and price may still change in (§4's `PATCH` rows).
-OPEN_FOR_EDITS: frozenset[OrderStatus] = frozenset({"draft", "quoted"})
 #: The states a person's decision has ended (nothing else may move).
 ENDED: frozenset[OrderStatus] = frozenset({"closed", "cancelled"})
 #: The states past a person's acceptance, which `derive` writes.
@@ -159,6 +184,21 @@ class FulfilmentInput(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     notes: str = ""
+    #: A Bambuddy archive this attempt is (#4251, "Attach to order item" on a print's
+    #: page): its facts are copied as a print's are (§8.2). Read when an attempt is
+    #: recorded; an edit leaves the attempt's archives as they are.
+    archive_id: int | None = Field(default=None, ge=1)
+
+
+def _refuse_revision_role(role: AttachmentRole) -> None:
+    """A `render` or a `test_print` is a design revision's file (storefront spec §4),
+    never an order's, an item's or an attempt's."""
+    if role in REVISION_ROLES:
+        raise LifecycleError(
+            "role",
+            f"a {role} file is a design revision's: attach it to the revision",
+            unprocessable=True,
+        )
 
 
 def _distinct_lines(items: list[ShipmentItem]) -> list[ShipmentItem]:
@@ -225,6 +265,14 @@ class OrderEdit(BaseModel):
     charges: list[ChargeInput] | None = None
 
 
+@dataclass(frozen=True)
+class LabourRate:
+    """``pricing_labour_rate_per_hour`` and the shop's ``orders_currency`` it is in."""
+
+    per_hour: Decimal
+    currency: str
+
+
 @dataclass
 class _Change:
     """What one transition did, told after commit."""
@@ -277,10 +325,82 @@ def derive(
     return "accepted"
 
 
+def _charge_line(charge: ChargeInput) -> dict[str, Any]:
+    """A charge as an audit row holds it: its kind, label and signed amount."""
+    return {"kind": charge.kind, "label": charge.label, "amount_minor": charge.amount_minor}
+
+
+def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
+    """Whether an item's design, quantity and price may still change: while the order is
+    `draft` or `quoted`, and past it while the item has no accepted quote, which only an
+    item added after acceptance can lack (#5349). An accepted price stays pinned; an item
+    revised after acceptance takes a new one through :func:`requote_open` (#5350)."""
+    if order.status in OPEN_FOR_EDITS:
+        return True
+    return order.status in TAKES_ITEMS and not any(quote.accepted for quote in quotes)
+
+
+#: The kinds that never take a design revision: a custom item names nothing (#4954), a
+#: library file item names its file (#5544).
+NO_REVISIONS: frozenset[str] = frozenset({"custom", "library_file"})
+
+
+def has_design(item: OrderItem) -> bool:
+    """Whether the item names something to slice and print: a template reference, or a
+    library file (#5544)."""
+    return item.reference is not None or item.library_file is not None
+
+
+#: The states an accepted item goes back to `draft` from when it is revised after
+#: acceptance (#5350): it waits for a quote of its new design. `queued` and `printing`
+#: refuse the revision (`print_in_flight`); a settled item refuses it too.
+REQUOTED: frozenset[ItemStatus] = frozenset({"quoted", "approved", "printed", "failed"})
+
+
+def stale_attempt(
+    attempt: Fulfilment, quotes: Iterable[Quote], revisions: Iterable[Revision]
+) -> bool:
+    """Whether a production attempt was made before the revision the accepted quote
+    prices: it printed an earlier design (#5350), so it is never accepted
+    (`fulfilment_stale`). A test print's attempt, a quote that names no revision and an
+    item with no accepted quote say nothing. The order detail marks such an attempt
+    ``stale`` by this same rule (#5592).
+
+    The two ``created_at`` values come from two transactions: the attempt's is ``now()``,
+    its transaction's start, and the revision's is ``clock_timestamp()``. Their order holds
+    because every writer of an item takes the order's row lock and reads the item after it:
+    a revision after acceptance is refused while a print of the item is open
+    (``print_in_flight``) and puts the item back to `draft`, and no attempt is recorded or
+    claimed on a `draft` item. So an attempt whose transaction began before the revision and
+    waited on the lock finds the item `draft` and is refused, and every attempt made after
+    the revision starts after the new quote's acceptance, later than the revision."""
+    if attempt.purpose != "production":
+        return False
+    accepted = next((q for q in quotes if q.accepted), None)
+    if accepted is None or accepted.revision_id is None:
+        return False
+    priced = next((r for r in revisions if r.id == accepted.revision_id), None)
+    return priced is not None and attempt.created_at < priced.created_at
+
+
+def requote_open(order: Order, item: OrderItem, quotes: Iterable[Quote]) -> bool:
+    """Whether the item takes a new design revision, a quote and a quote's acceptance:
+    while :func:`item_open`, and past `quoted` while it was revised after acceptance
+    (#5350, ``revised_after_acceptance``). Its old accepted quote stands until a quote of
+    the new design is accepted. Its quantity stays pinned."""
+    if item_open(order, quotes):
+        return True
+    return order.status in TAKES_ITEMS and item.revised_after_acceptance
+
+
 def _settle_open(items: Sequence[OrderItem]) -> OrderStatus:
     """`draft` or `quoted` (§3.5): quoted once every item not cancelled is approved."""
     open_items = [item for item in items if item.status != "cancelled"]
     return "quoted" if open_items and all(i.status == "approved" for i in open_items) else "draft"
+
+
+def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
+    return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
 
 
 class Lifecycle:
@@ -289,6 +409,8 @@ class Lifecycle:
         self.bus = bus
         #: The slice quotes' holds (#4250 Ruling 3); None where nothing holds a file.
         self.refs = refs
+        #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
+        self.parts = PartStore(store)
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -443,10 +565,16 @@ class Lifecycle:
                 or not isinstance(edit.billing_address_id, UnsetType)
             )
             if structural and order.status not in OPEN_FOR_EDITS:
+                # Past `quoted` the charges change on their own route (#5351).
+                route = (
+                    f"; change the charges with PUT /orders/{order.id}/charges/after-acceptance"
+                    if edit.charges is not None and order.status in TAKES_ITEMS
+                    else ""
+                )
                 raise LifecycleError(
                     "order_not_editable",
                     f"order {order.number} is {order.status}: only its notes and due date"
-                    " may change now",
+                    f" may change now{route}",
                 )
             for name in ("shipping_address_id", "billing_address_id"):
                 wanted = getattr(edit, name)
@@ -483,6 +611,47 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def replace_charges_after_acceptance(
+        self, order_id: str, by: Actor, charges: Sequence[ChargeInput]
+    ) -> Order:
+        """The charges, replaced whole, on an order past `quoted` (#5351): a fee or a
+        discount that keeps an agreed total when an item is added after acceptance. It
+        changes what the customer pays, so it is its own route and the agent's `outward`
+        tier. Only an `accepted`, `in_production` or `ready` order (`TAKES_ITEMS`) that is
+        not on hold takes it: `order_not_accepted` before that (use ``edit_order``),
+        `order_not_editable` once `shipped`, `order_closed`/`order_cancelled` after. The
+        audit row ``charges.replaced_after_acceptance`` holds the charges before and after,
+        written in the same transaction."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            if order.status in OPEN_FOR_EDITS:
+                raise LifecycleError(
+                    "order_not_accepted",
+                    f"order {order.number} is {order.status}, not accepted: change the charges"
+                    f" with PATCH /orders/{order.id}",
+                )
+            if order.status not in TAKES_ITEMS:
+                raise LifecycleError(
+                    "order_not_editable",
+                    f"order {order.number} is {order.status}: its charges are final once shipped",
+                )
+            self._not_on_hold(order)
+            before = self.store.charges(order.id, conn=conn)
+            after = self.store.replace_charges(conn, order.id, charges)
+            self._event(
+                conn,
+                order,
+                by,
+                "charges.replaced_after_acceptance",
+                order_status=order.status,
+                before=[_charge_line(charge) for charge in before],
+                after=[_charge_line(charge) for charge in after],
+            )
+            order = self.store.order(order.id, conn=conn) or order
+        self._told(_Change(order))
+        return order
+
     def add_payment(
         self,
         order_id: str,
@@ -511,6 +680,116 @@ class Lifecycle:
             self._event(conn, order, by, "payment.added", payment_id=payment.id)
         self._told(_Change(order))
         return payment
+
+    # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
+    # A record of what the job took, allowed in every status, ended and on hold included:
+    # a fee or a label often arrives after the order moved on. Nothing here moves a status.
+
+    def _entry_item(self, conn: Conn, order: Order, item_id: str | None) -> list[OrderItem]:
+        return [] if item_id is None else [self._item_of(conn, order, item_id)]
+
+    def add_time_entry(
+        self, order_id: str, body: TimeEntryInput, by: Actor, *, labour_rate: LabourRate
+    ) -> tuple[TimeEntry, bool]:
+        """Time spent, at the labour rate now (copied, in the order's minor units, under
+        the order's lock, so a currency change cannot slip in between), and whether this
+        call wrote it: a second write of one ``source`` returns the first entry and writes
+        nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            rate = (
+                to_minor(labour_rate.per_hour, order.currency)
+                if order.currency == labour_rate.currency
+                else None
+            )
+            entry, written = self.store.insert_time_entry(
+                conn, order.id, body, rate_minor_per_hour=rate, created_by=by
+            )
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "time.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def remove_time_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_time_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "time_entry_not_found",
+                    f"no time entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "time.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
+
+    def add_cost_entry(
+        self, order_id: str, body: CostEntryInput, by: Actor
+    ) -> tuple[CostEntry, bool]:
+        """Money spent, and whether this call wrote it: a second write of one ``source``
+        returns the first entry and writes nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_cost_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "cost_entry_not_found",
+                    f"no cost entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)
@@ -635,6 +914,10 @@ class Lifecycle:
         a quote not accepted, else `draft`; and whether it has an accepted quote."""
         quotes = self.store.quotes(item.id, conn=conn)
         accepted = any(quote.accepted for quote in quotes)
+        if accepted and item.revised_after_acceptance:
+            # #5350: priced at its kept quote, but its new design waits for its own.
+            new = any(q.revision_id == item.current_revision_id for q in quotes if not q.accepted)
+            return ("quoted" if new else "draft"), True
         attempts = self.store.fulfilments(item.id, conn=conn)
         latest = max(attempts, key=lambda a: a.attempt, default=None)
         if accepted:
@@ -669,8 +952,9 @@ class Lifecycle:
         A closed order takes the status its rows give it again (`shipped`, as it
         closed, unless a row changed since). A cancelled one goes back to the status it
         was cancelled from, and the items that cancel took with it come back as
-        `reopen_item` brings one back (an accepted order's item with no accepted quote
-        stays cancelled); then its status follows from its rows. Either way `closed_at`
+        `reopen_item` brings one back (an item with no accepted quote too, as `draft` or
+        `quoted`: an order cancelled from `accepted`, `in_production` or `ready` takes
+        such an item, #5349); then its status follows from its rows. Either way `closed_at`
         and `cancelled_at` are cleared and the quotes' sliced files are held again."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -701,7 +985,10 @@ class Lifecycle:
                     # with every item the cancel took.
                     base = "draft"
                 for item, status, priced in taken:
-                    if base in DERIVED and not priced:
+                    # Past `quoted` an unpriced item comes back where the order takes one
+                    # (`TAKES_ITEMS`, #5349); a cancel is refused once shipped, so every
+                    # base here takes one.
+                    if not priced and base not in OPEN_FOR_EDITS | TAKES_ITEMS:
                         continue
                     restored.append((self.store.update_item(conn, item.id, status=status), None))
             # The status its rows give it now, written once, on one audit row.
@@ -744,8 +1031,10 @@ class Lifecycle:
     def reopen_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
         """Undo a cancel: the item takes the state its quotes and attempts give it
         (`_reopened_status`), and its quotes' sliced files are held again. Refused once
-        the order ended (reopen the order instead), and on an order past `quoted` for
-        an item with no accepted quote: an accepted order only holds priced items."""
+        the order ended (reopen the order instead). An item with no accepted quote comes
+        back as `draft` or `quoted` while the order takes a new item (`draft`, `quoted`,
+        and `TAKES_ITEMS`, #5349), on hold too, as every reopen; on a `shipped` order it
+        is refused (`item_not_priced`), since a shipped order takes no unpriced item."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -757,11 +1046,11 @@ class Lifecycle:
                     items=[item.id],
                 )
             status, priced = self._reopened_status(conn, item)
-            if order.status not in OPEN_FOR_EDITS and not priced:
+            if not priced and order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
                 raise LifecycleError(
                     "item_not_priced",
                     f"item {item_id} has no accepted quote, and order {order.number} is"
-                    f" {order.status}: an accepted order holds priced items only",
+                    f" {order.status}: a shipped order takes back a priced item only",
                     items=[item.id],
                 )
             item = self.store.update_item(conn, item.id, status=status)
@@ -780,6 +1069,339 @@ class Lifecycle:
                 f"order {order.number} is {order.status}: {what} is pinned once accepted",
             )
 
+    def _open_for_item(self, conn: Conn, order: Order, item: OrderItem, what: str) -> None:
+        """As :meth:`_open_for_items`, but an item with no accepted quote on an order
+        past `quoted` stays open (:func:`item_open`, #5349)."""
+        if not item_open(order, self.store.quotes(item.id, conn=conn)):
+            raise LifecycleError(
+                "item_locked",
+                f"order {order.number} is {order.status}: {what} is pinned once accepted",
+                items=[item.id],
+            )
+
+    def _open_for_requote(self, conn: Conn, order: Order, item: OrderItem, what: str) -> None:
+        """As :meth:`_open_for_item`, but an item revised after acceptance stays open for
+        its design and price (:func:`requote_open`, #5350). The refusal names the route
+        that revises an accepted item."""
+        if not requote_open(order, item, self.store.quotes(item.id, conn=conn)):
+            route = (
+                f"; revise it with POST /orders/{order.id}/items/{item.id}"
+                "/revisions/after-acceptance"
+                if order.status in TAKES_ITEMS and item.kind not in NO_REVISIONS
+                else ""
+            )
+            raise LifecycleError(
+                "item_locked",
+                f"order {order.number} is {order.status}: {what} is pinned once accepted{route}",
+                items=[item.id],
+            )
+
+    def _takes_item(self, order: Order, after_acceptance: bool) -> None:
+        """The checks before an item is added. A plain add needs a `draft` or `quoted`
+        order. An add after acceptance (#5349) needs an `accepted`, `in_production` or
+        `ready` order that is not on hold: it changes what the customer gets."""
+        self._not_ended(order)
+        if not after_acceptance:
+            if order.status in TAKES_ITEMS:
+                raise LifecycleError(
+                    "item_locked",
+                    f"order {order.number} is {order.status}: the list of items is pinned once"
+                    f" accepted; add an item with POST /orders/{order.id}/items/after-acceptance",
+                )
+            self._open_for_items(order, "the list of items")
+            return
+        if order.status in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "order_not_accepted",
+                f"order {order.number} is {order.status}, not accepted: add the item with"
+                f" POST /orders/{order.id}/items",
+            )
+        if order.status not in TAKES_ITEMS:
+            raise LifecycleError(
+                "item_locked",
+                f"order {order.number} is {order.status}: it takes no new item once shipped",
+            )
+        self._not_on_hold(order)
+
+    def _added(
+        self,
+        conn: Conn,
+        order: Order,
+        item: OrderItem,
+        by: Actor,
+        after_acceptance: bool,
+        **detail: Any,
+    ) -> None:
+        """The add's audit row. After acceptance it is ``item.added_after_acceptance``,
+        naming the item and the status the order had (#5349)."""
+        if after_acceptance:
+            self._event(
+                conn,
+                order,
+                by,
+                "item.added_after_acceptance",
+                item_id=item.id,
+                title=item.title,
+                quantity=item.quantity,
+                order_status=order.status,
+                **detail,
+            )
+        else:
+            self._event(conn, order, by, "item.added", item_id=item.id, **detail)
+
+    def _revise(
+        self,
+        conn: Conn,
+        order: Order,
+        item: OrderItem,
+        by: Actor,
+        *,
+        reference: Reference,
+        colours: Sequence[ColourSlot],
+        note: str = "",
+        output_id: str | UnsetType | None = UNSET,
+        amend: bool = False,
+        repair: bool = False,
+        after_acceptance: bool = False,
+    ) -> tuple[OrderItem, Revision]:
+        """The item's next design revision, and the item's design a copy of it (spec
+        2026-11-02 §4.1): the one caller of `OrderStore.set_design`. The newest revision,
+        when it is sent and unanswered, is `superseded`. An unset ``output_id`` keeps the
+        item's while the reference stays, and clears it when the reference moves: the
+        output no longer matches what the item says. Every quote goes stale (§4.3), so
+        a `quoted` or `approved` item is `draft` again. The caller checks the item may
+        change and rederives the order.
+
+        With ``amend`` the current revision takes ``colours`` in place (the colours'
+        fill: an item made by hand given the slots its first render made, which changes
+        no design a customer saw): no new revision, nothing superseded, the quotes and
+        the status kept, the audit row `revision.amended`.
+
+        With ``repair`` (`_ensure_revision`) the new revision is the design the item
+        already has: a sent, unanswered one is superseded, but the quotes and the
+        status are kept, and the audit row is `revision.repaired`.
+
+        With ``after_acceptance``, or on an item already revised after acceptance, while
+        the order takes items (#5350), the accepted quote stays accepted: the price the
+        customer agreed stands until a quote of the new revision is accepted. The item is
+        marked ``revised_after_acceptance``, a `REQUOTED` one is `draft` again (so it is
+        not printed or fulfilled at the old quote), and the audit row is
+        `revision.added_after_acceptance`, naming the quote kept."""
+        if isinstance(output_id, UnsetType):
+            output_id = item.output_id if item.reference == reference else None
+        if amend:
+            assert item.current_revision_id is not None
+            revision = self.store.amend_revision_colours(conn, item.current_revision_id, colours)
+            item = self.store.set_design(conn, item.id, revision, output_id=output_id)
+            self._event(
+                conn, order, by, "revision.amended", item_id=item.id, revision_id=revision.id
+            )
+            return item, revision
+        newest = next(reversed(self.store.revisions(item.id, conn=conn)), None)
+        superseded = None
+        if newest is not None and newest.sent_at is not None and newest.answer is None:
+            self.store.stamp_revision(
+                conn, newest.id, answer="superseded", answered_at=datetime.now(UTC), answered_by=by
+            )
+            superseded = newest.id
+        revision = self.store.insert_revision(
+            conn, item.id, reference=reference, colours=colours, note=note, created_by=by
+        )
+        requote = (
+            not repair
+            and order.status in TAKES_ITEMS
+            and (after_acceptance or item.revised_after_acceptance)
+        )
+        kept = None
+        if requote:
+            kept = next((q.id for q in self.store.quotes(item.id, conn=conn) if q.accepted), None)
+        item = self.store.set_design(conn, item.id, revision, output_id=output_id)
+        detail: dict[str, Any] = {}
+        if requote:
+            item = self.store.update_item(
+                conn,
+                item.id,
+                revised_after_acceptance=True,
+                status="draft" if item.status in REQUOTED else UNSET,
+            )
+            detail = {"order_status": order.status, "accepted_quote_id": kept}
+        elif not repair:
+            self.store.unaccept_quotes(conn, item.id)
+            if item.status in ("quoted", "approved"):
+                item = self.store.update_item(conn, item.id, status="draft")
+        kind = "revision.repaired" if repair else "revision.added"
+        self._event(
+            conn,
+            order,
+            by,
+            "revision.added_after_acceptance" if requote else kind,
+            item_id=item.id,
+            revision_id=revision.id,
+            number=revision.number,
+            superseded=superseded,
+            **detail,
+        )
+        return item, revision
+
+    def _ensure_revision(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> OrderItem:
+        """The rollout's repair (spec 2026-11-02 §4.1): an item with a design whose copy
+        is not its current revision's, because a build before revisions wrote it (no
+        current revision) or edited it (a reference or colours its revision lacks), gets
+        its next revision made from the copy (`_revise` with ``repair``). Anything else,
+        and an item of an ended order or a settled item (whose record stays as it was), is
+        returned as it is, writing nothing."""
+        if item.kind == "custom" or item.reference is None:
+            return item
+        if order.status in ENDED or item.status in SETTLED:
+            return item
+        if item.current_revision_id is not None:
+            current = self.store.revision(item.current_revision_id, conn=conn)
+            if (
+                current is not None
+                and current.reference == item.reference
+                and current.colours == item.colours
+            ):
+                return item
+        item, _ = self._revise(
+            conn,
+            order,
+            item,
+            by,
+            reference=item.reference,
+            colours=list(item.colours),
+            repair=True,
+        )
+        return item
+
+    def ensure_revision(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
+        """`_ensure_revision` in a transaction of its own, so the repair stands when the
+        call that needed it is refused (a send naming the revision it superseded). Every
+        path that reads the item's current revision runs it first."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            before = self._item_of(conn, order, item_id)
+            item = self._ensure_revision(conn, order, before, by)
+        if item is not before:
+            self._told(_Change(order, [(item, None)]))
+        return item
+
+    def add_revision(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        resolved: ResolvedReference | None = None,
+        *,
+        output_id: str | UnsetType | None = UNSET,
+        filaments: Mapping[int, str | None] | None = None,
+        note: str = "",
+        after_acceptance: bool = False,
+    ) -> Revision:
+        """A new design for the item while its order is open (§4.3). Without
+        ``resolved`` it repeats the current revision's reference and colours: a revision
+        for new photos or a new note. ``filaments`` repins its slots as `update_item`'s
+        does. A custom item has no design (`item_custom`); a request has none until its
+        first revision names one (`item_has_no_design`). Past `quoted` an item with an
+        accepted quote takes one only while it was revised after acceptance
+        (:func:`requote_open`).
+
+        With ``after_acceptance`` (#5350) the item is an accepted one, on an `accepted`,
+        `in_production` or `ready` order not on hold: `order_not_accepted` before that,
+        `item_locked` once shipped, `item_not_priced` for an item with no accepted quote
+        (use the plain route), `print_in_flight` while a print of it runs,
+        `item_partly_fulfilled` once an attempt of it is accepted (#5592). Its accepted
+        quote stays accepted until a quote of the new revision is (`_revise`)."""
+        self.ensure_revision(order_id, item_id, by)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.kind == "custom":
+                raise LifecycleError("item_custom", f"item {item_id} is a custom item")
+            if item.kind == "library_file":
+                raise LifecycleError(
+                    "item_library_file",
+                    f"item {item_id} prints a library file: it has no design revisions;"
+                    " add a new item to order something else",
+                    items=[item.id],
+                )
+            if item.status in SETTLED:
+                raise LifecycleError(
+                    "item_not_open", f"item {item_id} is {item.status}", items=[item.id]
+                )
+            if after_acceptance:
+                self._revisable_after_acceptance(conn, order, item)
+            else:
+                self._open_for_requote(conn, order, item, "an item's design")
+            if resolved is not None:
+                reference, colours = resolved.reference, list(resolved.colours)
+            elif item.reference is not None:
+                reference, colours = item.reference, list(item.colours)
+            else:
+                raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
+            if filaments is not None:
+                colours = self._with_filaments(conn, colours, filaments)
+            item, revision = self._revise(
+                conn,
+                order,
+                item,
+                by,
+                reference=reference,
+                colours=colours,
+                note=note,
+                output_id=output_id,
+                after_acceptance=after_acceptance,
+            )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return revision
+
+    def _revisable_after_acceptance(self, conn: Conn, order: Order, item: OrderItem) -> None:
+        """The checks before an accepted item is revised after acceptance (#5350), past
+        the item's own (not custom, not settled)."""
+        if order.status in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "order_not_accepted",
+                f"order {order.number} is {order.status}, not accepted: revise the item with"
+                f" POST /orders/{order.id}/items/{item.id}/revisions",
+                items=[item.id],
+            )
+        if order.status not in TAKES_ITEMS:
+            raise LifecycleError(
+                "item_locked",
+                f"order {order.number} is {order.status}: its items' designs are final once"
+                " shipped",
+                items=[item.id],
+            )
+        self._not_on_hold(order)
+        if not any(quote.accepted for quote in self.store.quotes(item.id, conn=conn)):
+            raise LifecycleError(
+                "item_not_priced",
+                f"item {item.id} has no accepted quote: revise it with"
+                f" POST /orders/{order.id}/items/{item.id}/revisions",
+                items=[item.id],
+            )
+        accepted = [f for f in self.store.fulfilments(item.id, conn=conn) if f.accepted_at]
+        if accepted:
+            # #5592: the accepted units are real goods of the agreed design. A new design
+            # would count them as made of it, or leave them uncounted; neither is true.
+            # This refusal is permanent and `print_in_flight` is transient, so it answers
+            # first: a caller that waits for the print to end is not refused after (#5598).
+            made = sum(f.quantity for f in accepted)
+            raise LifecycleError(
+                "item_partly_fulfilled",
+                f"item {item.id} has accepted attempts ({made} of {item.quantity} made of the"
+                " agreed design): cancel the item and add one with the new design",
+                items=[item.id],
+            )
+        if item.status in ("queued", "printing"):
+            raise LifecycleError(
+                "print_in_flight",
+                f"item {item.id} is {item.status}: settle its print first",
+                items=[item.id],
+            )
+        self._none_in_flight(conn, item)
+
     def add_item(
         self,
         order_id: str,
@@ -791,11 +1413,14 @@ class Lifecycle:
         title: str | None = None,
         notes: str = "",
         sku: str | None = None,
+        after_acceptance: bool = False,
     ) -> OrderItem:
+        """A model item. With ``after_acceptance`` (#5349) the order must be past
+        `quoted` (:meth:`_takes_item`); the item starts `draft` with no quote either way,
+        and the order's accepted prices and charges stay as they are."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            self._open_for_items(order, "the list of items")
+            self._takes_item(order, after_acceptance)
             item = self.store.insert_item(
                 conn,
                 order.id,
@@ -807,7 +1432,106 @@ class Lifecycle:
                 notes=notes,
                 sku=sku,
             )
-            self._event(conn, order, by, "item.added", item_id=item.id)
+            self._added(conn, order, item, by, after_acceptance)
+            item, _ = self._revise(
+                conn,
+                order,
+                item,
+                by,
+                reference=resolved.reference,
+                colours=resolved.colours,
+                output_id=output_id,
+            )
+            rule = self.parts.rule(resolved.reference.slug, conn=conn)
+            given = rule_parts(rule.lines, resolved.colours)
+            if given:
+                self.parts.set_item_parts(conn, item.id, given)
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "item.parts_set",
+                    item_id=item.id,
+                    parts=_parts_detail(given),
+                    from_rule=True,
+                )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return item
+
+    def add_request_item(
+        self,
+        order_id: str,
+        by: Actor,
+        *,
+        title: str,
+        quantity: int,
+        notes: str = "",
+        sku: str | None = None,
+        after_acceptance: bool = False,
+    ) -> OrderItem:
+        """A request: what a customer wants made, before any design exists. It has no
+        reference, and is approved design first; its first revision (`add_revision`
+        with a resolved reference) gives it one. ``after_acceptance`` as `add_item`'s."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._takes_item(order, after_acceptance)
+            item = self.store.insert_item(
+                conn,
+                order.id,
+                kind="request",
+                reference=None,
+                colours=[],
+                output_id=None,
+                quantity=quantity,
+                title=title,
+                notes=notes,
+                sku=sku,
+                approval="design_first",
+            )
+            self._added(conn, order, item, by, after_acceptance, item_kind="request")
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return item
+
+    def add_library_item(
+        self,
+        order_id: str,
+        by: Actor,
+        file: LibraryFileRef,
+        *,
+        quantity: int,
+        title: str | None = None,
+        notes: str = "",
+        sku: str | None = None,
+        after_acceptance: bool = False,
+    ) -> OrderItem:
+        """A library file item (#5544): the file's id, name and library, with no template
+        commit and no inputs. It starts `draft`, unpriced, approved with its quote (it has
+        no design to approve first), and takes a slice quote of the file or a manual one.
+        The caller has read the file from the library that serves. ``after_acceptance``
+        as `add_item`'s."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._takes_item(order, after_acceptance)
+            item = self.store.insert_library_item(
+                conn,
+                order.id,
+                file=file,
+                quantity=quantity,
+                title=title,
+                notes=notes,
+                sku=sku,
+            )
+            self._added(
+                conn,
+                order,
+                item,
+                by,
+                after_acceptance,
+                item_kind="library_file",
+                library_file_id=file.id,
+            )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -824,16 +1548,24 @@ class Lifecycle:
         sku: str | None = None,
         requires_printing: bool = False,
         accept: bool = True,
+        after_acceptance: bool = False,
     ) -> OrderItem:
         """A custom item (#4954): a title, a quantity and a typed price, with no template
         behind it. Its price is a `manual` quote. With ``accept`` (the browser's) it is
         accepted as it is saved, so the item is `approved` at once, and a hold refuses it
         (accepting a quote advances the order). Without (the agent's, whose `write` tier
-        accepts nothing) the item is `quoted`, for `accept_quote` to pin."""
+        accepts nothing) the item is `quoted`, for `accept_quote` to pin. With
+        ``after_acceptance`` (#5349) the price is never accepted as it is saved: the item
+        is `quoted`, and ``accept`` is refused (422)."""
+        if after_acceptance and accept:
+            raise LifecycleError(
+                "accept",
+                "accept: an item added after acceptance needs its quote accepted on its own",
+                unprocessable=True,
+            )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            self._open_for_items(order, "the list of items")
+            self._takes_item(order, after_acceptance)
             if accept:
                 self._not_on_hold(order)
             item = self.store.insert_custom_item(
@@ -845,7 +1577,7 @@ class Lifecycle:
                 sku=sku,
                 requires_printing=requires_printing,
             )
-            self._event(conn, order, by, "item.added", item_id=item.id, item_kind="custom")
+            self._added(conn, order, item, by, after_acceptance, item_kind="custom")
             item = self._custom_price(conn, order, item, unit_price_minor, by, accept=accept)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
@@ -904,19 +1636,25 @@ class Lifecycle:
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | None = None,
         accept: bool = True,
+        approval: Approval | None = None,
+        expected_revision_id: str | None = None,
     ) -> OrderItem:
         """The reference (replaced whole), the quantity and the slots' filaments while
-        `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
-        §5.2's "changing the colours makes the next quote a new row"); title and notes in
-        any open state. A reference replaced without an ``output_id`` clears the item's:
-        the output it pointed at no longer matches what the item says.
+        `draft` or `quoted`, or past that while the item has no accepted quote
+        (:func:`item_open`, #5349), each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
+        §5.2's "changing the colours makes the next quote a new row"); title, notes and
+        ``approval`` in any open state. A design change (a different reference or a
+        slot's filament) is the item's next revision (spec 2026-11-02 §4.1, `_revise`);
+        the item's own reference sent again changes nothing and makes none. A reference
+        changed without an ``output_id`` clears the item's: the output it pointed at no
+        longer matches what the item says.
 
         ``filaments`` (``{slot: filament_id | None}``) repins only when it changes a
         slot: the same filaments sent again write nothing and drop nothing. A slot the
         item lacks, or a filament not in the book or archived, is refused (422).
         ``colours`` gives an item made by hand, which has none, the slots its first
         render made (the quote's run, #4250); it repins nothing, as it changes no slot
-        the item had.
+        the item had, and amends the current revision rather than making one.
 
         A custom item (#4954) takes ``unit_price_minor`` and ``requires_printing``, which
         a model item refuses (422). A new quantity or price on it is priced at once: a
@@ -924,13 +1662,41 @@ class Lifecycle:
         quote's, or its newest's). With ``accept`` that quote is accepted and the item
         stays `approved` (refused on hold, as an accepted quote is); without (the
         agent's) the item is `quoted`. A ``reference`` given to it makes it a model item,
-        on the normal flow: its quote is dropped as any reference change drops one."""
+        on the normal flow: its quote is dropped as any reference change drops one. A
+        custom item takes no ``approval`` (422): it has no design to approve.
+
+        With ``expected_revision_id`` (the quote's run) it writes nothing once the item's
+        current revision is another (`revision_not_newest`): the caller's work was of a
+        design since replaced."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if (
+                expected_revision_id is not None
+                and item.current_revision_id != expected_revision_id
+            ):
+                raise LifecycleError(
+                    "revision_not_newest",
+                    f"item {item_id} has a newer revision than the one rendered",
+                    items=[item.id],
+                )
+            library = item.kind == "library_file"
+            if library and reference is not None:
+                raise LifecycleError(
+                    "reference",
+                    "reference: a library file item prints its file; add a new item to order"
+                    " a template",
+                    unprocessable=True,
+                )
+            if library and approval == "design_first":
+                raise LifecycleError(
+                    "approval",
+                    "approval: a library file item has no design to approve first",
+                    unprocessable=True,
+                )
             custom = item.kind == "custom" and reference is None
             for name, value in (
                 ("unit_price_minor", unit_price_minor),
@@ -940,6 +1706,10 @@ class Lifecycle:
                     raise LifecycleError(
                         name, f"{name}: only a custom item takes one", unprocessable=True
                     )
+            if approval is not None and custom:
+                raise LifecycleError(
+                    "approval", "approval: a custom item has no design", unprocessable=True
+                )
             price = None
             if custom:
                 quotes = self.store.quotes(item.id, conn=conn)
@@ -962,19 +1732,42 @@ class Lifecycle:
             refiled = any(
                 slot.slot in before and before[slot.slot] != slot.filament_id for slot in slots
             )
-            repins = reference is not None or quantity is not None or refiled or price is not None
-            if repins:
-                self._open_for_items(order, "an item's reference, quantity and filaments")
+            # The colours' fill: an item with no slots given its first render's.
+            filled = not base and bool(slots)
+            designed = reference.reference if reference is not None else item.reference
+            amend = (
+                filled
+                and item.kind != "custom"
+                and designed == item.reference
+                and item.current_revision_id is not None
+            )
+            changed = reference is not None and (
+                item.kind == "custom"
+                or reference.reference != item.reference
+                or slots != item.colours
+            )
+            revised = not amend and (changed or refiled or filled)
+            # A library file item (#5544) has no revisions: its slots are written on it.
+            recolour = library and (refiled or filled)
+            if library:
+                amend, revised = False, refiled
+            design = not library and (revised or amend)
+            repins = revised or quantity is not None or price is not None
+            if repins and (quantity is not None or price is not None):
+                self._open_for_item(
+                    conn, order, item, "an item's reference, quantity and filaments"
+                )
+            elif repins:
+                # A design change alone: an item revised after acceptance takes it (#5350).
+                self._open_for_requote(conn, order, item, "an item's reference and filaments")
             if price is not None and accept:
                 self._not_on_hold(order)
+            if design and designed is None:
+                raise LifecycleError(
+                    "colours", f"item {item_id} has no design to colour", unprocessable=True
+                )
             fields: dict[str, Any] = {}
-            if reference is not None:
-                fields.update(reference=reference.reference, colours=slots)
-                if isinstance(output_id, UnsetType):
-                    output_id = None
-            elif slots != item.colours:
-                fields["colours"] = slots
-            if not isinstance(output_id, UnsetType):
+            if not design and not isinstance(output_id, UnsetType):
                 fields["output_id"] = output_id
             if quantity is not None:
                 fields["quantity"] = quantity
@@ -986,13 +1779,32 @@ class Lifecycle:
                 fields["sku"] = sku
             if requires_printing is not None and requires_printing != item.requires_printing:
                 fields["requires_printing"] = requires_printing
-            if not fields and price is None:
+            if approval is not None and approval != item.approval:
+                fields["approval"] = approval
+            if not fields and price is None and not design and not recolour:
                 # Nothing changes (the item's own filaments sent again): nothing written.
                 return item
-            if repins:
+            if design:
+                assert designed is not None
+                item, _ = self._revise(
+                    conn,
+                    order,
+                    item,
+                    by,
+                    reference=designed,
+                    colours=slots,
+                    output_id=output_id,
+                    amend=amend,
+                )
+            if recolour:
+                item = self.store.set_library_colours(conn, item.id, slots)
+            if repins and (library or not revised):
+                # A revision drops the quotes itself; a quantity or price change here, and
+                # any repin of a library file item, which has no revisions.
                 self.store.unaccept_quotes(conn, item.id)
                 fields["status"] = "draft"
-            item = self.store.update_item(conn, item.id, **fields)
+            if fields:
+                item = self.store.update_item(conn, item.id, **fields)
             if price is not None:
                 item = self._custom_price(conn, order, item, price, by, accept=accept)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
@@ -1036,27 +1848,50 @@ class Lifecycle:
         ]
 
     def delete_item(self, order_id: str, item_id: str, by: Actor) -> None:
-        """Only a `draft` item deletes (Ruling 6, 10); else `item_not_draft`, and the
-        caller decides whether to cancel it."""
+        """Only a `draft` item with no print attempt, a test print's too, deletes
+        (Ruling 6, 10); else `item_not_draft`, and the caller decides whether to cancel
+        it."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._item_of(conn, order, item_id)
+            if self.store.fulfilments(item.id, conn=conn, purpose=None):
+                # A test print's attempt and the sliced file it holds (storefront spec
+                # §4.4) stay with the record: an item printed once is cancelled.
+                raise LifecycleError(
+                    "item_not_draft",
+                    f"item {item_id} has print attempts: cancel it instead"
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    items=[item.id],
+                )
+            if self.store.item_has_entries(conn, item.id):
+                # Logged time and costs are the job's record (#5326): never dropped with
+                # the item, and its delete has no audit row for them.
+                raise LifecycleError(
+                    "item_has_entries",
+                    f"item {item_id} has time or cost entries: remove them or cancel it"
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    items=[item.id],
+                )
             # Its files go with it, each on the audit line, and with them their holds
             # on the blobs: nothing could show or remove an item's file once the item
             # is gone. A refusal below rolls this back.
-            for attachment in self.store.subject_attachments(item_subject(item.id), conn=conn):
-                self.store.delete_attachment(conn, attachment.id)
-                self._event(
-                    conn,
-                    order,
-                    by,
-                    "attachment.removed",
-                    attachment_id=attachment.id,
-                    item_id=item.id,
-                    filename=attachment.filename,
-                    sha256=attachment.sha256,
-                    was_delivered=item.delivered_attachment_id == attachment.id,
-                )
+            subjects = [item_subject(item.id)] + [
+                revision_subject(r.id) for r in self.store.revisions(item.id, conn=conn)
+            ]
+            for subject in subjects:
+                for attachment in self.store.subject_attachments(subject, conn=conn):
+                    self.store.delete_attachment(conn, attachment.id)
+                    self._event(
+                        conn,
+                        order,
+                        by,
+                        "attachment.removed",
+                        attachment_id=attachment.id,
+                        item_id=item.id,
+                        filename=attachment.filename,
+                        sha256=attachment.sha256,
+                        was_delivered=item.delivered_attachment_id == attachment.id,
+                    )
             if not self.store.delete_draft_item(conn, item.id):
                 raise LifecycleError(
                     "item_not_draft",
@@ -1092,11 +1927,12 @@ class Lifecycle:
         """A typed price (Ruling 1): one `manual` line, cost = price, quantity the
         item's now; the item is `quoted` (unless already approved on another quote). A
         custom item's price is its own field (#4954): ``item_custom``."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
-            self._open_for_items(order, "an item's price")
             item = self._item_of(conn, order, item_id)
+            self._open_for_requote(conn, order, item, "an item's price")
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             if item.kind == "custom":
@@ -1105,6 +1941,10 @@ class Lifecycle:
                     f"item {item_id} is a custom item: its price is its own field"
                     " (PATCH the item's unit_price_minor)",
                     items=[item.id],
+                )
+            if not has_design(item):
+                raise LifecycleError(
+                    "item_has_no_design", f"item {item_id} has no design yet", items=[item.id]
                 )
             line = QuoteLine(
                 kind="manual",
@@ -1122,6 +1962,7 @@ class Lifecycle:
                 unit_price_minor=body.unit_price_minor,
                 quantity=item.quantity,
                 created_by=by,
+                revision_id=item.current_revision_id,
             )
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
@@ -1156,19 +1997,45 @@ class Lifecycle:
         sliced_sha256: str,
         sliced_blob_key: str,
         by: Actor,
+        revision_id: str | None,
         quote_id: str | None = None,
+        part_settings: dict[str, dict[str, Any]] | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
         it, with the plates it read and the sliced file it read them from, under the id
         its ref was taken with (``quote_id``, Ruling 3). As a manual quote: the order
-        open for items, the item not settled, allowed on hold (it advances nothing)."""
+        open for items, the item not settled, allowed on hold (it advances nothing). It names
+        the revision the run sliced; one since superseded is `revision_not_newest`.
+        A ``quote_id`` already recorded (by an earlier attempt of the same operation,
+        #5353) is answered with, under the order's lock, and nothing is written but the
+        drop of this holder's holds on keys the recorded quote does not name (#5415: a
+        re-slice that gave other bytes). The holder is shared by every attempt, so those
+        holds may be a sibling attempt's that still runs; that attempt's own record is
+        answered with this quote too, so it never needs them (#5448). The quote's holds
+        are taken again in its own transaction, so a row never commits without them,
+        whatever another attempt dropped before it. A library file item's quote (#5544)
+        names no revision (``revision_id`` None): the item has none."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            if quote_id is not None:
+                recorded = self.store.quote(quote_id, conn=conn)
+                if recorded is not None and recorded.order_item_id == item_id:
+                    self.store.drop_holds(
+                        conn, QUOTE_HOLDER, quote_id, keep=quote_file_keys(recorded)
+                    )
+                    return recorded
             self._not_ended(order)
-            self._open_for_items(order, "an item's price")
             item = self._item_of(conn, order, item_id)
+            self._open_for_requote(conn, order, item, "an item's price")
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if revision_id != item.current_revision_id:
+                raise LifecycleError(
+                    "revision_not_newest",
+                    f"item {item_id} has a newer revision than the one sliced",
+                    items=[item.id],
+                )
             quote = self.store.insert_quote(
                 conn,
                 item.id,
@@ -1182,53 +2049,223 @@ class Lifecycle:
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
                 quote_id=quote_id,
+                revision_id=revision_id,
+                part_settings=part_settings,
             )
+            self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
         return quote
 
+    def drop_unrecorded_quote_holds(self, order_id: str, quote_id: str) -> bool:
+        """A failed quote run's holds (Ruling 3), unless its quote was recorded (#5353:
+        another attempt of the same operation may have recorded it): then only those on
+        keys the quote does not name (#5415). Under the order's lock, which
+        :meth:`record_slice_quote` takes too, so a drop never lands between that
+        record's check and its commit. Whether it dropped them all."""
+        with self.store.transaction() as conn:
+            self._lock(conn, order_id)
+            recorded = self.store.quote(quote_id, conn=conn)
+            if recorded is not None:
+                self.store.drop_holds(conn, QUOTE_HOLDER, quote_id, keep=quote_file_keys(recorded))
+                return False
+            self.store.drop_holds(conn, QUOTE_HOLDER, quote_id)
+        return True
+
     def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every
-        item not cancelled is."""
+        item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
+        `design_first` item the quote's revision must be accepted first
+        (`revision_not_accepted`); a custom item has neither."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
-            self._open_for_items(order, "an item's price")
-            self._not_on_hold(order)
             item = self._item_of(conn, order, item_id)
-            if item.status in SETTLED:
-                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            self._open_for_requote(conn, order, item, "an item's price")
+            self._not_on_hold(order)
             quote = self.store.quote(quote_id, conn=conn)
             if quote is None or quote.order_item_id != item.id:
                 raise LifecycleError(
                     "quote_not_found", f"no quote {quote_id} of item {item_id}", not_found=True
                 )
-            if quote.quantity != item.quantity:
-                raise LifecycleError(
-                    "quote_stale",
-                    f"quote {quote_id} priced {quote.quantity}, the item is now {item.quantity}",
-                )
-            self.store.accept_quote(conn, item.id, quote.id)
-            item = self.store.update_item(conn, item.id, status="approved")
-            self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
-            order = self._rederive(conn, order, by)
-            # §3.4: accepting a quote releases every other quote's sliced file.
-            released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
+            order, item, released = self._accept_quote(conn, order, item, quote, by)
         self._told(_Change(order, [(item, None)], released))
         return item
+
+    def _accept_quote(
+        self, conn: Conn, order: Order, item: OrderItem, quote: Quote, by: Actor
+    ) -> tuple[Order, OrderItem, list[str]]:
+        """Accepting ``quote`` once the caller has checked the order and the item: the
+        refusals, the row, the audit line, the order rederived and §3.4's release of
+        every other quote's sliced file."""
+        if item.status in SETTLED:
+            raise LifecycleError("item_not_open", f"item {item.id} is {item.status}")
+        if quote.quantity != item.quantity:
+            raise LifecycleError(
+                "quote_stale",
+                f"quote {quote.id} priced {quote.quantity}, the item is now {item.quantity}",
+            )
+        if item.kind not in NO_REVISIONS:
+            if quote.revision_id is not None and quote.revision_id != item.current_revision_id:
+                raise LifecycleError(
+                    "quote_stale", f"quote {quote.id} prices an earlier revision of the design"
+                )
+            if item.approval == "design_first":
+                revision_id = quote.revision_id or item.current_revision_id
+                revision = (
+                    None if revision_id is None else self.store.revision(revision_id, conn=conn)
+                )
+                if revision is None or revision.answer != "accepted":
+                    raise LifecycleError(
+                        "revision_not_accepted",
+                        f"the customer has not accepted the design of item {item.id}",
+                    )
+        self.store.accept_quote(conn, item.id, quote.id)
+        # #5350: the new price replaces the one kept since a revision after acceptance.
+        item = self.store.update_item(
+            conn, item.id, status="approved", revised_after_acceptance=False
+        )
+        self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+        order = self._rederive(conn, order, by)
+        released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
+        return order, item, released
+
+    # -- revisions sent and answered (storefront spec §4.3) -------------------------------
+
+    def _newest(self, conn: Conn, item: OrderItem, revision_id: str) -> Revision:
+        """The item's revision ``revision_id``, which must be its newest: a customer
+        sees and answers only the latest design."""
+        revisions = self.store.revisions(item.id, conn=conn)
+        found = next((r for r in revisions if r.id == revision_id), None)
+        if found is None:
+            raise LifecycleError(
+                "revision_not_found",
+                f"no revision {revision_id} of item {item.id}",
+                not_found=True,
+            )
+        if revisions[-1].id != found.id:
+            raise LifecycleError(
+                "revision_not_newest",
+                f"revision {found.number} of item {item.id} is not its newest",
+            )
+        return found
+
+    def _quote_of(self, conn: Conn, item: OrderItem, revision: Revision) -> Quote | None:
+        """The newest quote that names ``revision``."""
+        named = [q for q in self.store.quotes(item.id, conn=conn) if q.revision_id == revision.id]
+        return named[-1] if named else None
+
+    def send_revision(self, order_id: str, item_id: str, revision_id: str, by: Actor) -> Revision:
+        """Sends the item's newest revision to the customer: it needs a file on its
+        subject (`revision_empty`) and, on a `together` item, a quote that names it
+        (`revision_not_quoted`). Sent and unanswered already returns it, writing nothing."""
+        self.ensure_revision(order_id, item_id, by)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            revision = self._newest(conn, item, revision_id)
+            if revision.answer is not None:
+                raise LifecycleError(
+                    "revision_answered", f"revision {revision.number} is {revision.answer}"
+                )
+            if revision.sent_at is not None:
+                return revision
+            if not self.store.subject_attachments(revision_subject(revision.id), conn=conn):
+                raise LifecycleError(
+                    "revision_empty", f"revision {revision.number} has no file to send"
+                )
+            if item.approval == "together" and self._quote_of(conn, item, revision) is None:
+                raise LifecycleError(
+                    "revision_not_quoted",
+                    f"revision {revision.number} has no quote: this item is approved together",
+                )
+            revision = self.store.stamp_revision(conn, revision.id, sent_at=datetime.now(UTC))
+            self._event(conn, order, by, "revision.sent", item_id=item.id, revision_id=revision.id)
+        self._told(_Change(order, [(item, None)]))
+        return revision
+
+    def answer_revision(
+        self,
+        order_id: str,
+        item_id: str,
+        revision_id: str,
+        body: RevisionAnswerInput,
+        by: Actor,
+    ) -> Revision:
+        """The customer's answer to the newest sent revision. On a `together` item an
+        `accepted` also accepts the newest quote that names it, in the same transaction."""
+        if body.answer == "changes_requested" and not body.note.strip():
+            raise LifecycleError("note", "note: say what should change", unprocessable=True)
+        self.ensure_revision(order_id, item_id, by)
+        released: list[str] = []
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            revision = self._newest(conn, item, revision_id)
+            if revision.answer is not None:
+                raise LifecycleError(
+                    "revision_answered", f"revision {revision.number} is {revision.answer}"
+                )
+            if revision.sent_at is None:
+                raise LifecycleError(
+                    "revision_not_sent", f"revision {revision.number} was not sent"
+                )
+            quote = None
+            if body.answer == "accepted" and item.approval == "together":
+                quote = self._quote_of(conn, item, revision)
+                if quote is None:
+                    raise LifecycleError(
+                        "revision_not_quoted",
+                        f"revision {revision.number} has no quote: this item is approved together",
+                    )
+                self._open_for_requote(conn, order, item, "an item's price")
+                self._not_on_hold(order)
+            revision = self.store.stamp_revision(
+                conn,
+                revision.id,
+                answer=body.answer,
+                answer_note=body.note,
+                answered_at=datetime.now(UTC),
+                answered_by=by,
+            )
+            self._event(
+                conn,
+                order,
+                by,
+                "revision.answered",
+                item_id=item.id,
+                revision_id=revision.id,
+                answer=body.answer,
+                note=body.note,
+            )
+            if quote is not None:
+                order, item, released = self._accept_quote(conn, order, item, quote, by)
+        self._told(_Change(order, [(item, None)], released))
+        return revision
 
     # -- fulfilment (§6.1 by hand) ---------------------------------------------------------
 
     def _in_production(self, conn: Conn, order_id: str, item_id: str) -> tuple[Order, OrderItem]:
         """The order accepted and not on hold, and the item one of its own."""
         order = self._lock(conn, order_id)
+        self._producing(order)
+        return order, self._item_of(conn, order, item_id)
+
+    def _producing(self, order: Order) -> None:
+        """The order accepted, not ended and not on hold."""
         self._not_ended(order)
         if order.status not in DERIVED:
             raise LifecycleError(
                 "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
             )
         self._not_on_hold(order)
-        return order, self._item_of(conn, order, item_id)
 
     def _fulfillable(self, conn: Conn, order_id: str, item_id: str) -> tuple[Order, OrderItem]:
         order, item = self._in_production(conn, order_id, item_id)
@@ -1269,6 +2306,13 @@ class Lifecycle:
                 # Ruling 4: the new attempt first returns the item to `approved`; the
                 # bus hears the attempt's own status once, below.
                 item = self.store.update_item(conn, item.id, status="approved")
+            if body.archive_id is not None and self.store.archive_claimed(conn, body.archive_id):
+                # An archive is one print: another attempt's (this order's or any
+                # other's) is never copied into this one (#5268 security review).
+                raise LifecycleError(
+                    "archive_claimed",
+                    f"Bambuddy archive {body.archive_id} is already another attempt's print",
+                )
             attempt = self.store.insert_fulfilment(
                 conn,
                 item.id,
@@ -1279,6 +2323,7 @@ class Lifecycle:
                 started_at=body.started_at,
                 finished_at=body.finished_at,
                 notes=body.notes,
+                archive_ids=[] if body.archive_id is None else [body.archive_id],
             )
             status = self._after_attempt(body.outcome)
             if status != item.status:
@@ -1298,9 +2343,21 @@ class Lifecycle:
         self._told(_Change(order, changed))
         return attempt
 
-    def _attempt_of(self, conn: Conn, item: OrderItem, fulfilment_id: str) -> Fulfilment:
+    def _attempt_of(
+        self,
+        conn: Conn,
+        item: OrderItem,
+        fulfilment_id: str,
+        purpose: FulfilmentPurpose | None = "production",
+    ) -> Fulfilment:
+        """The item's attempt ``fulfilment_id`` of ``purpose`` (None, either): a test
+        print's attempt is no production attempt, so it is not found there."""
         attempt = self.store.fulfilment(fulfilment_id, conn=conn)
-        if attempt is None or attempt.order_item_id != item.id:
+        if (
+            attempt is None
+            or attempt.order_item_id != item.id
+            or (purpose is not None and attempt.purpose != purpose)
+        ):
             raise LifecycleError(
                 "fulfilment_not_found",
                 f"no attempt {fulfilment_id} of item {item.id}",
@@ -1308,19 +2365,39 @@ class Lifecycle:
             )
         return attempt
 
+    def _before_priced_design(self, conn: Conn, item: OrderItem, attempt: Fulfilment) -> bool:
+        """Whether the attempt was made before the revision the accepted quote prices: it
+        printed an earlier design (#5350). The rule, and why the order of the two
+        ``created_at`` values holds across their transactions, is :func:`stale_attempt`."""
+        return stale_attempt(
+            attempt,
+            self.store.quotes(item.id, conn=conn),
+            self.store.revisions(item.id, conn=conn),
+        )
+
     def update_fulfilment(
         self, order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, by: Actor
     ) -> Fulfilment:
         """An attempt not yet accepted, re-read whole; the item follows the outcome of
-        its latest attempt between `failed` and `approved`."""
+        its latest attempt between `failed` and `approved`. A test print's attempt
+        (storefront spec §4.4) is settled on an order not yet accepted too, and for an
+        item in any state, and never moves the item."""
         with self.store.transaction() as conn:
-            order, item = self._in_production(conn, order_id, item_id)
-            attempt = self._attempt_of(conn, item, fulfilment_id)
+            order = self._lock(conn, order_id)
+            found = self.store.fulfilment(fulfilment_id, conn=conn)
+            test = found is not None and found.purpose == "test"
+            if test:
+                self._not_ended(order)
+                self._not_on_hold(order)
+            else:
+                self._producing(order)
+            item = self._item_of(conn, order, item_id)
+            attempt = self._attempt_of(conn, item, fulfilment_id, purpose=None)
             if attempt.accepted_at is not None:
                 raise LifecycleError(
                     "fulfilment_accepted", f"attempt {attempt.attempt} is accepted"
                 )
-            if item.status not in FULFILLABLE | PRINTING:
+            if not test and item.status not in FULFILLABLE | PRINTING:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             if (
                 attempt.print_request_id is not None
@@ -1342,11 +2419,12 @@ class Lifecycle:
                 finished_at=body.finished_at,
                 notes=body.notes,
             )
-            latest = self.store.fulfilments(item.id, conn=conn)[-1]
-            status = self._after(latest, item.status)
             changed: list[tuple[OrderItem, int | None]] = []
-            if status != item.status:
-                item = self.store.update_item(conn, item.id, status=status)
+            if not test:
+                latest = self.store.fulfilments(item.id, conn=conn)[-1]
+                status = self._after(latest, item.status)
+                if status != item.status:
+                    item = self.store.update_item(conn, item.id, status=status)
             changed.append((item, attempt.attempt))
             self._event(
                 conn,
@@ -1366,7 +2444,9 @@ class Lifecycle:
         self, order_id: str, item_id: str, fulfilment_id: str, by: Actor
     ) -> Fulfilment:
         """§6.1: the attempt's quantity counts as made; the item is `fulfilled` once its
-        accepted attempts reach its quantity."""
+        accepted attempts reach its quantity. An attempt made before the accepted quote's
+        revision printed an earlier design (an item revised after acceptance, #5350): it is
+        refused (`fulfilment_stale`)."""
         with self.store.transaction() as conn:
             order, item = self._in_production(conn, order_id, item_id)
             attempt = self._attempt_of(conn, item, fulfilment_id)
@@ -1380,6 +2460,13 @@ class Lifecycle:
                 raise LifecycleError(
                     "fulfilment_failed", f"attempt {attempt.attempt} failed; nothing was made"
                 )
+            if self._before_priced_design(conn, item, attempt):
+                raise LifecycleError(
+                    "fulfilment_stale",
+                    f"attempt {attempt.attempt} printed an earlier design than the accepted"
+                    " quote's",
+                    items=[item.id],
+                )
             attempt = self.store.accept_fulfilment(conn, attempt.id, datetime.now(UTC))
             made = sum(
                 f.quantity
@@ -1389,6 +2476,7 @@ class Lifecycle:
             changed: list[tuple[OrderItem, int | None]] = []
             if made >= item.quantity:
                 item = self.store.update_item(conn, item.id, status="fulfilled")
+                self._use_parts(conn, order, item, by)
             elif item.status == "printed":
                 # Some are still to make: the next print is for the rest (§5.4 `copies`).
                 item = self.store.update_item(conn, item.id, status="approved")
@@ -1449,6 +2537,7 @@ class Lifecycle:
             attempt = self.store.unaccept_fulfilment(conn, accepted.id)
             status = self._after(attempts[-1], item.status)
             item = self.store.update_item(conn, item.id, status=status)
+            self._return_parts(conn, order, item, by)
             self._event(
                 conn,
                 order,
@@ -1463,6 +2552,123 @@ class Lifecycle:
         self._told(_Change(order, [(item, attempt.attempt)]))
         return item
 
+    # -- parts (job cost spec §11, #5543) --------------------------------------------------
+    # An item's parts leave stock when it becomes `fulfilled` and come back when it is
+    # unfulfilled, under the order's lock and then the parts' (in id order). Stock never
+    # refuses: it can go below zero. A failed attempt uses nothing.
+
+    def set_item_parts(
+        self, order_id: str, item_id: str, parts: Sequence[ItemPart], by: Actor
+    ) -> list[ItemPartRow]:
+        """The parts one unit of the item uses, replaced whole. Refused once the order is
+        ended, and for a fulfilled item, whose parts are already out of stock (unfulfil it
+        first), so an unfulfil gives back what was taken."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.status == "fulfilled":
+                raise LifecycleError(
+                    "item_parts_used",
+                    f"item {item_id} is fulfilled: its parts are out of stock; unfulfil it"
+                    " to change them",
+                    items=[item.id],
+                )
+            try:
+                self.parts.set_item_parts(conn, item.id, parts)
+            except PartNotFoundError as error:
+                raise LifecycleError("part_not_found", str(error)) from None
+            self._event(
+                conn, order, by, "item.parts_set", item_id=item.id, parts=_parts_detail(parts)
+            )
+            rows = self.parts.item_parts([item.id], conn=conn)[item.id]
+        self._told(_Change(order, [(item, None)]))
+        return rows
+
+    def _use_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
+        """The item's parts times its quantity out of stock, each a `material` cost entry
+        (``part:<item>:<part>``) at the part's unit cost now, when the part is priced in the
+        order's currency and costs anything."""
+        rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used == 0]
+        if not rows:
+            return
+        locked = self.parts.lock_parts(conn, [r.part_id for r in rows])
+        used: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda r: r.part_id):
+            part = locked[row.part_id]
+            count = row.per_unit * item.quantity
+            amount = use_amount(part.unit_cost_minor, count)
+            entry_id: str | None = None
+            if part.currency == order.currency and amount > 0:
+                entry, _ = self.store.insert_cost_entry(
+                    conn,
+                    order.id,
+                    CostEntryInput(
+                        order_item_id=item.id,
+                        kind="material",
+                        amount_minor=amount,
+                        note=f"{count} x {part.name}",
+                        source=f"part:{item.id}:{part.id}",
+                    ),
+                    created_by=by,
+                )
+                entry_id = entry.id
+            costed = amount if entry_id is not None else None
+            self.parts.move(
+                conn,
+                part,
+                "use",
+                -count,
+                by,
+                amount_minor=costed,
+                order_id=order.id,
+                order_item_id=item.id,
+            )
+            self.parts.set_used(conn, item.id, part.id, count)
+            used.append(
+                {"part_id": part.id, "count": count, "entry_id": entry_id, "amount_minor": costed}
+            )
+        self._event(conn, order, by, "parts.used", item_id=item.id, parts=used)
+
+    def _return_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
+        """What the item's fulfilment took, back in stock at the cost it was taken at, and
+        its cost entries removed."""
+        rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used > 0]
+        if not rows:
+            return
+        locked = self.parts.lock_parts(conn, [r.part_id for r in rows])
+        entries = {
+            e.source: e
+            for e in self.store.cost_entries(order.id, conn=conn)
+            if e.kind == "material" and e.source is not None
+        }
+        returned: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda r: r.part_id):
+            part = locked[row.part_id]
+            entry = entries.get(f"part:{item.id}:{part.id}")
+            if entry is not None:
+                self.store.delete_cost_entry(conn, order.id, entry.id)
+            self.parts.move(
+                conn,
+                part,
+                "return",
+                row.used,
+                by,
+                amount_minor=None if entry is None else entry.amount_minor,
+                unit_cost=self.parts.used_at(conn, item.id, part.id),
+                order_id=order.id,
+                order_item_id=item.id,
+            )
+            self.parts.set_used(conn, item.id, part.id, 0)
+            returned.append(
+                {
+                    "part_id": part.id,
+                    "count": row.used,
+                    "entry_id": None if entry is None else entry.id,
+                }
+            )
+        self._event(conn, order, by, "parts.returned", item_id=item.id, parts=returned)
+
     # -- the print path (§5.4, #4719) -----------------------------------------------------
 
     def claim_print(
@@ -1474,6 +2680,8 @@ class Lifecycle:
         request_id: str,
         sliced_sha256: str | None,
         sliced_blob_key: str | None,
+        project_id: int | None = None,
+        revision_id: str | None = None,
     ) -> Fulfilment:
         """Claim the item for one print before it starts (§5.4, #4719): under the order's
         lock, its next attempt, made nothing yet (``quantity`` 0, outcome `unknown`, no
@@ -1486,18 +2694,36 @@ class Lifecycle:
         operation) is that claim, and nothing is written, once its run is attached;
         before that, only while it may still print (the order not ended or on hold, the
         item still `queued`, the attempt still open), else ``ClaimRefusedError``, writing
-        nothing. A ``request_id`` another item claimed is
-        ``print_request_conflict``. Refused as a hand-recorded attempt is: the order
-        accepted, not ended, not on hold, the item `approved` or `failed`; and
-        ``item_made`` when its attempts made its quantity."""
+        nothing. A ``request_id`` another item claimed, or claimed for a print of another
+        purpose or revision, is ``print_request_conflict``. One print of an item is in
+        flight at a time, of either purpose (``print_in_flight``). Refused as a
+        hand-recorded attempt is: the order accepted, not ended, not on hold, the item
+        `approved` or `failed`; and ``item_made`` when its attempts made its quantity. A
+        new claim records ``project_id``, the Bambuddy project its run is keyed with
+        (#5263), which a retry keys it with again.
+
+        With ``revision_id`` it is a test print of that revision (storefront spec §4.4):
+        an attempt of purpose `test` naming it, of one copy, that counts for nothing and
+        never moves the item. It is refused only when the order ended or is on hold, the
+        item is settled (``item_not_open``), has no design (``item_custom``,
+        ``item_has_no_design``) or ``revision_id`` is not its current design
+        (``revision_not_found``, ``revision_not_newest``): the item prints the output of
+        its current design, whatever its status, on an order accepted or not."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             existing = self.store.print_claim(request_id, conn=conn)
             if existing is not None:
-                if existing.order_item_id != item_id:
+                purpose = "production" if revision_id is None else "test"
+                if (
+                    existing.order_item_id != item_id
+                    or existing.purpose != purpose
+                    or existing.revision_id != revision_id
+                ):
+                    # One key on `/print` and on a revision's `/test-print` is two
+                    # requests: neither answers with the other's attempt.
                     raise LifecycleError(
                         "print_request_conflict",
-                        f"request {request_id} is another item's print",
+                        f"request {request_id} is another item's or another kind of print",
                         items=[item_id],
                     )
                 if existing.print_run_id is not None:
@@ -1508,14 +2734,20 @@ class Lifecycle:
                 if refusal is None:
                     return existing
                 raise ClaimRefusedError(existing, refusal)
+        if revision_id is not None:
+            return self._claim_test_print(
+                order_id,
+                item_id,
+                by,
+                revision_id,
+                request_id=request_id,
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+                project_id=project_id,
+            )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            if order.status not in DERIVED:
-                raise LifecycleError(
-                    "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
-                )
-            self._not_on_hold(order)
+            self._producing(order)
             item = self._item_of(conn, order, item_id)
             if item.status not in FULFILLABLE:
                 raise LifecycleError(
@@ -1523,6 +2755,7 @@ class Lifecycle:
                     f"item {item_id} is {item.status}",
                     items=[item.id],
                 )
+            self._none_in_flight(conn, item)
             attempts = self.store.fulfilments(item.id, conn=conn)
             copies = item.quantity - sum(
                 a.quantity for a in attempts if a.outcome in ("succeeded", "partial")
@@ -1545,6 +2778,7 @@ class Lifecycle:
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
             )
+            self.store.set_claim_project(conn, attempt.id, project_id)
             if sliced_blob_key is not None:
                 self.store.hold_attempt_file(conn, FULFILMENT_HOLDER, sliced_blob_key, attempt.id)
             item = self.store.update_item(conn, item.id, status="queued")
@@ -1557,10 +2791,138 @@ class Lifecycle:
                 fulfilment_id=attempt.id,
                 attempt=attempt.attempt,
                 copies=copies,
+                purpose=attempt.purpose,
             )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, attempt.attempt)]))
         return attempt
+
+    def _test_printable(
+        self, conn: Conn, order: Order, item_id: str, revision_id: str
+    ) -> OrderItem:
+        """`claim_print`'s refusals of a test print of ``revision_id``."""
+        self._not_ended(order)
+        self._not_on_hold(order)
+        item = self._item_of(conn, order, item_id)
+        if item.status in SETTLED:
+            raise LifecycleError(
+                "item_not_open", f"item {item_id} is {item.status}", items=[item.id]
+            )
+        if item.kind == "custom":
+            raise LifecycleError("item_custom", f"item {item_id} is a custom item")
+        if item.kind == "library_file":
+            raise LifecycleError(
+                "item_library_file",
+                f"item {item_id} prints a library file: it has no revision to test print",
+            )
+        if item.reference is None:
+            raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
+        self._newest(conn, item, revision_id)
+        self._none_in_flight(conn, item)
+        return item
+
+    def _none_in_flight(self, conn: Conn, item: OrderItem) -> None:
+        """One print of an item at a time, of either purpose: every print of an item is
+        a print of its output, and a print's outcome is recorded against its subject's
+        newest run only (``bambuddy/outcomes.py``), so a second print in flight would
+        take the first one's outcome."""
+        open_attempt = self.store.print_in_flight(item.id, conn=conn)
+        if open_attempt is not None:
+            raise LifecycleError(
+                "print_in_flight",
+                f"item {item.id}'s attempt {open_attempt.attempt} ({open_attempt.purpose}) is"
+                " still printing: settle it first",
+                items=[item.id],
+            )
+
+    def _claim_test_print(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        revision_id: str,
+        *,
+        request_id: str,
+        sliced_sha256: str | None,
+        sliced_blob_key: str | None,
+        project_id: int | None,
+    ) -> Fulfilment:
+        """`claim_print`'s new claim of a test print: the attempt and its file's hold,
+        the item left as it is."""
+        self.ensure_revision(order_id, item_id, by)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item = self._test_printable(conn, order, item_id, revision_id)
+            attempt = self.store.insert_fulfilment(
+                conn,
+                item.id,
+                quantity=0,
+                outcome="unknown",
+                created_by=by,
+                started_at=datetime.now(UTC),
+                print_request_id=request_id,
+                copies=1,
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+                purpose="test",
+                revision_id=revision_id,
+            )
+            self.store.set_claim_project(conn, attempt.id, project_id)
+            if sliced_blob_key is not None:
+                self.store.hold_attempt_file(conn, FULFILMENT_HOLDER, sliced_blob_key, attempt.id)
+            self._event(
+                conn,
+                order,
+                by,
+                "print.claimed",
+                item_id=item.id,
+                fulfilment_id=attempt.id,
+                attempt=attempt.attempt,
+                copies=1,
+                purpose="test",
+                revision_id=revision_id,
+            )
+        self._told(_Change(order, [(item, attempt.attempt)]))
+        return attempt
+
+    def record_archive_facts(
+        self,
+        attempt: Fulfilment,
+        archive_ids: Sequence[int],
+        *,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        actual_seconds: int | None,
+        actual_grams: float | None,
+    ) -> Fulfilment:
+        """What the attempt's archives say (§8.2, ``OrderStore.set_archive_facts``), under
+        the order's lock as every writer of an item is, and told as `order_item.changed`
+        when it changed the attempt (#5263). Allowed on any order: it records a print.
+        Nothing is written when another attempt names one of the archives (#5273)."""
+        item = self.store.item(attempt.order_item_id)
+        if item is None:
+            return attempt
+        with self.store.transaction() as conn:
+            order = self._lock(conn, item.order_id)
+            if self.store.archives_named_elsewhere(conn, attempt.id, archive_ids):
+                # Named by hand since its run's archives were read (#5273): they are
+                # read again, without it, when the attempt's archives are next shown.
+                return attempt
+            written = self.store.set_archive_facts(
+                attempt.id,
+                archive_ids,
+                started_at=started_at,
+                finished_at=finished_at,
+                actual_seconds=actual_seconds,
+                actual_grams=actual_grams,
+                conn=conn,
+            )
+            item = self.store.item(item.id, conn=conn) or item
+        if written is None:
+            return attempt
+        if written != attempt:
+            self._told(_Change(order, [(item, written.attempt)]))
+        return written
 
     def attach_print(self, claim: Fulfilment, run_id: str, printer: str | None) -> Fulfilment:
         """The run a claim's print started (`print.started` on the audit line); again
@@ -1618,13 +2980,25 @@ class Lifecycle:
     ) -> LifecycleError | None:
         """Why a claim with no run may no longer start its print: the order ended or on
         hold since, the item moved off the `queued` the claim made it (a cancel), or the
-        attempt settled by hand."""
+        attempt settled by hand. A test print's claim made the item nothing: it may no
+        longer print once the item settled or its revision is no longer the item's."""
         try:
             self._not_ended(order)
             self._not_on_hold(order)
         except LifecycleError as error:
             return error
-        if item.status != "queued":
+        if claim.purpose == "test":
+            if item.status in SETTLED:
+                return LifecycleError(
+                    "item_not_open", f"item {item.id} is {item.status}", items=[item.id]
+                )
+            if claim.revision_id != item.current_revision_id:
+                return LifecycleError(
+                    "revision_not_newest",
+                    f"the revision attempt {claim.attempt} prints is not item {item.id}'s newest",
+                    items=[item.id],
+                )
+        elif item.status != "queued":
             return LifecycleError(
                 "item_not_open" if item.status in SETTLED else "item_not_approved",
                 f"item {item.id} is {item.status}",
@@ -1642,12 +3016,15 @@ class Lifecycle:
         self, conn: Conn, order: Order, row: Fulfilment, reason: str
     ) -> list[tuple[OrderItem, int | None]]:
         """A claim with no run released in ``conn``: its row and hold, the item back to
-        what its other attempts give it while it is still `queued`, `print.refused`."""
+        what its other attempts give it while it is still `queued` (a test print's claim
+        queued it not, and leaves it), `print.refused`."""
         self.store.release_print_claim(conn, FULFILMENT_HOLDER, row.id)
         item = self.store.item(row.order_item_id, conn=conn)
         assert item is not None
         changed: list[tuple[OrderItem, int | None]] = []
-        if item.status == "queued":
+        if row.purpose == "test":
+            changed.append((item, None))
+        elif item.status == "queued":
             rest = self.store.fulfilments(item.id, conn=conn)
             back: ItemStatus = "failed" if rest and rest[-1].outcome == "failed" else "approved"
             item = self.store.update_item(conn, item.id, status=back)
@@ -1670,20 +3047,23 @@ class Lifecycle:
         `succeeded` with ``copies`` made and the item `printed`, or `failed` (a failed
         or cancelled print) with the item `failed`; one whose end the follow could not
         read (`unknown`) gets its end and stays for a person to settle (``PATCH``). With
-        no outcome, a run that failed fails the attempt with its refusal; one that
+        no outcome, a run that failed fails the attempt with its refusal, and the order's
+        projects are asked of Bambuddy again by the next ensure (#5276); one that
         succeeded and whose print moved (``progressed``, a ``print.progress``) makes a
         `queued` item `printing`, when the run is still its output's newest (a later dialog
         print's progress is that print's). Only an attempt still open (outcome `unknown`, no end)
         moves, so a person's edit stands; the item moves only while it is in a print
         state, so a cancel stands. Allowed on hold: it records what the printer did.
-        Its audit rows are written as the person who started the print. The attempt
-        as it now is, or None when nothing moved."""
+        Its audit rows are written as the person who started the print. A test print's
+        attempt (storefront spec §4.4) settles the same way, and the item never follows
+        it. The attempt as it now is, or None when nothing moved."""
         attempt = self.store.print_attempt(run_id)
         if attempt is None or attempt.outcome != "unknown" or attempt.finished_at is not None:
             return None
         status, detail, outcome = self.store.print_state(run_id)
         now = datetime.now(UTC)
         settle: tuple[Outcome, int, str | None, ItemStatus | None] | None = None
+        run_failed = False
         if outcome == "finished":
             settle = ("succeeded", attempt.copies or 0, None, "printed")
         elif outcome in ("failed", "cancelled"):
@@ -1692,7 +3072,13 @@ class Lifecycle:
             settle = ("unknown", 0, "the print ended, but how could not be read", None)
         elif status == "failed":
             settle = ("failed", 0, detail or "the print run failed", "failed")
-        elif not (status == "succeeded" and progressed and self.store.runs_newest(run_id)):
+            # Only a run that failed before it printed (#5276): a print Bambuddy started
+            # and reported failed (an outcome) was filed under a project that stood.
+            run_failed = True
+        elif attempt.purpose == "test" or not (
+            status == "succeeded" and progressed and self.store.runs_newest(run_id)
+        ):
+            # A test print's progress moves no item: it is in no print state for it.
             # A print of the same output the dialog queued since is that run's, whose
             # progress is not this attempt's (`bambuddy/outcomes.py` reads the same way).
             return None
@@ -1726,7 +3112,12 @@ class Lifecycle:
                     failure_reason=reason,
                     finished_at=now,
                 )
-                if item_status is not None and item.status in PRINTING:
+                if run_failed:
+                    # Its project may be one just deleted in Bambuddy (#5276): the
+                    # retry asks for the order's projects again, not taking them to stand.
+                    self.store.forget_projects_seen(order.id, conn=conn)
+                # A test print's attempt settles alone: the item never follows it.
+                if item_status is not None and item.status in PRINTING and row.purpose != "test":
                     item = self.store.update_item(conn, item.id, status=item_status)
                 changed.append((item, row.attempt))
                 self._event(
@@ -1738,6 +3129,7 @@ class Lifecycle:
                     fulfilment_id=row.id,
                     attempt=row.attempt,
                     outcome=result,
+                    purpose=row.purpose,
                 )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, changed))
@@ -1896,17 +3288,55 @@ class Lifecycle:
         sha256: str,
         blob_key: str,
         caption: str,
+        fulfilment_id: str | None = None,
+        revision_id: str | None = None,
     ) -> Attachment:
-        """The row of a file already kept as ``blob_key``, on the order or one of its
-        items; the store holds the blob for it in the same transaction."""
+        """The row of a file already kept as ``blob_key``, on the order, one of its
+        items, or with ``fulfilment_id`` one of that item's attempts (#4251); the store
+        holds the blob for it in the same transaction. With ``revision_id`` it is on
+        that revision of the item (storefront spec §4): a render, or beside a
+        ``fulfilment_id`` the photo of that revision's test print."""
+        if revision_id is None:
+            _refuse_revision_role(role)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = None if item_id is None else self._item_of(conn, order, item_id)
+            if revision_id is not None:
+                found = self.store.revision(revision_id, conn=conn)
+                if item is None or found is None or found.item_id != item.id:
+                    raise LifecycleError(
+                        "revision_not_found",
+                        f"no revision {revision_id} of that item",
+                        not_found=True,
+                    )
+                subject = revision_subject(found.id)
+            if fulfilment_id is not None:
+                attempt = self.store.fulfilment(fulfilment_id, conn=conn)
+                if (
+                    item is None
+                    or attempt is None
+                    or attempt.order_item_id != item.id
+                    or (
+                        revision_id is not None
+                        and (attempt.purpose != "test" or attempt.revision_id != revision_id)
+                    )
+                ):
+                    raise LifecycleError(
+                        "fulfilment_not_found",
+                        f"no attempt {fulfilment_id} of that item",
+                        not_found=True,
+                    )
+                if revision_id is None:
+                    subject = fulfilment_subject(attempt.id)
+            elif revision_id is None:
+                subject = order_subject(order.id) if item is None else item_subject(item.id)
             attachment = self.store.insert_attachment(
                 conn,
+                subject_item_id=None if fulfilment_id is None and revision_id is None else item_id,
+                fulfilment_id=fulfilment_id if revision_id is not None else None,
                 attachment_id=attachment_id,
                 order_id=order.id,
-                subject=order_subject(order.id) if item is None else item_subject(item.id),
+                subject=subject,
                 kind=kind,
                 role=role,
                 filename=filename,
@@ -1924,6 +3354,8 @@ class Lifecycle:
                 "attachment.added",
                 attachment_id=attachment.id,
                 item_id=attachment.item_id,
+                fulfilment_id=attachment.fulfilment_id,
+                revision_id=attachment.revision_id,
                 role=attachment.role,
             )
             change = _Change(order)
@@ -1935,10 +3367,28 @@ class Lifecycle:
         self, order_id: str, attachment_id: str, patch: AttachmentPatch, by: Actor
     ) -> Attachment:
         """The caption and the role; a field left out stays. Each change is on the audit
-        line. An image marked delivered keeps its mark whatever its role becomes."""
+        line. An image marked delivered keeps its mark whatever its role becomes. A
+        file of a revision sent to the customer, or answered, keeps both
+        (`revision_sent`), as `remove_attachment`."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             before = self._attachment_of(conn, order, attachment_id)
+            if (patch.role not in (None, before.role)) or (
+                patch.caption not in (None, before.caption)
+            ):
+                self._refuse_sent_revision(conn, before)
+            if patch.role not in (None, before.role):
+                if before.revision_id is None:
+                    _refuse_revision_role(patch.role)
+                elif patch.role == "test_print":
+                    # A test print's photo may join the model's photos (`attachment_to_model`),
+                    # so it only ever arrives by upload: no re-role, from a render or through
+                    # another role, makes one.
+                    raise LifecycleError(
+                        "role",
+                        "only an upload is the photo of a test print: upload that photo",
+                        unprocessable=True,
+                    )
             attachment = self.store.update_attachment(
                 conn,
                 before.id,
@@ -1970,12 +3420,26 @@ class Lifecycle:
         self._told(change)
         return attachment
 
+    def _refuse_sent_revision(self, conn: Conn, attachment: Attachment) -> None:
+        if attachment.revision_id is None:
+            return
+        revision = self.store.revision(attachment.revision_id, conn=conn)
+        if revision is not None and (revision.sent_at is not None or revision.answer is not None):
+            raise LifecycleError(
+                "revision_sent",
+                f"revision {revision.number} was sent to the customer: its files"
+                " are the record of what they saw",
+            )
+
     def remove_attachment(self, order_id: str, attachment_id: str, by: Actor) -> None:
         """A mis-upload (Ruling 6): the row goes, and with it its hold on the file and
-        the item's delivered mark when it was this one."""
+        the item's delivered mark when it was this one. A file of a revision sent to the
+        customer, or answered, stays (`revision_sent`): it is the record of what they
+        saw."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             attachment = self._attachment_of(conn, order, attachment_id)
+            self._refuse_sent_revision(conn, attachment)
             item = (
                 None
                 if attachment.item_id is None
@@ -2001,17 +3465,26 @@ class Lifecycle:
     def set_delivered(
         self, order_id: str, item_id: str, attachment_id: str | None, by: Actor
     ) -> OrderItem:
-        """Mark one of the item's own image attachments, one a browser draws, as what
-        was actually delivered, or with None clear the mark."""
+        """Mark one of the item's own image attachments (or of its attempts), one a
+        browser draws, as what was actually delivered, or with None clear the mark."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._item_of(conn, order, item_id)
             if attachment_id is not None:
                 found = self.store.attachment(attachment_id, conn=conn)
-                if found is None or found[0].subject != item_subject(item.id):
+                # The item's own image, or one of its attempts' (#4251).
+                if found is None or found[0].item_id != item.id:
                     raise LifecycleError(
                         "attachment_id",
                         f"attachment {attachment_id} is not attached to this item",
+                        unprocessable=True,
+                    )
+                if found[0].revision_id is not None:
+                    # A revision's file shows a design, not what was delivered.
+                    raise LifecycleError(
+                        "attachment_id",
+                        f"attachment {attachment_id} is a revision's file, not the delivered"
+                        " object",
                         unprocessable=True,
                     )
                 if found[0].kind != "image" or found[0].media_type not in SHOWN_IMAGES:

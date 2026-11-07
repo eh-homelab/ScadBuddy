@@ -32,7 +32,7 @@ fi
 
 copy
 sed -i 's/pg_advisory_xact_lock/pg_advisory_lock/' "$work/r/backend/scadbuddy/workflows/payload_codec.py"
-if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "differ in: PgPayloadKeys" <<<"$out"; then
+if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "differ in: create_key" <<<"$out"; then
   echo "FAIL: a drifted codec passed: $out"; exit 1
 fi
 copy

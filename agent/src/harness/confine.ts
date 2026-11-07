@@ -17,6 +17,20 @@ import type { GuardVerdict, InputGuard } from './permissions.js'
 // What remains: a link swapped in between this check and the tool's own open would be
 // followed. Only a process the session runs can make one (a Monitor command, an allowed
 // package's Bash), and the write-back never follows one (workspace/directory.ts).
+//
+// One place outside it is open to Read and Grep only (#5542): this session's own
+// `tool-results` directory in the Claude Code config dir. When a tool result is too large to
+// return inline, Claude Code saves it there and tells the model to read it. The path is
+// `<config dir>/projects/<encoded cwd>/<session id>/tool-results/`. Read from the bundled
+// 2.1.314 binary (2026-11-06): the directory is `join(projectDir(cwd), sessionId,
+// "tool-results")`, with `cwd` the process's own `process.cwd()` (a real path), the session id
+// the root session's (a subagent saves into its parent's directory), and the project directory
+// `join(CLAUDE_CONFIG_DIR, "projects", name)`. The name is CLAUDE_CODE_PROJECT_DIR_NAME when set
+// (the harness env never sets it), or else the cwd with every character outside `[a-zA-Z0-9]`
+// replaced by `-` (`/`, `.` and `_` too), cut to 200 characters plus `-` and a hash when longer
+// (`projectDirName`). The session id is the one the run gives Claude Code (`sessionId` on the
+// first turn, `resume` after: the same id, test/nativeBuiltins.sdk.test.ts). Everything else in
+// the config dir stays refused: config, transcripts, credentials, other sessions' results.
 
 /** Each tool's path inputs, and whether the tool needs one. */
 const PATHS: Readonly<Record<string, { field: string; required: boolean }>> = {
@@ -178,6 +192,8 @@ function segmentMayClimb(segment: string): boolean {
       // `?.|x`; minimatch reads `0.[:0+*\|` as matching `..`), so refuse. `\(` names one.
       return true
     } else if (c === '*' || c === '?') tokens.push('w')
+    // Everything else names itself, a `]` that closes no class too (minimatch and picomatch read
+    // it as the character; a `[` that opens none is refused above).
     else tokens.push(c === '.' ? '.' : 'x')
   }
   if (tokens.length === 1 && tokens[0] === '.') return false
@@ -196,6 +212,55 @@ function mayClimb(glob: string): boolean {
   const spelled = alternatives(glob)
   if (spelled === undefined) return true
   return spelled.some((s) => s.split('/').some(segmentMayClimb))
+}
+
+/**
+ * The globs Claude Code's Grep passes to `rg --glob` for its `glob` input. Read from the bundled
+ * 2.1.314 binary (the code that builds Grep's rg arguments, 2026-11-03): the value is split on
+ * `/\s+/`, a piece holding both `{` and `}` is kept whole, and any other piece is split on every
+ * `,`, empty pieces dropped. Each whitespace piece is checked whole and each comma piece too,
+ * so the check covers both readings. Even unchecked, a piece only filters the files rg walks
+ * under `path` (checked as a path): Claude Code's rg 14.1.1, run in a directory beside a file
+ * `secret`, found nothing for `--glob '../*'` or `--glob '../secret'` (measured 2026-11-03).
+ */
+function grepGlobs(glob: string): string[] {
+  const out: string[] = []
+  for (const piece of glob.split(/\s+/).filter(Boolean)) {
+    out.push(piece)
+    if (!(piece.includes('{') && piece.includes('}'))) out.push(...piece.split(',').filter(Boolean))
+  }
+  return out
+}
+
+/** The tools that may read this session's `tool-results` directory: they read and never write. */
+const READS_TOOL_RESULTS: ReadonlySet<string> = new Set(['Read', 'Grep'])
+
+/** A session id the harness gives Claude Code: a UUID (sdk.d.ts `sessionId`: "Must be a valid UUID"). */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Longer names are cut and given a hash (2.1.314). */
+const MAX_PROJECT_DIR_NAME = 200
+
+/** The 32-bit string hash Claude Code 2.1.314 adds to a long project directory name. */
+function nameHash(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+  return h
+}
+
+/** The name of `cwd`'s directory under `<config dir>/projects/`, as Claude Code 2.1.314 makes it. */
+export function projectDirName(cwd: string): string {
+  const name = cwd.replace(/[^a-zA-Z0-9]/g, '-')
+  if (name.length <= MAX_PROJECT_DIR_NAME) return name
+  return `${name.slice(0, MAX_PROJECT_DIR_NAME)}-${Math.abs(nameHash(cwd)).toString(36)}`
+}
+
+/** Where this run's Claude Code saves a tool result too large to return inline. */
+export type ToolResultsDir = {
+  /** CLAUDE_CONFIG_DIR (options.ts `claudeConfigDir`). */
+  configDir: string
+  /** The session id the run gives Claude Code (`sessionId` or `resume`). */
+  sessionId: string
 }
 
 const inside = (root: string, abs: string): boolean => {
@@ -224,8 +289,9 @@ async function realOf(abs: string): Promise<string> {
 /**
  * A guard that refuses a file tool's path outside `root` (an absolute, existing directory).
  * With no `root` it refuses every file tool: the turn has no directory to confine them to.
+ * With `toolResults`, Read and Grep may also reach that session's `tool-results` directory.
  */
-export function confineGuard(root: string | undefined): InputGuard {
+export function confineGuard(root: string | undefined, toolResults?: ToolResultsDir): InputGuard {
   if (root === undefined) {
     return (toolName) =>
       Promise.resolve(PATHS[toolName] ? { deny: `${toolName} is not available: this turn has no working directory.` } : undefined)
@@ -243,6 +309,22 @@ export function confineGuard(root: string | undefined): InputGuard {
     realRoot ??= realpath(root)
     return !inside(await realRoot, await realOf(abs))
   }
+  // The real `tool-results` directory: the config dir's real path, then the names Claude Code
+  // uses, none of them resolved. So a link anywhere below the config dir (`tool-results` itself
+  // too) moves the target's real path out of it, and the path is refused.
+  let realResults: Promise<string | undefined> | undefined
+  const resultsDir = async (): Promise<string | undefined> => {
+    if (toolResults === undefined || !SESSION_ID.test(toolResults.sessionId)) return undefined
+    realRoot ??= realpath(root)
+    const cwd = await realRoot
+    return path.join(await realpath(toolResults.configDir), 'projects', projectDirName(cwd), toolResults.sessionId, 'tool-results')
+  }
+  const inToolResults = async (toolName: string, value: string): Promise<boolean> => {
+    if (!READS_TOOL_RESULTS.has(toolName) || fromHome(value) || value.split(/[/\\]/).includes('..')) return false
+    realResults ??= resultsDir().catch(() => undefined)
+    const dir = await realResults
+    return dir !== undefined && inside(dir, await realOf(path.resolve(root, value)))
+  }
   return async (toolName, input) => {
     const spec = PATHS[toolName]
     if (!spec) return undefined
@@ -252,7 +334,7 @@ export function confineGuard(root: string | undefined): InputGuard {
       if (spec.required) return deny(toolName, `it names no ${spec.field}`)
     } else if (typeof value !== 'string') {
       return deny(toolName, `its ${spec.field} is not a path`)
-    } else if (await outside(value)) {
+    } else if ((await outside(value)) && !(await inToolResults(toolName, value))) {
       return deny(toolName, `${value} is outside it`)
     }
     if (toolName === 'Glob') {
@@ -271,11 +353,14 @@ export function confineGuard(root: string | undefined): InputGuard {
         if (await outside(fixed)) return deny(toolName, `its pattern ${pattern} starts outside it`)
       }
     }
-    // Grep's `path` is a path (checked above, no glob); its `glob` filter follows the Glob rule.
+    // Grep's `path` is a path (checked above, no glob); its `glob` filter follows the Glob rule,
+    // for the whole value and for each piece Grep makes of it (`grepGlobs`).
     if (toolName === 'Grep' && args.glob !== undefined) {
       if (typeof args.glob !== 'string') return deny(toolName, 'its glob is not a string')
-      if (fromHome(args.glob)) return deny(toolName, `its glob ${args.glob} starts at a home directory`)
-      if (mayClimb(args.glob)) return deny(toolName, `its glob ${args.glob} may reach .. (${CLIMB_HINT})`)
+      for (const glob of [args.glob, ...grepGlobs(args.glob)]) {
+        if (fromHome(glob)) return deny(toolName, `its glob ${glob} starts at a home directory`)
+        if (mayClimb(glob)) return deny(toolName, `its glob ${glob} may reach .. (${CLIMB_HINT})`)
+      }
     }
     return undefined
   }

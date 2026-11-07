@@ -107,6 +107,8 @@ export interface ApprovalRecords {
    * #2481) now revoked or expired: `approved` is false for it, refused GrantRevoked.
    */
   lapsed?(requestId: string, call?: ApprovalBinding): Promise<boolean>
+  /** Whether the call's approval was a person's in the UI (responder `browser`, #959). */
+  byPerson?(requestId: string, call?: ApprovalBinding): Promise<boolean>
 }
 
 /** A run grant's responder in `ai_input_responses` (#2481): `{kind: 'run_grant', id}`. */
@@ -127,6 +129,16 @@ export class PgApprovalRecords implements ApprovalRecords {
   async lapsed(requestId: string, call?: ApprovalBinding): Promise<boolean> {
     const grant = await this.#approval(requestId, call)
     return typeof grant === 'string' && !(await this.#inForce(grant))
+  }
+
+  async byPerson(requestId: string, call?: ApprovalBinding): Promise<boolean> {
+    if (call === undefined) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM ai_input_responses r
+      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
+      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
+        AND a.input_hash = ${call.inputHash} AND r.responder->>'kind' = 'browser'`
+    return rows.length > 0
   }
 
   /** The approval for this call: undefined for none, null for a person's, a grant id for a run grant's. */
@@ -179,12 +191,6 @@ export type ToolActivityDeps = {
   resolveBackoffMs?: readonly number[]
   /** Tool access (#4757): a package built-in's, which `builtin_tier` answers; every built-in `outward` without it. */
   access?: Pick<AccessResolver, 'builtin'> | undefined
-  /**
-   * A session turn's own secrets beside `services.secrets` (its remote plugins' and package
-   * servers' header values and forwarder URLs, as sessions/turnRunner.ts gathers them), which a
-   * ToolCall's tool redacts as the in-process call does (tools/harness.ts `withSecrets`, #2329).
-   */
-  turnSecrets?: ((session: string, owner: Owner) => Promise<readonly string[]>) | undefined
 }
 
 export type ToolActivity = (input: unknown) => Promise<unknown>
@@ -398,6 +404,7 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
   const approvals = flows && {
     approved: (requestId: string, call?: ApprovalBinding) => flows.approved(requestId, call?.inputHash),
     lapsed: async (requestId: string, call?: ApprovalBinding) => (await flows.lapsed?.(requestId, call?.inputHash)) ?? false,
+    byPerson: async (requestId: string, call?: ApprovalBinding) => (await flows.byPerson?.(requestId, call?.inputHash)) ?? false,
   }
   return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals, tiers }
 }
@@ -488,7 +495,7 @@ async function runGated(
   // again. So a tool raised to outward after the workflow let it through unparked has no
   // approval and is refused NotApproved; one disabled after its approval is refused as
   // disabled; and no second read can disagree with the one that was checked.
-  const effective = await effectiveTool(tool, deps.services)
+  const effective = await effectiveTool(tool, deps.services, input)
   const refuse = async (detail: string, message: string, type: string, outcome: 'refused' | 'error' = 'refused'): Promise<never> => {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
@@ -518,8 +525,9 @@ async function runGated(
   const services = deps.services
   // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
   // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
-  // approval is of the script's raw arguments (the backend hashes those), so a flow's call
-  // runs them as sent, resolved only to refuse a pair its registry row no longer links.
+  // call is the script's raw arguments plus the tool's `flowBinding` (a registry printer's
+  // `printer_id`, or null for a row only the LAN reaches), which the backend binds a person's
+  // approval to (flows/print_binding.py, #4445): a printer re-linked since hashes otherwise.
   //
   // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
   // is tried again here, within the one approval: safe, since nothing is checked or sent before
@@ -527,6 +535,9 @@ async function runGated(
   // away after the last try, the call fails closed and is audited, and the model is told the
   // approval was spent, so it asks again and a person approves again.
   let runInput = input
+  // A flow's call as its approval binds it (#4445): the raw arguments plus `binds`, null
+  // markers included. Undefined: the raw arguments, as they run.
+  let flowBound: Record<string, unknown> | undefined
   if (effective.gated && tool.resolvesApproval) {
     const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
     const waits = deps.resolveBackoffMs ?? RESOLVE_BACKOFF_MS
@@ -540,8 +551,13 @@ async function runGated(
     for (let attempt = 0; ; attempt++) {
       try {
         // Only the input: the line naming the printer was the approval's, so its reads are skipped.
-        const resolved = (await tool.prepareApproval(input, ctx, { summary: false })).input
+        const { input: resolved, binds } = await tool.prepareApproval(input, ctx, { summary: false })
         if (flow === undefined) runInput = resolved
+        else if (Object.keys(binds).length > 0) {
+          flowBound = { ...(input as Record<string, unknown>), ...binds }
+          // A null marker is hashed only: the handler gets the raw arguments without it.
+          runInput = { ...(input as Record<string, unknown>), ...Object.fromEntries(Object.entries(binds).filter(([, value]) => value !== null)) }
+        }
         break
       } catch (err) {
         // A refusal, or an error no retry would change (arguments that do not parse), ends it now.
@@ -557,7 +573,22 @@ async function runGated(
   }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
   // describe_call gave the parked call, computed again from what this call was given.
-  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (runInput ?? {}) as Record<string, unknown>) } : undefined
+  let binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (flowBound ?? runInput ?? {}) as Record<string, unknown>) } : undefined
+  if (effective.gated && flowBound !== undefined && deps.audit && !(await caller.approvals?.approved(requestId, binding))) {
+    // An approval that never saw the resolution: a run grant's match, or a narrowing (the
+    // parent's, or a person's approval of one), which hash the script's raw arguments. It
+    // runs them as sent, as before; the handler still refuses a pair its registry row no
+    // longer links. A person's own decision binds the resolution, so never falls back here.
+    const raw = { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (input ?? {}) as Record<string, unknown>) }
+    if (await deps.flows?.approvedUnresolved?.(requestId, raw.inputHash)) {
+      runInput = input
+      binding = raw
+    } else if (await caller.approvals?.lapsed?.(requestId, raw)) {
+      // A run grant's raw-argument approval, revoked or expired since: refused GrantRevoked
+      // below, as any lapsed grant's call is, never "no approval is recorded".
+      binding = raw
+    }
+  }
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
     if (await caller.approvals?.lapsed?.(requestId, binding)) {
       await refuse(
@@ -592,6 +623,8 @@ async function runGated(
       lookup,
       gate: 'workflow',
       effective,
+      // Read only for a gated call: what was approved, and by whom (#959).
+      approvedByPerson: effective.gated && ((await caller.approvals?.byPerson?.(requestId, binding)) ?? false),
     })
   } finally {
     clearInterval(heartbeat)
@@ -756,10 +789,9 @@ export function toolCallActivities(tools: readonly Tool[], deps: ToolActivityDep
         }
         const { turnTiers: sent, turnId, ...who } = owner
         const callKey = requestId ?? `call:${session}:${toolUseId}`
-        // Redacted of what the turn redacts in-process: its plugin and package tokens too.
-        const base = deps.services.secrets
-        const turnSecrets = deps.turnSecrets
-        const services = turnSecrets ? { ...deps.services, secrets: async () => [...((await base?.()) ?? []), ...(await turnSecrets(session, who))] } : deps.services
+        // `services.secrets` is the one list every mode checks (main.ts, #5480): the saved
+        // credentials and every plugin and package secret.
+        const services = deps.services
         const caller: Caller = {
           owner: who,
           session,

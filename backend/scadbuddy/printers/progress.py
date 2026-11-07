@@ -38,13 +38,12 @@ from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.reports import RUNNING as _RUNNING
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import print_error_text
 from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
-
-_RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
 PAUSED = "Paused on the printer."
 MOVED_ON = "The printer has started another print since, so how this one ended is not known."
 NOT_HEARD = "The printer has not reported for a while, so how this print ended is not known."
@@ -156,7 +155,7 @@ def lan_ended(
     return None
 
 
-def _ended(started: LanStarted, printer_name: str | None) -> PrintProgress:
+def ended_plate(started: LanStarted, printer_name: str | None) -> PrintProgress:
     """A start the run waited out: how it ended, as its run recorded it."""
     stage = started.ended or "unknown"
     copy = CopyProgress(printer_name=printer_name, stage=stage, message=started.ended_message)
@@ -179,7 +178,7 @@ WAITING = "Waiting for the printer to finish the print before it."
 AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
 
 
-def _waiting(
+def waiting_plate(
     printer_name: str | None, stopped: LanStopped | None, reason: str = WAITING
 ) -> PrintProgress:
     """A start still to come: ``queued`` as one in Bambuddy's queue, or, once the run has
@@ -239,7 +238,15 @@ class LanProgress:
 
     async def read(self, run_subject: str) -> PrintProgress | None:
         run = await read_latest(self.latest, run_subject)
-        if run is None or run.status != "succeeded" or run.result is None:
+        if run is None:
+            return None
+        return await self.read_run(run)
+
+    async def read_run(self, run: PrintRun) -> PrintProgress | None:
+        """``run``'s LAN print, whichever run of its subject is the newest (#5613: an
+        older run the follow settles on its own); ``None`` when it did not print over the
+        LAN."""
+        if run.status != "succeeded" or run.result is None:
             return None
         started = run.result.lan
         printer = run.printer
@@ -255,7 +262,7 @@ class LanProgress:
         now = self.now()
         result = run.result
         plates = [
-            _ended(plate, name)
+            ended_plate(plate, name)
             if plate.ended is not None
             else from_lan_report(report, plate, printer_name=name, now=now, max_age=self.max_age)
             for plate in started
@@ -263,7 +270,7 @@ class LanProgress:
         reasons = [WAITING] * len(result.lan_waiting)
         if reasons and result.lan_awaiting_clear:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
-        plates += [_waiting(name, result.lan_stopped, reason) for reason in reasons]
+        plates += [waiting_plate(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
             return plates[0].model_copy(update={"run_id": run.id})
         merged = from_plates(

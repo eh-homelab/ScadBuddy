@@ -1,0 +1,189 @@
+"""The CRUD routers' guard (#5298): refused without the caller's credential in every
+mode, and every answer carries ``X-ScadBuddy-Crud``."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import psycopg
+import pytest
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+from scadbuddy.auth.check import auth_check, refusal
+from scadbuddy.auth.gate import AuthGate
+from scadbuddy.auth.models import Service
+from scadbuddy.core.problems import install_problem_handlers
+from scadbuddy.crud.guard import crud_router
+
+CREDENTIALS = {
+    "sbsvc_projects": Service("projects", frozenset({"crud.projects"})),
+    "sbsvc_projects_bare": Service("projects", frozenset({"api"})),
+    "sbsvc_print": Service("print", frozenset({"crud.print"})),
+    "sbsvc_render": Service("render", frozenset({"crud.render"})),
+    "sbsvc_agent": Service("agent", frozenset({"api", "internal.workspace"})),
+}
+
+
+class Credentials:
+    def resolve(self, token: str) -> Service | None:
+        return CREDENTIALS.get(token)
+
+
+class Body(BaseModel):
+    n: int
+
+
+class _KnownError(LookupError):
+    """An error the app has a handler of its own for."""
+
+
+class _Noted:
+    def note(self, *args: object) -> None: ...
+
+
+def _client(mode: str = "off") -> TestClient:
+    """The router behind the real app-level `auth_check`, as `main.py` mounts it."""
+    app = FastAPI(dependencies=[Depends(auth_check)])
+    auth = SimpleNamespace(would_refuse=_Noted())
+    app.state.scadbuddy = SimpleNamespace(
+        settings=SimpleNamespace(auth_mode=mode),
+        components=SimpleNamespace(get=lambda _component: auth),
+    )
+    router = crud_router("projects")
+
+    @router.get("/ping")
+    def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    @router.post("/body")
+    def body(item: Body) -> dict[str, int]:
+        return {"n": item.n}
+
+    @router.get("/broken")
+    def broken() -> None:
+        raise RuntimeError("relation runs has no column x")
+
+    @router.get("/database")
+    def database() -> None:
+        raise psycopg.OperationalError("connection refused")
+
+    @router.get("/known")
+    def known() -> None:
+        raise _KnownError("not installed")
+
+    app.include_router(router, prefix="/api/v1")
+    install_problem_handlers(app)
+
+    @app.exception_handler(_KnownError)
+    async def _known(request: Request, error: _KnownError) -> JSONResponse:
+        return JSONResponse({"detail": str(error)}, status_code=409)
+
+    app.add_middleware(AuthGate, sessions=lambda: None, credentials=lambda: Credentials())  # type: ignore[arg-type,return-value]
+    return TestClient(app)
+
+
+URL = "/api/v1/internal/crud/projects/ping"
+
+
+def _get(client: TestClient, token: str | None) -> Any:
+    headers = {"authorization": f"Bearer {token}"} if token else {}
+    return client.get(URL, headers=headers)
+
+
+@pytest.mark.parametrize("mode", ["off", "observe", "enforce"])
+def test_the_guard_refuses_in_every_mode(mode: str) -> None:
+    """The same status, problem type and headers in each mode (D2, D4)."""
+    client = _client(mode)
+    none = _get(client, None)
+    assert none.status_code == 401
+    assert none.json()["type"].endswith("/auth/signed-out")
+    dead = _get(client, "sbsvc_dead")
+    assert dead.status_code == 401
+    assert none.headers["WWW-Authenticate"] == 'Bearer realm="scadbuddy"'
+    for token, reason in (
+        ("sbsvc_print", "wrong_caller"),
+        ("sbsvc_render", "wrong_caller"),
+        ("sbsvc_agent", "wrong_caller"),
+        ("sbsvc_projects_bare", "out_of_scope"),
+    ):
+        refused = _get(client, token)
+        assert refused.status_code == 403, token
+        assert refused.json()["type"].endswith("/auth/forbidden")
+        assert refused.json()["reason"] == reason, token
+    ok = _get(client, "sbsvc_projects")
+    assert ok.status_code == 200
+    assert ok.json() == {"ok": True}
+    for response in (none, dead, ok, _get(client, "sbsvc_print"), _get(client, "sbsvc_render")):
+        assert response.headers["X-ScadBuddy-Crud"] == "1"
+        assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_a_validation_error_carries_the_header() -> None:
+    client = _client()
+    headers = {"authorization": "Bearer sbsvc_projects"}
+    bad = client.post("/api/v1/internal/crud/projects/body", json={"n": "x"}, headers=headers)
+    assert bad.status_code == 422
+    assert bad.headers["X-ScadBuddy-Crud"] == "1"
+    assert client.post(
+        "/api/v1/internal/crud/projects/body", json={"n": 2}, headers=headers
+    ).json() == {"n": 2}
+
+
+def test_a_path_no_route_matches_carries_no_header() -> None:
+    """D4 is the routers' own answers; the app's 404 is not one of them."""
+    response = _client().get("/api/v1/internal/crud/projects/nope")
+    assert response.status_code == 404
+    assert "X-ScadBuddy-Crud" not in response.headers
+
+
+@pytest.mark.parametrize("route_cls", ["crud.projects", "internal.outputs"])
+def test_a_service_class_refusal_asks_for_a_bearer(route_cls: str) -> None:
+    """`enforce`'s 401 on a service-only class names the scheme, browser cookie or not."""
+    error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
+    assert error.status == 401
+    assert error.headers == {"WWW-Authenticate": 'Bearer realm="scadbuddy"'}
+
+
+@pytest.mark.parametrize("route_cls", ["api", "flow.host"])
+def test_a_public_class_refusal_asks_for_a_bearer_only_from_a_bearer(route_cls: str) -> None:
+    """`flow.host` answers a browser as `api` does: no scheme without a bearer."""
+    error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
+    assert error.status == 401
+    assert "WWW-Authenticate" not in (error.headers or {})
+
+
+def test_an_unexpected_error_is_a_500_with_the_crud_headers() -> None:
+    """Without them the client would take it for a missing route (`crud/client.py`)."""
+    client = TestClient(_client("enforce").app, raise_server_exceptions=False)
+    answer = client.get(
+        "/api/v1/internal/crud/projects/broken", headers={"authorization": "Bearer sbsvc_projects"}
+    )
+    assert answer.status_code == 500
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"
+    assert answer.json()["detail"] == "RuntimeError"
+
+
+def _as_projects(path: str) -> Any:
+    client = TestClient(_client("enforce").app, raise_server_exceptions=False)
+    return client.get(
+        f"/api/v1/internal/crud/projects/{path}",
+        headers={"authorization": "Bearer sbsvc_projects"},
+    )
+
+
+def test_a_database_out_of_reach_is_a_503_that_says_so() -> None:
+    answer = _as_projects("database")
+    assert answer.status_code == 503
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"
+    assert answer.json()["reason"] == "database-unavailable"
+
+
+def test_an_error_the_app_handles_gets_the_apps_answer_with_the_crud_headers() -> None:
+    answer = _as_projects("known")
+    assert answer.status_code == 409
+    assert answer.json() == {"detail": "not installed"}
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"

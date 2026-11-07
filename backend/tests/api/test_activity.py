@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import psycopg
 from fastapi.testclient import TestClient
 
-from scadbuddy.activity.index import ActivityIndex, Count
+from scadbuddy.activity.index import _SUBJECT_KEY, ActivityIndex, Count
 from scadbuddy.activity.subject_labels import SubjectLabels
 from scadbuddy.api.activity import _printer_options, _subject_labels
 from scadbuddy.api.deps import STATE_ATTR, AppState
@@ -450,3 +450,92 @@ def test_a_bad_facet_value_is_a_400_problem(client: TestClient, agent_tables: Ag
         "/api/v1/activity", params={"kind": "agent.x", "facet.n": "2.5", "facet.b": "true"}
     )
     assert ok.status_code == 200, ok.text
+
+
+# #5596 — several subjects in one request: each subject's newest rows, paged per subject.
+def test_several_subjects_read_each_ones_newest(
+    client: TestClient, seed_activity: SeedActivity
+) -> None:
+    seed_activity(id="operation:a1", status="failed", subject="order_item:a")
+    seed_activity(id="operation:b1", status="failed", subject="order_item:b")
+    seed_activity(id="operation:a2", status="failed", subject="order_item:a")
+    seed_activity(id="operation:a3", status="succeeded", subject="order_item:a")
+    seed_activity(id="operation:x1", status="failed", subject="order_item:x")
+    params: dict[str, str | int | list[str]] = {
+        "subject": ["order_item:a", "order_item:b", "order_item:c"],
+        "status": "failed",
+        "limit": 1,
+    }
+    page = client.get("/api/v1/activity", params=params).json()
+    assert ids(page) == ["operation:a2", "operation:b1"]
+    assert page["next_cursor"] is None
+    assert list(page["subject_cursors"]) == ["order_item:a"]
+    # A subject's cursor pages that subject alone, as a plain list does.
+    more = client.get(
+        "/api/v1/activity",
+        params={
+            "subject": "order_item:a",
+            "status": "failed",
+            "limit": 1,
+            "cursor": page["subject_cursors"]["order_item:a"],
+        },
+    ).json()
+    assert ids(more) == ["operation:a1"]
+    assert more["next_cursor"] is None
+    # The limit is per subject, and the rows newest first over all.
+    wide = client.get(
+        "/api/v1/activity", params={"subject": ["order_item:a", "order_item:x"], "limit": 2}
+    ).json()
+    assert ids(wide) == ["operation:x1", "operation:a3", "operation:a2"]
+    assert list(wide["subject_cursors"]) == ["order_item:a"]
+
+
+def test_several_subjects_read_either_spelling_once(
+    client: TestClient, seed_activity: SeedActivity
+) -> None:
+    seed_activity(id="print:1", subject="library-5")
+    seed_activity(id="print:2", subject="box")
+    page = client.get(
+        "/api/v1/activity", params={"subject": ["library:5", "library-5", "box"]}
+    ).json()
+    assert ids(page) == ["print:2", "print:1"]
+    assert page["subject_cursors"] == {}
+
+
+def test_one_subject_answers_as_before(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(id="render:a", subject="box")
+    seed_activity(id="render:b", subject="box")
+    page = client.get("/api/v1/activity", params={"subject": "box", "limit": 1}).json()
+    assert set(page) == {"items", "next_cursor"}
+    assert ids(page) == ["render:b"]
+    assert page["next_cursor"] is not None
+
+
+def test_subjects_are_bounded_and_page_one_at_a_time(client: TestClient) -> None:
+    subjects = [f"order_item:{n}" for n in range(201)]
+    over = client.get("/api/v1/activity", params={"subject": subjects})
+    assert over.status_code == 422
+    assert over.headers["content-type"].startswith("application/problem+json")
+    assert client.get("/api/v1/activity", params={"subject": subjects[:200]}).status_code == 200
+    cursor = base64.urlsafe_b64encode(b"2026-10-10T00:00:00+00:00|render:a").decode()
+    paged = client.get("/api/v1/activity", params={"subject": subjects[:2], "cursor": cursor})
+    assert paged.status_code == 400
+    assert paged.headers["content-type"].startswith("application/problem+json")
+
+
+def test_the_subject_reads_walk_the_subject_key_index(
+    client: TestClient, activity_index: ActivityIndex
+) -> None:
+    """Each subject's read is a keyset walk of `activity_subject_key`, never a scan."""
+    with activity_index.pool.connection() as conn:
+        conn.execute("SET enable_seqscan = off")
+        plan = conn.execute(
+            "EXPLAIN SELECT s.key, a.id FROM unnest(%s::text[]) AS s(key) CROSS JOIN LATERAL"
+            " (SELECT id, created_at FROM activity WHERE source <> '' AND "
+            + _SUBJECT_KEY.as_string(conn)
+            + " = s.key ORDER BY created_at DESC, id DESC LIMIT 2) a",
+            (["order_item:a", "order_item:b"],),
+        ).fetchall()
+        conn.execute("RESET enable_seqscan")
+    text = "\n".join(str(next(iter(dict(r).values()))) for r in plan)
+    assert "activity_subject_key" in text, text

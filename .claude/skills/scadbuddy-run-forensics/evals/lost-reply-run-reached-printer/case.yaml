@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: lost-reply-run-reached-printer
+expected_outcome: |
+  States that the run reached the printer: lan_print completed at about 01:44:25Z with subtask_name scadbuddy-3291f613-p1 (run id 3291f613bba84c18ab8c07176321017c). Names the sliced native library file id 1000000060 (print_sliced_upload result / sliced_library_file_id). Reports the final status succeeded and the FollowPrint child. Mentions the several workflow task timeouts (Temporal persistence slowness) as the reason the client saw no reply, not a failure of the run.
+context:
+  scaffold_script: place-files.sh

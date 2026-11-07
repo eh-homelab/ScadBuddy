@@ -15,11 +15,15 @@ type V1PrintLibraryRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryRequestBuilderGetQueryParameters the folder tree and one folder's files (the root's without “folder_id“). Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“. A file ScadBuddy uploaded names its “output_id“ (#1864), while that output still exists: the upload row outlives a deleted output, and a file whose output is gone is any other library file (#2138). “file_id“ in place of “folder_id“ lists the folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy no longer has is its 404. On “library_backend=native“ it is ScadBuddy's own library, and an id outside it, a file's or a folder's, is a 404.
+// V1PrintLibraryRequestBuilderGetQueryParameters the folder tree and one folder's files (the root's without “folder_id“). Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“. A file ScadBuddy uploaded names its “output_id“ (#1864), while that output still exists: the upload row outlives a deleted output, and a file whose output is gone is any other library file (#2138). “file_id“ in place of “folder_id“ lists the folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy no longer has is its 404. On “library_backend=native“ it is ScadBuddy's own library, and an id outside it, a file's or a folder's, is a 404. “limit“ and “after“ (a file id) page the folder's files (#2290), and “X-Total-Count“ counts every file the folder lists; the tree comes with every page. A link to a file (“file_id“, with or without its “folder_id“) with a “limit“ answers from the top of the folder down to that file at least, so the linked file is on its first page.
 type V1PrintLibraryRequestBuilderGetQueryParameters struct {
+	// Start after this file (the last file of the page before)
+	After     *int32 "uriparametername:\"after\""
 	All       *bool  "uriparametername:\"all\""
 	File_id   *int32 "uriparametername:\"file_id\""
 	Folder_id *int32 "uriparametername:\"folder_id\""
+	// At most this many items; all when omitted
+	Limit *int32 "uriparametername:\"limit\""
 }
 
 // V1PrintLibraryRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
@@ -60,7 +64,7 @@ func (m *V1PrintLibraryRequestBuilder) ByFile_idInteger(file_id int32) *V1PrintL
 // NewV1PrintLibraryRequestBuilderInternal instantiates a new V1PrintLibraryRequestBuilder and sets the default values.
 func NewV1PrintLibraryRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryRequestBuilder {
 	m := &V1PrintLibraryRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library{?all*,file_id*,folder_id*}", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library{?after*,all*,file_id*,folder_id*,limit*}", pathParameters),
 	}
 	return m
 }
@@ -96,7 +100,7 @@ func (m *V1PrintLibraryRequestBuilder) Folders() *V1PrintLibraryFoldersRequestBu
 	return NewV1PrintLibraryFoldersRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
-// Get the folder tree and one folder's files (the root's without “folder_id“). Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“. A file ScadBuddy uploaded names its “output_id“ (#1864), while that output still exists: the upload row outlives a deleted output, and a file whose output is gone is any other library file (#2138). “file_id“ in place of “folder_id“ lists the folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy no longer has is its 404. On “library_backend=native“ it is ScadBuddy's own library, and an id outside it, a file's or a folder's, is a 404.
+// Get the folder tree and one folder's files (the root's without “folder_id“). Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“. A file ScadBuddy uploaded names its “output_id“ (#1864), while that output still exists: the upload row outlives a deleted output, and a file whose output is gone is any other library file (#2138). “file_id“ in place of “folder_id“ lists the folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy no longer has is its 404. On “library_backend=native“ it is ScadBuddy's own library, and an id outside it, a file's or a folder's, is a 404. “limit“ and “after“ (a file id) page the folder's files (#2290), and “X-Total-Count“ counts every file the folder lists; the tree comes with every page. A link to a file (“file_id“, with or without its “folder_id“) with a “limit“ answers from the top of the folder down to that file at least, so the linked file is on its first page.
 // returns a LibraryListingable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryListingable, error) {
@@ -147,7 +151,7 @@ func (m *V1PrintLibraryRequestBuilder) Search() *V1PrintLibrarySearchRequestBuil
 	return NewV1PrintLibrarySearchRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
-// ToGetRequestInformation the folder tree and one folder's files (the root's without “folder_id“). Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“. A file ScadBuddy uploaded names its “output_id“ (#1864), while that output still exists: the upload row outlives a deleted output, and a file whose output is gone is any other library file (#2138). “file_id“ in place of “folder_id“ lists the folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy no longer has is its 404. On “library_backend=native“ it is ScadBuddy's own library, and an id outside it, a file's or a folder's, is a 404.
+// ToGetRequestInformation the folder tree and one folder's files (the root's without “folder_id“). Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“. A file ScadBuddy uploaded names its “output_id“ (#1864), while that output still exists: the upload row outlives a deleted output, and a file whose output is gone is any other library file (#2138). “file_id“ in place of “folder_id“ lists the folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy no longer has is its 404. On “library_backend=native“ it is ScadBuddy's own library, and an id outside it, a file's or a folder's, is a 404. “limit“ and “after“ (a file id) page the folder's files (#2290), and “X-Total-Count“ counts every file the folder lists; the tree comes with every page. A link to a file (“file_id“, with or without its “folder_id“) with a “limit“ answers from the top of the folder down to that file at least, so the linked file is on its first page.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

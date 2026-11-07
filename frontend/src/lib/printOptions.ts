@@ -82,6 +82,40 @@ export function clampOption(raw: string, spec: Pick<OptionSpec, 'min' | 'max'>):
 export const CALIBRATION_CHOICES = ['off', 'on', 'auto'] as const
 export const PREHEAT_CHOICES = ['inherit', 'on', 'off'] as const
 
+/**
+ * #5352 — what a print over the LAN does with each calibration, as the backend's
+ * `bambuddy/options.py` `LAN_CALIBRATIONS`: the LAN start sends `flow_cali` false and no
+ * field for the others, so the printer decides (`auto`). `null`: no value is what the LAN
+ * does (`vibration_cali` is a plain bool). Any other value is refused on a native route.
+ */
+export const LAN_CALIBRATIONS: Partial<Record<OptionName, string | null>> = {
+  bed_levelling: 'auto',
+  flow_cali: 'off',
+  nozzle_offset_cali: 'auto',
+  vibration_cali: null,
+}
+
+/** Whether a print over the LAN can take `value` for `name`; unset always passes. */
+export function lanHonours(name: OptionName, value: OptionValue | string): boolean {
+  if (!(name in LAN_CALIBRATIONS) || value === null) return true
+  return LAN_CALIBRATIONS[name] === value
+}
+
+/**
+ * #5602 — the dialog's notice for the values a native route cleared, e.g. "Flow
+ * calibration On was cleared: the LAN cannot set it."; `null` when none was.
+ */
+export function lanClearedNotice(cleared: PrintOptions): string | null {
+  const named = PRINT_OPTIONS.filter((spec) => isSet(optionValue(cleared, spec.name))).map(
+    (spec) => `${spec.label} ${formatOption(spec.kind, optionValue(cleared, spec.name))}`,
+  )
+  if (named.length === 0) return null
+  const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`
+  return named.length === 1
+    ? `${list} was cleared: the LAN cannot set it.`
+    : `${list} were cleared: the LAN cannot set them.`
+}
+
 /** One layer of the merge, most general first. */
 export interface OptionLayer {
   scope: OptionScope | 'request'

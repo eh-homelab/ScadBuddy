@@ -13,6 +13,7 @@ import {
   type Access,
   type ItemDetails,
   type ItemView,
+  type Loading,
   type RefreshResult,
   type SourceView,
 } from '../../api/capabilities'
@@ -107,9 +108,16 @@ const OWN_PLUGIN_NAME = 'scadbuddy'
 const HTTP_TOOL = 'http_request'
 const HTTP_NOTE = 'read for GET and HEAD, outward (asks first) for anything else'
 
+/** The tools that take a loading (#838), and which of the mock's tools are base by default (the agent's `UPFRONT_TOOLS`). */
+const LOADING_SOURCES = new Set(['builtin:scadbuddy', 'builtin:browser'])
+// The mock's tools named in agent/src/harness/toolSearch.ts `UPFRONT_TOOLS` (copied: change both).
+const UPFRONT = new Set(['list_models', 'get_model', 'render_model'])
+
 const state = {
   /** Built-in rows: `<source>\u0000<item>` -> access. */
   rows: new Map<string, Access>(),
+  /** Stored loadings (#838), by tool name: only those that differ from the default. */
+  loadings: new Map<string, Loading>(),
   /** Built-in and package server switches; a source without a row is on. */
   enabled: new Map<string, boolean>(),
   /** Remote plugins refreshed at least once, by name. */
@@ -143,6 +151,7 @@ type Stored = {
   /** The installed packages (`../aiPlugins.ts` keeps them only in the page). */
   packages?: PluginPackage[]
   checked_pins?: string[]
+  loadings?: [string, Loading][]
   remote: Record<string, { tool_tiers: Record<string, RiskTier>; disabled_tools: string[]; enabled: boolean }>
 }
 
@@ -159,6 +168,7 @@ function save(): void {
     built_ins: Object.fromEntries(packageList().filter(isBuiltIn).map((p) => [p.name, p.enabled])),
     packages: packageList().filter((p): p is PluginPackage => !isBuiltIn(p)),
     checked_pins: [...state.checkedPins],
+    loadings: [...state.loadings],
     remote: Object.fromEntries(
       remotePluginList().map((p) => [p.name, { tool_tiers: p.tool_tiers, disabled_tools: p.disabled_tools, enabled: p.enabled }]),
     ),
@@ -191,6 +201,7 @@ function restore(stored: Stored): void {
   restorePackages(stored.packages ?? [])
   for (const pin of stored.checked_pins ?? []) state.checkedPins.add(pin)
   for (const [k, access] of stored.rows) state.rows.set(k, access)
+  for (const [tool, loading] of stored.loadings ?? []) state.loadings.set(tool, loading)
   for (const [id, on] of stored.enabled) state.enabled.set(id, on)
   for (const name of stored.listed) state.listed.add(name)
   for (const id of stored.listed_servers ?? []) state.listedServers.add(id)
@@ -209,6 +220,7 @@ export function seedBuiltInRow(source: string, item: string, access: Access): vo
 
 function clearState(): void {
   state.rows.clear()
+  state.loadings.clear()
   state.enabled.clear()
   state.listed.clear()
   state.listedServers.clear()
@@ -262,9 +274,14 @@ class Refusal extends Error {
 
 // ------------------------------------------------------------------ built-in sources
 
+const defaultLoading = (tool: string): Loading => (UPFRONT.has(tool) ? 'base' : 'searchable')
+
 function builtInItem(source: string, tool: BuiltInTool): ItemView {
   const row = state.rows.get(key(source, tool.name))
+  const loads = LOADING_SOURCES.has(source)
   return {
+    loading: loads ? (state.loadings.get(tool.name) ?? defaultLoading(tool.name)) : null,
+    default_loading: loads ? defaultLoading(tool.name) : null,
     id: tool.name,
     kind: 'tool',
     name: tool.name,
@@ -885,6 +902,19 @@ function refresh(id: string): RefreshResult {
   return { test, source: found(id) }
 }
 
+/** A ScadBuddy tool's loading (#838); `null` back to its default. Any other item has none: 409. */
+function setLoading(id: string, item: string, loading: Loading | null): SourceView {
+  const view = found(id)
+  const tool = view.items.find((i) => i.id === item)
+  if (tool === undefined) throw new Refusal(404, `no item "${item}" in "${id}"`)
+  if (!LOADING_SOURCES.has(id) || tool.kind !== 'tool') {
+    throw new Refusal(409, `"${item}" in "${id}" has no loading: only ScadBuddy's own tools take base or searchable`)
+  }
+  if (loading === null || loading === defaultLoading(item)) state.loadings.delete(item)
+  else state.loadings.set(item, loading)
+  return found(id)
+}
+
 /** Answers `run`'s value, or its refusal as `{ detail }` with its status; a write is saved. */
 function answer(run: () => unknown, writes = false) {
   try {
@@ -914,6 +944,7 @@ async function bodyOf<T>(request: Request, field: string, ok: (value: unknown) =
 }
 
 const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean'
+const isLoading = (v: unknown): v is Loading => v === 'base' || v === 'searchable'
 const isAccess = (v: unknown): v is Access => typeof v === 'string' && ['off', 'read', 'write', 'outward', 'on'].includes(v)
 // msw hands path params over decoded.
 const param = (value: unknown) => String(value)
@@ -938,6 +969,16 @@ export const handlers = [
   }),
 
   http.delete(`${base}/:source/items/:item`, ({ params }) => answer(() => resetItem(param(params.source), param(params.item)), true)),
+
+  http.put(`${base}/:source/items/:item/loading`, async ({ params, request }) => {
+    const body = await bodyOf(request, 'loading', isLoading)
+    if ('error' in body) return detail(400, body.error)
+    return answer(() => setLoading(param(params.source), param(params.item), body.value), true)
+  }),
+
+  http.delete(`${base}/:source/items/:item/loading`, ({ params }) =>
+    answer(() => setLoading(param(params.source), param(params.item), null), true),
+  ),
 
   http.post(`${base}/:source/refresh`, ({ params }) => answer(() => refresh(param(params.source)), true)),
 ]

@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import type { OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
+import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
+import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
+import { addMode, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
+import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
@@ -15,6 +18,7 @@ import { itemPrice, parseUnitPrice, UNIT_PRICE_HINT, unitPrice } from '../compon
 import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
 import { PrintItem } from '../components/orders/PrintItem'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
+import { ItemPartsEditor, PartsShort } from '../components/orders/ItemParts'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
 import { UnfulfilDialog } from '../components/orders/Unfulfil'
@@ -33,7 +37,6 @@ import { dueAt, dueDay, timeAgo } from '../lib/format'
 import { formatMoney, toMajor, toMinor } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
 
-const OPEN_FOR_EDITS = new Set(['draft', 'quoted'])
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
@@ -59,6 +62,10 @@ export function OrderPage() {
   const { id = '' } = useParams()
   const view = useAsync(() => api.order(id), [id], [`order:${id}`])
   const events = useAsync(() => api.orderEvents(id), [id], [`order:${id}`])
+  // #5326 — the money view, and the header's loss or thin-margin badge.
+  const costs = useAsync(() => api.orderCosts(id), [id], [`order:${id}`])
+  // #5543 — each item's parts, and what the open items are short of.
+  const orderParts = useAsync(() => api.orderParts(id), [id], [`order:${id}`])
   // #4953 — `orders_allow_unfulfil`; on until the settings answer, as the backend's default.
   const unfulfilAllowed = useAsync(() => api.getSettings(), []).data?.orders_allow_unfulfil ?? true
   const detail = view.data
@@ -112,6 +119,8 @@ export function OrderPage() {
   function reload() {
     view.refresh()
     events.refresh()
+    costs.refresh()
+    orderParts.refresh()
   }
 
   async function act(action: () => Promise<unknown>) {
@@ -148,6 +157,8 @@ export function OrderPage() {
   }
   const { order, items, totals, charges, payments, shipments, attachments } = detail
   const editable = OPEN_FOR_EDITS.has(order.status)
+  // #5349: `after_acceptance` on an accepted, in-production or ready order not on hold.
+  const adds = addMode(order)
   const ended = ENDED.has(order.status)
   const titles = new Map(items.map((i) => [i.id, i.title]))
   const current = items.find((i) => i.id === openItem)
@@ -160,6 +171,7 @@ export function OrderPage() {
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{order.number}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
+          <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
             <Link to={`/customers/${order.customer_id}`} className="text-primary underline-offset-4 hover:underline">
@@ -184,13 +196,13 @@ export function OrderPage() {
                 Accept order
               </Button>
             )}
-            {editable && (
+            {adds && (
               <Button variant="outline" disabled={busy} onClick={() => setAdding(true)}>
                 Add item
               </Button>
             )}
-            {editable && (
-              // #4954 — the entry row under the items takes it.
+            {adds && (
+              // #4954 — the entry row under the items takes it (#5541: after acceptance too).
               <Button variant="outline" disabled={busy} onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
                 Add custom item
               </Button>
@@ -252,7 +264,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
-          canAdd={editable}
+          addTo={adds && { mode: adds, number: order.number }}
           selected={current?.id ?? null}
           quoting={slices.runs}
           onHold={order.on_hold}
@@ -327,7 +339,7 @@ export function OrderPage() {
           <Card size="sm">
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-medium">Money</h2>
-              <ChargesEditor orderId={order.id} currency={order.currency} exponent={order.minor_exponent} charges={charges} editable={editable} onChanged={reload} />
+              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
                 <dt className="text-muted-foreground">Items</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>
@@ -405,6 +417,29 @@ export function OrderPage() {
           </CardContent>
         </Card>
 
+        {orderParts.data?.order_id === order.id && <PartsShort parts={orderParts.data} />}
+        {costs.data?.order_id === order.id ? (
+          <Card size="sm">
+            <CardContent>
+              <OrderCosts costs={costs.data} onChanged={reload} />
+            </CardContent>
+          </Card>
+        ) : (
+          costs.error && (
+            <Card size="sm">
+              <CardContent className="flex flex-col gap-2" aria-label="Cost">
+                <h2 className="text-sm font-medium">Cost and margin</h2>
+                <p role="alert" className="text-[13px] text-destructive">
+                  The order's cost could not be read: {costs.error.message}
+                </p>
+                <Button size="sm" variant="outline" className="self-start" onClick={() => costs.refresh()}>
+                  Try again
+                </Button>
+              </CardContent>
+            </Card>
+          )
+        )}
+
         <section className="flex flex-col gap-1" aria-label="Audit line">
           <h2 className="text-sm font-medium">History</h2>
           {events.data && events.data.length > 0 ? (
@@ -421,9 +456,18 @@ export function OrderPage() {
           )}
         </section>
       </div>
-      {editable && <AddItemDialog open={adding} orderId={order.id} onAdded={reload} onClose={() => setAdding(false)} />}
+      {adds && <AddItemDialog open={adding} orderId={order.id} mode={adds} order={order} onAdded={reload} onClose={() => setAdding(false)} />}
       {current && (
-        <ItemDrawer key={current.id} detail={detail} item={current} slices={slices} unfulfilAllowed={unfulfilAllowed} onClose={() => setOpenItem(null)} onChanged={reload} />
+        <ItemDrawer
+          key={current.id}
+          detail={detail}
+          item={current}
+          parts={orderParts.data?.order_id === order.id ? (orderParts.data.items.find((i) => i.item_id === current.id)?.parts ?? []) : undefined}
+          slices={slices}
+          unfulfilAllowed={unfulfilAllowed}
+          onClose={() => setOpenItem(null)}
+          onChanged={reload}
+        />
       )}
     </div>
   )
@@ -432,6 +476,7 @@ export function OrderPage() {
 function ItemDrawer({
   detail,
   item,
+  parts,
   slices,
   unfulfilAllowed,
   onClose,
@@ -439,6 +484,8 @@ function ItemDrawer({
 }: {
   detail: OrderDetail
   item: OrderItemDetail
+  /** #5543 — the item's parts per unit; undefined until read. */
+  parts: ItemPartRow[] | undefined
   slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'dismiss'>
   /** #4953 — `orders_allow_unfulfil`. */
   unfulfilAllowed: boolean
@@ -446,12 +493,19 @@ function ItemDrawer({
   onChanged: () => void
 }) {
   const { order } = detail
-  const editable = OPEN_FOR_EDITS.has(order.status)
+  // The item's own price decides past `quoted` (#5349): one added after acceptance is quoted here.
+  // It gates only the quantity and a custom item's price, which stay pinned once a quote is accepted.
+  const editable = itemOpen(order, item.quotes)
+  // #5350: an item revised after acceptance takes a quote of its new design, and that quote's acceptance.
+  // The design and filament edits follow it (#5582): the quote's filaments here, revisions in `RevisionsPanel` (`reviseMode`).
+  const quotable = priceOpen(order, item, item.quotes)
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   const [error, setError] = useState<string | null>(null)
   const [unfulfilling, setUnfulfilling] = useState(false)
   const unfulfilBlocked = unfulfilAllowed ? unfulfilBlock(order, detail.shipments, item) : UNFULFIL_OFF
   const custom = item.kind === 'custom'
+  // The order read lists test prints too (#5280); only production attempts make the item.
+  const production = item.fulfilments.filter((f) => f.purpose === 'production')
   const itemProject = detail.projects?.find((p) => p.item_id === item.id)
   const unit = unitPrice(item)
   const unitText = unit ? toMajor(unit.minor, order.minor_exponent) : ''
@@ -551,14 +605,14 @@ function ItemDrawer({
             <UnfulfilDialog orderId={order.id} item={item} open={unfulfilling} onOpenChange={setUnfulfilling} onChanged={onChanged} />
           </>
         ) : item.status === 'cancelled' && !ENDED.has(order.status) ? (
-          editable || item.quotes.some((q) => q.accepted) ? (
+          OPEN_FOR_EDITS.has(order.status) || TAKES_ITEMS.has(order.status) || item.quotes.some((q) => q.accepted) ? (
             <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
               Reopen item
             </Button>
           ) : (
-            // `item_not_priced`: an accepted order takes back a priced item only.
+            // `item_not_priced`: a shipped order takes back a priced item only (#5349).
             <p className="text-xs text-muted-foreground" data-testid="reopen-unpriced">
-              This item had no accepted price, so it can't come back into an accepted order.
+              This item had no accepted price, so it can't come back into a shipped order.
             </p>
           )
         ) : (
@@ -650,20 +704,24 @@ function ItemDrawer({
           </>
         )}
       </dl>
+      <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
+      {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {custom ? (
-        // #4954 — a custom item's price is the field above: its quotes are shown only.
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} onChanged={onChanged} />
+        // #4954 — a custom item's price is the field above: nothing is recorded here. A price
+        // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
       <PrintItem order={order} item={item} onChanged={onChanged} />
-      <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
+      <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={production} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       <OrderAttachments
         orderId={order.id}
         itemId={item.id}
-        attachments={detail.attachments.filter((a) => a.item_id === item.id)}
+        attachments={detail.attachments.filter((a) => a.item_id === item.id && !a.revision_id)}
         deliveredId={item.delivered_attachment_id ?? null}
+        attempts={production}
         onChanged={onChanged}
       />
       {error && (

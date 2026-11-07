@@ -307,6 +307,11 @@ jobs:
       - name: Test the clusters deploy pin
         run: .github/scripts/deploy-pin.test.sh
 
+      # Runs deploy.reusable.yml's own wait step against a stub gh: an open
+      # deploy PR lands before a newer deploy replaces it (#5168).
+      - name: Test the deploy PR wait
+        run: .github/scripts/deploy-wait.test.sh
+
       # deploy/grafana is built by kustomize in ArgoCD's repo-server, which
       # runs 5.6.0 (clusters/prod/bambuddy/kustomization.yaml says so), so the
       # lint builds it with that release, never whatever kustomize the runner

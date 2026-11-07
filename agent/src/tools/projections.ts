@@ -7,7 +7,7 @@ import type { AuditLog } from '../audit/log.js'
 import { TOOL_USE_META, toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { CallApproval } from '../harness/seamLedger.js'
-import { UPFRONT_TOOLS } from '../harness/toolSearch.js'
+import { loadingOf, type ToolLoadings } from '../harness/toolSearch.js'
 import type { ToolCallStarter } from './activityProjection.js'
 import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
@@ -107,6 +107,8 @@ export function createHarnessServer(
    * tools) runs here.
    */
   activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined },
+  /** Settings → Tools & plugins' stored loadings (#838, harness/toolSearch.ts): a `base` tool is sent upfront. */
+  loadings: ToolLoadings = {},
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -158,8 +160,8 @@ export function createHarnessServer(
               seamTier: seamTierOf(t, toolUseId),
             })
           }),
-        // The few every turn needs stay out of tool search (harness/toolSearch.ts, #5221).
-        { annotations: t.annotations, ...(UPFRONT_TOOLS.has(t.name) ? { alwaysLoad: true } : {}) },
+        // A base tool stays out of tool search (harness/toolSearch.ts, #5221, #838).
+        { annotations: t.annotations, ...(loadingOf(t.name, loadings) === 'base' ? { alwaysLoad: true } : {}) },
       ),
     ),
   })

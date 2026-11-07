@@ -129,6 +129,9 @@ export const handlers = [
     }
     return HttpResponse.json({ id, kind: body.kind, outcome: outcomeOf(body) })
   }),
+  // #815 — the agent's change stream: 204 tells an EventSource not to reconnect, so the mocked
+  // badge reads on its poll, as against an agent without the stream.
+  http.get('/api/v1/ai/pending-input/changes', () => new HttpResponse(null, { status: 204 })),
   // The agent's PendingInputPage (agent src/routes/pendingInput.ts).
   http.get('/api/v1/ai/pending-input', () =>
     HttpResponse.json({ entries: listed().filter((e) => !ended.has(e.id)), summaries_truncated: state.summariesTruncated }),

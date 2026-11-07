@@ -49,6 +49,7 @@ from scadbuddy.bambuddy.print_source import PrintSource, bambuddy_client
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.operations.kinds import await_to_end
 from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.slicing import slice_info
 from scadbuddy.slicing.catalogue import catalogue_for
@@ -173,9 +174,11 @@ async def _start_plate(
     native_slices: NativeSliceStore | None,
     temporal: Client | None,
     native_reads: LibraryReads | None,
+    fresh: bool = False,
 ) -> PreviewStarted:
     """One planned plate's background slice, recorded for ``subject``: a finished one of
-    the same copy and presets answered again rather than sliced twice."""
+    the same copy and presets answered again rather than sliced twice, unless ``fresh``
+    (the dialog's Reslice, #4433) asks for a new slice on either slicer."""
     if plate.plan is None:
         # Only a sliced file's plates have no plan, and those are refused above; said
         # rather than asserted, which python -O strips (#2691 review).
@@ -195,28 +198,37 @@ async def _start_plate(
             native_slices=native_slices,
             temporal=temporal,
             native_reads=native_reads,
+            fresh=fresh,
         )
     client = bambuddy_client(client)
     key = slice_request(plate.plan, plate.plate_id).preset_key
-    job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
+    # A fresh slice is recorded as the newest, so a run of these choices queues it.
+    job_id = None if fresh else await reusable_slice(client, uploads)(planned.library_file_id, key)
     if job_id is None:
-        accepted = await client.slice(
-            planned.library_file_id, slice_request(plate.plan, plate.plate_id)
-        )
-        job_id = accepted.job_id
-        # What Bambuddy says of the job now, so a job of the same id after a restart of
-        # Bambuddy's is never taken for this one.
-        job = await client.slice_job(job_id)
-        await uploads.record_preview(
-            PreviewSlice(
-                job_id=job_id,
-                subject=subject,
-                library_file_id=planned.library_file_id,
-                preset_key=key,
-                plate_id=plate.plate_id,
-                job_created=job.created_at,
+        plan = plate.plan
+
+        async def slice_and_record() -> int:
+            accepted = await client.slice(
+                planned.library_file_id, slice_request(plan, plate.plate_id)
             )
-        )
+            # What Bambuddy says of the job now, so a job of the same id after a restart
+            # of Bambuddy's is never taken for this one.
+            job = await client.slice_job(accepted.job_id)
+            await uploads.record_preview(
+                PreviewSlice(
+                    job_id=accepted.job_id,
+                    subject=subject,
+                    library_file_id=planned.library_file_id,
+                    preset_key=key,
+                    plate_id=plate.plate_id,
+                    job_created=job.created_at,
+                )
+            )
+            return accepted.job_id
+
+        # Run to the end even when cancelled (#5445): a job Bambuddy accepted but no
+        # row records cannot be reused, so the next attempt would slice it again.
+        job_id = await await_to_end(asyncio.ensure_future(slice_and_record()))
     return PreviewStarted(job_id=job_id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
 
 
@@ -234,9 +246,11 @@ async def start_preview(
     native_reads: LibraryReads | None = None,
     route: RunRoute | None = None,
     title: str | None = None,
+    fresh: bool = False,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
     record the slice for ``subject``; the first plate when every plate prints.
+    ``fresh`` (#4433) slices again even when a finished slice of the same could answer.
 
     The copy goes to the inbox even when a project is chosen: the dialog slices on every
     change, and a copy filed in a project's folder is that project's record, never
@@ -254,6 +268,7 @@ async def start_preview(
         native_slices=native_slices,
         temporal=temporal,
         native_reads=native_reads,
+        fresh=fresh,
     )
 
 
@@ -309,6 +324,7 @@ async def _start_native(
     native_slices: NativeSliceStore | None,
     temporal: Client | None,
     native_reads: LibraryReads | None,
+    fresh: bool = False,
 ) -> PreviewStarted:
     """The laid-out copy sliced by `SliceWorkflow` (Ruling C1: this only starts it; every
     byte moves on the ``library`` queue). Its ``job_id`` is the `native_slices` row's."""
@@ -340,6 +356,7 @@ async def _start_native(
             subject=subject,
             client=client,
             copy_sha256=copy.file_hash,
+            fresh=fresh,
         )
     except ProfileImageError as error:
         # The image's tree, not the plan (review N-b).

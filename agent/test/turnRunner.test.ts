@@ -91,6 +91,7 @@ describe('TurnRunner', () => {
     ["http_request's tier (#2171)", { access: [{ source: 'builtin:http', item: 'http_request', access: 'outward', updated_by: 'test' }] }, 'httpTier'],
     ["a package's allow_refused approval", { allowRefused: true }, 'allowedPackageHashes'],
     ['the Hindsight recall query cap', { recallMaxQueryChars: 12 }, 'recallMaxQueryChars'],
+    ["a ScadBuddy tool's loading (#838)", { toolLoadings: { list_models: 'searchable' } }, 'toolLoadings'],
   ])('fingerprints %s', async (_what, changed, field) => {
     const base = await turnRunnerForTest()
     const before = await base.runner.assemble(base.session, base.principal)
@@ -102,6 +103,13 @@ describe('TurnRunner', () => {
     const { [field]: _a, ...restAfter } = after.fingerprintParts
     const { [field]: _b, ...restBefore } = before.fingerprintParts
     expect(restAfter).toEqual(restBefore)
+  })
+
+  it("gives the in-process server Settings' stored loadings (#838)", async () => {
+    const { runner, session, principal, serverExtras } = await turnRunnerForTest({ toolLoadings: { list_models: 'searchable', list_outputs: 'base' } })
+    const turn = await runner.assemble(session, principal)
+    expect(serverExtras.at(-1)).toMatchObject({ loadings: { list_models: 'searchable', list_outputs: 'base' } })
+    expect([...turn.fingerprintParts.toolLoadings].sort()).toEqual(['list_models=searchable', 'list_outputs=base'])
   })
 
   type Hooks = Partial<Record<HookEvent, HookCallbackMatcher[]>>

@@ -17,12 +17,13 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast, get_args
+from typing import Any, ClassVar, NoReturn, cast, get_args
 
 import httpx
 import psycopg
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Summary
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.deployment.v1 import (
@@ -52,10 +53,26 @@ from temporalio.worker import (
 )
 
 from scadbuddy import worker as worker_module
+from scadbuddy.auth.service_credentials import (
+    ExchangeReader,
+    ServiceAuth,
+    ServiceCredentialConfigError,
+)
 from scadbuddy.core.config import Config
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import ROLE_SERIES, Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.guard import CRUD_HEADERS
+from scadbuddy.crud.render import (
+    RemoteBlobIndex,
+    RemoteBlobRefs,
+    RemoteGeometryIndex,
+    RemoteJobProjection,
+    RemoteStoreFolders,
+)
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
@@ -64,7 +81,7 @@ from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import RenderSettingsSource, StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
@@ -108,6 +125,7 @@ from tests.conftest import (
     PgPool,
     fake_3mf_openscad,
 )
+from tests.crud.crud_support import FixedToken, served_render_crud, static_render_crud
 from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
@@ -181,13 +199,21 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
         model_version=revision,
         created_at=datetime.now(UTC),
     )
-    projection = JobProjection(pg_conninfo, pool_size=2)
+    # The API's: the worker writes its job rows through the CRUD routes on it (#5298).
+    projection = JobProjection(
+        pg_conninfo,
+        pool_size=2,
+        events=PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo)),
+    )
     projection.open()
     try:
-        async with temporal_client() as client:
+        async with (
+            temporal_client() as client,
+            served_render_crud(projection.pool, cfg, projection=projection) as crud,
+        ):
             stop = asyncio.Event()
             worker = asyncio.create_task(
-                run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+                run_worker(cfg, stop=stop, health_port=health_socket, client=client, crud=crud)
             )
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
@@ -219,7 +245,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     assert stored.result is not None
     key = piece_key(model, revision, "model.scad", params)
     assert (cfg.data_dir / "blobs" / key).is_dir()
-    # The worker's own bus published the job's events.
+    # The API published the job's events, written for the worker.
     with psycopg.connect(pg_conninfo) as conn:
         kinds = {
             row[0]
@@ -245,6 +271,9 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     # Refreshed per scrape from this process's store (the local one: no cache to size).
     assert samples["scadbuddy_store_render_key_fallback"] == 0
     assert samples["scadbuddy_worker_cache_bytes"] == 0
+    # None of the API's series, whose zeros would fire its alerts (#664).
+    assert "scadbuddy_render_store_up" not in metrics
+    assert not _families(metrics) & API_ONLY
 
 
 # ── the drain after stop ───────────────────────────────────────────────────────
@@ -380,6 +409,136 @@ async def test_the_projects_worker_refuses_to_start_without_the_api_url(tmp_path
     )
     with pytest.raises(worker_module.ApiUrlMissingError, match="--queue projects"):
         await worker_module.run_projects_worker(settings, health_port=None)
+
+
+async def test_the_render_worker_refuses_to_start_without_the_api_url(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        api_internal_url=None,
+    )
+    with pytest.raises(worker_module.ApiUrlMissingError, match="the render worker"):
+        await worker_module.run_worker(settings, health_port=None)
+
+
+async def test_the_render_worker_refuses_to_start_without_a_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Render is exchange-only (#5494): without a proof file it has no credential, so it
+    fails at once rather than waiting on 401s, and reads no database first."""
+
+    def build(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("built without a credential")
+
+    def connect(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("connected to the database")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    monkeypatch.setattr(psycopg, "connect", connect)
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        api_internal_url="http://scadbuddy:8082",
+    )
+    async with asyncio.timeout(5):
+        with pytest.raises(ServiceCredentialConfigError, match="SCADBUDDY_SERVICE_TOKEN_FILE"):
+            await worker_module.run_worker(settings, health_port=None)
+
+
+async def test_the_render_workers_credential_has_no_view_to_fall_back_to(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "token"
+    token.write_text("a-projected-token")
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        api_internal_url="http://scadbuddy:8082",
+        service_token_file=token,
+    )
+    crud = worker_module.render_crud(settings)
+    try:
+        reader = crud._auth._reader
+        assert isinstance(reader, ExchangeReader)
+        assert reader._fallback is None
+    finally:
+        await crud.aclose()
+
+
+async def test_the_render_worker_waits_for_its_areas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """During a roll the API may be older than the worker (#5298): it reads no settings
+    and opens nothing until the API serves the `settings` and `jobs` areas; a stop ends
+    the wait. This API serves the settings only."""
+    asked: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        return httpx.Response(200, json={"areas": ["settings"]}, headers=CRUD_HEADERS)
+
+    def build(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("built before the API served the jobs area")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    crud = CrudClient(
+        "http://api", "render", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
+    )
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        worker_module.run_worker(settings, stop=stop, health_port=None, crud=crud)
+    )
+    async with asyncio.timeout(10):
+        while not asked:
+            await asyncio.sleep(0.01)
+    assert not worker.done()
+    stop.set()
+    await asyncio.wait_for(worker, timeout=10)
+    assert set(asked) == {"/api/v1/internal/crud/render/areas"}
+
+
+async def test_a_stop_ends_the_render_workers_first_settings_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+
+    async def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path.endswith("/areas"):
+            areas = {"areas": sorted(worker_module.RENDER_CRUD_AREAS)}
+            return httpx.Response(200, json=areas, headers=CRUD_HEADERS)
+        await asyncio.Event().wait()  # the settings never come
+        raise AssertionError("unreachable")
+
+    def build(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("built without the store settings")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    crud = CrudClient(
+        "http://api", "render", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
+    )
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    stop = asyncio.Event()
+    worker = asyncio.create_task(
+        worker_module.run_worker(settings, stop=stop, health_port=None, crud=crud)
+    )
+    async with asyncio.timeout(10):
+        while "/api/v1/internal/crud/render/settings" not in asked:
+            await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(worker, timeout=10)
 
 
 @pytest.mark.parametrize("queue", ["render", "bambuddy"])
@@ -2044,6 +2203,147 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
     assert samples["scadbuddy_render_data_bytes"] == allocated >= 100_000
 
 
+def _families(exposition: str) -> set[str]:
+    """The metric families an exposition declares, by their ``# TYPE`` lines (a
+    counter's without its ``_total``)."""
+    return {
+        line.split()[2].removesuffix("_total")
+        for line in exposition.splitlines()
+        if line.startswith("# TYPE ")
+    }
+
+
+#: Series only the API sets (#664): a worker that exported them would show its zeros,
+#: and `scadbuddy_render_store_up 0` fires ScadBuddyRenderStoreUnreadable.
+API_ONLY = {
+    "scadbuddy_render_store_up",
+    "scadbuddy_render_store_info",
+    "scadbuddy_render_store_errors",
+    "scadbuddy_render_queue_depth",
+    "scadbuddy_render_queue_oldest_seconds",
+    "scadbuddy_render_queue_max",
+    "scadbuddy_render_jobs_running",
+    "scadbuddy_render_jobs_submitted",
+    "scadbuddy_render_queue_listener_connected",
+    "scadbuddy_render_settle_failed",
+    "scadbuddy_store_blobs",
+    "scadbuddy_assets_stored",
+    "scadbuddy_trace_relay_batches",
+    "scadbuddy_auth_would_refuse",
+    "scadbuddy_http_requests",
+    "scadbuddy_native_slice_seconds",
+    "scadbuddy_operations_deferred",
+}
+
+#: What each worker sets, so what its /metrics must carry.
+WORKER_OWN = {
+    "render": {
+        "scadbuddy_build_info",
+        "scadbuddy_render_jobs_finished",
+        "scadbuddy_render_duration_seconds",
+        "scadbuddy_render_job_latency_seconds",
+        "scadbuddy_render_queue_wait_seconds",
+        "scadbuddy_render_stage_seconds",
+        "scadbuddy_render_project_retries",
+        "scadbuddy_store_operations",
+        "scadbuddy_worker_cache",
+        "scadbuddy_worker_cache_bytes",
+        "scadbuddy_render_data_bytes",
+        "scadbuddy_store_render_key_fallback",
+        "scadbuddy_events_published",
+        "scadbuddy_event_loop_lag_seconds",
+    },
+    "print": {
+        "scadbuddy_build_info",
+        "scadbuddy_print_follows_running",
+        "scadbuddy_rack_watch_settle_failed",
+        "scadbuddy_events_received",
+        "scadbuddy_event_loop_lag_seconds",
+        "scadbuddy_operation_duration_seconds",
+        "scadbuddy_operations_finished",
+    },
+    "projects": {
+        "scadbuddy_build_info",
+        "scadbuddy_events_received",
+        "scadbuddy_event_loop_lag_seconds",
+        "scadbuddy_operation_duration_seconds",
+        "scadbuddy_operations_finished",
+    },
+}
+
+
+@pytest.mark.parametrize("role", ["render", "print", "projects"])
+def test_a_worker_exports_its_own_series_and_none_of_the_apis(role: str) -> None:
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        revision="abc123",
+    )
+    metrics = worker_module.worker_metrics(settings, cast(MetricsRole, role))
+    exposed = _families(metrics.exposition().decode())
+    assert exposed >= WORKER_OWN[role]
+    assert not exposed & API_ONLY
+    assert 'revision="abc123"' in metrics.exposition().decode()
+    if role != "render":
+        assert "scadbuddy_render_stage_seconds" not in exposed
+        assert "scadbuddy_worker_cache_bytes" not in exposed
+
+
+async def test_the_render_workers_scrape_carries_no_api_series(tmp_path: Path) -> None:
+    """The scrape itself (#664): the store refresh and the SDK series added to it."""
+    local = LocalBlobStore(tmp_path / "blobs")
+    cache = CachedBlobStore(
+        local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
+    )
+    store = StoreBundle(
+        "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
+    )
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    app = worker_module._health_app(
+        settings, worker_module.worker_metrics(settings, "render"), store, "render"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:
+        exposition = (await http.get("/metrics")).text
+    exposed = _families(exposition)
+    assert "scadbuddy_render_store_up" not in exposition
+    assert not exposed & API_ONLY
+    assert exposed >= WORKER_OWN["render"]
+
+
+def test_every_role_names_only_metrics_that_exist() -> None:
+    metrics = Metrics()
+    for role, names in ROLE_SERIES.items():
+        for name in names:
+            assert isinstance(getattr(metrics, name, None), Counter | Gauge | Histogram), (
+                role,
+                name,
+            )
+
+
+def test_a_worker_never_exports_a_collector_of_another_type() -> None:
+    """A later `Summary`, `Info` or `Enum` attribute stays off a worker's scrape too (#664)."""
+
+    class WithSummary(Metrics):
+        def __init__(self, registry: CollectorRegistry, role: MetricsRole) -> None:
+            self.extra = Summary("scadbuddy_test_extra_seconds", "Not a role's.", registry=registry)
+            super().__init__(registry, role=role)
+
+    for role in ROLE_SERIES:
+        exposed = _families(WithSummary(CollectorRegistry(), role).exposition().decode())
+        assert "scadbuddy_test_extra_seconds" not in exposed, role
+
+
+def test_the_api_exports_every_series() -> None:
+    exposed = _families(Metrics().exposition().decode())
+    assert exposed >= API_ONLY
+    assert exposed >= set().union(*WORKER_OWN.values())
+
+
 async def test_the_data_directory_is_measured_when_the_database_is_down(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2102,25 +2402,45 @@ def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: P
     assert worker_module._allocated_bytes(root) == int(du.stdout.split()[0])
 
 
-def test_a_refused_store_closes_the_projection_the_worker_opened(
+def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
+    """`build_worker_deps` on the default store settings (the local store), read once."""
+    source, current = StoreSettingsSource(), RenderStoreSettings()
+    source.seed(current)
+    remote = static_render_crud().blocking()
+    return worker_module.build_worker_deps(
+        settings,
+        source,
+        current,
+        jobs=RemoteJobProjection(remote),
+        refs=RemoteBlobRefs(remote),
+        geometry=RemoteGeometryIndex(remote),
+        index=RemoteBlobIndex(remote),
+        folders=RemoteStoreFolders(static_render_crud()),
+    )
+
+
+class _RecordingPool(PgPool):
+    """Records each pool the worker opens."""
+
+    opened: ClassVar[list[PgPool]] = []
+
+    def open(self, *args: Any, **kwargs: Any) -> None:
+        super().open(*args, **kwargs)
+        self.opened.append(self)
+
+
+def test_a_refused_store_closes_the_pool_the_worker_opened(
     settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    opened: list[JobProjection] = []
-
-    class Recording(JobProjection):
-        def open(self, *, migrate_schema: bool = True) -> None:
-            assert not migrate_schema  # the worker never migrates (#601)
-            super().open(migrate_schema=migrate_schema)
-            opened.append(self)
-
     def refuse(**_: object) -> NoReturn:
         raise StoreNotReadyError("refused")
 
-    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    monkeypatch.setattr(_RecordingPool, "opened", [])
+    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
     monkeypatch.setattr(worker_module, "build_store", refuse)
     with pytest.raises(StoreNotReadyError):
-        worker_module.build_worker_deps(settings)
-    assert len(opened) == 1 and opened[0].pool.closed
+        _built(settings)
+    assert len(_RecordingPool.opened) == 1 and _RecordingPool.opened[0].closed
 
 
 async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
@@ -2128,16 +2448,13 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
 ) -> None:
     """#601: on an unmigrated schema the worker waits for the API rather than
     migrating; a stop ends the wait, and what it opened is closed."""
-    opened: list[JobProjection] = []
-
-    class Recording(JobProjection):
-        def open(self, *, migrate_schema: bool = True) -> None:
-            super().open(migrate_schema=migrate_schema)
-            opened.append(self)
-
-    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    opened: list[PgPool] = []
+    monkeypatch.setattr(_RecordingPool, "opened", opened)
+    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
     stop = asyncio.Event()
-    worker = asyncio.create_task(worker_module.run_worker(settings, stop=stop, health_port=None))
+    worker = asyncio.create_task(
+        worker_module.run_worker(settings, stop=stop, health_port=None, crud=static_render_crud())
+    )
     for _ in range(600):
         if opened:
             break
@@ -2145,7 +2462,7 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
     assert not worker.done()
     stop.set()
     await asyncio.wait_for(worker, timeout=30)
-    assert len(opened) == 1 and opened[0].pool.closed
+    assert len(opened) == 1 and opened[0].closed
     with psycopg.connect(settings.database_url) as conn:
         ledger = conn.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
     assert ledger == (None,)
@@ -2157,7 +2474,7 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
     """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
     loops: list[asyncio.AbstractEventLoop | None] = []
 
-    def build(_settings: Settings, **_: object) -> NoReturn:
+    def build(_settings: Settings, *_: object, **__: object) -> NoReturn:
         try:
             loops.append(asyncio.get_running_loop())
         except RuntimeError:
@@ -2166,7 +2483,7 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
 
     monkeypatch.setattr(worker_module, "build_worker_deps", build)
     with pytest.raises(StoreNotReadyError):
-        await worker_module.run_worker(settings, health_port=None)
+        await worker_module.run_worker(settings, health_port=None, crud=static_render_crud())
     assert loops == [None]
 
 
@@ -2180,28 +2497,33 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
     (seed / "BOSL2" / commit / "BOSL2" / "std.scad").write_text("// std\n")
     data = tmp_path / "worker-data"
     cfg = settings.model_copy(update={"data_dir": data, "seed_libraries_dir": seed})
-    deps, store = worker_module.build_worker_deps(cfg)
+    deps, store = _built(cfg)
     try:
         checkout = deps.paths.libraries / "BOSL2" / commit / "BOSL2" / "std.scad"
         assert checkout.read_text() == "// std\n"
     finally:
         await store.aclose()
-        deps.projection.close()
+        assert deps.pool is not None
+        deps.pool.close()
 
 
 @pytest.mark.requires_postgres
-async def test_the_render_workers_projection_writes_activity(
+async def test_the_render_workers_job_rows_go_through_the_api(
     settings: Settings, pg_pool: PgPool, tmp_path: Path
 ) -> None:
-    """Without it a render's state changes on a worker are missing from activity until
-    the repair sweep."""
+    """#5298: the worker writes no job row, event, activity row, blob ref or piece
+    geometry over SQL; the API writes them (`tests/crud/test_crud_render_jobs.py`,
+    `tests/crud/test_crud_render_refs.py`)."""
     cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
-    deps, store = worker_module.build_worker_deps(cfg)
+    deps, store = _built(cfg)
     try:
-        assert deps.projection.activity is not None
+        assert isinstance(deps.projection, RemoteJobProjection)
+        assert isinstance(deps.refs, RemoteBlobRefs)
+        assert isinstance(deps.geometry, RemoteGeometryIndex)
     finally:
         await store.aclose()
-        deps.projection.close()
+        assert deps.pool is not None
+        deps.pool.close()
 
 
 @pytest.mark.parametrize(
@@ -2220,11 +2542,12 @@ def test_each_worker_reports_under_its_deployments_name(
     monkeypatch.setattr(sys, "argv", ["scadbuddy.worker", "--queue", queue])
     monkeypatch.setattr(worker_module, "configure_tracing", lambda name, **_: named.append(name))
     monkeypatch.setattr(worker_module, "configure_logging", lambda level: None)
-    monkeypatch.setattr(
-        worker_module,
-        "Settings",
-        lambda: SimpleNamespace(log_level="INFO", version="v", revision="r"),
-    )
+    for settings in ("Settings", "NoDatabaseSettings"):
+        monkeypatch.setattr(
+            worker_module,
+            settings,
+            lambda: SimpleNamespace(log_level="INFO", version="v", revision="r"),
+        )
 
     def ran(main: Any) -> None:
         main.close()
@@ -2454,7 +2777,13 @@ async def test_the_render_workers_readyz_waits_for_the_render_queue_to_route_to_
     async with temporal_client() as client:
         stop = asyncio.Event()
         worker = asyncio.create_task(
-            run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+            run_worker(
+                cfg,
+                stop=stop,
+                health_port=health_socket,
+                client=client,
+                crud=static_render_crud(),
+            )
         )
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:

@@ -14,6 +14,8 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
+import { pinnedOutward } from './pinnedOutward.js'
+import type { FetchGrantMinter } from './fetchGrant.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -80,6 +82,8 @@ export type ToolServices = {
   commandFollowMs?: number
   /** How long a command follows a 202 `accepting` (tools/command.ts); `ACCEPTING_MS` when unset. */
   acceptingMs?: number
+  /** The monotonic clock in ms that `acceptingMs` is spent on (tools/command.ts); `performance.now` when unset. Tests set it. */
+  now?: () => number
   /** How long a call may run past its own waits before it is answered as timed out; `TOOL_DEADLINE_MS` when unset. */
   toolDeadlineMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
@@ -99,8 +103,10 @@ export type ToolServices = {
   workspace?: SessionFiles | undefined
   /**
    * The secrets a tool must never hand the model (#2329): every saved Claude
-   * credential's (main.ts), and in a classic turn the turn's plugin tokens too
-   * (tools/harness.ts). workspace_read redacts them from text, as the event log
+   * credential's and every plugin secret (main.ts, plugins/secrets.ts
+   * `readPluginSecrets`, one list in every mode, #5480), and in an in-process turn
+   * its loaded plugins' current headers too (tools/harness.ts). workspace_read
+   * redacts them from text and every upload refuses them, as the event log
    * is redacted of them (sessions/sdkEvents.ts `scrubForLog`).
    */
   secrets?: (() => Promise<readonly string[]>) | undefined
@@ -125,6 +131,8 @@ export type ToolServices = {
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
+  /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
+  fetchGrant?: FetchGrantMinter | undefined
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
@@ -145,10 +153,17 @@ export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
  * any outward tool (`approval: 'none'` tools are outward already, so this never
  * gates them), and an outward tool lowered below it is not gated at all.
  */
-export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
+export async function effectiveTool(
+  tool: Tool,
+  services: Pick<ToolServices, 'toolOverrides'>,
+  /** The call's arguments, when there is a call: one outward by its input (#959, pinnedOutward.ts) stays gated whatever the override. */
+  input?: unknown,
+): Promise<EffectiveTool> {
   const override = await services.toolOverrides?.of(tool.name)
+  const disabled = override?.disabled === true
+  if (input !== undefined && pinnedOutward(tool.name, input)) return { risk: 'outward', gated: true, disabled }
   const risk = override?.tier ?? tool.risk
-  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled: override?.disabled === true }
+  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled }
 }
 
 /** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
@@ -207,6 +222,13 @@ export type ToolContext = ToolServices & {
    * (`needs_approval`, spec 2026-10-01 §6.4) has passed. Not prepared again either.
    */
   gate?: 'harness' | 'workflow'
+  /**
+   * Whether this call's own approval was a person's in the ScadBuddy UI (responder or
+   * decider `browser`), not a run grant, a flow's standing grant or another principal's
+   * decision (#959). Set by the ToolCall activity (`workflow`) and by /mcp's
+   * confirm_action from the approval it consumed; unset anywhere else. Only what must reach a person reads it: fetch_asset's one-off host.
+   */
+  approvedByPerson?: boolean
   /**
    * Under `harness`: the tier the turn's permission seam applied to this call. The
    * seam reads each call's access (#2171, access/live.ts) and records the tier it
@@ -284,6 +306,14 @@ export type ToolSpec<S extends z.ZodRawShape> = {
     needs: ApprovalNeeds,
   ) => Promise<{ input: z.infer<z.ZodObject<S>>; summary: string }>
   /**
+   * What a flow's approval binds beside the script's raw arguments (#4445), from the
+   * parsed arguments and what `prepareApproval` resolved: the backend binds a person's
+   * approval to the same (backend flows/print_binding.py). A key whose value is null says
+   * the resolution found nothing to add (a printer only the LAN reaches); it is hashed,
+   * never sent to the handler. Without it, a flow's call binds its raw arguments alone.
+   */
+  flowBinding?: (args: z.infer<z.ZodObject<S>>, resolved: z.infer<z.ZodObject<S>>) => Record<string, unknown>
+  /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
    * the action ("Render cable-clip"), since the panel shows whether it is
    * running or done beside it. Defaults to the name in words, with the `slug`
@@ -333,8 +363,15 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
-  /** What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`). */
-  prepareApproval(args: unknown, ctx: ToolContext, needs?: ApprovalNeeds): Promise<{ input: Record<string, unknown>; summary: string }>
+  /**
+   * What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`).
+   * `binds` is what a flow's approval binds beside the raw arguments (ToolSpec.flowBinding, #4445).
+   */
+  prepareApproval(
+    args: unknown,
+    ctx: ToolContext,
+    needs?: ApprovalNeeds,
+  ): Promise<{ input: Record<string, unknown>; summary: string; binds: Record<string, unknown> }>
   /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
   readonly resolvesApproval: boolean
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
@@ -392,7 +429,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     resolvesApproval: spec.prepareApproval !== undefined,
     async prepareApproval(args, ctx, needs = { summary: true }) {
       const parsed = spec.input.parse(args)
-      if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }
+      if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args), binds: {} }
       const prepared = await spec.prepareApproval(parsed, ctx, needs)
       const input = spec.input.parse(prepared.input)
       // It may fill what the call left out, never change what the model chose (#4442 gate review).
@@ -400,7 +437,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const changed = Object.entries(parsed).find(([key, value]) => value !== undefined && JSON.stringify(resolved[key]) !== JSON.stringify(value))
       // A bug in the tool, never the backend away: a refusal (no status), so it ends at once (#4442 N2).
       if (changed) throw new ToolError(`${spec.name}'s prepareApproval changed the supplied argument ${changed[0]}`)
-      return { input, summary: prepared.summary }
+      return { input, summary: prepared.summary, binds: spec.flowBinding?.(parsed, input) ?? {} }
     },
     title(args) {
       const parsed = spec.input.safeParse(args)
@@ -641,7 +678,7 @@ async function runJudgedByResult(
 ): Promise<ToolRun> {
   let effective: EffectiveTool
   try {
-    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx, args))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
     return refused(`${tool.name} is refused: its Settings → Tools & plugins entry cannot be read`)

@@ -1,8 +1,17 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { nozzles, presetRef, slotChoice, tier } from './print.js'
-import { defineTool, json, type Tool, ToolError } from './registry.js'
+import {
+  nozzles,
+  partSettings,
+  partSettingsPhrase,
+  presetRef,
+  printOptionFields,
+  printPath,
+  slotChoice,
+  tier,
+} from './print.js'
+import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
@@ -14,6 +23,13 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 // terminal). An order on hold answers 409 `order_on_hold` to every tool that would advance
 // it, from the backend's lifecycle, not from each tool. The audit line (GET
 // /orders/{id}/events) is the page's; order_get carries the status (coverage.ts).
+//
+// An item added to an order past `quoted` (#5349) changes what the customer gets, so it is
+// its own route and its own `outward` tool (order_item_add_after_acceptance); order_item_add
+// stays `write` for a draft or quoted order. The charges past `quoted` (#5351) change what
+// the customer pays, so they are order_charges_update_after_acceptance, `outward`, too. A new
+// design of an accepted item (#5350) changes what the customer gets, so it is
+// order_item_revision_add_after_acceptance, `outward`; order_item_revision_add stays `write`.
 //
 // Phase 2 (#4250, plan Ruling 11): the price book is `read` to look at and `write` to keep
 // (the policy, a filament's record); order_item_quote takes both modes, a typed price or a
@@ -34,8 +50,8 @@ const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
 const attachmentRole = z
-  .enum(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
-  .describe('Why the file is kept')
+  .enum(['reference', 'issue', 'finished', 'packed', 'timelapse', 'render', 'test_print', 'other'])
+  .describe("Why the file is kept; `render` and `test_print` only on a design revision's file")
 const attachmentCaption = z.string().max(1000)
 const money = z.number().int().describe('Integer minor units (cents, pence) in the order\'s currency')
 const datetime = z.string().datetime({ offset: true })
@@ -78,6 +94,58 @@ const reference = z
     inputs: z.record(z.string(), z.unknown()).optional().describe('The customizer inputs, `{params: {...}}`'),
   })
   .strict()
+
+// order_item_add and order_item_add_after_acceptance take one body (#5349).
+const itemAddInput = z.object({
+  order_id: orderId,
+  kind: z
+    .enum(['model', 'custom', 'request', 'library_file'])
+    .optional()
+    .describe('`model` (the default), `custom`, `request` or `library_file`'),
+  output_id: ID.optional(),
+  library_file_id: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe('A file of the library (from search_library or list_library), as print_output takes it: the item prints it'),
+  ...reference.shape,
+  quantity: z.number().int().min(1).default(1),
+  title: z
+    .string()
+    .max(200)
+    .optional()
+    .describe("Defaults to the template's name; a custom or request item needs one"),
+  notes: z.string().default(''),
+  sku: z.string().max(100).optional(),
+  unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
+  requires_printing: z.boolean().optional().describe('A custom item\'s only'),
+})
+
+function itemAddTitle({
+  order_id,
+  slug,
+  output_id,
+  library_file_id,
+  kind,
+  title,
+}: {
+  order_id: string
+  slug?: string
+  output_id?: string
+  library_file_id?: number
+  kind?: string
+  title?: string
+}): string {
+  const what =
+    kind === 'custom' || kind === 'request'
+      ? (title ?? `a ${kind} item`)
+      : library_file_id !== undefined
+        ? (title ?? `library file ${library_file_id}`)
+        : (slug ?? output_id ?? 'an item')
+  return `Add ${what} to order ${order_id}`
+}
+
 const attempt = z
   .object({
     quantity: z.number().int().min(0).describe('Made in this attempt'),
@@ -86,6 +154,12 @@ const attempt = z
     started_at: datetime.optional(),
     finished_at: datetime.optional(),
     notes: z.string().default(''),
+    archive_id: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("A Bambuddy archive (a print) this attempt is; its time and grams are copied from it. Read on a record only. Refused with `archive_claimed` when another attempt already has it"),
   })
   .strict()
 const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int().min(1) }).strict()
@@ -145,8 +219,40 @@ const sliceQuote = z
         "The price-book filament (price_book_get) of each of the item's colour slots, keyed by `colours[].slot` " +
           '(from 0; the dialog\'s slot_id - 1): the spool slices, the filament prices',
       ),
+    // #5352: the quote slices on the route its print will take, so that print queues the quote's slice.
+    path: printPath,
+    // #5571: recorded with the quote; order_item_print prints with them when it sends none.
+    part_settings: partSettings,
   })
   .strict()
+
+/**
+ * The quote warning (job cost spec 2026-11-05 §6.3, #5328): the model's real cost per unit
+ * in its past jobs against the quote's unit price, when that price is thin. Undefined with
+ * no warning, for an answer that is not a quote (a slice quote still running), and when the
+ * lookup fails: the quote is recorded by then, and a failed tool call would invite a second.
+ */
+async function priceWarning(ctx: ToolContext, orderId: string, answer: unknown): Promise<unknown> {
+  const quote = answer as { order_item_id?: unknown; unit_price_minor?: unknown } | null
+  if (typeof quote?.order_item_id !== 'string' || typeof quote.unit_price_minor !== 'number') return undefined
+  try {
+    // The whole order: no route reads one item, and the order holds the currency.
+    const order = await ok(ctx.backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id: orderId } } }), `get order ${orderId}`)
+    const slug = order.items.find((item) => item.id === quote.order_item_id)?.reference?.slug
+    if (!slug) return undefined
+    const history = await ok(
+      ctx.backend.GET('/api/v1/orders/history/unit-cost', {
+        params: { query: { slug, currency: order.order.currency, unit_price_minor: quote.unit_price_minor } },
+      }),
+      `read the unit cost history of ${slug}`,
+    )
+    if (!history.warning) return undefined
+    const { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, estimated, below_cost } = history
+    return { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, below_cost, estimated }
+  } catch {
+    return undefined
+  }
+}
 
 /** The quiet-path answer for a `delete`: openapi-fetch gives no body for a 204. */
 const deleted = (what: string) => json({ deleted: what })
@@ -261,31 +367,243 @@ export const orderTools: Tool[] = [
     label: 'List orders',
     description:
       'Orders, newest first, a page at a time (`limit` up to 100): pass `next_cursor` back as `cursor`. Filter by ' +
-      '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made.',
+      '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made. ' +
+      "Each order carries its margin, the figures order_costs gives: `margin_minor`, `margin_percent`, `margin_state` " +
+      '(`loss`, `thin`, `unknown`, `ok`; null with no charged figure) and `margin_estimated`. `margin_state` filters by ' +
+      'any of the states given (`["loss", "thin"]` is the orders list\'s "Loss or thin"). With `margin_state`, each ' +
+      'call reads a limited number of orders, so a page can be short or empty while `next_cursor` remains: follow ' +
+      'the cursor until it is null before you say no order matches. `product`, `accepted_from` (inclusive), ' +
+      '`accepted_to` (exclusive) and `currency` list the orders behind an orders_profit_report row: pass its ' +
+      '`product`, its `period_from` and `period_to`, and its `currency`.',
     input: z.object({
       status: z.enum(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']).optional(),
       customer_id: customerId.optional(),
       q: z.string().max(200).optional(),
       from: datetime.optional(),
       to: datetime.optional(),
+      accepted_from: datetime.optional(),
+      accepted_to: datetime.optional(),
+      currency: z.string().regex(/^[A-Z]{3}$/).optional().describe('An ISO 4217 code, such as USD'),
+      product: z
+        .string()
+        .min(1)
+        .max(210)
+        .regex(/^(custom|(model|sku):.+)$/)
+        .optional()
+        .describe('`model:<slug>`, `sku:<sku>` or `custom`, as a profit report row names it'),
+      margin_state: z.array(z.enum(['loss', 'thin', 'unknown', 'ok'])).min(1).max(4).optional(),
       cursor: z.string().max(400).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     }),
     risk: 'read',
     routes: ['GET /api/v1/orders'],
-    handler: async (query, { backend }) => json(await ok(backend.GET('/api/v1/orders', { params: { query } }), 'list orders')),
+    // The route takes `status` repeated (#5276); the tool names one.
+    handler: async ({ status, ...query }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders', { params: { query: { ...query, ...(status ? { status: [status] } : {}) } } }), 'list orders')),
+  }),
+  defineTool({
+    name: 'orders_profit_report',
+    label: 'Read the profit report',
+    description:
+      'The profit report by model (job cost spec §6.4): the orders accepted at or after `from` and before `to` ' +
+      '(by default the last 90 days), cancelled ones too. Rows are per currency, never summed across currencies. ' +
+      'Each product row is one model `slug` (`group` `model`), one custom item `sku` (`sku`), or the custom items ' +
+      'with no SKU (`custom`), with its `orders`, `units`, what was charged (`revenue_minor`), the real cost ' +
+      '(`cost_minor`), `margin_minor`, `margin_percent`, `margin_state` and the waste (`waste_minor`, ' +
+      '`waste_percent`: the cost of test and failed prints). Each item counts as order_costs gives it. The `order` ' +
+      "row is the orders' own entries, shipments' cost and charges (its `orders` counts only the orders that have " +
+      "any; no order_list filter matches them), and the `total` row each currency's sum. Pass a product " +
+      "row's `product`, `period_from`, `period_to` and `currency` to order_list for its orders. With `complete` " +
+      'false the report stopped at `max_orders` and covers the orders accepted from `read_from` only.',
+    input: z.object({ from: datetime.optional(), to: datetime.optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/reports/profit'],
+    handler: async (query, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders/reports/profit', { params: { query } }), 'read the profit report')),
   }),
   defineTool({
     name: 'order_get',
     label: 'Read an order',
     description:
-      'One order whole: its status, number and addresses, its line items with their quotes and fulfilment ' +
-      'attempts, charges, payments, shipments and totals.',
+      'One order whole: its status, number and addresses, its line items with their quotes, design `revisions` ' +
+      'and fulfilment attempts (every attempt has a `purpose`: `production`, or `test` for a revision\'s test print), ' +
+      'charges, payments, shipments and totals.',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}'],
     handler: async ({ order_id }, { backend }) =>
       json(await ok(backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }), `get order ${order_id}`)),
+  }),
+  defineTool({
+    name: 'order_costs',
+    label: "Read an order's real cost",
+    description:
+      "An order's real cost and margin (#4251, #5326): per item, its accepted quote beside every attempt, failed " +
+      'ones included, each costed in filament and machine time (`estimated` names a figure taken from the quote ' +
+      "or today's settings; `unknown` an attempt with no source), its labour (`time_entries`, else a default, " +
+      '`labour_default`), its `cost_entries`, what it was charged (`revenue_minor`) and its `margin_minor`, ' +
+      '`margin_percent` and `margin_state` (`ok`, `thin`, `loss`, `unknown`); the order adds its own entries, its ' +
+      "shipments' cost and every charge but tax. `bambuddy_cost` is Bambuddy's own cost of an attempt, shown and " +
+      'never in any sum.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/costs'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/costs', { params: { path: { order_id } } }),
+          `get the costs of order ${order_id}`,
+        ),
+      ),
+  }),
+  // Job cost (#5326, spec 2026-11-05 §4.3, §4.4): a record of what the job took, in any
+  // order status. Removing one is the order page's (coverage.ts).
+  defineTool({
+    name: 'order_time_add',
+    label: 'Log time on an order',
+    description:
+      'Record time spent on an order, or on one of its items with `order_item_id`: `design`, `setup`, ' +
+      "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
+      "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
+      'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
+    input: z.object({
+      order_id: orderId,
+      order_item_id: itemId.optional(),
+      kind: z.enum(['design', 'setup', 'post_processing', 'packing', 'other']),
+      minutes: z.number().int().min(1).max(1_000_000),
+      note: z.string().max(1000).default(''),
+      started_at: datetime.optional(),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/time-entries'],
+    title: ({ order_id, minutes }) => `Log ${minutes} minutes on order ${order_id}`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/time-entries', { params: { path: { order_id } }, body }),
+          `log time on order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_cost_add',
+    label: 'Add a cost to an order',
+    description:
+      "Record money a job cost, in the order's currency's minor units, on the order or one of its items: " +
+      "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
+      "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
+      'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
+      'this call names, and writes nothing. Allowed in every order status.',
+    input: z.object({
+      order_id: orderId,
+      order_item_id: itemId.optional(),
+      kind: z.enum(['assistant', 'payment_fee', 'material', 'other']),
+      amount_minor: money.min(1),
+      note: z.string().max(1000).default(''),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/cost-entries'],
+    title: ({ order_id, kind }) => `Add a ${kind} cost to order ${order_id}`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/cost-entries', { params: { path: { order_id } }, body }),
+          `add a cost to order ${order_id}`,
+        ),
+      ),
+  }),
+  // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
+  // beside its filament. Making a part, editing it, correcting a count, its stock line and
+  // a model's rule are the Parts page's (coverage.ts).
+  defineTool({
+    name: 'part_list',
+    label: 'List parts',
+    description:
+      'The parts inventory (keychain hooks, rings, magnets): each part\'s pack, its unit cost (a decimal string in ' +
+      'minor units, the weighted average of the stock on hand), what is `on_hand` (below zero when more was used ' +
+      'than recorded) and `low` at or below its low-stock level. With `low`, only the low ones. With `order_id`, ' +
+      "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand.",
+    input: z.object({
+      low: z.boolean().default(false),
+      order_id: orderId.optional(),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/parts', 'GET /api/v1/orders/{order_id}/parts'],
+    handler: async ({ low, order_id }, { backend }) => {
+      if (order_id !== undefined) {
+        return json(
+          await ok(
+            backend.GET('/api/v1/orders/{order_id}/parts', { params: { path: { order_id } } }),
+            `get the parts of order ${order_id}`,
+          ),
+        )
+      }
+      return json(await ok(backend.GET('/api/v1/parts', { params: { query: { low } } }), 'list the parts'))
+    },
+  }),
+  defineTool({
+    name: 'part_stock_add',
+    label: 'Add stock to a part',
+    description:
+      "Record packs bought: `packs` of the part's pack join the stock, at `pack_price_minor` each (with tax, in " +
+      "the part's currency's minor units) when given, which becomes the part's pack price. The unit cost becomes " +
+      'the weighted average of the stock on hand and the new packs; orders already fulfilled keep their cost.',
+    input: z.object({
+      part_id: ID.describe('A part id, as part_list returns it'),
+      packs: z.number().int().min(1).max(10_000).default(1),
+      pack_price_minor: z.number().int().min(0).optional(),
+      note: z.string().max(1000).default(''),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/parts/{part_id}/stock'],
+    title: ({ part_id, packs }) => `Add ${packs} pack(s) to part ${part_id}`,
+    handler: async ({ part_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/parts/{part_id}/stock', { params: { path: { part_id } }, body }),
+          `add stock to part ${part_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_parts_set',
+    label: "Set a line item's parts",
+    description:
+      'The parts one unit of a line item uses, replaced whole (an empty list clears them). A new item takes its ' +
+      "model's rule; this changes it. When the item is fulfilled its parts times its quantity leave stock as a " +
+      '`material` cost entry, and come back when it is unfulfilled. Refused (409 `item_parts_used`) for a ' +
+      'fulfilled item. Stock never blocks: it can go below zero.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      parts: z
+        .array(z.object({ part_id: ID.describe('A part id, as part_list returns it'), per_unit: z.number().int().min(1).max(1000) }).strict())
+        .max(50),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/orders/{order_id}/items/{item_id}/parts'],
+    title: ({ order_id, item_id }) => `Set the parts of item ${item_id} on order ${order_id}`,
+    handler: async ({ order_id, item_id, parts }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/orders/{order_id}/items/{item_id}/parts', {
+            params: { path: { order_id, item_id } },
+            body: { parts },
+          }),
+          `set the parts of item ${item_id}`,
+        ),
+      ),
   }),
   defineTool({
     name: 'order_create',
@@ -304,7 +622,8 @@ export const orderTools: Tool[] = [
     label: 'Edit an order',
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
-      'charges, replaced whole, while draft or quoted. `hold` puts it on hold or releases it (true/false): on hold, ' +
+      'charges, replaced whole, while draft or quoted (past that, charges answer 409 `order_not_editable`: use ' +
+      'order_charges_update_after_acceptance). `hold` puts it on hold or releases it (true/false): on hold, ' +
       'every step that advances the order is refused until released. Releasing is a write, as holding is: it ' +
       'commits nothing to the customer, and every step that does (accepting, fulfilling, shipping, closing) stays ' +
       'outward. `payment` records money the shop already received, in any state but cancelled.',
@@ -365,7 +684,7 @@ export const orderTools: Tool[] = [
     name: 'order_item_add',
     label: 'Add an order line item',
     description:
-      'Add a line item: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
+      'Add a line item to a draft or quoted order: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
       '`commit`, `inputs`). Beside `output_id`, leave the others out: one given must be the output\'s own (`inputs` ' +
       'whole, `v` included). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
       'that is not a revision of the template, or an input the template does not take, is refused naming the field. ' +
@@ -373,27 +692,19 @@ export const orderTools: Tool[] = [
       'source (no `output_id`, `slug`, `commit` or `inputs`), for design work, a fee, packaging or a part made ' +
       'elsewhere. Its price is recorded, not accepted: the item is quoted until order_item_accept_quote accepts it. ' +
       '`requires_printing` (default ' +
-      'false) marks one that still has to be made. `sku` is the shop\'s stock code, on either kind.',
-    input: z.object({
-      order_id: orderId,
-      kind: z.enum(['model', 'custom']).optional().describe('`model` (the default) or `custom`'),
-      output_id: ID.optional(),
-      ...reference.shape,
-      quantity: z.number().int().min(1).default(1),
-      title: z
-        .string()
-        .max(200)
-        .optional()
-        .describe("Defaults to the template's name; a custom item needs one"),
-      notes: z.string().default(''),
-      sku: z.string().max(100).optional(),
-      unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
-      requires_printing: z.boolean().optional().describe('A custom item\'s only'),
-    }),
+      'false) marks one that still has to be made. ' +
+      '`kind: "request"` adds a design request: a `title` and `notes` only, no source and no price; its first ' +
+      'revision (order_item_revision_add) gives it its design. `library_file_id` adds a library file instead ' +
+      '(#5544): a file of the library that serves (from search_library), with no `output_id`, `slug`, `commit` ' +
+      'or `inputs`; the item names the file (no template), defaults its title to the file\'s name, is priced by ' +
+      'order_item_quote (a slice of the file, or `manual`), prints the file, and has no revisions. A file the ' +
+      'library does not have or does not print is 422; one deleted later is 409 `library_file_gone` on quote ' +
+      'and print. `sku` is the shop\'s stock code, on any kind. ' +
+      'An accepted, in-production or ready order answers 409 `item_locked`: use order_item_add_after_acceptance.',
+    input: itemAddInput,
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/items'],
-    title: ({ order_id, slug, output_id, kind, title }) =>
-      `Add ${kind === 'custom' ? (title ?? 'a custom item') : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
+    title: itemAddTitle,
     handler: async ({ order_id, ...body }, { backend }) =>
       json(
         await ok(
@@ -407,15 +718,168 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_item_add_after_acceptance',
+    label: 'Add a line item to an accepted order',
+    description:
+      'Add a line item to an order that is accepted, in production or ready (#5349). It takes what order_item_add ' +
+      'takes. It changes what the customer gets. The item starts unpriced (a custom item quoted, its price not ' +
+      'accepted): it needs order_item_quote and order_item_accept_quote before it is printed or fulfilled. The ' +
+      'accepted prices and charges do not change. A ready order goes back to in production. Refused: ' +
+      '`order_not_accepted` on a draft or quoted order (use order_item_add), `item_locked` once shipped, ' +
+      '`order_closed`/`order_cancelled`, and `order_on_hold`.',
+    input: itemAddInput,
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/after-acceptance'],
+    summarize: (input) => `${itemAddTitle(input)}, after its acceptance`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/after-acceptance', {
+            params: { path: { order_id } },
+            body: body as never,
+          }),
+          `add an item to accepted order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_charges_update_after_acceptance',
+    label: 'Change the charges of an accepted order',
+    description:
+      'Replace the charges of an order that is accepted, in production or ready (#5351), whole, as order_update ' +
+      'takes them before that. It changes what the customer pays. Use it to keep an agreed total: when an item ' +
+      'is added after acceptance, a `discount` (negative) or `fee` line absorbs its price. The audit row holds the ' +
+      'charges before and after. Refused: `order_not_accepted` on a draft or quoted order (use order_update), ' +
+      '`order_not_editable` once shipped, `order_closed`/`order_cancelled`, and `order_on_hold`.',
+    input: z.object({ order_id: orderId, charges: z.array(charge) }),
+    risk: 'outward',
+    routes: ['PUT /api/v1/orders/{order_id}/charges/after-acceptance'],
+    summarize: ({ order_id, charges }) =>
+      `Set ${charges.length} charge${charges.length === 1 ? '' : 's'} on accepted order ${order_id}`,
+    handler: async ({ order_id, charges }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/orders/{order_id}/charges/after-acceptance', {
+            params: { path: { order_id } },
+            body: { charges },
+          }),
+          `change the charges of accepted order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_revision_add',
+    label: 'Add a design revision to an order line item',
+    description:
+      "Record a new design revision of a line item (storefront spec §4): a `reference` (slug, commit, inputs) or an " +
+      "`output_id`, with the `filaments` per slot and a `note` for the customer. A request item's first revision gives " +
+      'it its design. A new revision supersedes a sent, unanswered one and drops the item\'s quotes. It is a draft ' +
+      'until order_item_revision_send sends it to the customer. Past `quoted` an item with an accepted quote answers ' +
+      '409 `item_locked`: use order_item_revision_add_after_acceptance (an item already revised after acceptance ' +
+      'takes this one too, and keeps its old accepted quote).',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      reference: reference.optional(),
+      output_id: ID.optional(),
+      filaments: z.record(z.string(), ID.nullable()).optional().describe('A filament id (or null) per slot'),
+      note: z.string().max(4000).optional(),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions'],
+    title: ({ order_id, item_id }) => `Add a design revision to item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, reference, output_id, filaments, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions', {
+            params: { path: { order_id, item_id } },
+            body: {
+              note: note ?? '',
+              ...(reference === undefined ? {} : { reference }),
+              ...(output_id === undefined ? {} : { output_id }),
+              ...(filaments === undefined ? {} : { filaments }),
+            },
+          }),
+          `add a revision to item ${item_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_revision_add_after_acceptance',
+    label: 'Revise the design of an accepted order line item',
+    description:
+      'Record a new design revision of a line item that has an accepted quote, on an order that is accepted, in ' +
+      'production or ready (#5350). The body is order_item_revision_add\'s. It changes what the customer gets. The ' +
+      'old accepted quote stays accepted, so the order total keeps the agreed price, until a quote of the new ' +
+      'design is accepted: quote it with order_item_quote, then accept with order_item_accept_quote. To keep the ' +
+      'old price, quote the same price. The item is `draft` until then and is not printed or fulfilled. Refused: ' +
+      '`order_not_accepted` on a draft or quoted order (use order_item_revision_add), `order_closed`/' +
+      '`order_cancelled`, `order_on_hold`, `item_not_open` for a fulfilled or cancelled item (every item of a ' +
+      'ready or shipped order is one, so the tool never works there and `item_locked` is not reached), ' +
+      '`item_not_priced` for an item with no accepted quote (use order_item_revision_add), `item_custom`, ' +
+      '`print_in_flight` while a print of it runs, and `item_partly_fulfilled` once an attempt of it is accepted ' +
+      '(those units are the agreed design: cancel the item and add one with the new design).',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      reference: reference.optional(),
+      output_id: ID.optional(),
+      filaments: z.record(z.string(), ID.nullable()).optional().describe('A filament id (or null) per slot'),
+      note: z.string().max(4000).optional(),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/after-acceptance'],
+    summarize: ({ order_id, item_id }) => `Revise the design of accepted item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, reference, output_id, filaments, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/after-acceptance', {
+            params: { path: { order_id, item_id } },
+            body: {
+              note: note ?? '',
+              ...(reference === undefined ? {} : { reference }),
+              ...(output_id === undefined ? {} : { output_id }),
+              ...(filaments === undefined ? {} : { filaments }),
+            },
+          }),
+          `revise accepted item ${item_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_revision_send',
+    label: 'Send a design revision to the customer',
+    description:
+      "Send a design revision to the customer for their answer. Outward: it commits the shop to the customer. The " +
+      "customer's answer is recorded by a person, never by an agent.",
+    input: z.object({ order_id: orderId, item_id: itemId, revision_id: ID.describe("A revision id, as order_get lists an item's `revisions`") }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/send'],
+    summarize: ({ order_id, item_id, revision_id }) =>
+      `Send revision ${revision_id} of item ${item_id} (order ${order_id}) to the customer`,
+    handler: async ({ order_id, item_id, revision_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/send', {
+            params: { path: { order_id, item_id, revision_id } },
+          }),
+          `send revision ${revision_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_item_update',
     label: 'Edit an order line item',
     description:
-      'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted, each dropping ' +
+      'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted (or, past ' +
+      'that, while the item has no accepted quote: one added by order_item_add_after_acceptance), each dropping ' +
       'the accepted quote; `title`, `notes` and `sku` in any open state. A custom item takes `unit_price_minor` and ' +
       '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
       'order_item_accept_quote). A `reference` or ' +
       '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
-      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead).',
+      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead), and one ' +
+      'with time or cost entries with `item_has_entries` (remove them, or cancel it). ' +
+      '`approval` sets how the customer approves the item: the design first, or design and price together.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -427,6 +891,10 @@ export const orderTools: Tool[] = [
       sku: z.string().max(100).nullable().optional(),
       unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
       requires_printing: z.boolean().optional(),
+      approval: z
+        .enum(['design_first', 'together'])
+        .optional()
+        .describe('`design_first`: the customer approves the design before the price; `together`: both at once'),
       delete: z.boolean().default(false),
     }),
     risk: 'write',
@@ -461,7 +929,12 @@ export const orderTools: Tool[] = [
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
-      'item is quoted; order_item_accept_quote pins it.',
+      'item is quoted; order_item_accept_quote pins it. When the unit price leaves a margin below the thin ' +
+      "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
+      '`price_warning`: `unit_cost_minor` and `jobs`, `below_cost` (true: the price is below the real cost; ' +
+      'false: it is above it, but the margin is thin), the `main_reason` (the cost part that most exceeded what ' +
+      'their quotes priced) and a `suggested_unit_price_minor`. It is advice: tell the user, never re-quote ' +
+      'without asking.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -472,26 +945,28 @@ export const orderTools: Tool[] = [
       slice: sliceQuote.optional(),
     }),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes', 'POST /api/v1/orders/{order_id}/items/{item_id}/quote'],
+    routes: [
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quotes',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quote',
+      'GET /api/v1/orders/history/unit-cost',
+    ],
     title: ({ order_id, item_id, slice }) => `${slice ? 'Quote from a slice' : 'Price'} item ${item_id} of order ${order_id}`,
     handler: async ({ order_id, item_id, manual, slice }, ctx) => {
       if ((manual === undefined) === (slice === undefined)) {
         throw new ToolError('give exactly one of `manual` (a typed price) or `slice` (the print dialog\'s choices)')
       }
       const path = { order_id, item_id }
-      if (manual !== undefined) {
-        return json(
-          await ok(
-            ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
-            `quote item ${item_id}`,
-          ),
-        )
-      }
-      return json(
-        await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
-          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
-        ),
-      )
+      const quote =
+        manual !== undefined
+          ? await ok(
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
+              `quote item ${item_id}`,
+            )
+          : await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
+            )
+      const warning = await priceWarning(ctx, order_id, quote)
+      return json(warning === undefined ? quote : { ...(quote as object), price_warning: warning })
     },
   }),
   defineTool({
@@ -535,7 +1010,9 @@ export const orderTools: Tool[] = [
       'Record a fulfilment attempt by hand (`attempt`: the quantity made and the outcome; a failed one fails the ' +
       'item, the next returns it to approved), edit one not yet accepted (`fulfilment_id` with `attempt`), or accept ' +
       'one (`fulfilment_id` with `accept: true`): its quantity counts as made, and the item is fulfilled once its ' +
-      "accepted attempts reach its quantity. Needs an accepted order.",
+      'accepted attempts reach its quantity. An attempt made before the design the accepted quote prices (an item ' +
+      'revised after acceptance) is refused `fulfilment_stale`; order_get marks such an attempt `stale: true`. ' +
+      'Needs an accepted order.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -595,7 +1072,15 @@ export const orderTools: Tool[] = [
       'a print whose end could not be read is settled with order_item_fulfil. Refused with `requote_needed` (no ' +
       "accepted quote, the item's output gone, or a slice quote whose sliced file is gone or changed: quote it " +
       'again), `item_not_approved` (printing already), `item_made` (its attempts made its quantity: accept them), ' +
-      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. Outward: it prints.',
+      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. With Bambuddy, a slot whose ' +
+      "filament the item names and the plan leaves out takes that filament's spool loaded on the printer, else the " +
+      'shelf spool with most left (never one loaded in another printer); `needs_spool_choice` names the slots with ' +
+      "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. " +
+      '`path: "bambuddy"` (#5352) prints it through Bambuddy\'s queue even where it would go over the LAN: it is ' +
+      "filed under the item's project in the order's, and `options` sets the calibrations and timelapse. " +
+      'Over the LAN the print files under no project, and a calibration value the LAN start cannot honour is refused ' +
+      "(see `path` on print_output). A quote sliced over the LAN is sliced again when printed with `path: \"bambuddy\"`; " +
+      'quote with that `path` to print the quote\'s own slice. Outward: it prints.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -603,18 +1088,100 @@ export const orderTools: Tool[] = [
       printer: sliceQuote.shape.printer,
       filament_plan: sliceQuote.shape.filament_plan,
       choices: printChoices,
+      options: printOptionFields.optional().describe(
+        "Per-print queue options, as print_output takes them: bed_levelling, flow_cali, nozzle_offset_cali, " +
+          "vibration_cali, timelapse and the rest. Its project_id and quantity are the item's, never these",
+      ),
+      path: printPath,
+      part_settings: partSettings.describe(
+        "Omit to print with the accepted quote's own (order_item_quote's `slice.part_settings`), so the print slices " +
+          'what was priced. Settings that differ from the quote\'s are refused `requote_needed`: quote with them first',
+      ),
+      test_revision_id: ID.optional().describe(
+        "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
+          'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
+      ),
     }),
     risk: 'outward',
-    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/print'],
-    summarize: ({ order_id, item_id, printer, printer_id }) =>
-      `Print item ${item_id} of order ${order_id}` +
-      (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : ''),
-    handler: async ({ order_id, item_id, ...request }, ctx) =>
+    routes: [
+      'POST /api/v1/orders/{order_id}/items/{item_id}/print',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
+    ],
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings }) =>
+      `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
+      (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
+      (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : '') +
+      partSettingsPhrase(part_settings),
+    handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
-        await command(ctx, `print item ${item_id}`, (headers) =>
-          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/print', {
-            params: { path: { order_id, item_id } },
-            body: request as never,
+        test_revision_id !== undefined
+          ? await command(ctx, `test print revision ${test_revision_id}`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print', {
+                params: { path: { order_id, item_id, revision_id: test_revision_id } },
+                body: request as never,
+                headers,
+              }),
+            )
+          : await command(ctx, `print item ${item_id}`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/print', {
+                params: { path: { order_id, item_id } },
+                body: request as never,
+                headers,
+              }),
+            ),
+      ),
+  }),
+  defineTool({
+    name: 'order_attempt_archives',
+    label: "Read an attempt's Bambuddy archives",
+    description:
+      "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers to copy: its " +
+      '`finish_photos` and whether it has a `timelapse`. Reading them copies what they say onto the attempt once ' +
+      'its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`). `linked` is false without ' +
+      'Bambuddy; an attempt by hand naming no archive, or one Bambuddy has not linked an archive to yet, has none.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      fulfilment_id: ID.describe("A fulfilment attempt's id, as order_get lists an item's fulfilments"),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives'],
+    handler: async ({ order_id, item_id, fulfilment_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives', {
+            params: { path: { order_id, item_id, fulfilment_id } },
+          }),
+          `read attempt ${fulfilment_id}'s archives`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_attempt_copy',
+    label: "Copy a print's photo or timelapse into an order",
+    description:
+      "Copy an attempt's Bambuddy archive's finish photo (`finished_photo`, its latest unless `name` names one of " +
+      "order_attempt_archives' `finish_photos`) or its `timelapse` onto the attempt, listed under its line item (#4253, #4251), with the role " +
+      '`finished` or `timelapse`; the same bytes again answer with the file already there. Refused with ' +
+      '`not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` (pull it off the ' +
+      'printer first).',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      fulfilment_id: ID.describe("A fulfilment attempt's id, as order_get lists an item's fulfilments"),
+      archive_id: z.number().int().min(1).describe('One of order_attempt_archives\' archive ids'),
+      what: z.enum(['finished_photo', 'timelapse']),
+      name: z.string().max(255).optional().describe('A finish photo of the archive, for `finished_photo`'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy'],
+    title: ({ what, archive_id }) => `Copy archive ${archive_id}'s ${what === 'timelapse' ? 'timelapse' : 'finish photo'}`,
+    handler: async ({ order_id, item_id, fulfilment_id, archive_id, ...body }, ctx) =>
+      json(
+        await command(ctx, `copy archive ${archive_id}'s ${body.what}`, (headers) =>
+          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy', {
+            params: { path: { order_id, item_id, fulfilment_id, archive_id } },
+            body,
             headers,
           }),
         ),
@@ -702,7 +1269,7 @@ export const orderTools: Tool[] = [
     description:
       'Undo a close or a cancel. A closed order takes the status its items and shipments give it (`shipped` as ' +
       'it closed); a cancelled order goes back to the status it was cancelled from, with the items that cancel took. ' +
-      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (an accepted order takes ' +
+      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (a shipped order takes ' +
       'back a priced item only, `item_not_priced`). Outward, as a cancel is: it changes what the shop told the customer.',
     input: z.object({ order_id: orderId, item_id: itemId.optional() }),
     risk: 'outward',
@@ -757,6 +1324,12 @@ export const orderTools: Tool[] = [
       .object({
         order_id: orderId,
         item_id: itemId.optional().describe('Attach to this line item; the order itself when left out'),
+        fulfilment_id: ID.optional().describe(
+          "Attach to this fulfilment attempt of `item_id` (a print's photo, its timelapse); beside `revision_id`, the test attempt the file shows",
+        ),
+        revision_id: ID.optional().describe(
+          "Attach to this design revision of `item_id`: its `render`, the photo of a `test_print`, or a `reference`",
+        ),
         workspace_path: workspacePathInput,
         workspace_sha256: workspaceShaInput,
         filename: z.string().min(1).max(255).optional().describe("e.g. \"finished.jpg\"; the workspace file's own name by default"),
@@ -765,13 +1338,27 @@ export const orderTools: Tool[] = [
       })
       .strict(),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/attachments', 'POST /api/v1/orders/{order_id}/items/{item_id}/attachments'],
-    title: ({ order_id, item_id, filename, workspace_path }) =>
-      `Attach ${filename ?? workspace_path} to ${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
-    handler: async ({ order_id, item_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+    routes: [
+      'POST /api/v1/orders/{order_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/attachments',
+    ],
+    title: ({ order_id, item_id, fulfilment_id, revision_id, filename, workspace_path }) =>
+      `Attach ${filename ?? workspace_path} to ${revision_id ? `revision ${revision_id} of ` : fulfilment_id ? `attempt ${fulfilment_id} of ` : ''}${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
+    handler: async (
+      { order_id, item_id, fulfilment_id, revision_id, workspace_path, workspace_sha256, filename, role, caption },
+      ctx,
+    ) => {
+      if ((fulfilment_id !== undefined || revision_id !== undefined) && item_id === undefined)
+        throw new ToolError('an attempt or a revision is attached to with its item_id')
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'order_attach')
       const name = filename ?? uploadName(info.path)
-      const fields = { ...(role === undefined ? {} : { role }), ...(caption === undefined ? {} : { caption }) }
+      const fields = {
+        ...(role === undefined ? {} : { role }),
+        ...(caption === undefined ? {} : { caption }),
+        ...(revision_id !== undefined && fulfilment_id !== undefined ? { fulfilment_id } : {}),
+      }
       const body = { file: name, role: role ?? null, caption: caption ?? null }
       const part = { name: 'file', filename: name, type: info.mediaType }
       const answer = await command(ctx, `attach ${name} to ${item_id ? `item ${item_id}` : `order ${order_id}`}`, (headers) =>
@@ -781,7 +1368,19 @@ export const orderTools: Tool[] = [
               body,
               ...uploadInit(ctx, info, part, headers, fields),
             })
-          : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
+          : revision_id !== undefined
+            ? ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/attachments', {
+                params: { path: { order_id, item_id, revision_id } },
+                body: { ...body, fulfilment_id: fulfilment_id ?? null },
+                ...uploadInit(ctx, info, part, headers, fields),
+              })
+          : fulfilment_id !== undefined
+            ? ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments', {
+                params: { path: { order_id, item_id, fulfilment_id } },
+                body,
+                ...uploadInit(ctx, info, part, headers, fields),
+              })
+            : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
               params: { path: { order_id, item_id } },
               body,
               ...uploadInit(ctx, info, part, headers, fields),
@@ -795,6 +1394,8 @@ export const orderTools: Tool[] = [
     label: "Edit an order's attachment",
     description:
       "Caption or re-role an attachment (order_get lists them under `attachments`), in any state of the order. " +
+      "A file of a design revision sent to the customer, or answered, keeps its role and caption (refused, " +
+      "`revision_sent`); no file is re-roled to `test_print` (upload the photo of a test print). " +
       "`delivered` with the attachment's `item_id`: true marks this image as what the item delivered (its picture " +
       "from then on; refused unless it is one of that item's images), false clears the item's delivered mark.",
     input: z.object({

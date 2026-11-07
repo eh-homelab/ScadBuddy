@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import psycopg
 import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -16,16 +17,19 @@ from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate
-from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, advance_print
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
+from scadbuddy.rack.usage import LanUsage, PickedHotend, RackUsageStore
 from scadbuddy.workflows.printer_watch import PrinterWatchInput
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
+from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000001"
+HOTEND = serial(51)
 LONG_AGO = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -36,6 +40,8 @@ class Lan:
     def __init__(self, *, subscribes: bool, deltas: list[dict[str, Any]] | None = None) -> None:
         self.subscribes = subscribes
         self.deltas = deltas or []
+        #: Each report yielded, so a test can name the one that ended a print.
+        self.sent: list[LanReport] = []
 
     async def reports(self, connected: asyncio.Event | None = None) -> AsyncIterator[LanReport]:
         if not self.subscribes:  # a connect to an address that never answers
@@ -43,7 +49,9 @@ class Lan:
         if connected is not None:
             connected.set()
         for delta in self.deltas:
-            yield LanReport(serial=SERIAL, received_at=datetime.now(UTC), print=delta)
+            report = LanReport(serial=SERIAL, received_at=datetime.now(UTC), print=delta)
+            self.sent.append(report)
+            yield report
         await asyncio.Event().wait()
 
 
@@ -141,3 +149,202 @@ def test_the_proof_window_is_two_keepalives() -> None:
 
     assert watch_module.LINK_PROOF == 2 * lan.KEEPALIVE
     assert lan.KEEPALIVE <= 10
+
+
+OLD_RUN, OLD_START = "run-old", "scadbuddy-run-old-p1"
+
+
+async def test_the_watch_settles_a_start_its_printer_ends_whatever_run_follows(
+    linked: tuple[PrinterStore, PrinterReportStore, str], pg_conninfo: str
+) -> None:
+    """#5138: a newer run of the output started since, so no follow reads the older
+    run's last copy. The printer's own watch still settles that start's rack pick once
+    its report ends it."""
+    printers, reports, pid = linked
+    rack = RackUsageStore(pg_conninfo)
+    try:
+        hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        assert (await rack.usage([HOTEND]))[HOTEND].pending == 1
+        lan = Lan(
+            subscribes=True,
+            deltas=[
+                {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+                {"gcode_state": "FINISH", "subtask_name": OLD_START},
+            ],
+        )
+        watches = WatchActivities(
+            printers, reports, None, connect=lambda *a: cast(LanPrinter, lan), rack=rack
+        )
+        await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+        usage = (await rack.usage([HOTEND]))[HOTEND]
+        assert (usage.prints, usage.pending) == (1, 0)
+    finally:
+        rack.close()
+
+
+async def test_a_start_the_printer_moved_on_from_settles_untimed(
+    linked: tuple[PrinterStore, PrinterReportStore, str], pg_conninfo: str
+) -> None:
+    """A report naming another print says the start ended, not when or how: its pick
+    settles as one print with no time, through the watch's own write."""
+    printers, reports, pid = linked
+    rack = RackUsageStore(pg_conninfo)
+    try:
+        hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        lan = Lan(
+            subscribes=True,
+            deltas=[
+                {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+                {"gcode_state": "RUNNING", "subtask_name": "someone-elses-print"},
+            ],
+        )
+        # No card field changes, so the report waits for `write_every`: none here.
+        watches = WatchActivities(
+            printers,
+            reports,
+            None,
+            connect=lambda *a: cast(LanPrinter, lan),
+            rack=rack,
+            write_every=0,
+        )
+        await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+        usage = (await rack.usage([HOTEND]))[HOTEND]
+        assert (usage.prints, usage.pending, usage.print_seconds) == (1, 0, 0)
+        with psycopg.connect(pg_conninfo) as conn:
+            row = conn.execute(
+                "SELECT print_seconds FROM rack_nozzle_prints WHERE lan_subtask = %s",
+                (OLD_START,),
+            ).fetchone()
+        assert row == (None,)
+    finally:
+        rack.close()
+
+
+class Settles:
+    """A rack that records each settle the watch asks for."""
+
+    def __init__(self) -> None:
+        self.ended: list[tuple[str, str, datetime, bool]] = []
+
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        self.ended.append((printer, subtask_name, ended_at, timed))
+        return 1
+
+
+async def test_a_failed_print_settles_timed_at_the_report_that_says_so(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#5261: a ``FAILED`` end is an end the printer timed, as ``FINISH`` is."""
+    printers, reports, pid = linked
+    lan = Lan(
+        subscribes=True,
+        deltas=[
+            {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+            {"gcode_state": "FAILED", "subtask_name": OLD_START},
+        ],
+    )
+    rack = Settles()
+    watches = WatchActivities(
+        printers,
+        reports,
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        rack=cast(LanUsage, rack),
+    )
+    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+    assert rack.ended == [(pid, OLD_START, lan.sent[1].received_at, True)]
+
+
+async def test_an_end_held_back_settles_when_the_quiet_watch_writes_it(
+    linked: tuple[PrinterStore, PrinterReportStore, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5261: a report that changes no card field waits for `write_every`. When the
+    printer then goes quiet, the `HEARD_EVERY` timeout writes it, and the end it shows
+    settles at that report's time, not at the flush."""
+    printers, reports, pid = linked
+    monkeypatch.setattr(watch_module, "HEARD_EVERY", 0.05)
+    lan = Lan(
+        subscribes=True,
+        deltas=[
+            {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+            {"gcode_state": "RUNNING", "subtask_name": "someone-elses-print"},
+        ],
+    )
+    rack = Settles()
+    watches = WatchActivities(
+        printers,
+        reports,
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        rack=cast(LanUsage, rack),
+        write_every=3600,
+    )
+    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+    assert rack.ended == [(pid, OLD_START, lan.sent[1].received_at, False)]
+    got = reports.get(pid)
+    assert got is not None and got[0]["subtask_name"] == "someone-elses-print"
+
+
+RUNNING_X = {"gcode_state": "RUNNING", "subtask_name": "x"}
+FINISH_X = {"gcode_state": "FINISH", "subtask_name": "x"}
+
+
+@pytest.mark.parametrize(
+    ("running", "new", "after", "ended"),
+    [
+        ("x", FINISH_X, None, PrintEnd("x", timed=True)),
+        ("x", {"gcode_state": "FAILED", "subtask_name": "x"}, None, PrintEnd("x", timed=True)),
+        ("x", {"gcode_state": "IDLE", "subtask_name": "x"}, None, PrintEnd("x", timed=False)),
+        ("x", {"gcode_state": "RUNNING", "subtask_name": "y"}, "y", PrintEnd("x", timed=False)),
+        ("x", {"gcode_state": "FINISH", "subtask_name": "y"}, None, PrintEnd("x", timed=False)),
+        ("x", {"gcode_state": "PAUSE", "subtask_name": "x"}, "x", None),
+        ("x", RUNNING_X, "x", None),
+        (None, RUNNING_X, "x", None),
+        # #4935: a new job's name while the printer still says the last one's FINISH.
+        (None, {"gcode_state": "FINISH", "subtask_name": "y"}, None, None),
+        (None, FINISH_X, None, None),
+        # A delta before the reconnect's pushall answer keeps the running print.
+        ("x", {"mc_percent": 3}, "x", None),
+        ("x", {"gcode_state": "FINISH"}, "x", None),
+        (None, {"subtask_name": "x"}, None, None),
+    ],
+    ids=[
+        "finished",
+        "failed",
+        "idle",
+        "moved on",
+        "moved on under FINISH",
+        "paused",
+        "running",
+        "a start",
+        "a start under FINISH",
+        "never seen running",
+        "says too little",
+        "names no print",
+        "names no state",
+    ],
+)
+def test_a_report_ends_only_the_print_running_before_it(
+    running: str | None, new: dict[str, Any], after: str | None, ended: PrintEnd | None
+) -> None:
+    assert advance_print(running, new) == (after, ended)
+
+
+def test_a_write_returns_the_end_it_shows_after_a_report_that_says_too_little(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#5138 review: a reconnect's first delta may name no print; the row keeps the one
+    running, so the next whole report still ends it."""
+    _, reports, pid = linked
+    assert reports.put(pid, RUNNING_X, datetime.now(UTC)) is None
+    assert reports.put(pid, {"mc_percent": 3}, datetime.now(UTC)) is None
+    assert reports.put(pid, FINISH_X, datetime.now(UTC)) == PrintEnd("x", timed=True)
+    assert reports.put(pid, FINISH_X, datetime.now(UTC)) is None

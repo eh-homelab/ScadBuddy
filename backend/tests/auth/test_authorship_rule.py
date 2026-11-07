@@ -19,6 +19,7 @@ from scadbuddy.auth.authorship_rule import AuthorshipRule, starter_matches
 from scadbuddy.auth.gate import CALLER_SCOPE_KEY
 from scadbuddy.auth.models import ANONYMOUS, AuthSession, Caller, Person, Service
 from scadbuddy.auth.run_tokens import mint_run_token, run_of_token
+from scadbuddy.auth.service_credentials import SCOPES
 from scadbuddy.core.authorship import (
     AUTHOR_REFUSAL_KEY,
     AgentAuthor,
@@ -95,7 +96,7 @@ def _client(caller: Caller, rule: AuthorshipRule) -> TestClient:
 
 AUTHOR = {"X-ScadBuddy-Agent-Author": "token:abc"}
 AGENT = Service("agent", frozenset({"api"}))
-PROJECTS = Service("projects", frozenset({"api"}))
+PROJECTS = Service("projects", SCOPES["projects"])
 PRINT = Service("print", frozenset({"internal.outputs"}))
 
 

@@ -852,6 +852,85 @@ async def test_the_reaper_removes_an_orphan_s_old_directory_too(
 
 
 @pytest.mark.requires_postgres
+async def test_the_reaper_removes_an_old_claimed_directory_that_holds_nothing(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#5448: a save that claimed its id (`OutputStore.claim`) and stopped before it
+    held its Parts leaves a directory with no meta.json and no hold. Past the grace it
+    goes, with no hold to release; one inside the grace, or one still held, stays."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    stale, fresh, held = "d" * 32, "e" * 32, "f" * 32
+    two_hours_ago = time.time() - 7200
+    for output_id in (stale, fresh, held):
+        assert store.claim(old.slug, output_id)
+    for output_id in (stale, held):
+        directory = store.paths.output_dir(old.slug, output_id)
+        os.utime(directory, (two_hours_ago, two_hours_ago))
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        hold_parts(refs, held, written.manifest, old.slug)  # inside its holds' grace
+        assert reap_orphan_holds(refs, store) == 0
+    assert not store.paths.output_dir(old.slug, stale).exists()
+    assert store.paths.output_dir(old.slug, fresh).is_dir()
+    assert store.paths.output_dir(old.slug, held).is_dir()
+    assert store.get(old.id).id == old.id
+
+
+@pytest.mark.requires_postgres
+async def test_an_unlistable_directory_is_logged_when_no_hold_is_aged(
+    tmp_path: Path,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#5453: with no hold past the grace only the unheld-directory pass walks the
+    outputs, so a listing that fails is logged and the pass ends, rather than failing
+    every tick. With a hold to release, the walk still raises."""
+    store, old, _, written = await _legacy_output(tmp_path)
+
+    def unlistable(root: Path) -> None:
+        raise PermissionError(root)
+
+    monkeypatch.setattr(outputs_module, "_live_outputs", unlistable)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)  # inside the grace
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+            assert reap_orphan_holds(refs, store) == 0
+        assert any("unheld directories" in r.getMessage() for r in caplog.records)
+        _age_holds(refs, old.id, 2)
+        with pytest.raises(PermissionError):
+            reap_orphan_holds(refs, store)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory of mode 000")
+async def test_a_slug_directory_it_cannot_list_is_logged_when_no_hold_is_aged(
+    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#5453, with a real listing that fails: a slug directory of mode 000 is logged
+    when no hold is past the grace, and raises once one is."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    locked = store.paths.outputs / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        with store_pool(pg_conninfo) as pool:
+            refs = BlobRefs(pool)
+            hold_parts(refs, old.id, written.manifest, old.slug)  # inside the grace
+            with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+                assert reap_orphan_holds(refs, store) == 0
+            warned = [r for r in caplog.records if "unheld directories" in r.getMessage()]
+            assert [r.__dict__["path"] for r in warned] == [str(locked)]
+            _age_holds(refs, old.id, 2)
+            with pytest.raises(PermissionError):
+                reap_orphan_holds(refs, store)
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.requires_postgres
 async def test_the_reaper_never_removes_a_symlinked_orphan_directory(
     tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
 ) -> None:

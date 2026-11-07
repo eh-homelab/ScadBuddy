@@ -35,7 +35,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta
 from typing import Any, Literal, LiteralString, Protocol
 
@@ -162,11 +162,11 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
 
     ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm``,
     ``filament_profiles``, ``supports`` (#1899), ``prime_tower`` (#3628), ``plate_ids``
-    (#3652), ``folder_id`` (#3651) and ``printer`` (#3823) are part of it when sent;
-    without them the key is what it was before the fields existed. ``printer`` counts
-    only without ``printer_id``, which decides when both are sent (#4442 I1, M1): the
-    dialog sent it, ignored, before the backend read it, so its keys stay as they were
-    across the deploy, and a retry that straddles it joins its run.
+    (#3652), ``folder_id`` (#3651), ``printer`` (#3823), ``path`` (#5352) and ``part_settings``
+    (#5571) are part of it when sent; without them the key is what it was before the fields existed.
+    ``printer`` counts only without ``printer_id``, which decides when both are sent
+    (#4442 I1, M1): the dialog sent it, ignored, before the backend read it, so its keys
+    stay as they were across the deploy, and a retry that straddles it joins its run.
     """
     optional = (
         "request_id",
@@ -178,6 +178,8 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "plate_ids",
         "folder_id",
         "printer",
+        "path",
+        "part_settings",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
     if request.printer_id is not None:
@@ -261,7 +263,12 @@ class PrintRunStore:
         """The output's runs that may still read a slice of it, newest first (#4312
         re-review I-a): those still ``running``, and a succeeded native run with prints
         still to start, which it starts from its sliced files later (#4541, #4337)."""
-        return await asyncio.to_thread(self._running_for, output_id)
+        return (await self.running_for_outputs([output_id]))[output_id]
+
+    async def running_for_outputs(self, output_ids: Iterable[str]) -> dict[str, list[PrintRun]]:
+        """:meth:`running_for` for several outputs in one query, not one per output; every
+        id is a key (#5403)."""
+        return await asyncio.to_thread(self._running_for, list(dict.fromkeys(output_ids)))
 
     async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
         """Every succeeded native run with prints still to start, neither all started nor
@@ -429,14 +436,19 @@ class PrintRunStore:
             self._announce(conn, run, slug, updated)
             return run
 
-    def _running_for(self, output_id: str) -> list[PrintRun]:
+    def _running_for(self, output_ids: list[str]) -> dict[str, list[PrintRun]]:
+        found: dict[str, list[PrintRun]] = {output_id: [] for output_id in output_ids}
+        if not output_ids:
+            return found
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s AND {_IN_USE}"
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = ANY(%s) AND {_IN_USE}"
                 " ORDER BY created_at DESC".encode(),
-                (output_id,),
+                (output_ids,),
             ).fetchall()
-        return [PrintRun.model_validate(row) for row in rows]
+        for row in rows:
+            found[row["output_id"]].append(PrintRun.model_validate(row))
+        return found
 
     def _lan_waiting_runs(self) -> list[tuple[str, str | None]]:
         with self._pool.connection() as conn:

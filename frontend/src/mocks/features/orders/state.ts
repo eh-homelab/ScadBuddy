@@ -6,12 +6,15 @@ import type {
   Fulfilment,
   Order,
   OrderCharge,
+  CostEntry,
+  TimeEntry,
   OrderEvent,
   OrderAttachment,
   OrderItem,
   OrderProject,
   Payment,
   Quote,
+  Revision,
   Shipment,
 } from '../../../api/types'
 import { versionIds } from '../../fixtures'
@@ -69,6 +72,8 @@ export type State = {
   items: OrderItem[]
   quotes: Quote[]
   fulfilments: Fulfilment[]
+  /** #5280 — `order_item_revisions`: each item's designs, numbered per item. */
+  revisions: Revision[]
   shipments: Shipment[]
   charges: OrderCharge[]
   payments: Payment[]
@@ -82,6 +87,9 @@ export type State = {
   /** #4253 §8.1 — `order_projects`: the Bambuddy projects of each order and its items. */
   projects: (OrderProject & { order_id: string })[]
   files: Record<string, Blob>
+  /** #5326 — `order_time_entries` and `order_cost_entries`. */
+  timeEntries: TimeEntry[]
+  costEntries: CostEntry[]
 }
 
 let counter = 0
@@ -101,6 +109,8 @@ export const ITEM_CLOSED = '7b1c2d3e-4f50-4617-8829-aabbccddee03'
 export const QUOTE_ACCEPTED = 'q0000000-0000-4000-8000-000000000002'
 /** The fixture output "Reagan" of name-keychain, which the draft item was made from. */
 export const OUTPUT_REAGAN = 'a'.repeat(32)
+/** The fixtures' revision 1 of an item (#5280). */
+export const firstRevisionId = (itemId: string) => `r1-${itemId}`
 
 function address(id: string, customerId: string): CustomerAddress {
   void customerId
@@ -201,13 +211,42 @@ export function item(id: string, orderId: string, status: OrderItem['status'], e
       { slot: 1, colour: '#1e1e1e', filament_id: null },
     ],
     output_id: OUTPUT_REAGAN,
+    approval: 'together',
+    revised_after_acceptance: false,
+    current_revision_id: firstRevisionId(id),
     created_at: '2026-10-19T09:00:00Z',
     updated_at: '2026-10-19T09:00:00Z',
     ...extra,
   }
 }
 
+/** An item's revisions, oldest first (`OrderStore.revisions`). */
+export const revisionsOf = (itemId: string) => state.revisions.filter((r) => r.item_id === itemId).sort((a, b) => a.number - b.number)
+
+function firstRevision(of: OrderItem): Revision {
+  return {
+    id: firstRevisionId(of.id),
+    item_id: of.id,
+    number: 1,
+    note: '',
+    reference: of.reference!,
+    colours: of.colours,
+    created_at: of.created_at,
+    created_by: BROWSER,
+    answer: null,
+    answer_note: null,
+    answered_at: null,
+    answered_by: null,
+    sent_at: null,
+  }
+}
+
 function fixtures(): State {
+  const items = [
+    item(ITEM_CLOSED, ORDER_CLOSED, 'fulfilled', { output_id: null }),
+    item(ITEM_APPROVED, ORDER_ACCEPTED, 'approved', { quantity: 2 }),
+    item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 }),
+  ]
   const { id: _a, ...adaAddress } = address(ADDRESS_ADA, CUSTOMER_ADA)
   const snapshot = { ...adaAddress, id: ADDRESS_ADA }
   delete (snapshot as { position?: number }).position
@@ -253,15 +292,13 @@ function fixtures(): State {
       }),
       order(ORDER_DRAFT, 'ORD-2026-3', CUSTOMER_ADA, 'draft', '2026-10-19T09:00:00Z'),
     ],
-    items: [
-      item(ITEM_CLOSED, ORDER_CLOSED, 'fulfilled', { output_id: null }),
-      item(ITEM_APPROVED, ORDER_ACCEPTED, 'approved', { quantity: 2 }),
-      item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 }),
-    ],
+    items,
+    revisions: items.map(firstRevision),
     quotes: [
       {
         id: QUOTE_ACCEPTED,
         order_item_id: ITEM_APPROVED,
+        revision_id: firstRevisionId(ITEM_APPROVED),
         created_at: '2026-10-18T12:30:00Z',
         source: 'manual',
         accepted: true,
@@ -278,6 +315,7 @@ function fixtures(): State {
       {
         id: 'q0000000-0000-4000-8000-000000000001',
         order_item_id: ITEM_CLOSED,
+        revision_id: firstRevisionId(ITEM_CLOSED),
         created_at: '2026-10-17T09:30:00Z',
         source: 'manual',
         accepted: true,
@@ -296,6 +334,7 @@ function fixtures(): State {
       {
         id: 'f0000000-0000-4000-8000-000000000001',
         order_item_id: ITEM_CLOSED,
+        purpose: 'production',
         attempt: 1,
         quantity: 1,
         outcome: 'succeeded',
@@ -338,6 +377,8 @@ function fixtures(): State {
     attachments: [],
     projects: [],
     files: {},
+    timeEntries: [],
+    costEntries: [],
   }
 }
 

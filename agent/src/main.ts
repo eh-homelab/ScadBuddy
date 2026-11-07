@@ -1,3 +1,9 @@
+import { pendingInput } from './routes/pendingInput.js'
+import { pendingNotices, NotificationDispatcher } from './notify/dispatcher.js'
+import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
+import { PushStore } from './notify/pushStore.js'
+import { ChannelStore } from './notify/channels.js'
+import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
@@ -41,18 +47,26 @@ import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { PluginOAuth } from './plugins/oauthStore.js'
-import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { toolSecrets } from './plugins/secrets.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
-import { ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
+import {
+  type CredentialSource,
+  ExchangeCredential,
+  ServiceCredential,
+  serviceCredentialMiddleware,
+  withServiceCredential,
+} from './api/serviceCredential.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
+import { fetchGrantKey, fetchGrantMinter } from './tools/fetchGrant.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
-import { TemporalTabRelay } from './bridge/relay.js'
+import { hostTabs, TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
 import { PostgresTabImageStore } from './bridge/tabImages.js'
@@ -85,7 +99,7 @@ import { TurnHost } from './sessions/turnHost.js'
 import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
-import { forwardPackageServers, packageHeaderSecrets } from './plugins/packages/mcp.js'
+import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
@@ -215,6 +229,20 @@ const database = config.databaseUrl
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
           )
         }
+        const push = await new PushStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
+        if (push.rewrapped || push.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${push.rewrapped} Web Push key(s)` +
+              (push.failed ? `; ${push.failed} could not be opened with the previous key` : ''),
+          )
+        }
+        const channels = await new ChannelStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
+        if (channels.rewrapped || channels.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${channels.rewrapped} notification channel token(s)` +
+              (channels.failed ? `; ${channels.failed} could not be opened with the previous key` : ''),
+          )
+        }
         const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
         if (grants.rewrapped || grants.failed) {
           console.log(
@@ -273,7 +301,19 @@ await startCredentialGateway()
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
 // #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
-const serviceCredential = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+// #5494: exchanged for its proof when one is configured, falling back to the view while the
+// agent has a database (an old backend answers the exchange 404); otherwise read from the view.
+const credentialView = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
+const serviceCredential: CredentialSource | undefined =
+  proofFile !== undefined
+    ? new ExchangeCredential({
+        backendUrl: config.backendUrl,
+        proofFile,
+        proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap',
+        ...(credentialView ? { fallback: credentialView } : {}),
+      })
+    : credentialView
 const backend = createBackendClient(
   config.backendUrl,
   globalThis.fetch,
@@ -283,6 +323,8 @@ const backend = createBackendClient(
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+// The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
+const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
 // Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
 // replicas make for a tab connected here (#4780).
@@ -329,6 +371,8 @@ const toolServices: ToolServices = {
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
   // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
+  // An approved one-off fetch off the asset allowlist's grant (#959): needs the KEK.
+  ...(kek.ok ? { fetchGrant: fetchGrantMinter(fetchGrantKey(kek.kek)) } : {}),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
@@ -414,14 +458,6 @@ if (role.http && database && workspace && workspaceBytesStatus) {
       if (moved) console.log(`workspace files: moved ${moved} file(s) from Postgres to the blob store`)
     })
     .catch((err: unknown) => console.error('workspace files: moving them to the blob store failed; retried at the next start:', (err as Error).message))
-}
-// What workspace_read redacts from text in every mode (classic, durable, /mcp):
-// each saved Claude credential's secret, read at the call (a classic turn adds its
-// plugin tokens, tools/harness.ts). None without the KEK, which opens them.
-if (credentials && kek.ok) {
-  const key = kek.kek
-  toolServices.secrets = async () =>
-    (await credentials.revealAll(key)).flatMap((row) => (row.credential ? [row.credential.secret] : []))
 }
 const stopWorkspaceSweep = !role.http ? undefined : workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
@@ -756,42 +792,20 @@ const durableCredentialSecrets = async () => {
 // A durable session's MCP client on each remote plugin, kept on the replica its calls
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
-/**
- * What a ToolCall's tool redacts beside the credentials (plan 2026-10-13 Step 9.2): the header
- * values of the remote plugins and package http servers a turn reaches, as the turn redacts them,
- * read from their stores alone: no address check, no forwarder route, no plugin contacted. The
- * turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (Step 9.3).
- */
-const readHeaderSecrets = async (): Promise<string[]> => {
-  const out: string[] = []
-  if (plugins) {
-    const { plugins: enabled } = await plugins.enabled(kek.ok ? kek.kek : undefined)
-    for (const plugin of enabled) if (plugin.header) out.push(...headerSecretVariants(plugin.header.value))
-  }
-  if (pluginPackages) {
-    const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
-    try {
-      out.push(...packageHeaderSecrets(loaded.loaded))
-    } finally {
-      loaded.release()
-    }
-  }
-  return out
-}
-/** How long one read of them serves every ToolCall's tool: a header changed since is redacted once it lapses. */
-const HEADER_SECRETS_MS = 30_000
-let headerSecrets: { at: number; read: Promise<string[]> } | undefined
-const turnHeaderSecrets = (): Promise<string[]> => {
-  if (!headerSecrets || Date.now() - headerSecrets.at > HEADER_SECRETS_MS) {
-    const read = readHeaderSecrets()
-    headerSecrets = { at: Date.now(), read }
-    // A read that failed is not kept: the next call reads again.
-    read.catch(() => {
-      if (headerSecrets?.read === read) headerSecrets = undefined
-    })
-  }
-  return headerSecrets.read
-}
+// What every tool redacts and every upload refuses, in every mode (an in-process turn, a
+// ToolCall, /mcp, a background task) (#5480): the saved credentials and every plugin secret
+// (plugins/secrets.ts `toolSecrets`, #5483). A turn adds its loaded plugins' current headers on
+// top (tools/harness.ts), so a header it signed in with since the last read is covered too. The
+// turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (plan
+// 2026-10-13 Step 9.3).
+const agentSecrets = toolSecrets({
+  kek: kek.ok ? kek.kek : undefined,
+  credentials,
+  plugins,
+  oauth: pluginOAuth,
+  ...(pluginPackages ? { packages: { store: pluginPackages, installer: packageInstaller } } : {}),
+})
+toolServices.secrets = agentSecrets.secrets
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -911,11 +925,8 @@ const temporalWorker =
         activities: {
           ...toolActivities(ALL_TOOLS, durableToolDeps),
           // A session turn's calls, each its own ToolCall workflow (plan 2026-10-13 Step 9.2),
-          // redacted of the turn's plugin and package tokens as an in-process call is.
-          ...toolCallActivities(ALL_TOOLS, {
-            ...durableToolDeps,
-            turnSecrets: turnHeaderSecrets,
-          }),
+          // redacted of the plugin and package tokens through `toolServices.secrets`, as an in-process call is.
+          ...toolCallActivities(ALL_TOOLS, durableToolDeps),
           ...gateActivities({
             audit,
             sessions: new PgSessionOwners(temporal.sql),
@@ -1007,28 +1018,24 @@ const hostWorkers =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
-// This replica claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with
-// bridge.tab: a claim before (or with a worker that never started) would send other replicas'
-// calls to wait out the ack timeout (#4806 review).
-if (tabRelay && hostWorkers) {
-  const relay = tabRelay
-  const pinned = hostWorkers.pinned
-  // Unref'd, so a worker that never connects does not hold the process open at shutdown.
-  const polling = setInterval(() => {
-    if (pinned.state() !== 'ok') return
-    clearInterval(polling)
-    relay.startHosting()
-  }, 200)
-  polling.unref()
-}
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
 // a recorded entry's decision in its row (R5, plan Step 9.7).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
-// that is deleted once the caller has the answer (#4780): so only with the codec.
-if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
+// that is deleted once the caller has the answer (#4780): so only with the codec. This replica
+// claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with bridge.tab: a
+// claim before (or with a worker that never started) would send other replicas' calls to wait out
+// the ack timeout (#4806 review). `hostTabs` sets the client first; a replica without the KEK has
+// none, so `startHosting` refuses and logs it once (#4949, #5421). Its poll stops on shutdown, so
+// a worker that never polled does not start hosting while the process closes (#5432).
+let stopTabHosting: (() => void) | undefined
+if (tabRelay) {
+  const sql = database?.sql
   const keys = payloadKeys
-  tabRelay.useClient({ client: temporalClient, dropKey: (subject) => dropPayloadKey(database.sql, keys, subject) })
+  stopTabHosting = hostTabs(tabRelay, {
+    sealing: temporalClient && dataConverter && keys && sql ? { client: temporalClient, dropKey: (subject) => dropPayloadKey(sql, keys, subject) } : undefined,
+    worker: hostWorkers?.pinned,
+  })
 }
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.
@@ -1102,6 +1109,31 @@ const commands =
       })
     : undefined
 
+// Web Push (#815 §3, notify/): each request waiting on the person (an approval, a question
+// or an attention request) pushed once to every subscribed browser,
+// so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
+// runs on each pending-input change and once the database is ready.
+const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
+// The out-of-browser channels (#815, notify/channels.ts): their tokens are sealed too.
+const notifyChannels = role.http && database && kek.ok ? new ChannelStore(database.sql, kek.kek) : undefined
+const pushDispatcher =
+  pushStore && sessions
+    ? new NotificationDispatcher({
+        store: pushStore,
+        notices: async (owner) => pendingNotices(await pendingInput(sessions, owner)),
+        // RFC 8292 §2.1: who the push service may contact about these messages.
+        subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
+        // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).
+        hosts: async () => pushHostsOf(await settings?.get<unknown>(SETTING_PUSH_HOSTS)),
+        channels: notifyChannels,
+        publicUrl: config.publicUrl,
+      })
+    : undefined
+if (pushDispatcher && database) {
+  pendingChanges?.subscribe(() => pushDispatcher.wake())
+  void database.ready().then((ok) => ok && pushDispatcher.wake())
+}
+
 const app = !role.http
   ? undefined
   : createApp({
@@ -1134,9 +1166,17 @@ const app = !role.http
   ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
+  // A file picked from a workspace (#4703) is refused when it holds one of these: every saved
+  // Claude credential and every plugin secret, as a turn's upload tools search for them.
+  // Read fresh, not through the 30 s cache: a pick is rare, and a secret stored a moment ago counts.
+  workspaceSecrets: agentSecrets.fresh,
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
+  ...(pendingChanges ? { pendingChanges } : {}),
+  ...(pushStore && pushDispatcher ? { push: { store: pushStore, dispatcher: pushDispatcher } } : {}),
+  ...(notifyChannels ? { notifyChannels } : {}),
+  publicUrl: config.publicUrl,
   upgradeWebSocket,
   tabs,
   // A person's session on /api/v1/ai/* (#4975 phase 5), dropped when the backend revokes it.
@@ -1227,6 +1267,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 }
 
 async function stop(): Promise<void> {
+  stopTabHosting?.()
   stopSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()

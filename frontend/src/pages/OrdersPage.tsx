@@ -1,11 +1,14 @@
 import { useCallback, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { Loader2Icon } from 'lucide-react'
+import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, Loader2Icon } from 'lucide-react'
 import { api } from '../api/client'
-import type { Customer, Order, OrderStatus } from '../api/types'
+import type { Customer, InventoryPart, OrderRow, OrderStatus } from '../api/types'
 import { CustomerPicker } from '../components/orders/CustomerPicker'
 import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustomerPicker'
+import { NEXT_SORT, sortByMargin, type MarginSort } from '../components/orders/marginSort'
+import { marginTint } from '../components/orders/OrderCosts'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
+import { OrdersTabs } from '../components/orders/OrdersTabs'
 import { refusalText } from '../components/orders/refusal'
 import { DataTable, type Column } from '../components/records/DataTable'
 import { FilterBar } from '../components/records/FilterBar'
@@ -17,12 +20,63 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { dueAt, formatDueDate, timeAgo } from '../lib/format'
-import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, parseOrdersQuery, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
+import { formatMoney } from '../lib/money'
+import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, isReportFiltered, LOSS_OR_THIN, parseOrdersQuery, REPORT_KEYS, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { useAsync } from '../lib/useAsync'
 
 const PAGE = 50
 const STATUSES: OrderStatus[] = ['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']
 const ANY = 'any'
+
+/**
+ * #5327 (job cost spec §6.2): the margin as a percent, the money in the tooltip; `≈` when a
+ * part is estimated, "—" with no charged figure. A job charged nothing shows its money.
+ */
+function MarginCell({ order }: { order: OrderRow }) {
+  if (order.margin_minor == null) return <span className="text-muted-foreground">—</span>
+  const money = formatMoney(order.margin_minor, order.currency, order.minor_exponent)
+  const approx = order.margin_estimated ? '≈ ' : ''
+  const incomplete = order.margin_state === 'unknown' ? ' Some costs are unknown.' : ''
+  return (
+    <span title={`Margin ${approx}${money}.${incomplete}`} data-testid="order-margin">
+      {approx}
+      {order.margin_percent != null ? `${order.margin_percent}%` : money}
+      {order.margin_state === 'unknown' && <span className="ml-1 text-warn">(incomplete)</span>}
+    </span>
+  )
+}
+
+/** #5329 — the profit report row's filters, in words. */
+function reportFilterText(query: OrdersQuery): string {
+  const parts: string[] = []
+  if (query.product === 'custom') parts.push('custom items with no SKU')
+  else if (query.product.startsWith('sku:')) parts.push(`SKU ${query.product.slice(4)}`)
+  else if (query.product.startsWith('model:')) parts.push(`model ${query.product.slice(6)}`)
+  else if (query.product) parts.push(query.product)
+  // The `total` row has no product: its link lists every order in the currency (#5546).
+  else parts.push('every order')
+  if (query.accepted_from || query.accepted_to) {
+    // The report's bounds are the browser's local midnights (#5546): its days are local ones.
+    const from = query.accepted_from ? new Date(query.accepted_from).toLocaleDateString() : 'any time'
+    const to = query.accepted_to ? new Date(Date.parse(query.accepted_to) - 1).toLocaleDateString() : 'now'
+    parts.push(`accepted ${from} to ${to}`)
+  }
+  if (query.currency) parts.push(`in ${query.currency}`)
+  return parts.join(', ')
+}
+
+/** #5543, job cost spec §11: the parts at or below their low-stock level, linked to the Parts page. */
+function LowStock({ parts }: { parts: InventoryPart[] }) {
+  if (parts.length === 0) return null
+  return (
+    <p role="status" data-testid="low-stock" className="rounded-md border border-warn/40 p-2 text-[13px] text-warn">
+      Low stock: {parts.map((p) => `${p.name} (${p.on_hand})`).join(', ')}.{' '}
+      <Link to="/orders/parts" className="underline underline-offset-4">
+        Parts
+      </Link>
+    </p>
+  )
+}
 
 /** `/orders` (spec 2026-10-18 §9): the list with its filters, newest first, paged by cursor. */
 export function OrdersPage() {
@@ -32,7 +86,10 @@ export function OrdersPage() {
   const key = toOrdersParams(query).toString()
   const customers = useAsync(() => api.customers({ includeArchived: true, limit: 500 }), [])
   const list = useAsync(() => api.orders(query, { limit: PAGE }), [key], ['orders'])
-  const [older, setOlder] = useState<{ key: string; items: Order[]; cursor: string | null } | null>(null)
+  // #5543: a fulfilment takes parts out of stock, so the low parts are read again on an order's change.
+  const lowParts = useAsync(() => api.parts(true), [], ['orders'])
+  const [older, setOlder] = useState<{ key: string; items: OrderRow[]; cursor: string | null } | null>(null)
+  const [sort, setSort] = useState<MarginSort>('none')
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreFailed, setMoreFailed] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -50,7 +107,8 @@ export function OrdersPage() {
   )
   const held = older?.key === key ? older : null
   const base = list.data?.items ?? []
-  const rows = [...base, ...(held?.items ?? []).filter((o) => !base.some((b) => b.id === o.id))]
+  // Sorting by margin orders the rows loaded so far; "Load more" adds the next page.
+  const rows = sortByMargin([...base, ...(held?.items ?? []).filter((o) => !base.some((b) => b.id === o.id))], sort)
   const cursor = held ? held.cursor : (list.data?.next_cursor ?? null)
   const names = new Map((customers.data ?? []).map((c) => [c.id, c.display_name]))
 
@@ -99,7 +157,8 @@ export function OrdersPage() {
     }
   }
 
-  const columns: Column<Order>[] = [
+  const SortIcon = sort === 'ascending' ? ArrowUpIcon : sort === 'descending' ? ArrowDownIcon : ArrowUpDownIcon
+  const columns: Column<OrderRow>[] = [
     {
       key: 'number',
       header: 'Order',
@@ -113,13 +172,29 @@ export function OrdersPage() {
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
     { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
     { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? formatDueDate(order.due_at) : '') },
+    {
+      key: 'margin',
+      header: (
+        <button type="button" className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => setSort(NEXT_SORT[sort])}>
+          Margin
+          <SortIcon className="size-3" aria-hidden />
+        </button>
+      ),
+      sort,
+      className: 'whitespace-nowrap text-right tabular-nums',
+      headerClassName: 'text-right',
+      cell: (order) => <MarginCell order={order} />,
+    },
   ]
 
   return (
     <div className="h-full overflow-y-auto" data-testid="orders-page">
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-xl font-semibold tracking-tight">Orders</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl font-semibold tracking-tight">Orders</h1>
+            <OrdersTabs />
+          </div>
           <Button
             onClick={() => {
               // Each New order starts empty: a cancelled attempt's choices do not carry over.
@@ -133,6 +208,7 @@ export function OrdersPage() {
             New order
           </Button>
         </div>
+        <LowStock parts={lowParts.data ?? []} />
         <FilterBar
           label="Order filters"
           search={{ value: query.q, onChange: (q) => onChange({ ...query, q }, { typing: true }), placeholder: 'Search orders' }}
@@ -153,6 +229,13 @@ export function OrdersPage() {
               selected: query.status ? [query.status] : [],
               onChange: ([status]) => onChange({ ...query, status: status ?? '' }),
             },
+            {
+              key: 'margin',
+              label: 'Margin',
+              chips: [{ value: LOSS_OR_THIN, label: 'Loss or thin' }],
+              selected: query.margin ? [query.margin] : [],
+              onChange: ([margin]) => onChange({ ...query, margin: margin ?? '' }),
+            },
           ]}
           filtered={isOrdersFiltered(query)}
           onClear={() => onChange(DEFAULT_ORDERS_QUERY)}
@@ -172,6 +255,14 @@ export function OrdersPage() {
             </div>
           </div>
         </FilterBar>
+        {isReportFiltered(query) && (
+          <div role="status" data-testid="orders-report-filter" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
+            <span>The orders behind a profit report row: {reportFilterText(query)}.</span>
+            <Button variant="link" size="sm" className="h-auto p-0" onClick={() => onChange({ ...query, ...Object.fromEntries(REPORT_KEYS.map((k) => [k, ''])) })}>
+              Show every order
+            </Button>
+          </div>
+        )}
         {list.error ? (
           <p role="alert" className="text-[13px] text-warn">
             Could not load orders: {list.error.message}
@@ -183,7 +274,17 @@ export function OrdersPage() {
             ))}
           </div>
         ) : (
-          <DataTable label="Orders" columns={columns} rows={rows} rowKey={(o) => o.id} rowTestId={(o) => `order-row-${o.id}`} empty="No orders match." />
+          <DataTable
+            label="Orders"
+            columns={columns}
+            rows={rows}
+            rowKey={(o) => o.id}
+            rowTestId={(o) => `order-row-${o.id}`}
+            rowClassName={(o) => marginTint(o.margin_state)}
+            // #5515: a margin filter reads a bounded number of orders a request, so a page
+            // can be empty while older orders are still to search.
+            empty={cursor ? 'No matches yet. Load more to search older orders.' : 'No orders match.'}
+          />
         )}
         {moreFailed === key && (
           <p role="alert" className="text-[13px] text-warn">

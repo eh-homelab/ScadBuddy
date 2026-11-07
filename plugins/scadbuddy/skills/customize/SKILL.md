@@ -90,13 +90,18 @@ parameter type means (main spec §5.1 and §5.2):
   (`POST /api/v1/fonts/install`, body `{family}`) downloads it onto the data
   volume (main spec §5.4 and §8; `CLAUDE.md`, section "Verified OpenSCAD facts").
   There is no "Lobster" family, only "Lobster Two" (`CLAUDE.md`, same section).
-- **Files.** `POST /api/v1/models/{slug}/assets` (multipart `file`, SVG or PNG,
-  at most 8 MiB) stores a picture and returns its `id`. Pass that id as the
+- **Files.** `POST /api/v1/models/{slug}/assets` (multipart `file`: SVG, PNG, or a
+  mesh, STL, 3MF or OBJ, for a parameter whose `accept` names it; at most 8 MiB)
+  stores the file and returns its `id`. Pass that id as the
   value, never a path. A sample's value is its bare name (main spec §5.5).
 - **A file from elsewhere goes through your workspace** (#2329;
   `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`). Save it
   there first: `http_request` with `save_to_workspace`, or `workspace_save` for a
-  ScadBuddy file; a file the user has arrives by their upload in the panel. Look at it
+  ScadBuddy file; a file the user has arrives by their upload in the panel, or, over
+  an external `/mcp` install, by `PUT <scadbuddy_url>/mcp/workspace/<name>` with your
+  token and the file's raw bytes as the body (`curl -T <file>`; not `-d` or
+  `--data-binary`, which send a form type that is refused), which answers `{name,
+  mediaType, size, sha256}` (#4550, `agent/src/mcp/uploads.ts`). Look at it
   with `workspace_read` (an image comes back as an image), change a text file with
   `workspace_edit`, then upload it with `upload_asset` giving `workspace_path` and
   the `workspace_sha256` that `workspace_list` or `workspace_read` showed. Bytes are

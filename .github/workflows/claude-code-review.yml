@@ -331,10 +331,14 @@ jobs:
                  repo rules enumerated above.
                - A missing test ONLY when this PR adds or changes behaviour and
                  NO test exercises that behaviour at all.
-               - Accuracy this diff broke: a comment, docstring, doc, README or
-                 CLAUDE.md statement that is now false *because of this diff* —
-                 the PR changed a value or what the code does and left text that
-                 still describes the old one. Blocking only when the correct text
+               - Accuracy: a comment, docstring, doc, README or CLAUDE.md
+                 statement that is false *because of this diff*. Two shapes, both
+                 Blocking: text this diff ADDS that does not match the code or
+                 config it describes (a diagram that says "reads" where the grant
+                 also writes), and text this diff LEAVES that still describes what
+                 it changed (a comment above a changed limit that quotes the old
+                 total). Put it in the original PR, not a follow-up: that is the
+                 cheapest time to fix it. Blocking only when the correct text
                  is unambiguous. This is about a false claim, never phrasing:
                  wording, tone and style stay out of Blocking. The claim is the
                  unit, not the line: before you raise one, grep the repo for
@@ -356,7 +360,9 @@ jobs:
 
                **Leave out entirely**:
                - Cosmetic details in added lines (punctuation, arrow or dash
-                 style, table delimiter spacing). Linters own those.
+                 style, table delimiter spacing, comment indentation, line length
+                 or wrap width). Linters own those; when the linter passes, they
+                 are not findings.
                - Phrasing and clarity: a sentence that "reads oddly", repeats
                  itself, or could be shorter. If it is true, it is not a finding.
                - Pre-existing problems that this diff neither causes, exposes
@@ -372,6 +378,16 @@ jobs:
                  confirm a status). These are not findings. List them on one
                  `Unverified:` line after the `## Non-blocking` section, and only
                  when a failure there would be Blocking.
+                 Keep it to one line: name what was not checked and why, with no
+                 worked analysis or account of what you did check instead.
+
+               **Do not hedge a concrete defect down to Non-blocking.** If you
+               can name the input or sequence that makes code this diff changes or
+               causes do the wrong thing (a late async answer that lands on the
+               wrong page, a banner that stays after its cause is gone, code that
+               contradicts its own comment or spec), it is a correctness bug and
+               Blocking. "If that matters" or "if that should hold" fits only a
+               real design choice with no wrong answer, and that is Non-blocking.
 
                Every finding, in either section, must be clearly actionable.
                When unsure whether something is Blocking, ask whether merging

@@ -290,34 +290,60 @@ describe('the library routes', () => {
     })
   })
 
-  it('lists one folder of the library, paged', async () => {
-    let query = ''
+  it('lists one folder of the library, paged by the backend (#5291 review)', async () => {
+    const queries: URLSearchParams[] = []
+    const files = [
+      { id: 1, filename: 'a.3mf', file_type: '3mf', printable: true },
+      { id: 2, filename: 'b.stl', file_type: 'stl', printable: true },
+    ]
     server.use(
       http.get(`${BACKEND}/api/v1/print/library`, ({ request }) => {
-        query = new URL(request.url).search
-        return HttpResponse.json({
-          folder_id: 3,
-          all: true,
-          folders: [{ id: 3, name: 'Parts', parent_id: null, depth: 0 }],
-          files: [
-            { id: 1, filename: 'a.3mf', file_type: '3mf', printable: true },
-            { id: 2, filename: 'b.stl', file_type: 'stl', printable: true },
-          ],
-          hidden: 0,
-        })
+        const query = new URL(request.url).searchParams
+        queries.push(query)
+        const after = query.get('after')
+        const start = after === null ? 0 : files.findIndex((file) => file.id === Number(after)) + 1
+        return HttpResponse.json(
+          {
+            folder_id: 3,
+            all: true,
+            folders: [{ id: 3, name: 'Parts', parent_id: null, depth: 0 }],
+            files: files.slice(start, start + Number(query.get('limit'))),
+            hidden: 0,
+          },
+          { headers: { 'X-Total-Count': String(files.length) } },
+        )
       }),
     )
-    const result = firstText(await tool('list_library').execute({ folder_id: 3, all: true, limit: 1 }, ctx())) as {
-      files: unknown[]
-      folders: unknown[]
-      next_cursor: string | null
-      total: number
-    }
-    expect(query).toBe('?folder_id=3&all=true')
-    expect(result.files).toEqual([{ id: 1, filename: 'a.3mf', file_type: '3mf', printable: true }])
-    expect(result.folders).toHaveLength(1)
-    expect(result.total).toBe(2)
-    expect(result.next_cursor).toBeTruthy()
+    type Listing = { files: unknown[]; folders: unknown[]; next_cursor: string | null; total: number; hidden: number }
+    const first = firstText(await tool('list_library').execute({ folder_id: 3, all: true, limit: 1 }, ctx())) as Listing
+    // One file more than the page, to know whether another follows.
+    expect(Object.fromEntries(queries[0]!)).toEqual({ folder_id: '3', all: 'true', limit: '2' })
+    expect(first.files).toEqual([files[0]])
+    expect(first.folders).toHaveLength(1)
+    expect(first.hidden).toBe(0)
+    expect(first.total).toBe(2)
+    expect(first.next_cursor).toBeTruthy()
+
+    const second = firstText(
+      await tool('list_library').execute({ folder_id: 3, all: true, limit: 1, cursor: first.next_cursor! }, ctx()),
+    ) as Listing
+    expect(Object.fromEntries(queries[1]!)).toEqual({ folder_id: '3', all: 'true', limit: '2', after: '1' })
+    expect(second.files).toEqual([files[1]])
+    expect(second.next_cursor).toBeNull()
+  })
+
+  it("says a list_library cursor whose file went away is stale, on the backend's 409 (#5291 review)", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/library`, () =>
+        HttpResponse.json({ detail: 'no file is listed any more to page after' }, { status: 409 }),
+      ),
+    )
+    const cursor = Buffer.from(JSON.stringify(['1', 0, JSON.stringify(['list_library', [['all', true], ['folder_id', 3]]])])).toString(
+      'base64url',
+    )
+    await expect(tool('list_library').execute({ folder_id: 3, all: true, limit: 1, cursor }, ctx())).rejects.toThrow(
+      /the cursor is stale/,
+    )
   })
 
   it('finds files by name in every folder (#3630)', async () => {
@@ -341,6 +367,14 @@ describe('the library routes', () => {
     expect(result).toEqual(found)
     await tool('search_library').execute({ query: 'dino', fresh: true }, ctx())
     expect(query).toBe('?q=dino&fresh=true')
+  })
+
+  it('get_library_file reads one file by id, any type, with its folder path (#5321)', async () => {
+    const one = { id: FILE, filename: 'box.gcode.3mf', file_type: 'gcode.3mf', sliced: true, folder_path: ['Supplies'] }
+    server.use(http.get(LIB, () => HttpResponse.json(one)))
+    expect(tool('get_library_file').risk).toBe('read')
+    expect(tool('get_library_file').routes).toEqual(['GET /api/v1/print/library/{file_id}'])
+    expect(firstText(await tool('get_library_file').execute({ file_id: FILE }, ctx()))).toEqual(one)
   })
 })
 

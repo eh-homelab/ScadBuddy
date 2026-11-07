@@ -27,6 +27,10 @@ type PrintRunRequest struct {
 	folder_id PrintRunRequest_PrintRunRequest_folder_idable
 	// A sparse overlay on “PrintQueueItemCreate“'s option fields. “extra="forbid"“ on purpose: a misspelled option must 422 rather than be remembered under a name nothing will ever read.
 	options PrintOptionsable
+	// The part_settings property
+	part_settings i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
+	// The path property
+	path PrintRunRequest_PrintRunRequest_pathable
 	// The plate_id property
 	plate_id *int32
 	// The plate_ids property
@@ -221,6 +225,92 @@ func (m *PrintRunRequest_PrintRunRequest_folder_id) SetInteger(value *int32) {
 // SetPrintRunRequestFolderIdMember1 sets the PrintRunRequest_folder_idMember1 property value. Composed type representation for type PrintRunRequest_folder_idMember1able
 func (m *PrintRunRequest_PrintRunRequest_folder_id) SetPrintRunRequestFolderIdMember1(value PrintRunRequest_folder_idMember1able) {
 	m.printRunRequest_folder_idMember1 = value
+}
+
+// PrintRunRequest_PrintRunRequest_path composed type wrapper for classes PrintRunRequest_pathMember1able, string
+type PrintRunRequest_PrintRunRequest_path struct {
+	// Composed type representation for type PrintRunRequest_pathMember1able
+	printRunRequest_pathMember1 PrintRunRequest_pathMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewPrintRunRequest_PrintRunRequest_path instantiates a new PrintRunRequest_PrintRunRequest_path and sets the default values.
+func NewPrintRunRequest_PrintRunRequest_path() *PrintRunRequest_PrintRunRequest_path {
+	m := &PrintRunRequest_PrintRunRequest_path{}
+	return m
+}
+
+// CreatePrintRunRequest_PrintRunRequest_pathFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreatePrintRunRequest_PrintRunRequest_pathFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewPrintRunRequest_PrintRunRequest_path()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreatePrintRunRequest_pathMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(PrintRunRequest_pathMember1able); ok {
+				result.SetPrintRunRequestPathMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *PrintRunRequest_PrintRunRequest_path) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *PrintRunRequest_PrintRunRequest_path) GetIsComposedType() bool {
+	return true
+}
+
+// GetPrintRunRequestPathMember1 gets the PrintRunRequest_pathMember1 property value. Composed type representation for type PrintRunRequest_pathMember1able
+// returns a PrintRunRequest_pathMember1able when successful
+func (m *PrintRunRequest_PrintRunRequest_path) GetPrintRunRequestPathMember1() PrintRunRequest_pathMember1able {
+	return m.printRunRequest_pathMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PrintRunRequest_PrintRunRequest_path) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *PrintRunRequest_PrintRunRequest_path) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetPrintRunRequestPathMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetPrintRunRequestPathMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetPrintRunRequestPathMember1 sets the PrintRunRequest_pathMember1 property value. Composed type representation for type PrintRunRequest_pathMember1able
+func (m *PrintRunRequest_PrintRunRequest_path) SetPrintRunRequestPathMember1(value PrintRunRequest_pathMember1able) {
+	m.printRunRequest_pathMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *PrintRunRequest_PrintRunRequest_path) SetString(value *string) {
+	m.string = value
 }
 
 // PrintRunRequest_PrintRunRequest_plate_ids composed type wrapper for classes PrintRunRequest_plate_idsMember1able, []int32
@@ -933,6 +1023,14 @@ type PrintRunRequest_PrintRunRequest_folder_idable interface {
 	SetPrintRunRequestFolderIdMember1(value PrintRunRequest_folder_idMember1able)
 }
 
+type PrintRunRequest_PrintRunRequest_pathable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetPrintRunRequestPathMember1() PrintRunRequest_pathMember1able
+	GetString() *string
+	SetPrintRunRequestPathMember1(value PrintRunRequest_pathMember1able)
+	SetString(value *string)
+}
+
 type PrintRunRequest_PrintRunRequest_plate_idsable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetInteger() []int32
@@ -1140,6 +1238,26 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPartSettings(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
+	res["path"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_pathFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPath(val.(PrintRunRequest_PrintRunRequest_pathable))
+		}
+		return nil
+	}
 	res["plate_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetInt32Value()
 		if err != nil {
@@ -1277,6 +1395,18 @@ func (m *PrintRunRequest) GetOptions() PrintOptionsable {
 	return m.options
 }
 
+// GetPartSettings gets the part_settings property value. The part_settings property
+// returns a UntypedNodeable when successful
+func (m *PrintRunRequest) GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.part_settings
+}
+
+// GetPath gets the path property value. The path property
+// returns a PrintRunRequest_PrintRunRequest_pathable when successful
+func (m *PrintRunRequest) GetPath() PrintRunRequest_PrintRunRequest_pathable {
+	return m.path
+}
+
 // GetPlateId gets the plate_id property value. The plate_id property
 // returns a *int32 when successful
 func (m *PrintRunRequest) GetPlateId() *int32 {
@@ -1389,6 +1519,18 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("options", m.GetOptions())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("part_settings", m.GetPartSettings())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("path", m.GetPath())
 		if err != nil {
 			return err
 		}
@@ -1513,6 +1655,16 @@ func (m *PrintRunRequest) SetOptions(value PrintOptionsable) {
 	m.options = value
 }
 
+// SetPartSettings sets the part_settings property value. The part_settings property
+func (m *PrintRunRequest) SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.part_settings = value
+}
+
+// SetPath sets the path property value. The path property
+func (m *PrintRunRequest) SetPath(value PrintRunRequest_PrintRunRequest_pathable) {
+	m.path = value
+}
+
 // SetPlateId sets the plate_id property value. The plate_id property
 func (m *PrintRunRequest) SetPlateId(value *int32) {
 	m.plate_id = value
@@ -1579,6 +1731,8 @@ type PrintRunRequestable interface {
 	GetFilamentProfiles() []string
 	GetFolderId() PrintRunRequest_PrintRunRequest_folder_idable
 	GetOptions() PrintOptionsable
+	GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
+	GetPath() PrintRunRequest_PrintRunRequest_pathable
 	GetPlateId() *int32
 	GetPlateIds() PrintRunRequest_PrintRunRequest_plate_idsable
 	GetPrimeTower() PrimeTowerChoiceable
@@ -1598,6 +1752,8 @@ type PrintRunRequestable interface {
 	SetFilamentProfiles(value []string)
 	SetFolderId(value PrintRunRequest_PrintRunRequest_folder_idable)
 	SetOptions(value PrintOptionsable)
+	SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
+	SetPath(value PrintRunRequest_PrintRunRequest_pathable)
 	SetPlateId(value *int32)
 	SetPlateIds(value PrintRunRequest_PrintRunRequest_plate_idsable)
 	SetPrimeTower(value PrimeTowerChoiceable)

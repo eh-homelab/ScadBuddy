@@ -7,6 +7,7 @@ import { AccessResolver } from '../../src/access/resolver.js'
 import type { AccessReader } from '../../src/access/store.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../../src/memory/hindsight.js'
 import type { ApprovalRequest, RiskTier } from '../../src/harness/permissions.js'
+import { TOOL_LOADING_KEY, type ToolLoading } from '../../src/harness/toolSearch.js'
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
 import { forwardForRun, type PluginForwarder } from '../../src/plugins/forwarder.js'
 import type { PackagesForRun } from '../../src/plugins/packages/install.js'
@@ -51,6 +52,8 @@ export type TurnRunnerTestOptions = {
   packages?: Omit<PackagesForRun, 'release'>
   /** Wraps the access store's reader (a read that fails, #4757). */
   reader?: (base: AccessReader) => AccessReader
+  /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
+  toolLoadings?: Record<string, ToolLoading>
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -102,6 +105,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const store = memoryAccess(rows)
   /** Every event the turn appended to the session's log. */
   const appended: unknown[] = []
+  /** What each assembly gave the in-process servers. */
+  const serverExtras: unknown[] = []
   const runner = new TurnRunner({
     sql: unusedSql,
     paths,
@@ -111,13 +116,17 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         const stored: Record<string, unknown> = {
           model: 'claude-test',
           [SETTING_RECALL_MAX_QUERY_CHARS]: options.recallMaxQueryChars,
+          [TOOL_LOADING_KEY]: options.toolLoadings,
         }
         return Promise.resolve(stored[key] as T | undefined)
       },
     },
     access: new AccessResolver(options.reader ? options.reader(store.access) : store.access),
     tierOf: () => 'read',
-    mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),
+    mcpServers: (_session, _turn, extras) => {
+      serverExtras.push(extras)
+      return { scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }
+    },
     prepareApproval: options.prepareApproval ?? (() => async () => undefined),
     builtInTools: () =>
       Promise.resolve(
@@ -201,5 +210,5 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       }
     },
   }
-  return { runner, session, principal, gateCalls, paths, access: store.access, appended }
+  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras }
 }

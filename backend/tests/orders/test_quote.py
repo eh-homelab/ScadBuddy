@@ -5,6 +5,7 @@ fakes; the rows are Postgres."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,14 +27,17 @@ from scadbuddy.orders.models import (
     Order,
     OrderItem,
     PricingPolicy,
+    Quote,
     Reference,
 )
+from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.quote import (
     QuoteError,
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
     ensure_output,
+    operation_output_id,
     output_matches,
     quote_check,
     quote_run,
@@ -156,6 +160,12 @@ class FakeSlicer:
         self, output_id: str, request: SliceQuoteRequest, subject: str
     ) -> list[PreviewStarted]:
         self.subjects.append(subject)
+        return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
+
+    async def start_library(
+        self, file_id: int, request: SliceQuoteRequest, subject: str
+    ) -> list[PreviewStarted]:
+        self.subjects.append(f"{subject} file {file_id}")
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
@@ -294,6 +304,14 @@ def test_the_check_refuses_a_settled_item(shop: Shop) -> None:
     assert gone.value.status == 404
 
 
+def test_the_check_refuses_a_request_with_no_design(shop: Shop) -> None:
+    request = shop.lifecycle.add_request_item(shop.order.id, BY, title="A dragon", quantity=1)
+    with pytest.raises(ApiError) as refused:
+        quote_check(shop.rows, POLICY, shop.order.id, request.id, shop.request())
+    assert refused.value.status == 409
+    assert refused.value.type == PROBLEMS + "item_has_no_design"
+
+
 def test_the_check_refuses_an_order_that_is_not_open(shop: Shop) -> None:
     quote = shop.lifecycle.record_manual_quote(
         shop.order.id, shop.item.id, ManualQuoteInput(unit_price_minor=100), BY
@@ -305,6 +323,15 @@ def test_the_check_refuses_an_order_that_is_not_open(shop: Shop) -> None:
             shop.rows, POLICY, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.pla)
         )
     assert (refused.value.status, refused.value.type.rsplit("/", 1)[-1]) == (409, "order_not_open")
+    # #5350: revised after acceptance, the item takes a slice quote of its new design, and a
+    # filament changed for it keeps the old accepted quote.
+    shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, after_acceptance=True)
+    slots = quote_check(
+        shop.rows, POLICY, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg)
+    )
+    assert slots == {0: shop.pla, 1: shop.petg}
+    shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, filaments={1: shop.petg})
+    assert [q.accepted for q in shop.rows.quotes(shop.item.id)] == [True]
 
 
 def test_the_check_needs_a_filament_per_slot(shop: Shop) -> None:
@@ -558,6 +585,84 @@ async def test_the_run_writes_the_filaments_first(shop: Shop, tmp_path: Path) ->
     assert run.slicer.subjects == [f"order_item:{shop.item.id}"]
 
 
+async def test_the_runs_new_filaments_are_a_revision_the_quote_names(
+    shop: Shop, tmp_path: Path
+) -> None:
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    revisions = shop.rows.revisions(shop.item.id)
+    assert [r.number for r in revisions] == [1, 2]
+    assert quote.revision_id == revisions[1].id
+
+
+async def test_a_revision_made_during_the_run_refuses_its_quote(shop: Shop, tmp_path: Path) -> None:
+    """Review Focus 5: the slice is of a design a person has since replaced."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    assert isinstance(run.slicer, FakeSlicer)
+    fetch = run.slicer.fetch
+
+    async def revising(sliced: SlicedPlate) -> bytes:
+        shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, note="new photos")
+        return await fetch(sliced)
+
+    run.slicer.fetch = revising  # type: ignore[method-assign]
+    with pytest.raises(ApiError) as refused:
+        await quote_run(
+            run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+        )
+    assert refused.value.status == 409
+    assert refused.value.type.endswith("/revision_not_newest")
+    assert shop.rows.quotes(shop.item.id) == []
+    assert shop.holders() == set()
+
+
+async def test_a_revision_made_during_the_render_refuses_its_quote(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """A revision made while the item's render runs: the render is of the old design,
+    so the run writes nothing past it and records no quote."""
+
+    class Revising(FakeRenders):
+        async def submit(self, *args: Any, **kwargs: Any) -> Job:
+            shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, note="new photos")
+            return await super().submit(*args, **kwargs)
+
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])}, renders=Revising())
+    with pytest.raises(ApiError) as refused:
+        await quote_run(
+            run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+        )
+    assert refused.value.status == 409
+    assert refused.value.type.endswith("/revision_not_newest")
+    assert shop.rows.quotes(shop.item.id) == []
+    assert shop.holders() == set()
+    assert shop.get_item().output_id is None
+
+
+async def test_an_item_with_no_revision_is_repaired_and_quoted(shop: Shop, tmp_path: Path) -> None:
+    """An item a build before revisions wrote has none: the run makes its revision 1
+    from the item's copy and quotes it, never a 500."""
+    shop.lifecycle.update_item(
+        shop.order.id, shop.item.id, BY, filaments={0: shop.pla, 1: shop.petg}
+    )
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_items SET current_revision_id = NULL WHERE id = %s", (shop.item.id,)
+        )
+        conn.execute("DELETE FROM order_item_revisions WHERE item_id = %s", (shop.item.id,))
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    item = shop.get_item()
+    assert item.current_revision_id is not None
+    assert quote.revision_id == item.current_revision_id
+    kinds = [e.kind for e in shop.rows.events(shop.order.id)]
+    assert "revision.repaired" in kinds
+
+
 async def test_a_recorded_quote_keeps_its_rates(shop: Shop, tmp_path: Path) -> None:
     """Review Focus 2: the book changing afterwards never moves a recorded quote."""
     book = Book()
@@ -609,3 +714,232 @@ async def test_a_failed_run_drops_its_own_holder(shop: Shop, tmp_path: Path) -> 
     assert "plate 2" in failed.value.detail
     assert shop.holders() == set()
     assert shop.rows.quotes(shop.item.id) == []
+
+
+# -- attempts of one operation that overlap (#5353) -------------------------------------------
+
+#: The quote id every attempt of one operation records under (`operation_quote_id`).
+ONE_OPERATION = "5353" * 8
+
+
+class PausedSlicer(FakeSlicer):
+    """Holds the second plate's fetch until ``go``: by then the first plate's file is
+    kept and held, so the attempt is between its holds and its record. With ``fail``
+    the attempt fails there, as one whose worker stopped does."""
+
+    def __init__(self, files: Mapping[int, bytes]) -> None:
+        super().__init__(files)
+        self.paused = asyncio.Event()
+        self.go = asyncio.Event()
+        self.fail = False
+
+    async def fetch(self, sliced: SlicedPlate) -> bytes:
+        if sliced.plate_id == 2:
+            self.paused.set()
+            await self.go.wait()
+            if self.fail:
+                raise RuntimeError("this attempt's worker stopped")
+        return await super().fetch(sliced)
+
+
+async def paused_attempt(
+    shop: Shop, tmp_path: Path, seconds: int = 600, **extra: Any
+) -> tuple[PausedSlicer, asyncio.Task[Quote]]:
+    """An attempt of the operation, started and run to its pause. Another ``seconds``
+    is a re-slice that gave other bytes, so other keys; ``extra`` goes to `run_of`."""
+    files = {
+        1: sliced_plate(1, seconds, [1.0, 1.0]),
+        2: sliced_plate(2, seconds, [1.0, 1.0]),
+    }
+    run = run_of(shop, tmp_path, files, **extra)
+    slicer = PausedSlicer(files)
+    run.slicer = slicer
+    task = asyncio.create_task(
+        quote_run(
+            run,
+            shop.order.id,
+            shop.item.id,
+            shop.request(s0=shop.pla, s1=shop.petg),
+            BY,
+            quote_id=ONE_OPERATION,
+        )
+    )
+    await asyncio.wait_for(slicer.paused.wait(), 30)
+    return slicer, task
+
+
+def held_keys(shop: Shop, quote_id: str) -> set[str]:
+    with shop.refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (QUOTE_HOLDER, quote_id),
+        ).fetchall()
+    return {row["key"] for row in rows}
+
+
+def plate_keys(quote: Quote) -> set[str]:
+    return {plate["blob_key"] for plate in quote.plates} | {quote.sliced_blob_key or ""}
+
+
+async def test_an_attempt_that_fails_before_another_records_leaves_its_quote_held(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#5353: a heartbeat timeout starts the next attempt while the first still runs.
+    One fails after both took their holds and drops them, since nothing is recorded
+    yet; the other then records, and its quote's holds commit with its row."""
+    first, recording = await paused_attempt(shop, tmp_path)
+    second, failing = await paused_attempt(shop, tmp_path)
+    assert held_keys(shop, ONE_OPERATION)
+    second.fail = True
+    second.go.set()
+    with pytest.raises(RuntimeError):
+        await failing
+    assert held_keys(shop, ONE_OPERATION) == set()
+    first.go.set()
+    quote = await recording
+    assert quote.id == ONE_OPERATION
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]
+
+
+async def test_attempts_that_end_after_another_recorded_keep_its_holds(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#5353: three overlapping attempts. One records; one that reaches its record
+    afterwards answers with that quote (no second row, no primary-key failure); one that
+    fails afterwards leaves the recorded quote's holds where they are."""
+    first, recording = await paused_attempt(shop, tmp_path)
+    second, late = await paused_attempt(shop, tmp_path)
+    third, failing = await paused_attempt(shop, tmp_path)
+    first.go.set()
+    quote = await recording
+    second.go.set()
+    assert (await late).id == quote.id == ONE_OPERATION
+    third.fail = True
+    third.go.set()
+    with pytest.raises(RuntimeError):
+        await failing
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]
+
+
+async def test_an_attempt_whose_reslice_differs_keeps_only_the_recorded_quotes_holds(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#5415: overlapping attempts whose re-slices gave other bytes hold keys the quote
+    another attempt recorded does not name. One that reaches its record afterwards, and
+    one that fails afterwards, drop those holds; the recorded quote keeps its own."""
+
+    class Broken(Book):
+        def policy(self) -> tuple[str, PricingPolicy, str]:
+            raise RuntimeError("this attempt's worker stopped")
+
+    first, recording = await paused_attempt(shop, tmp_path)
+    second, late = await paused_attempt(shop, tmp_path, seconds=601)
+    # Fails after it kept both plates' files: at the price.
+    third, failing = await paused_attempt(shop, tmp_path, seconds=602, book=Broken())
+    first.go.set()
+    quote = await recording
+    second.go.set()
+    assert (await late).id == quote.id
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    third.go.set()
+    with pytest.raises(RuntimeError):
+        await failing
+    assert held_keys(shop, ONE_OPERATION) == plate_keys(quote)
+    assert [q.id for q in shop.rows.quotes(shop.item.id)] == [ONE_OPERATION]
+
+
+# -- an output saved once per operation (#5390) -----------------------------------------------
+
+
+class SavedOutputs:
+    """``OutputsRead`` over the outputs ``create`` saved, each the reference's render."""
+
+    def __init__(self) -> None:
+        self.metas: dict[str, OutputMeta] = {}
+        self.created: list[str] = []
+
+    def get(self, output_id: str) -> OutputMeta:
+        if output_id not in self.metas:
+            raise OutputNotFoundError(output_id)
+        return self.metas[output_id]
+
+    def inputs(self, output_id: str) -> dict[str, Any]:
+        return INPUTS
+
+    def arranged_from(self, output_id: str) -> list[str]:
+        return []
+
+    async def create(self, body: dict[str, Any]) -> dict[str, Any]:
+        # As `output_create`'s run: an id already there is another save's claim.
+        output_id = body.get("output_id") or ""
+        if not output_id or output_id in self.metas:
+            output_id = f"out-{len(self.created)}"
+        colours = ["#ff0000", "#00ff00"]
+        self.metas[output_id] = OutputMeta.model_construct(
+            id=output_id, slug="demo", model_version="a" * 40, colors=colours
+        )
+        self.created.append(output_id)
+        return {"id": output_id, "colors": colours}
+
+
+async def test_an_attempt_that_stopped_after_saving_the_output_is_not_saved_twice(
+    shop: Shop, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5390: an attempt saves the item's output and stops before the item's
+    ``output_id`` write. The next attempt of the operation finds that output by the id
+    the operation saves under and sets it on the item, with no second render or save."""
+    outputs = SavedOutputs()
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 600, [1.0, 1.0])}, outputs=outputs)
+    run.create_output = outputs.create
+    renders = run.renders
+    assert isinstance(renders, FakeRenders)
+    real = shop.lifecycle.update_item
+
+    def stopped(*args: Any, **kwargs: Any) -> OrderItem:
+        if kwargs.get("output_id") is not None:
+            raise RuntimeError("this attempt's worker stopped")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(shop.lifecycle, "update_item", stopped)
+    request = shop.request(s0=shop.pla, s1=shop.petg)
+    with pytest.raises(RuntimeError):
+        await quote_run(run, shop.order.id, shop.item.id, request, BY, quote_id=ONE_OPERATION)
+    assert shop.get_item().output_id is None
+    monkeypatch.setattr(shop.lifecycle, "update_item", real)
+
+    quote = await quote_run(run, shop.order.id, shop.item.id, request, BY, quote_id=ONE_OPERATION)
+    saved = operation_output_id(ONE_OPERATION)
+    assert outputs.created == [saved]
+    assert len(renders.submitted) == 1
+    assert shop.get_item().output_id == saved
+    assert quote.id == ONE_OPERATION
+
+
+async def test_an_output_of_the_operations_id_that_does_not_match_is_left_alone(
+    shop: Shop,
+) -> None:
+    """#5390: an output already saved under the operation's id that is not the item's
+    render (another reference's) is never overwritten: the new one gets an id of its
+    own."""
+    outputs = SavedOutputs()
+    keyed = operation_output_id(ONE_OPERATION)
+    outputs.metas[keyed] = OutputMeta.model_construct(
+        id=keyed, slug="other", model_version="a" * 40, colors=[]
+    )
+    found = await ensure_output(
+        lifecycle=shop.lifecycle,
+        outputs=outputs,
+        renders=FakeRenders(),
+        create_output=outputs.create,
+        order=shop.get_order(),
+        item=shop.get_item(),
+        filaments={},
+        by=BY,
+        follow_every=0.0,
+        saved_as=keyed,
+    )
+    assert found != keyed and outputs.created == [found]
+    assert outputs.metas[keyed].slug == "other"
+    assert shop.get_item().output_id == found

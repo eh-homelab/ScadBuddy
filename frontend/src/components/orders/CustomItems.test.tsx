@@ -58,6 +58,103 @@ describe('custom line items', () => {
     expect(screen.getByRole('textbox', { name: 'Custom item title' })).toHaveValue('')
   })
 
+  it('adds one to an accepted order after a confirm, its price left to accept (#5541)', async () => {
+    const plain = vi.spyOn(api, 'addOrderItem')
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('button', { name: 'Add custom item' }))
+    expect(screen.getByRole('textbox', { name: 'Custom item title' })).toHaveFocus()
+    await user.type(screen.getByRole('textbox', { name: 'Custom item title' }), 'Rush fee')
+    await user.type(screen.getByRole('textbox', { name: 'Custom item unit price' }), '8{Enter}')
+    // The first save asks, naming the order and its status, and sends nothing.
+    expect(await screen.findByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is accepted\. Adding an item changes what the customer gets/)
+    expect(after).not.toHaveBeenCalled()
+    // A change to the row asks again.
+    await user.clear(screen.getByRole('textbox', { name: 'Custom item unit price' }))
+    await user.type(screen.getByRole('textbox', { name: 'Custom item unit price' }), '9')
+    expect(screen.queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save custom item' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirm custom item' }))
+    await waitFor(() => expect(customOf(ORDER_ACCEPTED)).toHaveLength(1))
+    expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, {
+      kind: 'custom',
+      title: 'Rush fee',
+      quantity: 1,
+      unit_price_minor: 900,
+      notes: '',
+      requires_printing: false,
+      accept: false,
+    })
+    expect(plain).not.toHaveBeenCalled()
+    const item = customOf(ORDER_ACCEPTED)[0]!
+    expect(item.status).toBe('quoted')
+    const row = await screen.findByTestId(`order-item-${item.id}`)
+    expect(within(row).getByText('not accepted')).toBeInTheDocument()
+    expect(screen.queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+  })
+
+  it('offers no entry row on an accepted order on hold (#5541)', async () => {
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByRole('button', { name: 'Add custom item' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('custom-item-row')).not.toBeInTheDocument()
+  })
+
+  it("accepts a custom item's quoted price in its drawer (#5541)", async () => {
+    const item = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'custom', title: 'Rush fee', quantity: 2, unit_price_minor: 400 })
+    expect(item.status).toBe('quoted')
+    const quote = state.quotes.find((q) => q.order_item_id === item.id)!
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_ACCEPTED)
+    await user.click(await screen.findByRole('button', { name: 'Rush fee' }))
+    const drawer = await screen.findByRole('dialog')
+    // Nothing to record: the price is the field above; only the pending quote's Accept.
+    expect(within(drawer).queryByRole('button', { name: 'Record and accept' })).not.toBeInTheDocument()
+    await user.click(within(within(drawer).getByTestId(`quote-${quote.id}`)).getByRole('button', { name: 'Accept' }))
+    await waitFor(() => expect(accepted).toHaveBeenCalledWith(ORDER_ACCEPTED, item.id, quote.id))
+    await waitFor(() => expect(state.items.find((i) => i.id === item.id)?.status).toBe('approved'))
+    // Accepted, the price is pinned: no Accept is offered again.
+    await waitFor(() => expect(within(drawer).queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument())
+  })
+
+  it("offers no Accept in the drawer of an accepted order on hold (#5555 review)", async () => {
+    const item = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'custom', title: 'Rush fee', quantity: 2, unit_price_minor: 400 })
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    const quote = state.quotes.find((q) => q.order_item_id === item.id)!
+    const { user } = render(ORDER_ACCEPTED)
+    await user.click(await screen.findByRole('button', { name: 'Rush fee' }))
+    const drawer = await screen.findByRole('dialog')
+    expect(within(drawer).getByTestId(`quote-${quote.id}`)).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
+  })
+
+  it('asks again after a confirmed add fails (#5555 review)', async () => {
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance').mockRejectedValueOnce(new Error('refused'))
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('button', { name: 'Add custom item' }))
+    await user.type(screen.getByRole('textbox', { name: 'Custom item title' }), 'Rush fee')
+    await user.type(screen.getByRole('textbox', { name: 'Custom item unit price' }), '8{Enter}')
+    await user.click(await screen.findByRole('button', { name: 'Confirm custom item' }))
+    await waitFor(() => expect(after).toHaveBeenCalledTimes(1))
+    // The failure clears the confirm: the next save asks first and sends nothing.
+    await waitFor(() => expect(screen.queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Save custom item' }))
+    expect(await screen.findByRole('alert', { name: 'Confirm the change' })).toBeInTheDocument()
+    expect(after).toHaveBeenCalledTimes(1)
+  })
+
+  it("offers no Accept on a custom item's accepted price", async () => {
+    await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Packaging', quantity: 1, unit_price_minor: 300 })
+    const { user } = render(ORDER_DRAFT)
+    await user.click(await screen.findByRole('button', { name: 'Packaging' }))
+    const drawer = await screen.findByRole('dialog')
+    expect(within(drawer).getByText('Accepted')).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
+  })
+
   it('says what the entry row lacks, and sends nothing', async () => {
     const added = vi.spyOn(api, 'addOrderItem')
     const { user } = render(ORDER_DRAFT)

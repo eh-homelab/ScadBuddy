@@ -977,6 +977,30 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         expect(asked).toHaveLength(1)
         expect(run.body).toBeUndefined()
       })
+
+      // #5352 — asked through Bambuddy's queue, it keeps its project and every option.
+      it('path bambuddy sends the project, the calibrations and timelapse, and approves the queue', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        server.use(row(2), linkedNative(), ...capturedRun(run))
+        const options = { bed_levelling: 'on', flow_cali: 'on', nozzle_offset_cali: 'off', vibration_cali: false, timelapse: true }
+        const args = { ...chosen, printer: PRINTER, project_id: 265, path: 'bambuddy', options }
+        const result = await tool('print_output').execute(args, ctx())
+        expect(result.isError).toBeFalsy()
+        expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2, project_id: 265, path: 'bambuddy', options })
+        const { context } = pendingCtx()
+        const answer = firstText(await runTool(tool('print_output'), args, context)) as { summary: string }
+        expect(answer.summary).toContain(`on printer "Garage" through Bambuddy's queue`)
+        expect(answer.summary).not.toContain('over the LAN')
+      })
+    })
+
+    it('path bambuddy on a row that links no Bambuddy printer is refused before anything is sent (#5352)', async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      server.use(row(null), ...capturedRun(run))
+      const result = await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER, path: 'bambuddy' }, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toMatch(/links no Bambuddy printer, so it cannot print through Bambuddy's queue/)
+      expect(run.body).toBeUndefined()
     })
 
     it("keeps a Bambuddy run's queue item ids and its Bambuddy URL, with no follow handle", async () => {
@@ -1236,6 +1260,30 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     )
     expect(t.summarize({ ...args, prime_tower: { enabled: false } })).toContain(', without a prime tower')
     expect(t.summarize(args)).not.toContain('prime tower')
+  })
+
+  it("sends a slot's part settings when given, names them in its approval line, and omits them otherwise (#5571)", async () => {
+    const chosen: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    const part_settings = { '2': { top_shell_layers: 8, ironing_type: 'top' } }
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, part_settings }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect((chosen.body as { part_settings?: unknown }).part_settings).toEqual(part_settings)
+    expect(plain.body).not.toHaveProperty('part_settings')
+    expect(t.summarize({ ...args, part_settings })).toContain(", with slot 2's parts at top_shell_layers 8, ironing_type top")
+    expect(t.summarize(args)).not.toContain('parts at')
+    // An unknown key or a value out of range is refused before anything is sent.
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { infill_wall_overlap: 15 } } }).success).toBe(false)
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { sparse_infill_density: 150 } } }).success).toBe(false)
+    // Keys are slot ids from 1 (#5571 review): no 0, no leading zero, no name, nothing past 64.
+    for (const slot of ['0', '01', 'Color 2', '-1', '1.5', '65']) {
+      expect(z.object(t.shape).safeParse({ ...args, part_settings: { [slot]: { wall_loops: 3 } } }).success).toBe(false)
+    }
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '64': { wall_loops: 3 } } }).success).toBe(true)
   })
 
   it('sends the accepted analyzer fixes it is given and names them in its approval line (#284)', async () => {
@@ -1925,6 +1973,40 @@ describe('preset tools carry a description and tags (#327)', () => {
   })
 })
 
+describe('preset tools hand back the link to a preset (#1022)', () => {
+  const MUM = {
+    id: 'p',
+    name: 'Mum',
+    origin: 'mine',
+    params: {},
+    description: '',
+    tags: [],
+    path: '/m/m?preset=p',
+    url: 'https://scad.test/m/m?preset=p',
+  }
+
+  it('says so, and passes the link through from the backend', async () => {
+    for (const name of ['list_presets', 'save_preset', 'update_preset', 'duplicate_preset']) {
+      expect(tool(name).description).toMatch(/`url`.*`path`/)
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json([MUM])),
+      http.post(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json(MUM, { status: 201 })),
+      http.patch(`${BACKEND}/api/v1/models/m/presets/p`, () => HttpResponse.json(MUM)),
+      http.post(`${BACKEND}/api/v1/models/m/presets/p/duplicate`, () =>
+        HttpResponse.json({ ...MUM, id: 'q', path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' }, { status: 201 })),
+    )
+    const listed = await runTool(tool('list_presets'), { slug: 'm' }, ctx())
+    expect(firstText(listed)).toMatchObject({ items: [{ path: MUM.path, url: MUM.url }] })
+    const saved = await runTool(tool('save_preset'), { slug: 'm', name: 'Mum' }, ctx())
+    expect(firstText(saved)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const updated = await runTool(tool('update_preset'), { slug: 'm', preset_id: 'p', name: 'Mum' }, ctx())
+    expect(firstText(updated)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const copied = await runTool(tool('duplicate_preset'), { slug: 'm', preset_id: 'p', name: 'Mum 2' }, ctx())
+    expect(firstText(copied)).toMatchObject({ path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' })
+  })
+})
+
 describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () => {
   const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
 
@@ -1934,6 +2016,24 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
       status: 'pending_approval',
       summary: 'Fetch and import a model from https://evil.example/x?d=secret',
     })
+  })
+
+  it("fetch_asset names the file's licence on its approval and sends it to be kept (#959)", async () => {
+    const url = 'https://openmoji.org/data/color/svg/1F984.svg'
+    const licence = { spdx: 'CC-BY-SA-4.0', author: 'OpenMoji' }
+    const pending = await runTool(tool('fetch_asset'), { slug: 'box', url, licence }, ctx())
+    expect(firstText(pending)).toMatchObject({
+      summary: `Fetch ${url} (openmoji.org) into model "box" as a file asset, under CC-BY-SA-4.0`,
+    })
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: 'a'.repeat(64), name: 'u.svg', kind: 'svg', size: 10, source_url: url }, { status: 201 })
+      }),
+    )
+    await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url, licence }, ctx())
+    expect(bodies).toEqual([{ url, licence }])
   })
 
   it('search_icons runs unattended and answers the backend search (#959)', async () => {
@@ -2167,6 +2267,19 @@ describe('binary results: inline under the cap, a link over it', () => {
     expect(large.isError).toBeFalsy()
     expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
   })
+
+  it("get_asset with content: a mesh's picture is its preview, never its bytes (#959)", async () => {
+    const asset = 'c'.repeat(64)
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset, kind: 'stl', triangles: 12 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () => HttpResponse.json({}, { status: 500 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/preview`, () =>
+        new HttpResponse(new Uint8Array(4), { headers: { 'content-type': 'image/png' } }),
+      ),
+    )
+    const answer = await runTool(tool('get_asset'), { slug: 'box', asset_id: asset, include_content: true }, ctx({ maxInlineBytes: 16 }))
+    expect(answer.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
+  })
 })
 
 describe("tools for #324's routes", () => {
@@ -2325,6 +2438,7 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     ['set_model_thumbnail', { slug: 'w', png_base64: png }],
     ['set_output_thumbnail', { output_id: 'b'.repeat(32), png_base64: png }],
     ['add_model_media', { slug: 'w', filename: 'p.png', content_base64: png }],
+    ['add_readme_image', { slug: 'w', filename: 'p.png', content_base64: png }],
     ['upload_asset', { slug: 'w', filename: 'p.png', content_base64: png }],
     ['create_model_from_mesh', { name: 'X', filename: 'x.stl', content_base64: png }],
     ['workspace_write', { path: 'p.png', content_base64: png }],
@@ -2343,7 +2457,7 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     expect(tool('create_model_from_mesh').description).toContain(BYTES_NEVER_AN_ARGUMENT)
   })
 
-  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'upload_asset'])(
+  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'add_readme_image', 'upload_asset'])(
     '%s requires workspace_path and workspace_sha256',
     (name) => {
       const schema = z.toJSONSchema(z.object(tool(name).shape), { io: 'input' })
@@ -2859,6 +2973,30 @@ describe("a model's lifecycle as operations (#1054)", () => {
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
+
+  it.each([
+    [{ slug: 'w' }, 'false'],
+    [{ slug: 'w', delete_inbox_copies: true }, 'true'],
+  ] as const)('delete_model passes delete_inbox_copies (#5371): %o', async (args, sent) => {
+    let asked: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        asked = new URL(request.url).searchParams.get('delete_inbox_copies')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(asked).toBe(sent)
+  })
+
+  it("delete_model's summary says when it trashes the library copies, on ScadBuddy's own library only (#5371, #5422)", () => {
+    const summarize = tool('delete_model').summarize!
+    expect(summarize({ slug: 'w', force: false, delete_inbox_copies: false })).toBe('Delete the model "w" and its outputs')
+    expect(summarize({ slug: 'w', force: false, delete_inbox_copies: true })).toBe(
+      "Delete the model \"w\" and its outputs; on ScadBuddy's own library, also trashing their copies there",
+    )
+  })
 })
 
 describe("a model's edits as operations (#1054)", () => {
@@ -2873,6 +3011,7 @@ describe("a model's edits as operations (#1054)", () => {
     ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
     ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
     ['set_model_thumbnail', { slug: 'w', ...pngs.ref('p.png') }, 'put', '/api/v1/models/w/thumbnail'],
+    ['add_readme_image', { slug: 'w', ...pngs.ref('p.png') }, 'post', '/api/v1/models/w/images'],
     ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
     ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
     ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],
@@ -3240,6 +3379,20 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
     expect(JSON.stringify(stale.content)).toMatch(/stale/)
   })
 
+  it('list_models passes its search and filters to the backend, and scopes the cursor to them (#2290)', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => models, (m) => m.slug, queries)))
+    const args = { limit: 25, q: 'box lid', tag: ['kitchen', 'box'], origin: 'mine', sort: 'name' }
+    const first = firstText(await runTool(tool('list_models'), args, ctx())) as { next_cursor: string }
+    expect(queries[0]?.get('q')).toBe('box lid')
+    expect(queries[0]?.getAll('tag')).toEqual(['kitchen', 'box'])
+    expect(queries[0]?.get('origin')).toBe('mine')
+    expect(queries[0]?.get('sort')).toBe('name')
+    const other = await runTool(tool('list_models'), { ...args, q: 'bolt', cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
+
   it('list_outputs passes the window through for its model, and scopes the cursor to it', async () => {
     const queries: URLSearchParams[] = []
     server.use(http.get(`${BACKEND}/api/v1/models/:slug/outputs`, windowed(() => outputs, (o) => o.id, queries)))
@@ -3304,19 +3457,29 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
   })
 
   it('gives up following after its budget, saying it may still start (review #2849)', async () => {
+    // The budget's clock moves only when a follow is answered, so a slow machine cannot
+    // spend it before the first follow (#5379): the third answer ends it. The poll interval
+    // is the test's own: a pause of 10 ms or more between follows would end the budget
+    // after fewer than three (#5391).
+    let clock = 0
     let follows = 0
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
+        clock += 10
         return acceptingAnswer('op-delete_output-x', 'k')
       }),
     )
-    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 30, now: () => clock, pollIntervalMs: 1 }),
+    )
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('ScadBuddy is still starting it')
-    expect(follows).toBeGreaterThan(0)
+    expect(follows).toBe(3)
   })
 
   it('takes no pause that would end past its budget (#3039)', async () => {

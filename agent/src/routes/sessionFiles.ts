@@ -14,6 +14,7 @@ import {
   workspacePath,
 } from '../workspace/store.js'
 import { browserUser } from '../auth/browserSession.js'
+import { asSecretBytes, holdsSecret } from '../tools/workspaceUploads.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -23,7 +24,14 @@ import { ready, type RouteModule } from './module.js'
 //
 //   GET    /api/v1/ai/sessions/:id/files          { files, usage: {files, bytes},
 //                                                   limits: {file_max_bytes, workspace_max_bytes} }
-//   GET    /api/v1/ai/sessions/:id/files/<path>   the bytes, always as an attachment
+//   GET    /api/v1/ai/sessions/:id/files/<path>[?expected_sha256=]
+//                                                 the bytes, always as an attachment. With
+//                                                 `expected_sha256` it is a pick (#4703): the
+//                                                 file is about to be uploaded into ScadBuddy,
+//                                                 so 409 when it no longer has that sha256, and
+//                                                 422 when it holds a saved Claude credential
+//                                                 or a plugin secret (a header value or an
+//                                                 OAuth token: plugins/secrets.ts)
 //   POST   /api/v1/ai/sessions/:id/files          multipart: `file`, `path`, and
 //                                                   `expected_sha256` to replace a file
 //                                                   → 201 {file} (200 when it replaced one);
@@ -51,6 +59,8 @@ export type SessionFileRouteDeps = {
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   audit?: AuditRepo | undefined
+  /** Every saved Claude credential and plugin secret (main.ts `workspaceSecrets`): a pick that holds one is refused. */
+  secrets?: (() => Promise<readonly string[]>) | undefined
 }
 
 declare module '../app.js' {
@@ -60,6 +70,13 @@ declare module '../app.js' {
      * routes (routes/sessionFiles.ts) read and write it. Undefined without a database.
      */
     workspace?: SessionFiles | undefined
+    /**
+     * Every saved Claude credential and every plugin secret (plugins/secrets.ts
+     * `readPluginSecrets`: header values and OAuth tokens), which a turn's upload tools
+     * also refuse to send (tools/workspaceUploads.ts): a file the browser picks from a
+     * workspace (#4703) is refused when it holds one.
+     */
+    workspaceSecrets?: (() => Promise<readonly string[]>) | undefined
   }
 }
 
@@ -242,9 +259,26 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
   app.get(
     `${BASE}/:id/files/*`,
     route('read', async (c, { files }, ws) => {
+      const expected = c.req.query('expected_sha256')
+      if (expected !== undefined && !SHA256.test(expected)) {
+        return c.json({ detail: 'expected_sha256: a lowercase hex sha256' }, 400)
+      }
       const name = workspacePath(filePathOf(c) ?? '')
       const file = await files.read(ws, name)
       if (!file) throw new WorkspaceError('not_found', `no file ${name} in this session's workspace`)
+      if (expected !== undefined) {
+        // A pick (#4703): the bytes go on into ScadBuddy, so they must be the ones the list showed.
+        if (file.sha256 !== expected) {
+          throw new WorkspaceError('conflict', `${name} changed since the list was read: its sha256 is now ${file.sha256}, not ${expected}`)
+        }
+        // A saved credential or plugin secret that reached the workspace never moves on from it.
+        if (holdsSecret(file.bytes, asSecretBytes((await deps.secrets?.()) ?? []))) {
+          return c.json(
+            { detail: `${name} contains one of the agent's secrets (a saved Claude credential, or a plugin's header value or OAuth token), which may never be uploaded` },
+            422,
+          )
+        }
+      }
       // The last segment is a checked path segment: letters, digits, "_", "." and "-" only.
       const filename = name.slice(name.lastIndexOf('/') + 1)
       return c.body(new Uint8Array(file.bytes), 200, {
@@ -359,6 +393,7 @@ export const route: RouteModule = {
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       audit: deps.audit,
+      secrets: deps.workspaceSecrets,
     })
   },
 }

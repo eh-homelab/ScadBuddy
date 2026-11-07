@@ -2,7 +2,7 @@
 its row, and the `close` that ends its execution."""
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from temporalio import activity
 
@@ -10,12 +10,15 @@ from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_models import FlowRecord, ProjectionWrite
 from scadbuddy.workflows.flow_steps import FLOW_PROJECT
 
+if TYPE_CHECKING:
+    from scadbuddy.crud.projects import RemoteFlowStore
+
 FLOW_RECORD = "flow_record"
 FLOW_CLOSE = "flow_close"
 
 
 class FlowActivities:
-    def __init__(self, store: FlowStore) -> None:
+    def __init__(self, store: "FlowStore | RemoteFlowStore") -> None:
         self._store = store
 
     @activity.defn(name=FLOW_RECORD)

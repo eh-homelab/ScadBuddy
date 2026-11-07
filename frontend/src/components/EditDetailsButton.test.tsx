@@ -1,7 +1,11 @@
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { seedSessionFile } from '../mocks/features/sessionFiles'
+import { seedPickerSession } from '../mocks/features/workspacePicker'
+import { storeMockReadmeImage } from '../mocks/features/readmeImages'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import { GALLERY_SLUG, keychainReadme } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
@@ -446,5 +450,136 @@ describe('EditDetailsButton, live (#269)', () => {
     emitRealtime('model.updated', ['model:name-keychain'], { slug: 'name-keychain' })
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(within(dialog).queryByText(/changed elsewhere since you opened them/)).not.toBeInTheDocument()
+  })
+
+  it("takes the thumbnail from an assistant session's workspace (#4703)", async () => {
+    seedPickerSession({ id: 's-cover', title: 'Cover shots', touched: [{ type: 'model', id: 'name-keychain' }] })
+    seedSessionFile('s-cover', 'cover.png', new TextEncoder().encode('png'), 'image/png')
+    const uploadMedia = vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug, file) => {
+      const model = await api.getModel(slug)
+      const added = {
+        id: 'e5f6a1b2c3d4',
+        file: 'e5f6a1b2c3d4.png',
+        kind: 'image' as const,
+        caption: '',
+        poster: null,
+        missing: false,
+        readonly: false,
+        content_type: 'image/png',
+        size: file.size,
+      }
+      return { ...model, media: [...(model.media ?? []), added] }
+    })
+    const view = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <EditDetailsButton slug="name-keychain" onSaved={vi.fn()} />
+      </AssistantOpenerContext.Provider>,
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    await within(dialog).findByLabelText('Name')
+    await view.user.click(within(dialog).getByRole('button', { name: 'Change…' }))
+    const picker = screen.getByRole('dialog', { name: 'Choose the thumbnail' })
+    await view.user.click(within(picker).getByRole('button', { name: 'From a session…' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Use cover.png' }))
+
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('cover.png becomes the cover on save.'),
+    )
+    expect(uploadMedia).toHaveBeenCalledWith('name-keychain', expect.objectContaining({ name: 'cover.png', type: 'image/png' }))
+  })
+})
+
+describe('EditDetailsButton, README images (#5475)', () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+  const WEBP = new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 ')
+
+  async function openWithAssistant() {
+    const onSaved = vi.fn()
+    // A file part cannot reach msw under vitest (`mocks/features/readmeImages.ts`), so
+    // the call runs the mock route's own logic.
+    const addReadmeImage = vi.spyOn(api, 'addReadmeImage').mockImplementation(async (slug, file) => {
+      const answer = storeMockReadmeImage(slug, file.name, new Uint8Array(await file.arrayBuffer()))
+      if (Array.isArray(answer)) throw new ApiError(answer[0], answer[1])
+      return answer
+    })
+    const view = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <EditDetailsButton slug="name-keychain" onSaved={onSaved} />
+      </AssistantOpenerContext.Provider>,
+      { userEventOptions: { applyAccept: false } },
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    const field = await within(dialog).findByLabelText<HTMLTextAreaElement>('README')
+    await waitFor(() => expect(field).toHaveValue(keychainReadme))
+    return { ...view, dialog, field, onSaved, addReadmeImage }
+  }
+
+  it('stores an image from disk and links it at the cursor', async () => {
+    const sent = recordWrites()
+    const { dialog, field, user, onSaved, addReadmeImage } = await openWithAssistant()
+    const cursor = keychainReadme.indexOf('\n') + 1
+    field.setSelectionRange(cursor, cursor)
+
+    await user.click(within(dialog).getByRole('button', { name: 'Insert image…' }))
+    const picker = screen.getByRole('dialog', { name: 'Insert an image' })
+    await user.upload(within(picker).getByLabelText('Upload a file'), new File([PNG], 'Front View.png', { type: 'image/png' }))
+
+    const link = '![Front View](images/front-view.png)'
+    const linked = keychainReadme.slice(0, cursor) + link + keychainReadme.slice(cursor)
+    await waitFor(() => expect(field).toHaveValue(linked))
+    expect(screen.queryByRole('dialog', { name: 'Insert an image' })).not.toBeInTheDocument()
+    await waitFor(() => expect(field.selectionStart).toBe(cursor + link.length))
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(addReadmeImage).toHaveBeenCalledExactlyOnceWith('name-keychain', expect.objectContaining({ name: 'Front View.png' }))
+    // The image is its own revision at once; the save sends only the README.
+    expect(sent.map(({ method, path }) => `${method} ${path}`)).toEqual(['PUT /api/v1/models/name-keychain/readme'])
+    expect(sent[0]?.body).toEqual({ content: linked })
+  })
+
+  it("takes the image from an assistant session's workspace, over the selected text", async () => {
+    seedPickerSession({ id: 's-shots', title: 'Shots', touched: [{ type: 'model', id: 'name-keychain' }] })
+    seedSessionFile('s-shots', 'side.webp', WEBP, 'image/webp')
+    seedSessionFile('s-shots', 'notes.svg', new TextEncoder().encode('<svg/>'), 'image/svg+xml')
+    const { dialog, field, user, addReadmeImage } = await openWithAssistant()
+    field.setSelectionRange(0, 2)
+
+    await user.click(within(dialog).getByRole('button', { name: 'Insert image…' }))
+    const picker = screen.getByRole('dialog', { name: 'Insert an image' })
+    await user.click(within(picker).getByRole('button', { name: 'From a session…' }))
+    await user.click(await screen.findByRole('button', { name: 'Use side.webp' }))
+
+    await waitFor(() => expect(field).toHaveValue('![side](images/side.webp)' + keychainReadme.slice(2)))
+    expect(addReadmeImage).toHaveBeenCalledWith('name-keychain', expect.objectContaining({ name: 'side.webp', type: 'image/webp' }))
+    // An SVG is never offered: the picker lists only the types the server takes.
+    expect(screen.queryByRole('button', { name: 'Use notes.svg' })).not.toBeInTheDocument()
+  })
+
+  it('numbers a second image of the same name, and links each', async () => {
+    const { dialog, field, user } = await openWithAssistant()
+    field.setSelectionRange(0, 0)
+
+    for (const extra of [1, 2]) {
+      await user.click(within(dialog).getByRole('button', { name: 'Insert image…' }))
+      const picker = screen.getByRole('dialog', { name: 'Insert an image' })
+      await user.upload(within(picker).getByLabelText('Upload a file'), new File([PNG, new Uint8Array([extra])], 'a.png', { type: 'image/png' }))
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Insert an image' })).not.toBeInTheDocument())
+    }
+
+    await waitFor(() => expect(field.value.startsWith('![a](images/a.png)![a](images/a-2.png)')).toBe(true))
+  })
+
+  it('shows why a file that is not an image is refused, and leaves the README alone', async () => {
+    const { dialog, field, user } = await openWithAssistant()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Insert image…' }))
+    const picker = screen.getByRole('dialog', { name: 'Insert an image' })
+    await user.upload(within(picker).getByLabelText('Upload a file'), new File(['just text'], 'notes.png', { type: 'image/png' }))
+
+    expect(await within(picker).findByText('the file is not a PNG, JPEG, WebP or GIF image')).toBeInTheDocument()
+    expect(field).toHaveValue(keychainReadme)
   })
 })

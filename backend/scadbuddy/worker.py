@@ -34,7 +34,11 @@ from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
-from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
+from scadbuddy.auth.service_credentials import (
+    ServiceAuth,
+    exchange_source,
+    token_source,
+)
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -48,6 +52,7 @@ from scadbuddy.bambuddy.progress import (
     lan_first,
     library_progress,
     progress_for,
+    run_reader,
 )
 from scadbuddy.bambuddy.runs import PrintRunStore, RecentRuns, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -55,16 +60,27 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.loop_watch import LoopWatch
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.core.secrets import Kek
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.core.tracing import configure_tracing
-from scadbuddy.flows.keys import approval_key, payload_keys
+from scadbuddy.crud.client import CrudClient, wait_for_areas
+from scadbuddy.crud.operations import RemoteOperationStore
+from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
+from scadbuddy.crud.render import (
+    RemoteBlobIndex,
+    RemoteBlobRefs,
+    RemoteGeometryIndex,
+    RemoteJobProjection,
+    RemoteRenderSettingsSource,
+    RemoteStoreFolders,
+)
+from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
-from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
@@ -79,8 +95,8 @@ from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import (
+    RenderStoreSettings,
     SettingsStore,
-    load_render_store_settings,
     settings_kek,
 )
 from scadbuddy.operations.store import OperationStore
@@ -93,7 +109,6 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.usage import RackUsageStore, lan_settle_hook, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
-from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
@@ -106,11 +121,11 @@ from scadbuddy.spools.component import Spools
 from scadbuddy.spools.providers import SettingsOnly, discover_providers
 from scadbuddy.spools.spool_providers import native_use_hook
 from scadbuddy.spools.store import SpoolStore
-from scadbuddy.store import BlobRefs
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.index import Pool
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
@@ -150,6 +165,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_PORT = 9090
+#: How long the render worker's pool waits for its first connection.
+POOL_CONNECT_TIMEOUT = 30.0
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
 #: How long a stopping worker whose build is still current, and polled by another
@@ -179,10 +196,11 @@ ROUTED_WAIT = 60.0
 ROUTED_POLL = 0.5
 
 
-def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Awaitable[int]]:
-    """The Settings page's per-job colour slots, through the `render_settings` view on
+def stored_solid_concurrency(source: StoreSettingsSource) -> Callable[[], Awaitable[int]]:
+    """The Settings page's per-job colour slots, through the store settings on
     ``source``'s TTL: a worker holds no settings store, so this is how the live setting
-    reaches it (#601). ``deps.config`` is the one read at start."""
+    reaches it (#601; the API's CRUD route on a render worker, #5298). ``deps.config`` is
+    the one read at start."""
 
     async def current() -> int:
         return (await source.current()).solid_concurrency
@@ -190,11 +208,31 @@ def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Await
     return current
 
 
+def worker_metrics(settings: Settings, role: MetricsRole) -> Metrics:
+    """A worker's metrics: only the series ``role`` sets (#664), its build among them."""
+    metrics = Metrics(role=role)
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    return metrics
+
+
 def build_worker_deps(
-    settings: Settings, *, stopping: Callable[[], bool] = lambda: False
+    settings: Settings,
+    source: StoreSettingsSource,
+    current: RenderStoreSettings,
+    *,
+    jobs: RemoteJobProjection,
+    refs: RemoteBlobRefs,
+    geometry: RemoteGeometryIndex,
+    index: RemoteBlobIndex,
+    folders: RemoteStoreFolders,
+    metrics: Metrics | None = None,
+    stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
-    """``stopping`` ends the wait for the API's schema and grants
-    (`WorkerStoppedError`)."""
+    """``current`` is ``source``'s first read, which the store is built from. ``jobs``
+    writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry,
+    ``index`` the blob index, ``folders`` the Bambuddy store's folders; its caller closes
+    their clients. ``stopping`` ends the wait
+    for the API's schema and grants (`WorkerStoppedError`)."""
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
     paths = DataPaths(root=settings.data_dir)
@@ -208,46 +246,41 @@ def build_worker_deps(
         except OSError:
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # The projection's job events go out on the API's bus: `publish_in` writes and
-    # NOTIFYs in the row's transaction, so the listener is never started here.
-    events = PgNotifyEventBus(
-        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
-    )
-    projection = JobProjection(
-        settings.database_url, pool_size=settings.database_pool_size, events=events
+    metrics = metrics or worker_metrics(settings, "render")
+    # For the stores still on SQL, until #5298 Tasks 18-20 move them to CRUD routes: the
+    # job rows, their events and activity rows (``jobs``), the blob refs (``refs``), the
+    # piece geometry (``geometry``), the blob index (``index``) and the Bambuddy store's
+    # folders (``folders``) already go through them.
+    pool: Pool = row_pool(
+        settings.database_url,
+        name="scadbuddy-render",
+        min_size=1,
+        max_size=settings.database_pool_size,
     )
     # Never migrated here (#601): the worker's own role may not, and in a rollout the
     # API, which does, may not have started yet. Wait for it instead.
-    projection.open(migrate_schema=False)
-    # The `project` activity writes `mark_started`/`finish` here: its state changes reach
-    # activity in the same transaction, and NOTIFY on the API's listeners.
-    projection.activity = ActivityIndex(projection.pool, events=events, metrics=metrics)
+    pool.open(wait=True, timeout=POOL_CONNECT_TIMEOUT)
     # The leases in Postgres, where the API's removals see them (#872).
-    checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
+    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(
-        libraries, InstallPermits(INSTALL_CONCURRENCY, projection.pool), checkouts
-    )
+    fetcher = CheckoutFetcher(libraries, InstallPermits(INSTALL_CONCURRENCY, pool), checkouts)
     assets = AssetStore(
         paths.assets,
-        projection.pool,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
     try:
-        wait_until_ready(projection.pool, stopping=stopping)
-        source = RenderSettingsSource(projection.pool, settings)
-        current = load_render_store_settings(projection.pool, settings)
-        source.seed(current)
+        wait_until_ready(pool, stopping=stopping)
         backend = current.store_backend
         store = build_store(
             backend=backend,
             current=current,
             config=config,
             paths=paths,
-            pool=projection.pool,
+            pool=pool,
+            index=index,
+            folders=folders,
             source=source,
             # On bambuddy a worker has no git: the API makes the snapshots it renders from.
             history=None,
@@ -258,16 +291,17 @@ def build_worker_deps(
         )
     except BaseException:
         # A refused start (an unready store) closes what it opened before propagating.
-        projection.close()
+        pool.close()
         raise
     deps = WorkerDeps(
         config=config,
         paths=paths,
         assets=assets,
         blobs=store.blobs,
-        refs=BlobRefs(projection.pool),
-        projection=projection,
-        geometry=GeometryIndex(projection.pool),
+        refs=refs,
+        projection=jobs,
+        geometry=geometry,
+        pool=pool,
         history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
@@ -1023,6 +1057,24 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
     return asyncio.create_task(_housekeep_periodically(deps, interval))
 
 
+#: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
+RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs", "blob-index", "store-folders"})
+
+
+def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
+    """The render worker's client of the API's CRUD routes, with its service credential,
+    which it exchanges for its proof (#5494). The exchange is its only source: it has no
+    view to fall back to, and holds no KEK."""
+    if settings.api_internal_url is None:
+        raise ApiUrlMissingError(
+            "SCADBUDDY_API_INTERNAL_URL is required for the render worker: it reads the"
+            " store settings through the API's CRUD routes (#5298), e.g."
+            " http://scadbuddy:8082"
+        )
+    credential = ServiceAuth(exchange_source("render", settings))
+    return CrudClient(settings.api_internal_url, "render", credential, metrics=metrics)
+
+
 async def run_worker(
     settings: Settings,
     *,
@@ -1030,16 +1082,73 @@ async def run_worker(
     stop_now: asyncio.Event | None = None,
     health_port: HealthListen | None = HEALTH_PORT,
     client: Client | None = None,
+    crud: CrudClient | None = None,
 ) -> None:
+    """``crud``, the client of the API's CRUD routes, defaults to `render_crud`'s; the
+    worker closes it when it ends."""
     stop = stop or asyncio.Event()
-    # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
-    # the rest opens the projection's pool, waits for the API's schema and grants
-    # (#601), and reads the store settings. A stop meanwhile ends the wait.
+    metrics = worker_metrics(settings, "render")
+    crud = crud or render_crud(settings, metrics)
     try:
-        deps, store = await asyncio.to_thread(build_worker_deps, settings, stopping=stop.is_set)
-    except WorkerStoppedError:
-        logger.info("stopped before the database was ready for this worker")
-        return
+        # During a roll the API pod may be older than this worker: read the store
+        # settings only once it serves every area the worker calls.
+        if not await wait_for_areas(crud, "render", RENDER_CRUD_AREAS, stop):
+            logger.info("stopped before the API served this worker's CRUD areas")
+            return
+        source = RemoteRenderSettingsSource(crud)
+        reading = asyncio.create_task(source.current())
+        stopping = asyncio.create_task(stop.wait())
+        await asyncio.wait({reading, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        if not reading.done():
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+            logger.info("stopped before the API answered this worker's store settings")
+            return
+        current = reading.result()
+        # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
+        # client for the four, closed with ``jobs``.
+        remote = crud.blocking()
+        jobs = RemoteJobProjection(remote)
+        try:
+            # Off the loop, as the API's boot seeds its libraries: the seed copies trees,
+            # and the rest opens the pool and waits for the API's schema and grants (#601).
+            # A stop meanwhile ends the wait.
+            try:
+                deps, store = await asyncio.to_thread(
+                    build_worker_deps,
+                    settings,
+                    source,
+                    current,
+                    jobs=jobs,
+                    refs=RemoteBlobRefs(remote),
+                    geometry=RemoteGeometryIndex(remote),
+                    index=RemoteBlobIndex(remote),
+                    # On the loop, as the store calls it: the async client.
+                    folders=RemoteStoreFolders(crud, source=source),
+                    metrics=metrics,
+                    stopping=stop.is_set,
+                )
+            except WorkerStoppedError:
+                logger.info("stopped before the database was ready for this worker")
+                return
+            await _serve_render(settings, deps, store, stop, stop_now, health_port, client)
+        finally:
+            jobs.close()
+    finally:
+        await crud.aclose()
+
+
+async def _serve_render(
+    settings: Settings,
+    deps: WorkerDeps,
+    store: StoreBundle,
+    stop: asyncio.Event,
+    stop_now: asyncio.Event | None,
+    health_port: HealthListen | None,
+    client: Client | None,
+) -> None:
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
@@ -1074,7 +1183,8 @@ async def run_worker(
             with contextlib.suppress(asyncio.CancelledError):
                 await evicting
         await store.aclose()
-        deps.projection.close()
+        if deps.pool is not None:
+            deps.pool.close()
         deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -1137,8 +1247,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             " reads outputs through the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "print")
     events = PgNotifyEventBus(
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
@@ -1148,10 +1257,11 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     pool = settings_store.pool
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
-    # #4975 phase 4: the print worker's service credential on the internal routes, read
-    # from its own view and unsealed with the KEK (none without one).
+    # #4975 phase 4: the print worker's service credential on the internal routes:
+    # exchanged for its proof when one is configured (#5494), else read from its own view
+    # and unsealed with the KEK (none without one).
     credential = ServiceAuth(
-        TokenReader("print", settings.database_url, settings_kek(settings.secret_key_file))
+        token_source("print", settings, settings_kek(settings.secret_key_file))
     )
     outputs = RemoteOutputs(
         settings.api_internal_url,
@@ -1172,7 +1282,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
 
     activity = ActivityIndex(pool, events=events, metrics=metrics)
     print_runs = PrintRunStore(pool, events=events, activity=activity)
-    operations = OperationStore(pool, events=events, activity=activity)
+    # This worker ends its kinds' records, so it counts them (#2295).
+    operations = OperationStore(pool, events=events, activity=activity, metrics=metrics)
     kek = settings_kek(settings.secret_key_file)
     printers = PrinterStore(pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file))
     reports = PrinterReportStore(pool)
@@ -1206,6 +1317,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         store=SpoolStore(pool),
         providers=discover_providers(SettingsOnly(settings_store), None),
     )
+    outcomes = PrintOutcomeStore(pool, events)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1222,7 +1334,10 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         newest_failed=newest_failed_from(
             print_runs, settings_store.load, latest=recent_runs.latest
         ),
-        record_outcome=PrintOutcomeStore(pool, events).record,
+        record_outcome=outcomes.record,
+        # Each older run of a subject is settled on its own (#5613).
+        older_runs=outcomes,
+        read_run=run_reader(lan, lambda: client_for(settings_store.load()), links, uploads=uploads),
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys,
     # with the kept copy of Bambuddy's local presets (#4645).
@@ -1243,6 +1358,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         printers=printers,
         reports=reports,
     )
+    metrics.operation_kinds(kind.name for kind in kinds)
     printing = PrintActivities(
         PrintDeps(
             settings_store=settings_store,
@@ -1296,7 +1412,13 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         printers=printers,
         reports=reports,
         kek=kek,
-        printer_watch=WatchActivities(printers, reports, events).printer_watch,
+        printer_watch=WatchActivities(
+            printers,
+            reports,
+            events,
+            rack=rack,
+            settle_failed=metrics.rack_watch_settle_failed,
+        ).printer_watch,
     )
 
 
@@ -1369,6 +1491,10 @@ class ProjectsKeyMissingError(ValueError):
     pass
 
 
+#: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
+PROJECTS_CRUD_AREAS = frozenset({"flows", "operations", "payload-keys"})
+
+
 async def run_projects_worker(
     settings: Settings,
     *,
@@ -1376,15 +1502,21 @@ async def run_projects_worker(
     health_port: HealthListen | None = HEALTH_PORT,
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
-    §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
-    runs unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
+    §4.3). No database (#5298): its flow runs, operations and payload keys go through
+    the API's CRUD routes, with a credential it exchanges its proof for, and the KEK
+    opens the payload keys: a flow's payloads are sealed per run, and it never runs
+    unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
     ``SCADBUDDY_REVISION``, its build made current once at start and `/readyz` ready once
     the queue routes to it, as the print worker. Every workflow on it is AUTO_UPGRADE
     (`client.projects_deployment`), never pinned (plan 2026-10-09 Ruling 13), so it stops
     without a drain; a run in flight moves to the current build at its next task."""
     stop = stop or asyncio.Event()
-    keys = payload_keys(settings)
-    if keys is None:
+    if settings.database_url:
+        logger.warning(
+            "ignoring SCADBUDDY_DATABASE_URL: the projects worker holds no database (#5298)"
+        )
+    kek = settings_kek(settings.secret_key_file)
+    if kek is None:
         raise ProjectsKeyMissingError(
             "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"
             " are sealed under keys the KEK protects (spec 2026-10-01 §6.5)"
@@ -1395,39 +1527,39 @@ async def run_projects_worker(
             " print and arrange call the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
-    events = PgNotifyEventBus(
-        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
-    )
-    settings_store = SettingsStore(settings, events=events)
-    # #5210: on a role of its own, wait for the API's migrations and grants.
-    await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
+    # #4975 phase 4, #5494: the service credential on the API's routes, exchanged for
+    # its proof, with no view to fall back to; no proof refuses the start.
+    credential = ServiceAuth(exchange_source("projects", settings))
+    metrics = worker_metrics(settings, "projects")
+    # #5298: no event bus. The API makes every write that announces, and the event
+    # commits there.
+    crud: CrudClient | None = None
+    routes: FlowRoutes | None = None
     try:
-        await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
-        # #4975 phase 4: the projects worker's service credential on the API's routes.
-        credential = ServiceAuth(
-            TokenReader("projects", settings.database_url, settings_kek(settings.secret_key_file))
-        )
+        # #5298: flow runs, decisions, grants, operations and payload keys through the
+        # API's CRUD routes. A key comes sealed and is opened here with the KEK (plan D10).
+        crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
+        keys = RemotePayloadKeys(crud, kek)
         client = await connect_flows(
-            settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
+            settings.temporal_address, settings.temporal_namespace, keys, runtime=runtime
         )
-        store = FlowStore(settings_store.pool, events=events)
+        store = RemoteFlowStore(crud)
         queue = settings.temporal_task_queue_projects
-        decisions = operation_activities(
-            OperationStore(settings_store.pool, events=events),
-            settings_store,
-            {
-                kind.name: kind
-                for kind in flow_kinds(
-                    store,
-                    keys[0],
-                    approval_key(settings),
-                    api=lambda: api_client(settings.api_internal_url, credential),
-                )
-            },
-        )
+        kinds = {
+            kind.name: kind
+            for kind in flow_kinds(
+                store,
+                keys,
+                approval_key(settings),
+                api=lambda: api_client(settings.api_internal_url, credential),
+            )
+        }
+        # The API ends its kinds' records and counts them (#2295, #5298). Its series are
+        # still made here at zero: the dashboard's library panels leave out the kinds
+        # that a print or projects job has (`deploy/grafana/scadbuddy-renders.json`).
+        metrics.operation_kinds(kinds)
+        decisions = operation_activities(RemoteOperationStore(crud, "projects"), None, kinds)
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)
         grants = FlowGrants(store, api, approval_key(settings))
@@ -1446,25 +1578,29 @@ async def run_projects_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            async with LoopWatch(metrics):
-                await _serve_versioned(
-                    client,
-                    [worker],
-                    stop,
-                    build_id=build_id,
-                    deployment_name=PROJECTS_DEPLOYMENT_NAME,
-                    task_queue=queue,
-                    drain_timeout=None,
-                    ready=(queue, routed),
-                )
+            # During a roll the API pod may be older than this worker: poll Temporal only
+            # once it serves every area the worker calls.
+            if await wait_for_areas(crud, "projects", PROJECTS_CRUD_AREAS, stop):
+                async with LoopWatch(metrics):
+                    await _serve_versioned(
+                        client,
+                        [worker],
+                        stop,
+                        build_id=build_id,
+                        deployment_name=PROJECTS_DEPLOYMENT_NAME,
+                        task_queue=queue,
+                        drain_timeout=None,
+                        ready=(queue, routed),
+                    )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
                 await serving
-            await routes.aclose()
     finally:
-        await events.aclose()
-        await asyncio.to_thread(settings_store.close)
+        if routes is not None:
+            await routes.aclose()
+        if crud is not None:
+            await crud.aclose()
 
 
 Queue = Literal["render", "bambuddy", "projects"]
@@ -1518,7 +1654,7 @@ def parse_queue(argv: Sequence[str] | None = None) -> Queue:
 
 def main() -> None:
     queue = parse_queue()
-    settings = Settings()
+    settings = NoDatabaseSettings() if queue == "projects" else Settings()
     configure_logging(settings.log_level)
     # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
     if queue not in SERVICE_NAMES:

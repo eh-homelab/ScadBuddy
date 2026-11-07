@@ -27,6 +27,18 @@ Money = int
 OrderStatus = Literal[
     "draft", "quoted", "accepted", "in_production", "ready", "shipped", "closed", "cancelled"
 ]
+
+
+def _listed(types: frozenset[str]) -> list[JsonValue]:
+    """A set as the spec carries it, sorted so the export is stable."""
+    return list[JsonValue](sorted(types))
+
+
+#: The states an order's items and price may still change in (§4's `PATCH` rows).
+OPEN_FOR_EDITS: frozenset[OrderStatus] = frozenset({"draft", "quoted"})
+#: The states past acceptance an order still takes a new item in (#5349): an item added
+#: then starts unpriced, and needs its own quote and that quote's acceptance.
+TAKES_ITEMS: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready"})
 #: Every §3.5 state: `queued`, `printing` and `printed` are the print path's
 #: (``order_item_print``, #4719), which the item follows from its run.
 ItemStatus = Literal[
@@ -46,8 +58,20 @@ ContactKind = Literal[
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
 QuoteSource = Literal["slice", "manual"]
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
-#: ``custom`` item is a title, a quantity and a typed price with nothing behind it.
-ItemKind = Literal["model", "custom"]
+#: ``custom`` item is a title, a quantity and a typed price with nothing behind it; a
+#: ``library_file`` item (#5544) names a file of the library (its ``library_file``).
+ItemKind = Literal["model", "custom", "request", "library_file"]
+#: Which library a ``library_file`` item's file is in (#5544): Bambuddy's, or
+#: ScadBuddy's own (``library_backend=native``). The file's id says which.
+ItemLibrary = Literal["bambuddy", "native"]
+#: When the customer approves a design (storefront spec §4): ``design_first`` waits for the
+#: design to be accepted before the item is quoted or printed; ``together`` approves it
+#: with the quote.
+Approval = Literal["design_first", "together"]
+#: A design revision's answer: the customer's, or ``superseded`` by a newer revision.
+RevisionAnswer = Literal["accepted", "changes_requested", "superseded"]
+#: Why an attempt was printed: the order's ``production`` run, or a ``test`` of a revision.
+FulfilmentPurpose = Literal["production", "test"]
 #: ``rounding`` is ``to_major``'s difference (#4250 Ruling 5), so the lines always add.
 QuoteLineKind = Literal[
     "filament", "machine_time", "setup", "labour", "markup", "rounding", "manual"
@@ -204,7 +228,14 @@ class Order(BaseModel):
     id: str
     number: str
     customer_id: str
-    status: OrderStatus
+    #: The spec carries `OPEN_FOR_EDITS` and `TAKES_ITEMS`, so the browser's copy
+    #: (``afterAcceptance.ts``) is checked against them (``afterAcceptance.test.ts``, #5349).
+    status: OrderStatus = Field(
+        json_schema_extra={
+            "x-open-for-edits": _listed(OPEN_FOR_EDITS),
+            "x-takes-items": _listed(TAKES_ITEMS),
+        }
+    )
     currency: str
     on_hold: bool
     #: The customer's rows an open order follows (Ruling 11)...
@@ -230,15 +261,49 @@ class Order(BaseModel):
         return minor_exponent(self.currency)
 
 
+#: A profit report row's products: an item with a model ``slug``; else one with a ``sku``;
+#: else ``custom`` (a custom item with no SKU, or a request with no design yet).
+ProductKind = Literal["model", "sku", "custom"]
+
+
+class Product(BaseModel):
+    """A profit report row's key (job cost spec §6.4), and the orders list's ``product``
+    filter: ``model:<slug>``, ``sku:<sku>`` or ``custom``."""
+
+    kind: ProductKind
+    key: str | None = None
+
+    @classmethod
+    def parse(cls, value: str) -> Product:
+        """``ValueError`` for anything but the three forms."""
+        if value == "custom":
+            return cls(kind="custom")
+        kind, sep, key = value.partition(":")
+        if not sep or not key or kind not in ("model", "sku"):
+            raise ValueError("product is model:<slug>, sku:<sku> or custom")
+        return cls(kind="model" if kind == "model" else "sku", key=key)
+
+    def __str__(self) -> str:
+        return "custom" if self.kind == "custom" else f"{self.kind}:{self.key}"
+
+
 class OrderFilter(BaseModel):
     """What ``GET /orders`` narrows by (§4)."""
 
-    status: OrderStatus | None = None
+    #: Any of these (#5276); None or empty is every status.
+    status: list[OrderStatus] | None = None
     customer_id: str | None = None
     #: Matched against the number, the notes and the customer's name.
     q: str | None = None
     since: datetime | None = None
     until: datetime | None = None
+    #: The profit report's row (job cost spec §6.4, #5329): orders accepted at or after
+    #: ``accepted_since`` and before ``accepted_until``, in ``currency``, with an item of
+    #: ``product``.
+    accepted_since: datetime | None = None
+    accepted_until: datetime | None = None
+    currency: str | None = None
+    product: Product | None = None
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -270,6 +335,18 @@ class ColourSlot(BaseModel):
     filament_id: str | None = None
 
 
+class LibraryFileRef(BaseModel):
+    """The library file a ``library_file`` item prints (#5544): its id, its name when the
+    item was added (for display after a delete or a rename), and which library it is
+    in. It has no template commit and no customizer inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(ge=1)
+    filename: str
+    library: ItemLibrary
+
+
 class OrderItem(BaseModel):
     id: str
     order_id: str
@@ -279,10 +356,13 @@ class OrderItem(BaseModel):
     title: str
     notes: str
     kind: ItemKind = "model"
-    #: What to make; None for a ``custom`` item, which names nothing (#4954).
+    #: What to make; None for a ``custom`` item, which names nothing (#4954), for a
+    #: ``request`` item until its first design, and for a ``library_file`` item.
     reference: Reference | None
+    #: A ``library_file`` item's file (#5544); None for every other kind.
+    library_file: LibraryFileRef | None = None
     #: A ``custom`` item's own flag: False skips the print path (it is marked done by
-    #: hand). Always True for a ``model`` item.
+    #: hand). Always True for a ``model`` or ``library_file`` item.
     requires_printing: bool = True
     #: The shop's stock code, when it keeps one.
     sku: str | None = None
@@ -291,8 +371,34 @@ class OrderItem(BaseModel):
     #: The image attachment a person marked as what was actually delivered (§6.2), one
     #: of the item's own; None until one is marked, and again once it is removed.
     delivered_attachment_id: str | None = None
+    #: The design revision the reference and colours are a copy of; None before the first.
+    current_revision_id: str | None = None
+    approval: Approval = "together"
+    #: True while an accepted item's newest revision, added after acceptance (#5350),
+    #: waits for its own quote to be accepted. The old accepted quote stays accepted (the
+    #: price the customer agreed) until then; accepting a quote clears it.
+    revised_after_acceptance: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+class Revision(BaseModel):
+    """One design of an item: a reference and colours, numbered per item, with the
+    customer's answer once it is sent and answered."""
+
+    id: str
+    item_id: str
+    number: int = Field(ge=1)
+    reference: Reference
+    colours: list[ColourSlot]
+    note: str
+    created_at: datetime
+    created_by: Actor
+    sent_at: datetime | None = None
+    answer: RevisionAnswer | None = None
+    answer_note: str | None = None
+    answered_at: datetime | None = None
+    answered_by: Actor | None = None
 
 
 # -- quotes (§3.4) ----------------------------------------------------------------------
@@ -311,6 +417,8 @@ class QuoteLine(BaseModel):
 class Quote(BaseModel):
     id: str
     order_item_id: str
+    #: The design revision it was quoted for, when the item had one.
+    revision_id: str | None = None
     created_at: datetime
     source: QuoteSource
     accepted: bool
@@ -326,6 +434,10 @@ class Quote(BaseModel):
     quantity: int
     total_minor: Money
     created_by: Actor
+    #: A slice quote's settings per filament slot (#5571), as it sliced with them:
+    #: `{"<slot>": {"<key>": value}}`. Null for none. An item's print that sends none
+    #: prints with these (`orders/operations.py` `print_body`).
+    part_settings: dict[str, dict[str, Any]] | None = None
 
 
 # -- fulfilment (§6.1 by hand) and shipments (§6.3) ------------------------------------
@@ -335,6 +447,9 @@ class Fulfilment(BaseModel):
     id: str
     order_item_id: str
     attempt: int
+    #: A ``test`` attempt prints a revision for the shop, and names it.
+    purpose: FulfilmentPurpose = "production"
+    revision_id: str | None = None
     quantity: int
     outcome: Outcome
     failure_reason: str | None
@@ -363,6 +478,13 @@ class Fulfilment(BaseModel):
     #: The print run's ``request_id`` this attempt was claimed under before its print
     #: started (#4719); a retried operation finds its claim by it.
     print_request_id: str | None = None
+    #: The Bambuddy archives its run's queue items made, one per plate (§8.2), copied
+    #: once the print settled (an attempt by hand: the one it named); empty for an attempt
+    #: by hand naming none, or one not linked yet.
+    archive_ids: list[int] = Field(default_factory=list)
+    #: The archives' printing time and filament, summed (§8.2).
+    actual_seconds: int | None = None
+    actual_grams: float | None = None
 
 
 class OrderProject(BaseModel):
@@ -397,6 +519,68 @@ class Shipment(BaseModel):
     items: list[ShipmentItem]
 
 
+# -- time and cost entries (job cost spec 2026-11-05 §4.3, §4.4, #5326) ----------------
+
+#: What a time entry was spent on.
+TimeKind = Literal["design", "setup", "post_processing", "packing", "other"]
+#: What a cost entry paid for. Shipping is a shipment's `cost_minor`, never an entry.
+CostKind = Literal["assistant", "payment_fee", "material", "other"]
+#: The longest time entry, in minutes (about two years): a typo, never a real entry.
+MAX_ENTRY_MINUTES = 1_000_000
+#: The largest cost entry: `order_cost_entries.amount_minor` is a `bigint`.
+MAX_ENTRY_MINOR = 2**63 - 1
+#: An entry's ``source``: ``<writer>:<id>``.
+ENTRY_SOURCE = r"^[a-z_]+:\S{1,200}$"
+
+
+class TimeEntryInput(BaseModel):
+    """Time spent on the order (``order_item_id`` None) or one of its items."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_item_id: str | None = None
+    kind: TimeKind
+    minutes: int = Field(ge=1, le=MAX_ENTRY_MINUTES)
+    note: str = Field(default="", max_length=1000)
+    #: When the timer started, when a timer wrote it.
+    started_at: datetime | None = None
+    #: What wrote it (``timer:<item or order>:<started_at>``, ``manual:<uuid>``): one entry
+    #: per order and source, whatever its kind, so a retry whose first reply was lost
+    #: writes once.
+    source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
+
+
+class TimeEntry(TimeEntryInput):
+    id: str
+    order_id: str
+    #: The labour rate in force when it was written, in the order's minor units per hour;
+    #: None when the order's currency is not the shop's, so no rate could be copied.
+    rate_minor_per_hour: Money | None
+    created_by: Actor
+    created_at: datetime
+
+
+class CostEntryInput(BaseModel):
+    """Money spent on the order or one of its items, in the order's currency."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_item_id: str | None = None
+    kind: CostKind
+    amount_minor: Money = Field(ge=1, le=MAX_ENTRY_MINOR)
+    note: str = Field(default="", max_length=1000)
+    #: What wrote it (``ai_session:<id>``, ``payment:<id>``, a form's ``manual:<uuid>``):
+    #: one entry per order, kind and source, so a writer that runs twice writes once.
+    source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
+
+
+class CostEntry(CostEntryInput):
+    id: str
+    order_id: str
+    created_by: Actor
+    created_at: datetime
+
+
 # -- attachments (§6.2, #4251) ----------------------------------------------------------
 
 #: What a file is, from its bytes (``orders/attachments.py`` ``sniff``): an ``image`` or
@@ -405,7 +589,12 @@ class Shipment(BaseModel):
 AttachmentKind = Literal["image", "video", "document", "other"]
 #: Why it is kept: the customer's ``reference`` (a sketch, a logo, a drawing), a print's
 #: ``issue``, the ``finished`` object, the ``packed`` box, a ``timelapse``, or ``other``.
-AttachmentRole = Literal["reference", "issue", "finished", "packed", "timelapse", "other"]
+AttachmentRole = Literal[
+    "reference", "issue", "finished", "packed", "timelapse", "render", "test_print", "other"
+]
+#: The roles only a design revision's file takes (storefront spec §4): its ``render``
+#: and the photo of its ``test_print``.
+REVISION_ROLES: frozenset[AttachmentRole] = frozenset({"render", "test_print"})
 #: The longest caption, in characters, as a template's media (``library/media.py``).
 MAX_ATTACHMENT_CAPTION = 1000
 
@@ -432,18 +621,19 @@ SHOWN_IMAGES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif", 
 THUMBNAILED = frozenset({"image/png", "image/jpeg", "image/webp"})
 
 
-def _listed(types: frozenset[str]) -> list[JsonValue]:
-    """A type set as the spec carries it, sorted so the export is stable."""
-    return list[JsonValue](sorted(types))
-
-
 class Attachment(BaseModel):
     id: str
     order_id: str
-    #: ``order:<id>`` or ``order_item:<id>``: what it is attached to.
+    #: ``order:<id>``, ``order_item:<id>``, ``order_item_fulfilment:<id>`` or
+    #: ``order_item_revision:<id>``: what it is
+    #: attached to.
     subject: str
-    #: The line item it is attached to, or None for the order's own.
+    #: The line item it is attached to, or the attempt's item; None for the order's own.
     item_id: str | None
+    #: The fulfilment attempt it is attached to (#4251), or None.
+    fulfilment_id: str | None = None
+    #: The design revision it is attached to (an ``order_item_revision:<id>`` subject).
+    revision_id: str | None = None
     kind: AttachmentKind
     role: AttachmentRole
     #: The name it was sent with, for display and the download.

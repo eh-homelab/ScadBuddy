@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import re
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
 
 from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.orders import lifecycle, store
 from scadbuddy.orders.models import (
     Actor,
     AddressInput,
@@ -19,7 +25,8 @@ from scadbuddy.orders.models import (
     QuoteLine,
     Reference,
 )
-from scadbuddy.orders.store import OrderStore, RowNotOwnedError
+from scadbuddy.orders.store import OrderStore, RowNotOwnedError, revision_subject
+from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -242,7 +249,7 @@ def test_order_list_pages_newest_first_by_cursor(rows: OrderStore) -> None:
 
     mine, _ = rows.orders(OrderFilter(customer_id=customer.id), None, 50)
     assert [o.id for o in mine] == [ids[3], ids[1]]
-    quoted, _ = rows.orders(OrderFilter(status="quoted"), None, 50)
+    quoted, _ = rows.orders(OrderFilter(status=["quoted"]), None, 50)
     assert quoted == []
     by_number, _ = rows.orders(OrderFilter(q=made[0].number), None, 50)
     assert [o.id for o in by_number] == [ids[0]]
@@ -418,3 +425,300 @@ def test_shipments_charges_payments_and_the_audit_line(rows: OrderStore) -> None
     assert rows.events(order.id) == [event]
     assert event.detail == {"from": "draft", "to": "quoted"}
     assert event.by == BROWSER
+
+
+def _item_with_reference(rows: OrderStore, **fields: object) -> tuple[str, str]:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        item = rows.insert_item(
+            conn,
+            order.id,
+            reference=reference(),
+            colours=[ColourSlot(slot=0, colour="#ff0000")],
+            output_id=None,
+            quantity=1,
+            **fields,  # type: ignore[arg-type]
+        )
+    return order.id, item.id
+
+
+def _request_item(rows: OrderStore) -> str:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        item = rows.insert_item(
+            conn,
+            order.id,
+            kind="request",
+            reference=None,
+            colours=[],
+            output_id=None,
+            quantity=1,
+            title="A dragon",
+        )
+    return item.id
+
+
+def test_a_request_item_has_no_reference_until_its_design(rows: OrderStore) -> None:
+    item = rows.item(_request_item(rows))
+    assert item is not None
+    assert item.kind == "request" and item.reference is None and item.approval == "design_first"
+
+
+def test_the_table_refuses_a_half_designed_request(rows: OrderStore, pool: PgPool) -> None:
+    item_id = _request_item(rows)
+    with pytest.raises(psycopg.errors.CheckViolation), rows.transaction() as conn:
+        conn.execute("UPDATE order_items SET slug = 'demo' WHERE id = %s", (item_id,))
+
+
+def test_revisions_are_numbered_per_item(rows: OrderStore) -> None:
+    _, item_id = _item_with_reference(rows)
+    other_id = _request_item(rows)
+    with rows.transaction() as conn:
+        for _ in range(2):
+            rows.insert_revision(
+                conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+            )
+        rows.insert_revision(
+            conn, other_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+    assert [r.number for r in rows.revisions(item_id)] == [1, 2]
+    assert rows.revisions(other_id)[0].number == 1
+
+
+def test_set_design_copies_the_revision_onto_the_item(rows: OrderStore) -> None:
+    item_id = _request_item(rows)
+    colours = [ColourSlot(slot=0, colour="#00ff00")]
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=colours, note="v1", created_by=BROWSER
+        )
+        moved = rows.set_design(conn, item_id, revision, output_id=None)
+    assert moved.reference == revision.reference and moved.colours == revision.colours
+    assert moved.current_revision_id == revision.id
+    assert moved.kind == "request"
+    assert rows.revision(revision.id) == revision
+
+
+def test_set_design_makes_a_custom_item_a_model_item(rows: OrderStore) -> None:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        custom = rows.insert_custom_item(conn, order.id, title="Bracket", quantity=1)
+        revision = rows.insert_revision(
+            conn, custom.id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        moved = rows.set_design(conn, custom.id, revision, output_id=None)
+    assert moved.kind == "model" and moved.requires_printing
+
+
+def test_stamp_revision_sets_only_what_it_is_given(rows: OrderStore) -> None:
+    item_id = _request_item(rows)
+    sent = datetime.now(UTC)
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        stamped = rows.stamp_revision(conn, revision.id, sent_at=sent)
+        answered = rows.stamp_revision(
+            conn,
+            revision.id,
+            answer="changes_requested",
+            answer_note="bigger",
+            answered_at=sent,
+            answered_by=BROWSER,
+        )
+    assert stamped.sent_at == sent and stamped.answer is None
+    assert answered.sent_at == sent and answered.answer == "changes_requested"
+    assert answered.answer_note == "bigger" and answered.answered_by == BROWSER
+
+
+def test_fulfilments_leave_out_test_attempts_unless_asked(rows: OrderStore) -> None:
+    _, item_id = _item_with_reference(rows)
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        rows.insert_fulfilment(conn, item_id, quantity=1, outcome="succeeded", created_by=BROWSER)
+        rows.insert_fulfilment(
+            conn,
+            item_id,
+            quantity=0,
+            outcome="unknown",
+            created_by=BROWSER,
+            purpose="test",
+            revision_id=revision.id,
+        )
+    assert [a.purpose for a in rows.fulfilments(item_id)] == ["production"]
+    assert [a.purpose for a in rows.fulfilments(item_id, purpose=None)] == [
+        "production",
+        "test",
+    ]
+
+
+def test_a_test_attempt_needs_its_revision(rows: OrderStore) -> None:
+    _, item_id = _item_with_reference(rows)
+    with pytest.raises(psycopg.errors.CheckViolation), rows.transaction() as conn:
+        rows.insert_fulfilment(
+            conn, item_id, quantity=0, outcome="unknown", created_by=BROWSER, purpose="test"
+        )
+
+
+def test_item_inputs_name_every_revisions_inputs(rows: OrderStore) -> None:
+    item_id = _request_item(rows)
+    with rows.transaction() as conn:
+        for asset in ("asset-1", "asset-2"):
+            ref = reference().model_copy(update={"inputs": {"params": {"logo": asset}}})
+            rows.insert_revision(
+                conn, item_id, reference=ref, colours=[], note="", created_by=BROWSER
+            )
+    inputs = list(rows.item_inputs())
+    assert {"params": {"logo": "asset-1"}} in inputs
+    assert {"params": {"logo": "asset-2"}} in inputs
+
+
+def test_a_revision_attachment_names_its_revision_and_item(rows: OrderStore) -> None:
+    order_id, item_id = _item_with_reference(rows)
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        attachment = rows.insert_attachment(
+            conn,
+            attachment_id="att1",
+            order_id=order_id,
+            subject=revision_subject(revision.id),
+            kind="image",
+            role="render",
+            filename="r.png",
+            media_type="image/png",
+            size_bytes=1,
+            sha256="d" * 64,
+            blob_key="attachment-" + "d" * 64,
+            caption="",
+            created_by=BROWSER,
+            subject_item_id=item_id,
+        )
+    assert attachment.revision_id == revision.id and attachment.item_id == item_id
+    assert attachment.fulfilment_id is None
+
+
+def _functions(path: Path) -> Iterator[ast.FunctionDef]:
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.FunctionDef):
+            yield node
+
+
+def _sql_by_function(path: Path) -> Iterator[tuple[str, str]]:
+    """Each function's name with the string constants in its body joined."""
+    for fn in _functions(path):
+        parts = [
+            node.value
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        yield fn.name, "".join(parts)
+
+
+#: The columns that are an item's design (spec 2026-11-02 §4.1).
+DESIGN_COLUMNS = frozenset(
+    {
+        "slug",
+        "commit",
+        "inputs",
+        "libraries",
+        "template_name",
+        "render_key",
+        "colours",
+        "current_revision_id",
+    }
+)
+
+
+def _keys_written(fn: ast.FunctionDef) -> set[str]:
+    """The names a function puts in a dict: literal keys, ``d["k"] = …`` and
+    ``d.update(k=…)``."""
+    keys: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Dict):
+            keys |= {
+                k.value
+                for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                keys.add(node.slice.value)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+        ):
+            keys |= {kw.arg for kw in node.keywords if kw.arg is not None}
+    return keys
+
+
+def _updates_order_items(fn: ast.FunctionDef) -> bool:
+    """Whether the function calls ``_update(conn, "order_items", …)``."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_update"
+        and len(node.args) > 1
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "order_items"
+        for node in ast.walk(fn)
+    )
+
+
+def _callers(path: Path, attr: str) -> set[str]:
+    """The functions whose body calls ``<something>.attr(``."""
+    return {
+        fn.name
+        for fn in _functions(path)
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == attr
+            for node in ast.walk(fn)
+        )
+    }
+
+
+def test_only_the_revision_writer_sets_an_items_design() -> None:
+    # Spec §4.1: past insert_item's INSERT, set_design is the one UPDATE of the design
+    # columns, and Lifecycle._revise its one caller.
+    store_path = Path(store.__file__)
+    store_writers = {
+        fn
+        for fn, text in _sql_by_function(store_path)
+        if re.search(
+            r"UPDATE order_items SET[^\"]*\b(slug|commit|inputs|render_key|colours)\b", text
+        )
+    }
+    # A library file item (#5544) has no revisions: its slots are its own, written only
+    # where the row is one.
+    assert store_writers == {"set_design", "set_library_colours"}
+    assert "kind = 'library_file'" in inspect.getsource(OrderStore.set_library_colours)
+    # The generic writer's fields come from dict keys, not SQL text.
+    generic = {
+        fn.name: _keys_written(fn) & DESIGN_COLUMNS
+        for fn in _functions(store_path)
+        if _updates_order_items(fn)
+    }
+    assert generic and not any(generic.values()), generic
+    assert {"reference", "colours"}.isdisjoint(inspect.signature(OrderStore.update_item).parameters)
+    package = Path(lifecycle.__file__).parents[1]
+    callers = {
+        (str(path.relative_to(package)), name)
+        for path in sorted(package.rglob("*.py"))
+        for name in _callers(path, "set_design")
+    }
+    assert callers == {("orders/lifecycle.py", "_revise")}

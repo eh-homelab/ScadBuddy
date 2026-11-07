@@ -91,7 +91,7 @@ projects (§8.1), which is the only place the word "project" appears in an order
 | F13 | Grant rules bound `queue_print`, `arrange` and `tool` by printers, model slugs, library files, `max_prints`, `max_filament_g`, `max_calls` and pointer-bounded `args`; the vocabulary is closed and never reads inputs. | `flows/grants.py:27,70`, 10-11 spec §3 |
 | F14 | Template-owned UIs: the loader (dynamic `import()`, a shadow root, a 15 s mount deadline, fallback to the form) is module-agnostic; Host API v1 is one template's inputs (`inputs.get/set/subscribe`, `schema`, `files.url`, `generate`, `openPrint`, `presets`, `describe`), the serving route is `models/{slug}/ui/**` with suffix and path checks, and the page's CSP is `script-src 'self'; connect-src 'self'`, so a module may call any `/api/v1` route as the user. | `frontend/src/template-ui/host.ts:19-151`, `TemplateUi.tsx:168-299`, `api/template_ui.py:33-146`, `api/static.py:197-211` |
 | F15 | The one JSON-Schema form in the frontend is the flow inputs form: a closed subset (scalars, arrays of scalars, enum, bounds), validated by `flows/inputs.py`. | `frontend/src/lib/flowInputs.ts:35-60`, `components/flows/inputsForm.tsx:10-28`, `flows/inputs.py:1-116` |
-| F16 | Operations: a feature registers kinds by exporting `OPERATION_KINDS` from `scadbuddy/<feature>/operations.py`; a route runs one through `run_operation` with an `Idempotency-Key`; activity kinds the same way through `ACTIVITY_KINDS`; a service is a discovered `Component`. | CLAUDE.md "Layout" (operations, activity, components) |
+| F16 | Operations: a feature registers kinds by exporting `OPERATION_KINDS` from `scadbuddy/<feature>/operations.py`; a route runs one through `run_operation` with an `Idempotency-Key`; activity kinds the same way through `ACTIVITY_KINDS`; a service is a discovered `Component`. | backend/CLAUDE.md "Layout" (operations, activity, components) |
 
 ## 3. The record
 
@@ -152,8 +152,9 @@ pickers, and `POST /customers/{id}/unarchive` clears it, putting them back. A cu
   The reference is complete without it; a deleted output leaves the item renderable
   (F2, F3).
 
-The reference is the one way a line item names what to make. **Nothing on an order is a
-file path or a Bambuddy id.** The `// file` assets an item's inputs name are kept alive
+The reference is the one way a template's line item names what to make. **Nothing on an
+order is a file path or a Bambuddy id**, except the file a library file item names
+(#5544, below). The `// file` assets an item's inputs name are kept alive
 by adding `order_items.inputs` to `referenced_asset_ids`
 (`library/assets.py:766-780`), so the asset sweep never takes an ordered upload.
 
@@ -187,6 +188,69 @@ the asset sweep reads nothing of it. It is made by hand: the drawer's **Mark don
 it, and it then ships as any fulfilled item. The grid shows a "Custom" badge in place
 of its picture and an entry row under the items (title, SKU, notes, quantity, unit
 price, "Requires printing"; Enter saves).
+
+**As built: a library file as a line item (#5544).** A shop sells a model that is not a
+catalogue template: a file of the library (`/library`, Bambuddy's or ScadBuddy's own).
+`kind` `library_file` names the file by `library_file_id`, `library_filename` (its name
+when the item was added, for display after a delete or a rename) and `library_source`
+(`bambuddy` or `native`, which the id's range gives); the wire shape is
+`OrderItem.library_file` `{id, filename, library}`. It has no reference, no inputs, no
+output and no revisions, and it always prints; the check `order_items_library_file`
+keeps the three columns whole on such an item and null on any other (migration
+`20261107T0732Z_order_items_library_file.sql`). This is the one place an order names a
+Bambuddy id: the file is not ScadBuddy's to keep, so the item points at it and the
+refusals below cover it going away.
+
+- `POST /orders/{id}/items` (and `…/items/after-acceptance`, with the same rules) takes
+  `library_file_id`, with `kind` left out or `library_file`. Any other source (`output_id`,
+  `slug`, `commit`, `inputs`), another `kind`, or a custom item's fields is 422. The route
+  reads the file from the library that serves, as `POST /print/library/{file_id}/run` does
+  (`check_served`, `served_reads`; `orders/bambuddy.py` `ServedLibrary`): a file it does
+  not have (deleted, trashed, the other library's) or does not print (not a 3MF or STL)
+  is 422 on `library_file_id`. The title defaults to the file's name. The item starts
+  `draft`, approved with its quote.
+- Pricing is a manual quote, or a slice quote of the file: `quote.py` `_library_quote`
+  slices every plate through the dialog's background slice of a library file
+  (`Slicer.start_library`, `orders/bambuddy.py` `start_library_quote_preview`), and its
+  first quote gives the item the colour slots its plates use (`library_colours`: colours
+  from the file's filament requirements, grey where it names none), priced with the
+  body's filaments. The quote names no revision. A sliced file has nothing to slice (the
+  dialog's 422); it takes a manual quote. A later filament change writes the slots on
+  the item (`update_item`, no revision) and drops the accepted quote, as a quantity does.
+- Printing starts the library print route's own run (`start_library_run`, run subject
+  `library:<file id>`, the file's filament slots read as that route reads them), so the
+  item follows its print as any other (`print_runs.output_id` is the run subject).
+  Every print of one file shares that subject. Each run is settled on its own (#5613):
+  the subject's one follow (`FollowPrint`, workflow id `follow-print-<subject>`) reads
+  the subject's newest run as before, and on each pass also reads each older run still
+  open by that run (`Follower.read_run`, `progress.py` `run_reader`): a library file's
+  run on Bambuddy's queue by its own sends (`PrintLinkStore.run_sends`), a LAN run from
+  its printer's report (`LanProgress.read_run`). Each settled one is recorded against its
+  own run (`outcomes.py` `record_run`), and the follow ends only once none is open. An
+  older run is open while it `succeeded`, has no outcome and started within
+  `OPEN_RUN_WINDOW` (3 days). So two items of one file printing at once (two items of one
+  order, the file on two orders, or a dialog print of it) each settle by themselves.
+  Design note: the change is in the follow's activity only. The workflow, its id, its
+  input and its commands are unchanged, so a follow open across the deploy needs no
+  `workflow.patched`: its next attempt (a worker that stops ends its attempt, and the
+  retry runs on the new build) reads the older runs too (`tests/test_follow_replay.py`
+  replays histories recorded before). A follow per run was weighed and not taken: a new
+  workflow id needs a patched start in `PrintRunWorkflow`, and every reader of the
+  subject's topic and progress would change. Limits: an output's older run on Bambuddy's
+  queue is not read (an output's queue items are its last print's, not kept per run; two
+  items rarely share an output), nor is an older run past the window; such a print is
+  settled by hand (`PATCH` the attempt). A follow that ended before the deploy while an
+  older print still ran starts again on the next print or progress read of its subject.
+- A file gone since it was added is 409 `library_file_gone` (naming the item) in the
+  quote's check and run and in the print's check, before anything starts; the item can
+  still be priced by hand, cancelled, or replaced by a new item. A revision, a reference
+  `PATCH` or `approval: design_first` is refused (`item_library_file`, 422 `reference`,
+  422 `approval`), and so is a test print, which prints a revision.
+- The Add Item dialog has a "Library file" source: the library searched as the Library
+  page searches it (`GET /print/library/search`, unsliced 3MFs), one file picked, a
+  quantity and an optional title. The items grid names the file under the item's title
+  ("Library file in Bambuddy: <name>"), and the item's slice quote and print open the
+  print dialog on the file (a `library` source).
 
 ### 3.4 Quotes
 
@@ -273,14 +337,16 @@ the body.
   - A cancelled order goes back to the status it was cancelled from, which the cancel's
     audit row records with the items it took. Those items come back as an item's reopen
     brings one back; an item cancelled on its own before stays cancelled. Then the
-    order's status follows from its rows. On an accepted order, an item with no
-    accepted quote stays cancelled.
+    order's status follows from its rows. An item with no accepted quote comes back
+    as `draft` or `quoted`, also on an order cancelled from `accepted`,
+    `in_production` or `ready`: such an order takes an unpriced item (#5349).
 - `POST /orders/{id}/items/{item}/reopen` takes a cancelled item back to the state its
   quotes and attempts give it: `approved` with an accepted quote (`failed` when its
   latest attempt failed), `quoted` with a quote not accepted, else `draft`. The order's
-  status follows. It is refused once the order has ended, and on an order past `quoted`
-  for an item with no accepted quote (`item_not_priced`), since an accepted order holds
-  priced items only.
+  status follows. It is refused once the order has ended. An item with no accepted
+  quote comes back while the order takes a new item: `draft`, `quoted`, `accepted`,
+  `in_production` or `ready` (#5349). On a `shipped` order it is refused
+  (`item_not_priced`), since a shipped order takes no unpriced item.
 - Both reopens are allowed while the order is on hold, as a cancel is: undoing a
   mistake does not advance the order.
 - `POST /orders/{id}/items/{item}/unfulfil` (#4952) undoes a fulfilment. The item's
@@ -300,6 +366,143 @@ the body.
   so a reopen racing it keeps the holds it took.
 - A file the sweep took while a quote was released stays gone. The hold taken again
   keeps nothing, and the item needs a new quote before it prints.
+
+**As built: an item added after acceptance (#5349).** Before #5349, an order took no new
+item once accepted. Adding one missing name then needed a second order (ORD-2026-9 beside
+ORD-2026-3).
+- `POST /orders/{id}/items/after-acceptance` takes the body of `POST /orders/{id}/items`
+  (a model, custom or request item). It works on an `accepted`, `in_production` or
+  `ready` order only (`orders/lifecycle.py` `TAKES_ITEMS`).
+- It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use the
+  plain route), once it is `shipped` (`item_locked`), once it has ended
+  (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). The plain route on
+  an accepted order answers `item_locked` and names the new route.
+- The add changes what the customer gets, so it is a route of its own. The agent's tool
+  for it, `order_item_add_after_acceptance`, is `outward`. `order_item_add` stays
+  `write` for a `draft` or `quoted` order.
+- The new item starts as on a draft order: `draft` with no quote. A custom item is
+  `quoted`: its price is recorded and not accepted (`accept: true` is 422). The item
+  needs its own quote and that quote's acceptance before it is printed or fulfilled.
+- The accepted prices and the charges do not change. `OrderTotals` counts the new item
+  as pending (`pending_minor`) or unpriced (`unpriced_items`), as any item without an
+  accepted quote.
+- Past `quoted`, the item lock is now per item (`item_open`). An item with no accepted
+  quote takes a revision, a quantity, a quote and a quote's acceptance. An item with an
+  accepted quote stays pinned, until it is revised after acceptance (#5350, below).
+- A cancelled item with no accepted quote comes back as `draft` or `quoted` on such an
+  order, alone (`reopen_item`) or with its cancelled order (`reopen_order`). Only a
+  `shipped` order refuses it (`item_not_priced`).
+- The order's status follows `derive`. An `accepted` order stays `accepted`, and
+  `in_production` stays `in_production`. A `ready` order goes back to `in_production`,
+  since its fulfilled item has an attempt and the new item is not settled.
+- One `item.added_after_acceptance` audit row, in the add's transaction, names the item,
+  its title, its quantity and the order's status. The bus hears the item and the order
+  after the commit, as for every item write.
+- The order page offers "Add item" and the "Add custom item" entry row on such an order
+  (#5541), and "Add to order…" lists it. Each asks the person to confirm first that the
+  add changes an accepted order (`afterAcceptanceWarning`). A new pick (a customer, an
+  order, a quantity, a field of the row) asks again.
+- A custom item's quoted price is accepted from the item drawer: Accept on its newest
+  quote while none is accepted (#5541). It is `accept_quote`, the route
+  `order_item_accept_quote` calls, with that route's checks.
+
+**As built: the charges changed after acceptance, and a no-charge item (#5351).** A shop
+can agree a fixed total with a customer (an $80 cap). When an item is added after
+acceptance, the total must stay at the agreed figure. Before #5351, the charges changed
+only while the order was `draft` or `quoted` (seen on ORD-2026-3).
+- `PUT /orders/{id}/charges/after-acceptance` takes `{charges: [...]}`, the charges part
+  of `PATCH /orders/{id}`, and replaces the charges whole. It works on an `accepted`,
+  `in_production` or `ready` order only (`TAKES_ITEMS`, the states that take an item
+  after acceptance). A `discount` line is negative.
+- It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use
+  `PATCH`), once it is `shipped` (`order_not_editable`), once it has ended
+  (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). `PATCH` with
+  charges on such an order answers `order_not_editable` and names the new route.
+- The change changes what the customer pays, so it is a route of its own. The agent's
+  tool for it, `order_charges_update_after_acceptance`, is `outward`. `order_update`
+  stays `write`.
+- One `charges.replaced_after_acceptance` audit row, in the change's transaction, holds
+  the order's status and the charges before and after (`kind`, `label`,
+  `amount_minor`). The bus hears the order after the commit. The status does not move.
+- A no-charge item needs no new path. #5349's route takes a custom item at
+  `unit_price_minor: 0`, quoted and not accepted. `POST …/quotes/{quote}/accept`
+  (the item drawer's Accept, #5541) accepts it. The total does not change.
+- Job cost (§6.4, `orders/costs.py`) counts such an item's real cost (its entries)
+  against a revenue of 0: its margin is negative, `loss`, with no percent. A discount
+  charge counts in the order's revenue, signed. Tax never counts.
+- The order page saves the charges of such an order on the new route. It asks the
+  person to confirm first, and the confirm names the order's status
+  (`components/orders/afterAcceptance.ts` `chargesWarning`, in `ChargesEditor`).
+
+**As built: an accepted item's new design (#5350).** Before #5350, an accepted item's
+design was pinned: a revision was 409 `item_locked`. The only way out was to cancel the
+item and add a new one, and reopening the cancelled item brought back its old design and
+its old price (seen on ORD-2026-3).
+- `POST /orders/{id}/items/{item}/revisions/after-acceptance` takes the body of
+  `POST …/revisions` (`note`, `reference` or `output_id`, `filaments`). It records the
+  item's next revision. It works on an item with an accepted quote, on an `accepted`,
+  `in_production` or `ready` order (`TAKES_ITEMS`).
+- It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use the
+  plain route), once it is `shipped` (`item_locked`; every item of a shipped order is
+  settled, so `item_not_open` answers first), on a `ready` order (every item of it is
+  settled too, so `item_not_open` answers: the route never works on `ready`, though
+  `TAKES_ITEMS` lists it), once it has ended
+  (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). It is refused for a
+  fulfilled or cancelled item (`item_not_open`), a custom item (`item_custom`), an item
+  with no accepted quote (`item_not_priced`: use the plain route, #5349), while a
+  print of the item is queued or running (`print_in_flight`), and once an attempt of the
+  item is accepted (`item_partly_fulfilled`, #5592). `item_partly_fulfilled` answers
+  before `print_in_flight`: it is permanent, so a caller that waits out the print is
+  not refused after it (#5598). Accepted units are real goods of
+  the agreed design. A new design would count them as made of it, or leave them out of
+  the count, and both are false. To change the design of the rest, the shop cancels the
+  item and adds one with the new design. So an accepted attempt never predates the
+  revision the accepted quote prices, and the `made` sum counts the priced design only.
+- The accepted quote stays accepted. The order's totals keep the price the customer
+  agreed. The item is marked `revised_after_acceptance` (a new column on `order_items`).
+  An item in `quoted`, `approved`, `printed` or `failed` goes back to `draft`, so it is
+  not printed or fulfilled at the old quote.
+- An attempt of the old design (a `printed` item's print, or one recorded by hand) stays
+  on the item, not accepted. Once a quote of the new design is accepted, the item is
+  `approved` again, and accepting that old attempt is refused (`fulfilment_stale`): an
+  attempt made before the revision the accepted quote prices printed an earlier design
+  (#5582, `Lifecycle.accept_fulfilment`). The rule is `lifecycle.py` `stale_attempt`.
+  `GET /orders/{id}` marks such an attempt `stale: true` by the same rule (#5592), and
+  the drawer shows it as "Old design" with no Accept (`FulfilmentForm`).
+- The rule compares the attempt's `created_at` (`now()`, the start of its transaction)
+  with the revision's (`clock_timestamp()`). The two come from separate transactions.
+  Their order holds because every writer of an item takes the order's row lock and reads
+  the item after it. The revision is refused while a print of the item is open
+  (`print_in_flight`), and it puts the item back to `draft`. No attempt is recorded or
+  claimed on a `draft` item (`_fulfillable`, `claim_print`). So an attempt whose
+  transaction started before the revision and waited on the lock is refused. Every
+  attempt made after the revision starts after the new quote's acceptance.
+- While the mark stands, the lock is `requote_open` (`orders/lifecycle.py`), not
+  `item_open`. The item takes a quote (manual or slice), a quote's acceptance, a
+  customer's answer, and more revisions on either route. Its quantity stays pinned.
+  The old quote prices an earlier revision, so its acceptance is `quote_stale`.
+- Accepting a quote of the new design replaces the price and clears the mark. To keep
+  the old price, the shop records a quote at the same price and accepts it.
+- A cancelled item with the mark reopens as `quoted` (with a quote of the new design) or
+  `draft`, not `approved`.
+- The audit row is `revision.added_after_acceptance`. It holds the revision, the order's
+  status and the id of the accepted quote that was kept. The bus hears the order and the
+  item after the commit.
+- The change changes what the customer gets, so it is a route of its own. The agent's
+  tool for it, `order_item_revision_add_after_acceptance`, is `outward`.
+  `order_item_revision_add` stays `write`; its refusal names the new route.
+- The item drawer's Revisions panel offers "New revision" on such an item. Both "Add
+  revision (same design)" and "Change the design…" ask the person to confirm first, and
+  the confirm names the order's status (`afterAcceptance.ts` `reviseMode`,
+  `reviseWarning`). A failed save clears the confirm. The quote editor follows
+  `priceOpen`. Once an attempt of the item is accepted, `reviseMode` gives no route
+  (`partlyFulfilled`, #5592): the panel offers no "New revision" and says to cancel the
+  item and add one with the new design. It says so only when the accepted attempt is the
+  reason, not while the order is on hold or a print of the item runs (#5598).
+- The drawer offers the design and filament edits that `update_item` lets through
+  `_open_for_requote` (#5582): a new design in the Revisions panel (`reviseMode`, which
+  is `open` while `priceOpen` holds) and the filaments of a slice quote in the quote
+  editor (`priceOpen`). The quantity field follows `itemOpen`, so it stays locked.
 
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed
@@ -341,7 +544,7 @@ agent's follow a 202.
 | `POST /orders/{id}/reopen`, `POST /orders/{id}/items/{item}/reopen`, `POST /customers/{id}/unarchive` | §3.5's undo and §3.1's: a closed order, a cancelled item, an archived customer back |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
-| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order or an item; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. An attempt's own attachments (`…/fulfilments/{f}/attachments`) wait for the print path |
+| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments`, `POST /orders/{id}/items/{item}/fulfilments/{f}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order, an item or an attempt (listed under its item); the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. |
 | `PUT /orders/{id}/items/{item}/delivered` | §6.2: marks one of the item's own image attachments as what was delivered (`delivered_attachment_id`), or clears it with `null` |
 | `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
@@ -349,6 +552,8 @@ agent's follow a 202.
 | `GET/PUT /orders/price-book` | §5.1: the currency (with its `minor_exponent`), the policy and the filaments not archived (`?include_archived=true` adds the archived ones, #4977); `PUT` takes the policy whole and the estimate's factor |
 | `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive`, `POST …/{filament}/unarchive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record in the book (an archived record frees its identity, so the same filament can be added again; an unarchive, #4977, brings the same record back with its id, and is 409 `filament_exists` when its identity was taken since) |
 | `GET /orders/estimate?output_id=&filament_id=` | §5.3: the rough estimate of every plate of an output, never recorded; 422 `filament_density` for a filament with no density |
+| `POST /orders/{id}/items/after-acceptance`, `PUT /orders/{id}/charges/after-acceptance` | §3.5 "As built" (#5349, #5351): an item added, or the charges changed, on an `accepted`, `in_production` or `ready` order |
+| `POST /orders/{id}/items/{item}/revisions/after-acceptance` | §3.5 "As built" (#5350): an accepted item's new design; its accepted price stays until a quote of the new design is accepted |
 | `GET /orders/{id}/events` | the audit line |
 
 Every body has `extra="forbid"`; no body carries an author, a principal or a status
@@ -477,10 +682,11 @@ settles only by hand (`PATCH` the fulfilment attempt, §6.1).
 quote's file: `order_not_accepted`, `order_on_hold`, `item_custom`, `item_not_approved`
 (an item already printing among them), `item_made` (its attempts made its quantity), and
 `requote_needed` (no accepted quote, the item's output gone or no longer its reference's,
-or a slice quote whose `quote-<sha256>/sliced.3mf` is gone or reads to another digest).
+or a slice quote whose `quote-<sha256>/sliced.3mf` is gone or reads to another digest,
+or a body whose `part_settings` are not the ones the quote sliced with, #5571).
 The run starts the print as `POST /print/outputs/{id}/run` does (`api/printing.py`
 `accept_run`, `PrintRunWorkflow` on the item's output), with the body's printer, spools and
-choices, every plate, `copies` the quantity still to print and a `request_id` made from the
+choices (and the quote's `part_settings` when the body sends none, #5571), every plate, `copies` the quantity still to print and a `request_id` made from the
 operation's key, so a retry or a re-send repeats the run. The item is claimed before
 the print starts (`Lifecycle.claim_print`, under the order's lock): the attempt, keyed by
 that `request_id` (`print_request_id`, unique), with `copies`, the quote's `sliced_sha256`
@@ -508,13 +714,51 @@ attempt with its refusal, the first `print.progress` after the run succeeded mak
 `printing`, and `print_outcomes` (#2665) settles it, `printed` with `copies` made or
 `failed`. That outcome is written by the follow of every path, the native LAN print's too
 (#3823's follow, #4540), so **a native print settles by itself**; only an `unknown` end, or
-an outcome recorded against a newer run of the same output, is settled by hand. An attempt
+an older run of the same subject that the follow cannot read by its own run (§3.3), is
+settled by hand. An attempt
 is edited in `queued`, `printing` and `printed`, and accepted in `printed` (an accepted
 part leaves the item `approved` for the rest). Not yet: the run slices the item's output
 with the request's choices rather than printing the quote's file itself (with the quote's
-own choices the dialog's slice reuse queues that slice), an accepted `manual` quote's
-attempt records no file, and the per-slot spool fill (`needs_spool_choice`,
-`spool_not_filament`) waits on §8.3's spool-to-filament match.
+own choices the dialog's slice reuse queues that slice), and an accepted `manual` quote's
+attempt records no file. Both need a third `SourceSpec` kind, a pre-sliced file, on both
+queue paths (plan 2026-11-03 "Not in this plan").
+
+**As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
+`order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
+the check, which keys a retry's run as its first try's. A slot's filament is matched to
+spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
+upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
+and for a slot the item names no filament for, the plan stays as the request gave it.
+
+**As built, the path, calibrations and timelapse (#5352).** On ORD-2026-3 a print on the
+hot path's backends went over the LAN, so it had no project, and the tools could not set
+calibrations or timelapse. Each plate went through a script that downloaded the quote's
+sliced file and uploaded it to Bambuddy. Now the body of `order_item_print` is the print
+route's `PrintRunRequest` with its `path` and `options` (print-flow spec §2, "As built:
+the request picks the path"). With `path` `bambuddy`, `item_project_of` and the spools'
+`native_run` judge the route as the run does (`run_route(..., asked=)`), so the print is
+filed under the item's project in the order's (`order_projects`, §8.1), the item's
+filaments fill the plan from Bambuddy's spools, and the calibrations and timelapse go to
+the queue item. With the quote's choices the run queues the quote's own slice: nothing is
+sliced again and no sliced file is uploaded (measured with Bambuddy's slicer:
+`tests/api/test_order_print.py` `test_an_item_prints_through_bambuddys_queue_with_its_calibrations`
+queues library file 301, the quote's slice). The one upload is the unsliced copy, filed
+in the item's project folder (#79). That is the same path as a print of the output from
+the dialog. Over the LAN a calibration value the LAN start cannot honour is refused
+(422; `flow_cali` `"off"` and `"auto"` bed levelling and nozzle offset pass), and a `path`
+`native` the run cannot honour is refused. A slice quote takes `path` too
+(`SliceQuoteRequest.path`), so the quote slices on the route its print will take. A quote
+made without `path` on a printer the LAN reaches is sliced over the LAN; printing it with
+`path` `bambuddy` is not `requote_needed` (the quote's file and digest still stand, and
+the attempt holds that file), but the run slices the output again on Bambuddy's route,
+because the LAN's slice is planned for the LAN start and the printer's trays
+(`tests/api/test_order_print.py`
+`test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice`: the
+fake slicer runs twice). To print the quote's own slice through Bambuddy's queue, quote
+with `path` `bambuddy`. The
+agent's `order_item_print` takes `path` and `options` (outward, as before), and
+`order_item_quote`'s `slice` takes `path`.
 
 ## 6. Fulfilment and provenance
 
@@ -548,7 +792,13 @@ not read as a print's `print_attachments`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'
-own attachments (`order_item_fulfilment:<id>`) wait for the print path. The row carries
+own attachments (`order_item_fulfilment:<id>`) came after the print path (plan 2026-11-03
+Ruling 3): `POST …/items/{item}/fulfilments/{f}/attachments`, the row's `attempt_item_id`
+naming the attempt's item so the file is listed under it too (`item_id`, with
+`fulfilment_id`). An archive's copies (§8.2) land on their attempt. A print made outside
+the order's print path is attached from its own page ("Attach to order item"), which
+records an attempt naming its archive (`FulfilmentInput.archive_id`); that attempt copies
+the archive as a print's would. An archive another attempt already has (named, or made by its run) is refused, `archive_claimed`, so no order copies another's print. The rule holds the other way too (#5273): a run's archives leave out one another attempt named before Bambuddy linked it to the run, so it stays the hand attempt's only. The row carries
 `order_id` beside `subject`, so an order's whole list is one index read and
 `OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;
@@ -621,7 +871,17 @@ grams and seconds against actual, the quoted filament cost against the actual gr
 the quote's prices, the attempts that failed and what they consumed. That is "the real
 cost of a specific line item": the sum over its attempts, failures included. Bambuddy's
 own `cost` (F8) is shown alongside when an archive is linked, corrected as
-`api/print_history.py:1119-1151` corrects it, and not used in the sums.
+`bambuddy/costs.py` corrects it (shared with `api/print_history.py`), and not used in the sums.
+
+**As built (#4251, plan 2026-11-03 Rulings 1 and 2).** `orders/costs.py`, read only. Per
+item, the accepted quote's seconds, grams and filament cost come from a `slice` quote's
+plates and `filament` lines, for the item's quantity. Every attempt's `actual_grams` (§8.2)
+is priced at that quote's own price per gram, not at today's book. A `manual` quote prices
+no grams, so that item has actual figures and no filament cost. Bambuddy's cost is the
+seam's `archive_cost` (archive and runs). Its correction moved to `bambuddy/costs.py`,
+which the print page shares. An archive that cannot be read sets `bambuddy_unavailable`
+and fails nothing. The order page shows it in a Cost card once the order is accepted, and
+the agent reads it with `order_costs`.
 
 ## 7. The flow
 
@@ -830,7 +1090,17 @@ thread lets go of one it got too late. `OrderDetail.projects` lists them; the or
 item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
 retried print of an item cancelled meanwhile looks for its run by the run's key
 (`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on
-in the projects it had instead of making a second of each name.
+in the projects it had instead of making a second of each name. A project deleted in
+Bambuddy is made again by the next ensure (`project_exists`, false only on a 404), and the
+mapping names the new one (#5263). A project made or found there within the last
+minute (`EXISTS_TTL_SECONDS`, told by `order_projects.seen_at`, which every replica
+shares, #5276) is not asked for again (#5273), so an accept and the prints after it ask
+once; a deletion is seen by the first ensure past that, or by the retry of a print of the
+order that failed (a failed run, or a start the print path refused, clears `seen_at`). A print's claim records the project its run is keyed
+with (`print_project_id`), so a retry keys the run the same whatever the mapping says
+since. A claim from before that recorded none, and its retry looks for the run under no
+project and under the item's current one. One whose project was deleted and made again
+before the retry is not found under the old project: that narrow gap is accepted.
 
 ### 8.2 Archives
 
@@ -840,6 +1110,32 @@ attempt copies `archive_id`, outcome, times and grams, and offers the archive's
 once through the existing proxies, then ScadBuddy's own blob). Nothing is promoted to
 Bambuddy from an order: the project `Media/` folder copy that `print_attachments`
 makes is that feature's, not this one's.
+
+**As built (#4253).** `orders/archives.py`. A print run queues one item per plate, so an
+attempt has one archive per plate: `OrderStore.run_archives` finds them through
+`print_sends` (by `run_id`) and `print_links` (by queue item). Once the attempt's print
+settled it copies `archive_ids`, the archives' earliest start and latest end as its
+`started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
+(`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
+outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
+The times are copied once, told by `archive_copied` (#5273), so one a person corrected
+stands even when the archives give no seconds or grams. An attempt that named archives before that column was
+added is taken as copied (#5276): nothing tells one copied from an archive with neither
+from one never read.
+The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
+each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
+and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST
+…/archives/{archive_id}/copy` (`{what: finished_photo | timelapse, name?}`) is the
+`order_attempt_copy` operation: the bytes are streamed once through the seam's
+`download_archive_media` into the claim store, up to `media_upload_max_bytes`, kept as
+`attachment-<sha256>` and recorded as an attachment **of the attempt**
+(`order_item_fulfilment:<id>`, listed under its item, #4251), with the role `finished` or
+`timelapse` and the
+caption `Attempt <n>, Bambuddy archive <id>`. The same bytes copied again under the same
+role answer with the attachment already there. An archive with no timelapse is
+`no_timelapse`: pull it off the printer first (`POST /prints/{archive_id}/timelapse/pull`).
+`timelapse_blob_key` is not a column: the timelapse is an attachment like the photo.
+Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
 
 ### 8.3 Spool prices
 

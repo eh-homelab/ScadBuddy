@@ -1,19 +1,24 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
-import { formatMoney } from '../../lib/money'
+import { formatMoney, toMajor } from '../../lib/money'
+import { useAsync } from '../../lib/useAsync'
+import { orderItemSource } from '../../lib/printSource'
+import { useDebounced } from '../../lib/useDebounced'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
+import { byCreated, parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
+import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
+import { elapsed, useNow } from './useNow'
+import { When } from './When'
 
-function startTime(at: number): string {
-  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
+/** How long the typed price must stay still before the warning asks the route about it. */
+export const CHECK_DEBOUNCE_MS = 300
 
 /** A quote line's kind as the drawer names it (§3.4, #4250 Ruling 5). */
 const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
@@ -30,8 +35,12 @@ const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
  * A typed price for a line item (§3.4's `manual` quote, plan Ruling 1), a quote from a
  * slice of it (#4250: the print dialog in its quote mode, which slices every plate and
  * prices it with the price book), and the item's quotes with their lines and the accepted
- * one marked. `editable` while the order is draft or quoted. The slice quote runs on the
- * page (`slice`, #4693), so it outlives the dialog and this drawer.
+ * one marked. `editable` while the order is draft or quoted, or past that while the item has
+ * no accepted quote (#5349) or was revised after acceptance (#5350, `afterAcceptance.ts`
+ * `priceOpen`). The slice quote runs on the
+ * page (`slice`, #4693), so it outlives the dialog and this drawer. `acceptPending` offers
+ * Accept on the pending quote alone, with nothing to record (#5541: a custom item, whose
+ * price is its own field, added after acceptance or by the agent with its price `quoted`).
  */
 export function QuoteEditor({
   orderId,
@@ -40,9 +49,11 @@ export function QuoteEditor({
   exponent,
   quotes,
   editable,
+  acceptPending = false,
   onChanged,
   item,
   slice,
+  parts = '',
 }: {
   orderId: string
   itemId: string
@@ -51,17 +62,42 @@ export function QuoteEditor({
   exponent: number
   quotes: Quote[]
   editable: boolean
+  /** Offer Accept on the newest quote while none is accepted, though `editable` is false. */
+  acceptPending?: boolean
   onChanged: () => void
-  /** What a slice quote slices: the item's output and its colours' filaments. */
-  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
+  /** What a slice quote slices: the item's output or library file, and its colours' filaments. */
+  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> & Partial<Pick<OrderItem, 'library_file'>>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
   slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
+  /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
+   * them, so a change reads it again. */
+  parts?: string
 }) {
   const [slicing, setSlicing] = useState(false)
+  // What a slice quote slices: the item's output, or a library file item's file (#5544).
+  const sliceSource = item ? orderItemSource(item) : null
   const [price, setPrice] = useState('')
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // #5328, job cost spec §6.3: the warning judges the typed price, else the newest quote
+  // not yet accepted: what is about to be sent. The route decides whether it warns
+  // (`warning`, `below_cost`); the browser never works out the thin rule itself. Each
+  // price, once typing stops, is a read of its own, so a job fulfilled meanwhile counts.
+  // A typed price that does not parse warns about nothing: the pending quote is not what
+  // the field holds (#5533).
+  const slug = editable ? item?.reference?.slug : undefined
+  const pending = quotes.some((q) => q.accepted) ? undefined : [...quotes].sort(byCreated).at(-1)
+  const current = price.trim() ? parseUnitPrice(price, exponent) : (pending?.unit_price_minor ?? null)
+  // #5554 — the newest quote is marked when there are several to tell apart.
+  const newest = quotes.length > 1 ? [...quotes].sort(byCreated).at(-1)?.id : undefined
+  const running = slice?.run && !slice.run.error ? slice.run : undefined
+  const now = useNow(running !== undefined)
+  const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
+  const history = useAsync(
+    () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked, itemId) : Promise.resolve(null)),
+    [slug, currency, checked, itemId, parts],
+  )
 
   async function record(accept: boolean) {
     const minor = parseUnitPrice(price, exponent)
@@ -109,10 +145,14 @@ export function QuoteEditor({
                   {quote.source === 'slice' ? 'From a slice' : (quote.lines[0]?.label ?? quote.source)}
                   {quote.sliced_sha256 ? <span className="font-mono text-xs"> · {quote.sliced_sha256.slice(0, 12)}</span> : null}
                 </span>
+                <span className="text-xs text-muted-foreground">
+                  Quoted <When at={quote.created_at} />
+                </span>
+                {quote.id === newest && <span className="text-xs text-foreground" data-testid="quote-newest">Newest</span>}
                 {quote.accepted ? (
                   <span className="text-xs text-primary">Accepted</span>
                 ) : (
-                  editable && (
+                  (editable || (acceptPending && quote.id === pending?.id)) && (
                     <Button size="xs" variant="outline" disabled={busy} onClick={() => void accept(quote.id)}>
                       Accept
                     </Button>
@@ -135,14 +175,20 @@ export function QuoteEditor({
           ))}
         </ul>
       )}
-      {slice?.run && !slice.run.error && (
-        <p role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
+      {slice && running && (
+        <p role="status" className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
-          {slice.run.detached
-            ? `No answer from the quote started at ${startTime(slice.run.startedAt)}: it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.`
-            : `Slicing every plate and pricing it, since ${startTime(slice.run.startedAt)}…`}
+          {running.detached ? (
+            <span>
+              No answer from the quote started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.
+            </span>
+          ) : (
+            <span>
+              Slicing every plate and pricing it. Started <When at={running.startedAt} />, running for <span data-testid="quote-elapsed">{elapsed(running.startedAt, now)}</span>…
+            </span>
+          )}
           {/* No longer followed, so a failure would never show: the user may stop waiting. */}
-          {slice.run.detached && (
+          {running.detached && (
             <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
               Stop waiting
             </Button>
@@ -151,7 +197,17 @@ export function QuoteEditor({
       )}
       {slice?.run?.error && (
         <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn" data-testid="quote-error">
-          The slice quote failed: {slice.run.error}
+          <span>
+            The slice quote failed: {slice.run.error}
+          </span>
+          <span className="text-xs text-muted-foreground" data-testid="quote-error-times">
+            Started <When at={slice.run.startedAt} />
+            {slice.run.finishedAt !== undefined && (
+              <>
+                , ended <When at={slice.run.finishedAt} />
+              </>
+            )}
+          </span>
           <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
             Dismiss
           </Button>
@@ -163,21 +219,21 @@ export function QuoteEditor({
             type="button"
             size="sm"
             variant="outline"
-            disabled={busy || !item.output_id || (slice.run !== undefined && !slice.run.error)}
+            disabled={busy || !(item.output_id || item.library_file) || (slice.run !== undefined && !slice.run.error)}
             onClick={() => setSlicing(true)}
             data-testid="quote-from-slice"
           >
             Quote from a slice…
           </Button>
-          {!item.output_id && (
+          {!item.output_id && !item.library_file && (
             <span className="text-xs text-muted-foreground">Render the item first: a slice quote slices its output.</span>
           )}
         </div>
       )}
-      {item?.output_id && item.reference && slice && slicing && (
+      {item && slice && slicing && sliceSource && (
         <PrintPicker
           open
-          source={{ kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }}
+          source={sliceSource}
           onClose={() => setSlicing(false)}
           onRan={() => undefined}
           quote={{
@@ -211,6 +267,9 @@ export function QuoteEditor({
             Record only
           </Button>
         </form>
+      )}
+      {editable && current !== null && (
+        <QuoteWarning history={history.data} unitPrice={current} currency={currency} exponent={exponent} onUse={(minor) => setPrice(toMajor(minor, exponent))} />
       )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">

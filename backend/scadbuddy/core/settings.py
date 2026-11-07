@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationError, ValidationInfo, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -82,6 +83,10 @@ def check_approval_timeout(value: int, name: str) -> int:
             f" {MAX_APPROVAL_TIMEOUT_S} seconds, not {value}"
         )
     return value
+
+
+#: SCADBUDDY_CRUD_PORT's default (#5298); `tests/conftest.py` moves it to 0.
+DEFAULT_CRUD_PORT = 8082
 
 
 class Settings(BaseSettings):
@@ -182,6 +187,15 @@ class Settings(BaseSettings):
     # `to_minor_unit`: the unit price is its lines, each rounded once; `to_major`: then
     # rounded up to a whole currency unit, the difference a line of its own.
     pricing_rounding: Literal["to_minor_unit", "to_major"] = "to_minor_unit"
+    # Job cost (spec 2026-11-05 §4.3, §4.4, §5, #5326), decimal strings in the shop's
+    # `orders_currency`: the labour rate per hour a time entry copies when it is written
+    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which will
+    # convert the assistant's spend once it is recorded on a job (#5327 to #5330; nothing
+    # reads it yet; `SCADBUDDY_PRICING_USD_RATE`, more than 0), and the margin percent
+    # below which a job is thin (`SCADBUDDY_ORDERS_THIN_MARGIN_PERCENT`).
+    pricing_labour_rate_per_hour: str = "0"
+    pricing_usd_rate: str = "1"
+    orders_thin_margin_percent: str = "15"
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
@@ -258,6 +272,44 @@ class Settings(BaseSettings):
     # addresses, as a URL import is (`library/url_import.py` `PublicOnlyBackend`).
     auth_oidc_private_network: bool = False
 
+    # Service credentials by exchange (#5494, spec 2026-11-05 §6, §7.2). On a caller:
+    # SCADBUDDY_SERVICE_TOKEN_FILE, its projected ServiceAccount token (audience
+    # `scadbuddy`), or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, its bootstrap secret outside
+    # Kubernetes, exchanged at `POST /api/v1/auth/service-token`; both set is a start
+    # error, neither reads the credential's view as before. On the API:
+    # SCADBUDDY_SERVICE_BOOTSTRAP_DIR, one secret file per caller (only their hashes are
+    # kept; unset, no bootstrap secret is accepted), and
+    # SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE, the namespace whose ScadBuddy ServiceAccounts
+    # may exchange (unset, no Kubernetes token is accepted).
+    service_token_file: Path | None = None
+    service_bootstrap_file: Path | None = None
+    service_bootstrap_dir: Path | None = None
+    service_account_namespace: str = ""
+
+    # SCADBUDDY_CRUD_PORT (#5298, plan D3): the second port the API serves, answering only
+    # the CRUD routes, the service-token exchange and /healthz (`crud/listener.py`). 0 is
+    # any free port. A factory, so the tests can move the default off a fixed port.
+    crud_port: int = Field(default_factory=lambda: DEFAULT_CRUD_PORT, ge=0, le=65535)
+
+    @model_validator(mode="after")
+    def _one_service_proof(self) -> Settings:
+        if self.service_token_file is not None and self.service_bootstrap_file is not None:
+            raise ValueError(
+                "Set SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, not"
+                " both: a caller proves itself one way"
+            )
+        return self
+
+    @field_validator("service_account_namespace")
+    @classmethod
+    def _namespace_is_a_name(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", value):
+            raise ValueError(
+                f"SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE: {value!r} is not a Kubernetes namespace"
+            )
+        return value
+
     @field_validator("orders_currency")
     @classmethod
     def _currency_has_a_minor_unit(cls, code: str) -> str:
@@ -276,11 +328,14 @@ class Settings(BaseSettings):
         "pricing_labour_per_item",
         "pricing_markup_percent",
         "rough_estimate_factor",
+        "pricing_labour_rate_per_hour",
+        "pricing_usd_rate",
+        "orders_thin_margin_percent",
     )
     @classmethod
     def _decimal_rate(cls, value: str, info: ValidationInfo) -> str:
         name = info.field_name or ""
-        positive = name == "rough_estimate_factor"
+        positive = name in {"rough_estimate_factor", "pricing_usd_rate"}
         return decimal_string(value, env_var(name), positive=positive)
 
     @field_validator("store_s3_prefix")
@@ -420,8 +475,9 @@ class Settings(BaseSettings):
     temporal_projects_worker_inprocess: bool = False
     # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
     # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5), and the
-    # projects worker calls for a flow's render, print and arrange (#1057). Also the base
-    # the API mints the native slicer's transfer URLs under (`slicing/transfer.py`, #3822).
+    # projects worker calls for a flow's render, print and arrange (#1057), and the render
+    # worker reads its store settings through (#5298). Also the base the API mints the
+    # native slicer's transfer URLs under (`slicing/transfer.py`, #3822).
     api_internal_url: str | None = None
     # SCADBUDDY_SLICER_PROFILES_DIR: Bambu Studio's BBL vendor profiles and the image's
     # BAMBU_STUDIO_VERSION, which the native slicer's preset files are built from (#3822).
@@ -610,6 +666,16 @@ class Settings(BaseSettings):
         return _first_directory(REPO_ROOT / "frontend" / "dist", CONTAINER_FRONTEND_DIR)
 
 
+class NoDatabaseSettings(Settings):
+    """The settings of a worker that holds no SQL (#5298): the projects worker. It
+    starts with ``SCADBUDDY_DATABASE_URL`` unset, and ignores it when set."""
+
+    @field_validator("database_url")
+    @classmethod
+    def _database_required(cls, value: str) -> str:
+        return value
+
+
 #: What ``log_level`` takes: the standard library's own level names.
 LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
@@ -652,6 +718,26 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "auth_oidc_private_network": (
             "Whether the issuer may be fetched from a private address; the deployment knows"
             " where its identity provider runs (#4975)."
+        ),
+        "service_token_file": (
+            "Where the kubelet puts this caller's projected ServiceAccount token, which proves"
+            " who it is to the API (#5494); the deployment mounts it."
+        ),
+        "service_bootstrap_file": (
+            "This caller's bootstrap secret outside Kubernetes (#5494). A secret kept in the"
+            " database it unlocks would protect nothing."
+        ),
+        "service_bootstrap_dir": (
+            "The callers' bootstrap secrets the API checks (#5494). Set in Settings, anyone"
+            " who could write it could mint a service credential."
+        ),
+        "service_account_namespace": (
+            "Whose ServiceAccounts may exchange for a service credential (#5494): the"
+            " deployment's namespace, never a stored setting."
+        ),
+        "crud_port": (
+            "The port the workers' CRUD calls reach (#5298). The deployment's Service and"
+            " NetworkPolicy name it, so a form only the API reads would split them."
         ),
         "trusted_proxies": (
             "Which peers are believed about the client they forward for. Like the allowed"
@@ -723,9 +809,9 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " deployment runs the `scadbuddy-print` worker."
         ),
         "api_internal_url": (
-            "Where the print, projects and slicer workers reach the API inside the cluster:"
-            " the deployment's Service, read by those workers and by the API, which mints"
-            " the slicer's transfer URLs under it."
+            "Where the render, print, projects and slicer workers reach the API inside the"
+            " cluster: the deployment's Service, read by those workers and by the API, which"
+            " mints the slicer's transfer URLs under it."
         ),
         "slicer_profiles_dir": (
             "Where the image puts Bambu Studio's BBL profiles and their VERSION, copied from"
@@ -835,6 +921,10 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "pricing_markup_percent": "live",
         "pricing_rounding": "live",
         "rough_estimate_factor": "live",
+        # Read by each time entry and each costs read (#5326).
+        "pricing_labour_rate_per_hour": "live",
+        "pricing_usd_rate": "live",
+        "orders_thin_margin_percent": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.

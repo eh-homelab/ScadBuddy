@@ -348,4 +348,63 @@ describe('ItemRow', () => {
     expect(isUserOnly(within(dialog).getByRole('button', { name: 'Cancel' }))).toBe(false)
     expect(isUserOnly(within(dialog).getByRole('button', { name: 'Lower to off' }))).toBe(false)
   })
+
+  describe('loading (#838)', () => {
+    const loadingSelect = (name: string) => screen.getByRole('combobox', { name: `Loading of ${name} (Send to printer)` })
+
+    /** Answers the loading writes as the agent would, and records them. */
+    function serveLoading(start: ItemView): { method: string; loading?: string }[] {
+      const sent: { method: string; loading?: string }[] = []
+      let current = start
+      const view = (): SourceView => ({
+        id: 'builtin:scadbuddy',
+        kind: 'builtin',
+        title: 'ScadBuddy tools',
+        enabled: true,
+        switchable: false,
+        options_route: null,
+        listed_at: null,
+        truncated: false,
+        problem: null,
+        checking: false,
+        items: [current],
+        children: [],
+      })
+      server.use(
+        http.put(`${BASE}/:source/items/:item/loading`, async ({ request }) => {
+          const { loading } = (await request.json()) as { loading: 'base' | 'searchable' }
+          sent.push({ method: 'PUT', loading })
+          current = { ...current, loading }
+          return HttpResponse.json(view())
+        }),
+        http.delete(`${BASE}/:source/items/:item/loading`, () => {
+          sent.push({ method: 'DELETE' })
+          current = { ...current, loading: current.default_loading }
+          return HttpResponse.json(view())
+        }),
+      )
+      return sent
+    }
+
+    it('sets a ScadBuddy tool to be sent every turn, and back to its default by DELETE', async () => {
+      const start = item({ loading: 'searchable', default_loading: 'searchable' })
+      const sent = serveLoading(start)
+      const { user } = renderPage(<Harness start={start} />)
+      expect(loadingSelect('send_to_printer')).toHaveTextContent('Found by search (default)')
+      expect(await optionsOf(user, loadingSelect('send_to_printer'))).toEqual(['Sent every turn', 'Found by search (default)'])
+      await choose(user, loadingSelect('send_to_printer'), 'Sent every turn')
+      await waitFor(() => expect(loadingSelect('send_to_printer')).toHaveTextContent('Sent every turn'))
+      await choose(user, loadingSelect('send_to_printer'), 'Found by search (default)')
+      await waitFor(() => expect(loadingSelect('send_to_printer')).toHaveTextContent('Found by search (default)'))
+      expect(sent).toEqual([{ method: 'PUT', loading: 'base' }, { method: 'DELETE' }])
+      expect(isUserOnly(loadingSelect('send_to_printer'))).toBe(false)
+    })
+
+    it('shows no loading for an item without one, or a tool that is off', () => {
+      renderPage(<Harness start={item({ id: 'a', name: 'a' })} />)
+      expect(screen.queryByRole('combobox', { name: /^Loading of a/ })).not.toBeInTheDocument()
+      renderPage(<Harness start={item({ id: 'b', name: 'b', access: 'off', loading: 'searchable', default_loading: 'searchable' })} />)
+      expect(screen.queryByRole('combobox', { name: /^Loading of b/ })).not.toBeInTheDocument()
+    })
+  })
 })

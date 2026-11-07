@@ -4,8 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
+import { seedPart } from '../mocks/features/orders/parts'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
+import type { OrderRow } from '../api/types'
+import { sortByMargin } from '../components/orders/marginSort'
+import { DEFAULT_ORDERS_QUERY } from '../lib/ordersQuery'
 import { OrdersPage } from './OrdersPage'
 
 function Location() {
@@ -29,6 +33,22 @@ describe('OrdersPage (#4249)', () => {
     expect(rows.map((r) => within(r).getByRole('link').textContent)).toEqual(['ORD-2026-3', 'ORD-2026-2', 'ORD-2026-1'])
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Ada Lovelace')).toBeInTheDocument()
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Accepted')).toBeInTheDocument()
+  })
+
+  it('says which parts are low and links to the Parts page (#5543)', async () => {
+    seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599, on_hand: 2, low_stock: 5 })
+    seedPart({ name: 'Ring', pack_size: 10, pack_price_minor: 100, on_hand: 50, low_stock: 5 })
+    renderPage(<OrdersPage />, { route: '/orders' })
+
+    const banner = await screen.findByTestId('low-stock')
+    expect(banner).toHaveTextContent('Low stock: Silver hook (2).')
+    expect(within(banner).getByRole('link', { name: 'Parts' })).toHaveAttribute('href', '/orders/parts')
+  })
+
+  it('shows no low-stock line while no part is low (#5543)', async () => {
+    renderPage(<OrdersPage />, { route: '/orders' })
+    await screen.findByRole('table', { name: 'Orders' })
+    expect(screen.queryByTestId('low-stock')).not.toBeInTheDocument()
   })
 
   it('keeps the status chip and the customer in the URL', async () => {
@@ -177,5 +197,96 @@ describe('OrdersPage (#4249)', () => {
     expect(await api.customers({ q: 'grace' })).toHaveLength(1)
     expect(createOrder).toHaveBeenCalledTimes(2)
     createOrder.mockRestore()
+  })
+})
+
+describe('OrdersPage margin (#5327)', () => {
+  beforeEach(() => resetMockState())
+
+  it('shows each margin, tints a loss, and filters to loss or thin', async () => {
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+    await screen.findByRole('table', { name: 'Orders' })
+    const draft = screen.getByTestId(`order-row-${ORDER_DRAFT}`)
+    expect(within(draft).getByText('—')).toBeInTheDocument()
+    expect((await api.orderCosts(ORDER_ACCEPTED)).margin_state).toBe('ok')
+
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 1_000_000 })
+    await user.click(screen.getByRole('radio', { name: 'Loss or thin' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?margin=loss_thin')
+    await waitFor(() => expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull())
+    const row = screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)
+    expect(row.className).toContain('text-destructive')
+    const costs = await api.orderCosts(ORDER_ACCEPTED)
+    const margin = within(row).getByTestId('order-margin')
+    expect(margin).toHaveTextContent(`${costs.margin_percent}%`)
+    expect(margin.getAttribute('title')).toMatch(/^Margin /)
+  })
+
+  it('cycles the Margin header through ascending, descending and none, with aria-sort (#5515)', async () => {
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 1_000_000 })
+    const loaded = (await api.orders(DEFAULT_ORDERS_QUERY, { limit: 50 })).items
+    const { user } = renderPage(<OrdersPage />, { route: '/orders' })
+    const table = await screen.findByRole('table', { name: 'Orders' })
+    const header = within(table).getByRole('columnheader', { name: 'Margin' })
+    const order = () => within(table).getAllByRole('row').slice(1).map((r) => r.getAttribute('data-testid'))
+    const ids = (rows: OrderRow[]) => rows.map((r) => `order-row-${r.id}`)
+    const unsorted = order()
+    expect(unsorted).toEqual(ids(loaded))
+    expect(header).toHaveAttribute('aria-sort', 'none')
+
+    await user.click(within(header).getByRole('button', { name: 'Margin' }))
+    expect(header).toHaveAttribute('aria-sort', 'ascending')
+    expect(order()).toEqual(ids(sortByMargin(loaded, 'ascending')))
+    expect(order()[0]).toBe(`order-row-${ORDER_ACCEPTED}`)
+    expect(order().at(-1)).toBe(`order-row-${ORDER_DRAFT}`)
+
+    await user.click(within(header).getByRole('button', { name: 'Margin' }))
+    expect(header).toHaveAttribute('aria-sort', 'descending')
+    expect(order()).toEqual(ids(sortByMargin(loaded, 'descending')))
+    expect(order().at(-1)).toBe(`order-row-${ORDER_DRAFT}`)
+
+    await user.click(within(header).getByRole('button', { name: 'Margin' }))
+    expect(header).toHaveAttribute('aria-sort', 'none')
+    expect(order()).toEqual(unsorted)
+  })
+
+  it('keeps Load more on an empty page that still has a cursor (#5515)', async () => {
+    const [row] = (await api.orders(DEFAULT_ORDERS_QUERY, { limit: 1 })).items
+    if (!row) throw new Error('the mocks hold no order')
+    const list = vi.spyOn(api, 'orders')
+    // Two empty pages that each end on a cursor, then a page with the match.
+    const pages: Record<string, { items: OrderRow[]; next_cursor: string | null }> = {
+      first: { items: [], next_cursor: 'c1' },
+      c1: { items: [], next_cursor: 'c2' },
+      c2: { items: [row], next_cursor: null },
+    }
+    list.mockImplementation(async (_query, options) => pages[options?.cursor ?? 'first'] ?? { items: [], next_cursor: null })
+    const { user } = renderPage(<OrdersPage />, { route: '/orders?margin=loss_thin' })
+    expect(await screen.findByText('No matches yet. Load more to search older orders.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(list.mock.calls.some(([, options]) => options?.cursor === 'c1')).toBe(true))
+    expect(await screen.findByRole('button', { name: 'Load more' })).toBeEnabled()
+    expect(screen.getByText('No matches yet. Load more to search older orders.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByTestId(`order-row-${row.id}`)).toBeInTheDocument()
+    expect(list.mock.calls.some(([, options]) => options?.cursor === 'c2')).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    list.mockRestore()
+  })
+
+  it('sorts by margin, worst first, with no margin last', () => {
+    const row = (id: string, margin_minor: number | null, margin_percent: number | null) => ({ id, margin_minor, margin_percent }) as OrderRow
+    const rows = [row('none', null, null), row('ok', 500, 50), row('zero', -10, null), row('thin', 50, 5)]
+    expect(sortByMargin(rows, 'ascending').map((r) => r.id)).toEqual(['zero', 'thin', 'ok', 'none'])
+    expect(sortByMargin(rows, 'descending').map((r) => r.id)).toEqual(['ok', 'thin', 'zero', 'none'])
+    expect(sortByMargin(rows, 'none')).toBe(rows)
   })
 })

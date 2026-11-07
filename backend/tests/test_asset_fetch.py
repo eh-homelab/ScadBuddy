@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import httpx
 import pytest
 import respx
@@ -60,3 +62,28 @@ async def test_hosts_are_compared_as_the_ascii_name_that_is_connected_to() -> No
     assert (idn.data, sub.data) == (svg, svg)
     with pytest.raises(AssetFetchRefusedError):
         await fetch_file("https://例え.com/a.svg", domains=DOMAINS, limit=1024)
+
+
+async def test_a_host_allowed_once_is_that_host_alone(resolved: list[str]) -> None:
+    """#959: a one-off approval lets the URL's own host through, not its subdomains or
+    its parent, and a redirect anywhere else off the list is still refused."""
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://icons.example.com/a.svg").mock(
+            return_value=httpx.Response(200, content=svg)
+        )
+        mock.get("https://icons.example.com/moved.svg").mock(
+            return_value=httpx.Response(302, headers={"Location": "/a.svg"})
+        )
+        mock.get("https://icons.example.com/away.svg").mock(
+            return_value=httpx.Response(302, headers={"Location": "https://evil.example/a.svg"})
+        )
+        once = partial(fetch_file, domains=DOMAINS, limit=1024, allow_host="icons.example.com")
+        assert (await once("https://icons.example.com/a.svg")).data == svg
+        assert (await once("https://icons.example.com/moved.svg")).data == svg
+        with pytest.raises(AssetFetchRefusedError, match=r"evil\.example"):
+            await once("https://icons.example.com/away.svg")
+        for other in ("https://cdn.icons.example.com/a.svg", "https://example.com/a.svg"):
+            with pytest.raises(AssetFetchRefusedError):
+                await once(other)
+    assert "evil.example" not in resolved

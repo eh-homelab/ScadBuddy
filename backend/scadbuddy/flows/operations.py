@@ -59,16 +59,19 @@ from temporalio import activity
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import ResetReapplyExcludeType
 from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
-from temporalio.client import WorkflowUpdateFailedError
+from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
+from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.crud.projects import RESET_REFUSED
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Proposal, Run
 from scadbuddy.flows.narrowing import narrowing_problem
+from scadbuddy.flows.print_binding import api_lookup, bind_call, named_printer
 from scadbuddy.flows.store import (
     FlowStore,
     HopMovedError,
@@ -82,6 +85,7 @@ from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
+    from scadbuddy.crud.projects import RemoteFlowStore
 
 FLOW_ANSWER = "flow_answer"
 FLOW_DECIDE = "flow_decide"
@@ -98,6 +102,14 @@ PROPOSAL_CHANGED = "https://scadbuddy.dev/problems/flow-escalation-proposal-chan
 NOT_NARROWER = "https://scadbuddy.dev/problems/flow-escalation-not-a-narrowing"
 PARENT_TIER = "https://scadbuddy.dev/problems/flow-escalation-parent-tier"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
+#: A print's registry printer links another printer than the run page showed (#4445).
+PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
+#: An approval of a print on a registry printer the run page could not name (#4445).
+PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
+#: The API refused the projects worker's read of a print's registry printer (#5466).
+PRINTER_REFUSED = "https://scadbuddy.dev/problems/flow-printer-refused"
+#: The statuses of that read that no retry mends: the worker's service credential (#5472).
+REFUSED_READS = frozenset({401, 403})
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
@@ -105,6 +117,29 @@ LANDED_PROBE = timedelta(seconds=10)
 #: The harness tool an outward `tool(...)` call parks as (`flow_tools.approved_tool`):
 #: its input names the agent tool and its arguments.
 APPROVED_TOOL = "approved_tool"
+
+
+async def reset_execution(
+    client: Client, workflow_id: str, *, replaced: str, point: int, request_id: str, reason: str
+) -> str:
+    """Reset the execution `replaced` to event `point` under `request_id` (Temporal dedupes
+    on it): the new execution's run id."""
+    answer = await client.workflow_service.reset_workflow_execution(
+        ResetWorkflowExecutionRequest(
+            namespace=client.namespace,
+            workflow_execution=WorkflowExecution(workflow_id=workflow_id, run_id=replaced),
+            reason=reason,
+            workflow_task_finish_event_id=point,
+            request_id=request_id,
+            # Every answer, approval and `close` after the point is undone with it: the
+            # calls past it run again and park again for a person.
+            reset_reapply_exclude_types=[
+                ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL,
+                ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE,
+            ],
+        )
+    )
+    return answer.run_id
 
 
 def request_id(run: Run, call_id: str) -> str:
@@ -163,6 +198,41 @@ def _proposal_changed() -> ApiError:
     )
 
 
+def _printer_changed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The printer this call prints on is not the one you were shown. Reload it.",
+        type_=PRINTER_CHANGED,
+    )
+
+
+def _printer_unbound() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run page could not say which printer this call prints on, so it cannot be"
+        " approved yet. Reload it, and approve once it names the printer.",
+        type_=PRINTER_UNBOUND,
+    )
+
+
+def _printer_refused(code: int) -> ApiError:
+    """The API refused the projects worker's read of the row: its service credential, a
+    fault an operator fixes. Trying again would be refused the same way."""
+    return ApiError(
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        f"ScadBuddy's API refused to read the printer this call prints on (HTTP {code}),"
+        " so nothing was approved. Check the projects worker's service credential.",
+        type_=PRINTER_REFUSED,
+    )
+
+
+def _printer_unreadable() -> ApiError:
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "Could not read the printer this call prints on, so nothing was approved. Try again.",
+    )
+
+
 def _unavailable_key() -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -208,7 +278,7 @@ def _same(existing: Decision, kind: str, request: dict[str, Any], answer: str | 
 
 
 def flow_kinds(
-    store: FlowStore,
+    store: FlowStore | RemoteFlowStore,
     keys: PayloadKeys | None,
     hash_key: bytes | None,
     *,
@@ -218,7 +288,9 @@ def flow_kinds(
     them. `hash_key` makes an approval's input hash (`approval_hash.py`); None records
     none, and the agent then runs no approved tool call. `api` makes a client on
     ScadBuddy's own API, which a parent's narrowing is matched through (the grant's
-    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person."""
+    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person.
+    A person's approval of a `print_output` call that names a registry printer reads
+    that printer through it too (#4445); None, and that approval is refused."""
 
     async def answer_of(request: dict[str, Any]) -> str:
         if "answer" in request:
@@ -344,20 +416,59 @@ def flow_kinds(
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
-    async def parked_hash(checked: dict[str, Any], call_id: str) -> str | None:
+    async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:
         """The input hash of the call as it is parked (#2318): an outward agent tool's
         name and arguments, which the agent hashes again from the call it is asked to
-        run. None for a ScadBuddy host function (the workflow runs it itself)."""
+        run. None for a ScadBuddy host function (the workflow runs it itself). A print
+        on a registry printer is bound to the pair its row links now (#4445), which must
+        be the `bound_hash` the run page showed (`shown`): else a 409, which says
+        whether the page showed another pair or none."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
                 continue
             if parked.tool_name != APPROVED_TOOL or hash_key is None:
                 return None
+            name = str(parked.tool_input.get("name"))
             args = parked.tool_input.get("args")
-            return input_hash(
-                hash_key, str(parked.tool_input.get("name")), args if isinstance(args, dict) else {}
-            )
+            args = args if isinstance(args, dict) else {}
+            if named_printer(name, args) is not None:
+                # Bound to the registry printer's link as it is now (#4445), which the
+                # agent's gate checks again when the call runs.
+                registry = None if api is None else api()
+                if registry is None:
+                    raise ApiError(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "Approving a print on a registry printer needs SCADBUDDY_API_INTERNAL_URL.",
+                    )
+                try:
+                    args = (await bind_call(name, args, api_lookup(registry))).args
+                except httpx.HTTPStatusError as err:
+                    activity.logger.warning(
+                        "could not read the printer a flow's print names", exc_info=True
+                    )
+                    if err.response.status_code in REFUSED_READS:
+                        # The worker's credential refused: another try is refused the same way.
+                        raise _printer_refused(err.response.status_code) from None
+                    # Any other status (408, 429, a 5xx, ...) may pass on another try.
+                    raise _printer_unreadable() from None
+                except httpx.HTTPError:
+                    # Nothing is recorded: the person approves again once the row reads.
+                    activity.logger.warning(
+                        "could not read the printer a flow's print names", exc_info=True
+                    )
+                    raise _printer_unreadable() from None
+                finally:
+                    await registry.aclose()
+                bound = input_hash(hash_key, name, args)
+                if not isinstance(shown, str):
+                    # The page showed no binding (its read of the run or of the printer
+                    # failed): never approved without one.
+                    raise _printer_unbound()
+                if not hmac.compare_digest(shown, bound):
+                    raise _printer_changed()
+                return bound
+            return input_hash(hash_key, name, args)
         raise _stale()
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
@@ -383,7 +494,9 @@ def flow_kinds(
         elif approved and await store.get_decision(decision.request_id) is None:
             # Bound to the call as it waits now, which is what the person was shown; a
             # resend keeps the hash its first attempt recorded.
-            decision.input_hash = await parked_hash(checked, decision.call_id)
+            decision.input_hash = await parked_hash(
+                checked, decision.call_id, request.get("bound_hash")
+            )
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:
@@ -697,33 +810,30 @@ def flow_kinds(
         replaced = str(checked["replaced"])
         event_id = int(request["event_id"])
 
+        # The operation's own id: a retried run resets once, and the row records it to
+        # tell that retry from another Reset.
+        reset_id = str(activity.info().workflow_id)
+        responder = str(request.get("responder") or "browser")
+
         async def reset() -> str:
-            answer = await client.workflow_service.reset_workflow_execution(
-                ResetWorkflowExecutionRequest(
-                    namespace=client.namespace,
-                    workflow_execution=WorkflowExecution(workflow_id=workflow_id, run_id=replaced),
-                    reason=f"flow reset by {request.get('responder') or 'browser'}",
-                    workflow_task_finish_event_id=event_id,
-                    # The operation's own id: a retried run resets once, and the row
-                    # records it to tell that retry from another Reset.
-                    request_id=str(activity.info().workflow_id),
-                    # Every answer, approval and `close` after the point is undone with it:
-                    # the calls past it run again and park again for a person.
-                    reset_reapply_exclude_types=[
-                        ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL,
-                        ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE,
-                    ],
-                )
+            return await reset_execution(
+                client,
+                workflow_id,
+                replaced=replaced,
+                point=event_id,
+                request_id=reset_id,
+                reason=f"flow reset by {responder}",
             )
-            return answer.run_id
 
         try:
+            # On `RemoteFlowStore` the API resets under the row's lock, not `reset` (#5298).
             run = await store.reset_run(
                 str(request["run_id"]),
                 replaced=replaced,
                 point=event_id,
-                request_id=str(activity.info().workflow_id),
+                request_id=reset_id,
                 reset=reset,
+                responder=responder,
             )
         except ResetBeforeFloorError as err:
             raise _before_floor(err.floor) from None
@@ -732,6 +842,14 @@ def flow_kinds(
                 status.HTTP_409_CONFLICT,
                 "Another Reset moved the run first; check its history again.",
                 type_=RESET_CHANGED,
+            ) from None
+        except CrudRefusedError as err:
+            # The API's own refusal of a Reset Temporal refused for good: no retry mends it.
+            if err.status != 422 or err.problem.get("reason") != RESET_REFUSED:
+                raise
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Temporal refused to reset the run to event {event_id}; check its history again.",
             ) from None
         if run is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")

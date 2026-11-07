@@ -11,6 +11,7 @@ import type {
   LibraryCopyResult,
   LibraryDeleteResult,
   LibraryEntry,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryFolder,
   LibraryFolderCreate,
@@ -165,19 +166,21 @@ function pngResponse() {
   return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }
 
+/** A folder's names from the top, as the backend's `folder_path`. */
+function folderPathOf(id: number | null | undefined): string[] {
+  const folder = listedFolders().find((row) => row.id === id)
+  return folder ? [...folderPathOf(folder.parent_id), folder.name] : []
+}
+
 /** The backend's `search_library` (#3630): every word in the name or the folder path. */
 function searchFiles(query: string, all: boolean): LibrarySearch {
   const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
   const terms = words(query).split(' ').filter(Boolean)
-  const pathOf = (id: number | null | undefined): string[] => {
-    const folder = listedFolders().find((row) => row.id === id)
-    return folder ? [...pathOf(folder.parent_id), folder.name] : []
-  }
   const matched = terms.length === 0
     ? []
     : listedFiles().filter((file) => {
         const name = words(file.filename)
-        const where = words(pathOf(file.folder_id).join(' '))
+        const where = words(folderPathOf(file.folder_id).join(' '))
         return terms.every((term) => name.includes(term) || where.includes(term))
       })
   const shown = matched.filter((file) => all || file.file_type?.toLowerCase() === '3mf')
@@ -189,14 +192,29 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
     files: shown.slice(0, 100).map((file) => ({
       ...file,
       output_id: mockLibraryOutput(file.id) ?? null,
-      folder_path: pathOf(file.folder_id),
+      folder_path: folderPathOf(file.folder_id),
     })),
     total: shown.length,
     hidden: matched.length - shown.length,
   }
 }
 
+/** #4703 — the files uploaded through `POST /print/library/files`, newest last; they join the listings. */
+const uploads: LibraryEntry[] = []
+
 export const handlers = [
+  http.post(`${base}/print/library/files`, async ({ request }) => {
+    const form = await request.formData()
+    const file = form.get('file')
+    if (!(file instanceof File) || file.size === 0) return HttpResponse.json({ detail: 'send the file as the `file` part' }, { status: 422 })
+    const rawFolder = form.get('folder_id')
+    const folderId = typeof rawFolder === 'string' && rawFolder !== '' ? Number(rawFolder) : null
+    const type = file.name.toLowerCase().endsWith('.gcode.3mf') ? 'gcode.3mf' : (file.name.split('.').pop() ?? '')
+    const added = entry(9000 + uploads.length, file.name, type, folderId, { file_size: file.size, created_at: new Date().toISOString() })
+    uploads.push(added)
+    libraryFiles.push(added)
+    return HttpResponse.json({ id: added.id, filename: added.filename, folder_id: folderId })
+  }),
   // #2349 — names by id; a file the mock library does not have is `name: null`.
   http.get(`${base}/print/library/names`, ({ request }) => {
     const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
@@ -218,6 +236,18 @@ export const handlers = [
     return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
   }),
 
+  // #5321 — one file by id, whatever its type, with its folder's path. After `names` and
+  // `search`, which the pattern would otherwise take.
+  http.get(`${base}/print/library/:id`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return HttpResponse.json({
+      ...file,
+      output_id: mockLibraryOutput(file.id) ?? null,
+      folder_path: folderPathOf(file.folder_id),
+    } satisfies LibraryFileEntry)
+  }),
+
   http.get(`${base}/print/library`, ({ request }) => {
     const search = new URL(request.url).searchParams
     const asked = search.get('folder_id')
@@ -231,13 +261,28 @@ export const handlers = [
     const all = search.get('all') === 'true'
     const here = listedFiles().filter((file) => (file.folder_id ?? null) === folderId)
     const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
-    return HttpResponse.json({
-      folder_id: folderId,
-      all,
-      folders: listedFolders(),
-      files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
-      hidden: here.length - files.length,
-    } satisfies LibraryListing)
+    // #2290 — paged as the backend pages it: `limit`, `after` (a file id; one no longer
+    // listed is a 409), the first page stretched down to a linked `file_id`.
+    const limit = search.get('limit')
+    const after = search.get('after')
+    let start = 0
+    if (after !== null) {
+      start = files.findIndex((file) => file.id === Number(after)) + 1
+      if (start === 0) return problem(409, 'Conflict', `no file '${after}' is listed any more to page after; list again without \`after\``)
+    }
+    let size = limit === null ? files.length : Number(limit)
+    if (after === null && linked !== null) size = Math.max(size, files.findIndex((file) => file.id === Number(linked)) + 1)
+    const page = files.slice(start, start + size)
+    return HttpResponse.json(
+      {
+        folder_id: folderId,
+        all,
+        folders: listedFolders(),
+        files: page.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
+        hidden: here.length - files.length,
+      } satisfies LibraryListing,
+      { headers: { 'X-Total-Count': String(files.length) } },
+    )
   }),
 
   /** #2167 — to the mocked trash; Bambuddy skips the file another user added. */
@@ -362,6 +407,17 @@ export const handlers = [
 
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+  // #1031 — the file itself, always a download, as `get_library_file` serves it.
+  http.get(`${base}/print/library/:id/file`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return new HttpResponse(new TextEncoder().encode(`mock ${file.filename}`), {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename*=utf-8''${encodeURIComponent(file.filename)}`,
+      },
+    })
+  }),
   // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
   http.get(`${base}/print/library/:id/preview.glb`, ({ params, request }) => {
     const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']
@@ -721,6 +777,15 @@ function descendants(id: number): Set<number> {
   return found
 }
 
+/**
+ * #5371 — a model delete's `delete_inbox_copies`: its outputs' copies still filed under the
+ * template's folder go to the mocked trash. A move clears `filed` (`trash_filed`, #5422), so
+ * a copy moved out stays where it is.
+ */
+export function trashFiledMockLibraryFiles(ids: Iterable<number>): void {
+  for (const id of ids) if (!moved.has(id)) trashed.add(id)
+}
+
 function listedFiles(): LibraryEntry[] {
   return [...libraryFiles, ...copies]
     .filter((file) => !trashed.has(file.id) && !removed.has(file.id))
@@ -731,12 +796,18 @@ function listedFiles(): LibraryEntry[] {
     }))
 }
 
+/** #5544 — a file of the mocked library by id, as an order's library file item reads it. */
+export function mockLibraryFile(fileId: number): LibraryEntry | undefined {
+  return listedFiles().find((file) => file.id === fileId)
+}
+
 // #3651 — the default destination reads which folder a file is in.
 export function mockLibraryFileFolder(fileId: number): number | null {
   return listedFiles().find((file) => file.id === fileId)?.folder_id ?? null
 }
 
 export function reset(): void {
+  for (const added of uploads.splice(0)) libraryFiles.splice(libraryFiles.indexOf(added), 1)
   lastQueued.clear()
   batches.clear()
   refusedRequests.clear()

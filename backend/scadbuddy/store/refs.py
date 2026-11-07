@@ -2,10 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import timedelta
+from typing import Protocol
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+
+
+class HoldsBlobs(Protocol):
+    """What a render worker's activities call on its blob refs (`WorkerDeps.refs`):
+    `BlobRefs` over SQL, `crud/render.py` `RemoteBlobRefs` over the API's routes, and
+    `workflows/verify_pipeline.py`'s, which holds nothing."""
+
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None: ...
 
 
 class BlobRefs:
@@ -21,11 +32,26 @@ class BlobRefs:
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
+        """``budget`` is `crud/render.py` `RemoteBlobRefs.add`'s, ignored here: the
+        connection waits the pool's own timeout."""
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
                 " ON CONFLICT DO NOTHING",
+                (key, holder_kind, holder_id),
+            )
+
+    def hold(self, key: str, holder_kind: str, holder_id: str) -> None:
+        """``add``, except that a row the holder already has gets a fresh ``created_at``,
+        so a reaper's grace counts from this hold (#5353: a quote's next attempt takes
+        its holds again). Needs ``UPDATE`` on the table, which ``add`` does not."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
                 (key, holder_kind, holder_id),
             )
 

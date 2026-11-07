@@ -1,0 +1,219 @@
+import { render, screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { api } from '../../api/client'
+import type { Fulfilment } from '../../api/types'
+import { useAsync } from '../../lib/useAsync'
+import { resetMockState } from '../../mocks/handlers'
+import { server } from '../../mocks/server'
+import { BROWSER, ITEM_APPROVED, ORDER_ACCEPTED, QUOTE_ACCEPTED, state } from '../../mocks/features/orders/state'
+import { renderPage } from '../../test/utils'
+import { timerKey } from './CostEntryForms'
+import { MarginBadge, OrderCosts } from './OrderCosts'
+
+function attempt(n: number, outcome: Fulfilment['outcome'], grams: number): void {
+  state.fulfilments.push({
+    id: `f-${n}`,
+    order_item_id: ITEM_APPROVED,
+    purpose: 'production',
+    attempt: n,
+    quantity: outcome === 'succeeded' ? 2 : 0,
+    outcome,
+    failure_reason: null,
+    started_at: null,
+    finished_at: '2026-11-01T12:00:00Z',
+    notes: '',
+    accepted_at: null,
+    created_by: BROWSER,
+    created_at: '2026-11-01T10:00:00Z',
+    actual_seconds: 500,
+    actual_grams: grams,
+    archive_ids: [8000 + n],
+  })
+}
+
+/** The card as the order page mounts it: over the costs read, reloaded after a write. */
+function Card() {
+  const view = useAsync(() => api.orderCosts(ORDER_ACCEPTED), [])
+  return view.data ? <OrderCosts costs={view.data} onChanged={view.refresh} /> : null
+}
+
+// #4251 §6.4, #5326 §6.1 — the money view: charged, real cost and margin per item.
+describe('OrderCosts', () => {
+  beforeEach(() => {
+    resetMockState()
+    window.localStorage.clear()
+    const quote = state.quotes.find((q) => q.id === QUOTE_ACCEPTED)!
+    Object.assign(quote, {
+      source: 'slice',
+      plates: [{ index: 1, print_seconds: 600, filaments: [{ slot: 0, used_g: '10' }] }],
+      lines: [{ kind: 'filament', label: 'PLA, 10 g', quantity: 1, unit_minor: 20, amount_minor: 20 }],
+    })
+  })
+
+  it('shows charged, real cost and margin, and each attempt when opened', async () => {
+    attempt(1, 'failed', 7.5)
+    attempt(2, 'succeeded', 21)
+    const { user } = renderPage(<Card />)
+
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    expect(within(row).getByTestId('cost-charged')).toHaveTextContent('$30.00')
+    // 28.5 g at the quote's 2 cents a gram; today's machine rate and labour are 0.
+    expect(within(row).getByTestId('cost-real')).toHaveTextContent('≈ $0.57')
+    expect(within(row).getByTestId('margin')).toHaveTextContent('$29.43 (98.1%)')
+    expect(row).toHaveAttribute('data-state', 'ok')
+
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+    const attempts = await screen.findByRole('list', { name: 'Attempts' })
+    expect(within(attempts).getByText(/Attempt 1 \(production, failed\): 7.5 g · 8m · filament \$0.15 · machine \$0.00 · estimated machine rate/)).toBeInTheDocument()
+    // The order adds its shipping charge to what was charged.
+    expect(within(screen.getByRole('row', { name: 'Order total' })).getByText('$35.00')).toBeInTheDocument()
+  })
+
+  it('tints a loss and logs time at the labour rate', async () => {
+    await api.putSettings({ pricing_labour_rate_per_hour: '600' })
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    const form = await screen.findByRole('form', { name: 'Log time on this item' })
+    await user.type(within(form).getByLabelText('Minutes'), '45')
+    await user.click(within(form).getByRole('button', { name: 'Log time' }))
+
+    // 45 minutes at 600 an hour is 450.00, over the 30.00 charged.
+    await waitFor(() => expect(screen.getByRole('row', { name: /Name Keychain/ })).toHaveAttribute('data-state', 'loss'))
+    expect(state.timeEntries.map((e) => [e.order_item_id, e.minutes, e.rate_minor_per_hour])).toEqual([[ITEM_APPROVED, 45, 60000]])
+    expect(state.timeEntries[0]!.source).toMatch(/^manual:/)
+    expect(await screen.findByText(/Setup, 45 min · \$450.00/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove Setup time, 45 min' }))
+    await waitFor(() => expect(state.timeEntries).toEqual([]))
+  })
+
+  it('treats removing an entry that is already gone as done, and blocks a second click', async () => {
+    const entry = await api.addCostEntry(ORDER_ACCEPTED, { kind: 'material', amount_minor: 125 })
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 40 })
+    const { user } = renderPage(<Card />)
+    const remove = await screen.findByRole('button', { name: 'Remove Materials cost, $1.25' })
+    // Gone behind the page's back: another tab removed it.
+    state.costEntries = state.costEntries.filter((e) => e.id !== entry.id)
+
+    await user.click(remove)
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove Materials cost, $1.25' })).toBeNull())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it.each([
+    // The mock's own refusal, typed order_not_found.
+    ['a missing order', () => { state.orders = state.orders.filter((o) => o.id !== ORDER_ACCEPTED) }, `no order ${ORDER_ACCEPTED}`],
+    // A proxy's plain 404, with no problem type.
+    ['an untyped 404', () => { server.use(http.delete('/api/v1/orders/:id/cost-entries/:entry', () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 }))) }, 'Not Found'],
+  ])('shows %s as an error, not as removed', async (_name, break404, text) => {
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'material', amount_minor: 125 })
+    const { user } = renderPage(<Card />)
+    const remove = await screen.findByRole('button', { name: 'Remove Materials cost, $1.25' })
+    break404()
+
+    await user.click(remove)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(text)
+    expect(screen.getByRole('button', { name: 'Remove Materials cost, $1.25' })).toBeInTheDocument()
+  })
+
+  it('says the timer is still running when Stop fails', async () => {
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 5 * 60_000).toISOString())
+    server.use(http.post('/api/v1/orders/:id/time-entries', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    await user.click(await screen.findByRole('button', { name: /Stop timer/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The timer is still running')
+    expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).not.toBeNull()
+  })
+
+  it('adds a cost to the order', async () => {
+    const { user } = renderPage(<Card />)
+    const form = await screen.findByRole('form', { name: 'Add a cost to the order' })
+    await user.type(within(form).getByLabelText('Amount (USD)'), '1.25')
+    await user.type(within(form).getByLabelText('Note'), 'magnets')
+    await user.click(within(form).getByRole('button', { name: 'Add cost' }))
+
+    await waitFor(() => expect(state.costEntries.map((e) => [e.order_item_id, e.kind, e.amount_minor, e.note])).toEqual([[null, 'material', 125, 'magnets']]))
+    // A form's own key, so a resubmit after a lost reply writes once.
+    expect(state.costEntries[0]!.source).toMatch(/^manual:[0-9a-f]{32}$/)
+    expect(await screen.findByText('Materials, $1.25 · magnets')).toBeInTheDocument()
+  })
+
+  it('adds a cost outside a secure context, where crypto.randomUUID is missing', async () => {
+    const original = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true })
+    try {
+      const { user } = renderPage(<Card />)
+      const form = await screen.findByRole('form', { name: 'Add a cost to the order' })
+      await user.type(within(form).getByLabelText('Amount (USD)'), '2')
+      await user.click(within(form).getByRole('button', { name: 'Add cost' }))
+      await waitFor(() => expect(state.costEntries.map((e) => e.amount_minor)).toEqual([200]))
+    } finally {
+      if (original) Object.defineProperty(crypto, 'randomUUID', original)
+      else delete (crypto as { randomUUID?: unknown }).randomUUID
+    }
+  })
+
+  it('stops a timer started earlier into one entry, rounded up to the minute', async () => {
+    const started = new Date(Date.now() - 9.5 * 60_000).toISOString()
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), started)
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    await user.click(await screen.findByRole('button', { name: 'Stop timer (10 min)' }))
+
+    await waitFor(() => expect(state.timeEntries.map((e) => e.minutes)).toEqual([10]))
+    expect(state.timeEntries[0]!.started_at).not.toBeNull()
+    // Its scope and start name it, so a retry after a lost reply writes once.
+    expect(state.timeEntries[0]!.source).toBe(`timer:${ITEM_APPROVED}:${started}`)
+    expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).toBeNull()
+    expect(await screen.findAllByRole('button', { name: 'Start timer' })).not.toHaveLength(0)
+  })
+
+  it('marks a collapsed row whose timer runs, and says the timer is on this browser only', async () => {
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 60_000).toISOString())
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    expect(within(row).getByText('Timer running')).toBeInTheDocument()
+
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    expect(await screen.findByText('on this browser only')).toBeInTheDocument()
+    expect(within(row).queryByText('Timer running')).toBeNull()
+  })
+
+  it('offers to log or discard a timer older than 12 hours', async () => {
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 13 * 60 * 60_000).toISOString())
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+
+    const offer = await screen.findByRole('status')
+    expect(offer).toHaveTextContent(/This timer has run since/)
+    await user.click(within(offer).getByRole('button', { name: 'Discard timer' }))
+
+    expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).toBeNull()
+    expect(state.timeEntries).toEqual([])
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+})
+
+describe('MarginBadge', () => {
+  it('says Loss or Thin margin, and nothing otherwise', () => {
+    const { rerender } = render(<MarginBadge state="loss" />)
+    expect(screen.getByText('Loss')).toBeInTheDocument()
+    rerender(<MarginBadge state="thin" />)
+    expect(screen.getByText('Thin margin')).toBeInTheDocument()
+    rerender(<MarginBadge state="ok" />)
+    expect(screen.queryByText(/Loss|Thin/)).toBeNull()
+  })
+})

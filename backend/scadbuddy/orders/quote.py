@@ -18,6 +18,12 @@ Slots: the sliced file numbers its filament slots from 1, as the 3MF does
 (``orders/reference.py`` ``colours_of``), so the sliced file's slot ``n`` is the item's
 colour slot ``n - 1``. Everything an order records (``filaments``, a quote's ``plates``)
 is in the item's numbering.
+
+A library file item (#5544) names a file of the library, not a template: the run checks
+the file is still there (:class:`LibraryFiles`, 409 ``library_file_gone`` when it is not),
+slices it as the dialog slices a library file (``Slicer.start_library``), gives the item
+the slots its plates use when it has none (:func:`library_colours`), and records a quote
+that names no revision, since such an item has none.
 """
 
 from __future__ import annotations
@@ -37,21 +43,25 @@ from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
+from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
-    OPEN_FOR_EDITS,
     QUOTE_HOLDER,
     QUOTE_TIMEOUT,
     SETTLED,
     Lifecycle,
     LifecycleError,
+    requote_open,
 )
 from scadbuddy.orders.models import (
     Actor,
+    ColourSlot,
     Filament,
+    LibraryFileRef,
     Order,
     OrderItem,
     PricingPolicy,
@@ -103,6 +113,13 @@ class SliceQuoteRequest(BaseModel):
     filament_plan: FilamentPlan
     choices: PrintChoices
     filaments: dict[int, str] = Field(default_factory=dict)
+    #: The path the item's print will take (#5352, `PrintRunRequest.path`), so the quote
+    #: slices on the run's route and the print can queue that slice. Omitted is the
+    #: run's own choice.
+    path: Literal["bambuddy", "native"] | None = None
+    #: Slicer settings for each slot's parts (#5571, `PrintRunRequest.part_settings`):
+    #: recorded with the quote, and the item's print prints with them when it sends none.
+    part_settings: PartSettingsMap | None = None
 
 
 class QuoteError(ValueError):
@@ -117,8 +134,16 @@ class QuoteError(ValueError):
 
 def reference_of(item: OrderItem) -> Reference:
     """What the item names to make. A custom item (#4954) names nothing, so there is
-    nothing to render or slice: 409 ``item_custom``, and its price is typed instead."""
+    nothing to render or slice: 409 ``item_custom``, and its price is typed instead. A
+    request has none until its first revision: 409 ``item_has_no_design``."""
     if item.reference is None:
+        if item.kind == "request":
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"item {item.id} is a request with no design yet: add a revision first",
+                type_=PROBLEMS + "item_has_no_design",
+                items=[item.id],
+            )
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"item {item.id} is a custom item: it has no model to render or slice, so its"
@@ -127,6 +152,28 @@ def reference_of(item: OrderItem) -> Reference:
             items=[item.id],
         )
     return item.reference
+
+
+def check_design(item: OrderItem) -> None:
+    """:func:`reference_of`'s refusals, except for a library file item (#5544), which
+    names its file instead of a reference."""
+    if item.library_file is None:
+        reference_of(item)
+
+
+def library_file_gone(item_id: str, file: LibraryFileRef) -> ApiError:
+    """409 ``library_file_gone``: the library file a library file item names was deleted,
+    or is not in the library that serves now (#5544)."""
+    where = "Bambuddy's library" if file.library == "bambuddy" else "ScadBuddy's library"
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        f"item {item_id}'s library file {file.filename} (id {file.id}) is no longer in"
+        f" {where}: it was deleted, or the library that serves changed. Add the file again"
+        " as a new item",
+        type_=PROBLEMS + "library_file_gone",
+        items=[item_id],
+        library_file_id=file.id,
+    )
 
 
 def _unprocessable(field: str, message: str) -> ApiError:
@@ -169,7 +216,9 @@ def quote_check(
     request: SliceQuoteRequest,
 ) -> dict[int, str | None]:
     """Ruling 8's refusals, from the rows: 404 for an unknown order or item, 409
-    ``order_not_open`` unless the order is `draft` or `quoted`, 409 ``item_not_open``
+    ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
+    accepted quote on an order that takes items after acceptance, #5349, or was revised after
+    acceptance, #5350), 409 ``item_not_open``
     for a settled item, 422 ``filaments`` for a slot the item lacks, a slot with no
     filament once the body's are applied, or one unknown or archived, and 422
     ``price_book`` when nothing would price the item. Blocking; writes nothing. The
@@ -180,11 +229,12 @@ def quote_check(
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
-    if order.status not in OPEN_FOR_EDITS:
+    if not requote_open(order, item, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            f"order {order.number} is {order.status}: an item is quoted while it is draft"
-            " or quoted",
+            f"order {order.number} is {order.status}: an item is quoted while the order is"
+            " draft or quoted, or, past that, while the item has no accepted quote or was"
+            " revised after acceptance",
             type_=PROBLEMS + "order_not_open",
         )
     if item.status in SETTLED:
@@ -193,7 +243,7 @@ def quote_check(
             f"item {item_id} is {item.status}",
             type_=PROBLEMS + "item_not_open",
         )
-    reference_of(item)
+    check_design(item)
     known = {slot.slot for slot in item.colours}
     unknown = sorted(set(request.filaments) - known) if item.colours else []
     if unknown:
@@ -300,22 +350,30 @@ def output_matches(
     With ``schema`` (the commit's), both inputs are compared at its defaults where they
     omit one (#4774): an output saved before renders filled them records only the params
     it was sent, and is still the render of a reference that names its defaults."""
-    if output_id is None:
-        return False
+    return output_id is not None and _matching(outputs, output_id, item, schema) is not None
+
+
+def _matching(
+    outputs: OutputsRead, output_id: str, item: OrderItem, schema: CustomizerSchema | None
+) -> OutputMeta | None:
+    """The output's ``meta.json`` when it matches (:func:`output_matches`), from one
+    read of it."""
     try:
         meta = outputs.get(output_id)
         inputs = outputs.inputs(output_id)
         arranged = not is_commit_id(meta.model_version) and bool(outputs.arranged_from(output_id))
     except (OutputNotFoundError, OSError, ValueError):
-        return False
+        return None
     reference = item.reference
     if reference is None:
-        return False
-    return (
+        return None
+    if (
         meta.slug == reference.slug
         and (meta.model_version == reference.commit or arranged)
         and _at_defaults(inputs, schema) == _at_defaults(reference.inputs, schema)
-    )
+    ):
+        return meta
+    return None
 
 
 def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> dict[str, Any]:
@@ -340,15 +398,31 @@ async def ensure_output(
     by: Actor,
     follow_every: float = FOLLOW_EVERY,
     schema: CustomizerSchema | None = None,
+    revision_id: str | None = None,
+    saved_as: str | None = None,
 ) -> str:
     """The output the item slices (Ruling 7): its own while it matches the reference,
     else the reference rendered at its commit, waited on through the projection, saved
     as ``POST /outputs`` saves one (``create_output``, ``output_create``'s run) and set
     as the item's ``output_id``. An item with no colour slots takes the render's, with
-    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`."""
+    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`.
+    With ``revision_id`` (the quote's run) the render is of that revision: once the
+    item has another, nothing is written and the run is refused `revision_not_newest`.
+    ``saved_as`` is the id a new output is saved under (:func:`operation_output_id`,
+    #5390): an output of that id that matches is one an earlier attempt of the same
+    operation saved before it stopped, and is set on the item without a second render
+    or save. The save claims the id first (``OutputStore.claim``): a directory already
+    there (another attempt's save still writing, or an output that does not match) is
+    left alone, and the new output gets an id of its own."""
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
+    if saved_as is not None:
+        earlier = await asyncio.to_thread(_matching, outputs, saved_as, item, schema)
+        if earlier is not None:
+            return await _set_output(
+                lifecycle, order, item, saved_as, list(earlier.colors), filaments, by, revision_id
+            )
     reference = reference_of(item)
     params = reference.inputs.get("params", {})
     pipeline = reference.render_key == inputs_key(
@@ -378,10 +452,33 @@ async def ensure_output(
             "index": 0,
             "inputs": reference.inputs,
             "name": f"{order.number} {item.title}",
+            **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )
-    output_id = str(saved["id"])
-    colours = saved.get("colors") or []
+    return await _set_output(
+        lifecycle,
+        order,
+        item,
+        str(saved["id"]),
+        saved.get("colors") or [],
+        filaments,
+        by,
+        revision_id,
+    )
+
+
+async def _set_output(
+    lifecycle: Lifecycle,
+    order: Order,
+    item: OrderItem,
+    output_id: str,
+    colours: Sequence[str],
+    filaments: Mapping[int, str],
+    by: Actor,
+    revision_id: str | None,
+) -> str:
+    """The item's ``output_id`` set to the saved output, with its colour slots when the
+    item has none."""
     try:
         await asyncio.to_thread(
             lambda: lifecycle.update_item(
@@ -391,6 +488,7 @@ async def ensure_output(
                 output_id=output_id,
                 colours=colours_of(colours) if not item.colours else None,
                 filaments=None if item.colours else dict(filaments) or None,
+                expected_revision_id=revision_id,
             )
         )
     except LifecycleError as error:
@@ -422,6 +520,25 @@ class Slicer(Protocol):
 
     async def fetch(self, sliced: SlicedPlate) -> bytes: ...
 
+    async def start_library(
+        self, file_id: int, request: SliceQuoteRequest, subject: str
+    ) -> list[PreviewStarted]:
+        """Every plate of a library file (#5544), as :meth:`start` slices an output's."""
+        ...
+
+
+class LibraryFiles(Protocol):
+    """What a library file item's quote reads of the library that serves (#5544)."""
+
+    async def exists(self, file_id: int) -> bool:
+        """Whether the file is in the library that serves; false for a deleted file and
+        for one of the other library. Any other failure (Bambuddy away) raises."""
+        ...
+
+    async def colours(self, file_id: int) -> dict[int, str]:
+        """The file's slot colours as ``#RRGGBB``, by its slot id (from 1)."""
+        ...
+
 
 async def slice_item(
     slicer: Slicer,
@@ -434,6 +551,13 @@ async def slice_item(
     """Every plate of the output sliced (``start_preview_plates``) and followed to its
     end, in plate order; a plate that fails fails the quote with the slicer's text."""
     started = await slicer.start(output_id, request, subject)
+    return await _follow(slicer, started, subject, follow_every)
+
+
+async def _follow(
+    slicer: Slicer, started: list[PreviewStarted], subject: str, follow_every: float
+) -> list[SlicedPlate]:
+    """Each started plate followed to its end, in plate order."""
     sliced: list[SlicedPlate] = []
     for one in started:
         while (done := await slicer.poll(one, subject)) is None:
@@ -480,6 +604,33 @@ def read_plate(
         blob_key=blob_key,
         sha256=sha256,
     )
+
+
+def library_colours(
+    plates: Sequence[Plate], colours: Mapping[int, str], filaments: Mapping[int, str]
+) -> list[ColourSlot]:
+    """A library file item's slots from its first slice quote (#5544): every slot a
+    plate uses, from 0, coloured as the file names it (``colours`` by slot id from 1; grey
+    when it names none), priced with the body's filament."""
+    used = sorted({filament.slot for plate in plates for filament in plate.filaments})
+    return [
+        ColourSlot(
+            slot=slot,
+            colour=_hex(colours.get(slot + 1)) or "#808080",
+            filament_id=filaments.get(slot),
+        )
+        for slot in used
+    ]
+
+
+def _hex(colour: str | None) -> str | None:
+    """``#RRGGBB`` of a colour the file names (``#RRGGBBAA`` drops its alpha)."""
+    if colour is None:
+        return None
+    text = colour if colour.startswith("#") else f"#{colour}"
+    if len(text) in (7, 9) and all(c in "0123456789abcdefABCDEF" for c in text[1:]):
+        return text[:7].upper()
+    return None
 
 
 def unsliced_slots(plates: Sequence[Plate], item: OrderItem) -> None:
@@ -529,7 +680,7 @@ async def keep_sliced(
     key = sliced_key(sha256)
     await asyncio.to_thread(_write_sliced, blobs, key, payload)
     await blobs.publish(key, scope=scope)
-    await asyncio.to_thread(refs.add, key, QUOTE_HOLDER, quote_id)
+    await asyncio.to_thread(refs.hold, key, QUOTE_HOLDER, quote_id)
     return key, sha256
 
 
@@ -572,6 +723,26 @@ class QuoteRun:
     #: The schema of a reference's commit (None for a pipeline template, or none to
     #: read), so `output_matches` compares inputs at their defaults (#4774).
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None
+    #: The library that serves, for a library file item's quote (#5544).
+    library: LibraryFiles | None = None
+
+
+def operation_quote_id(operation: str | None) -> str:
+    """The id a quote's run records its quote under (#5353): the operation's (its
+    workflow id, the same on every attempt), so an attempt that runs again after its
+    worker stopped (a rollout) finds the quote an earlier attempt recorded. A run
+    outside an operation gets one of its own."""
+    if operation is None:
+        return uuid.uuid4().hex
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote:{operation}").hex
+
+
+def operation_output_id(quote_id: str) -> str:
+    """The id a quote's run saves a new output under (#5390): one per quote id, so per
+    operation (:func:`operation_quote_id`). An attempt that runs again after its worker
+    stopped between the save and the item's ``output_id`` write finds the output the
+    earlier attempt saved (:func:`ensure_output`) instead of saving a second."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote_output:{quote_id}").hex
 
 
 def subject_of(item_id: str) -> str:
@@ -581,11 +752,23 @@ def subject_of(item_id: str) -> str:
 
 
 async def quote_run(
-    run: QuoteRun, order_id: str, item_id: str, request: SliceQuoteRequest, by: Actor
+    run: QuoteRun,
+    order_id: str,
+    item_id: str,
+    request: SliceQuoteRequest,
+    by: Actor,
+    *,
+    quote_id: str | None = None,
 ) -> Quote:
-    """The whole run, in the order the module docstring gives."""
+    """The whole run, in the order the module docstring gives. ``quote_id`` is the id
+    every attempt of one operation records under (:func:`operation_quote_id`): an
+    attempt that finds it recorded answers with it and does nothing (#5353)."""
     lifecycle = run.lifecycle
     store = lifecycle.store
+    quote_id = quote_id or uuid.uuid4().hex
+    recorded = await asyncio.to_thread(store.quote, quote_id)
+    if recorded is not None and recorded.order_item_id == item_id:
+        return recorded
     try:
         await asyncio.to_thread(set_filaments, lifecycle, order_id, item_id, request.filaments, by)
     except LifecycleError as error:
@@ -594,7 +777,18 @@ async def quote_run(
     item = await asyncio.to_thread(store.item, item_id)
     if order is None or item is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order_id!r}")
+    if item.library_file is not None:
+        return await _library_quote(run, order, item, item.library_file, request, by, quote_id)
     reference = reference_of(item)
+    try:
+        # The revision the run quotes, read before the render: a revision made while
+        # it renders or slices refuses the quote (`ensure_output`, `record_slice_quote`).
+        item = await asyncio.to_thread(lifecycle.ensure_revision, order_id, item_id, by)
+    except LifecycleError as error:
+        raise refused(error) from None
+    revision_id = item.current_revision_id
+    if revision_id is None:
+        raise refused(LifecycleError("item_has_no_design", f"item {item_id} has no design yet"))
     schema = await run.schema_of(reference) if run.schema_of is not None else None
     output_id = await ensure_output(
         lifecycle=lifecycle,
@@ -607,13 +801,95 @@ async def quote_run(
         by=by,
         follow_every=run.follow_every,
         schema=schema,
+        revision_id=revision_id,
+        saved_as=operation_output_id(quote_id),
     )
     subject = subject_of(item_id)
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
-    quote_id = uuid.uuid4().hex
+    return await _priced(
+        run,
+        order,
+        item_id,
+        sliced,
+        scope,
+        by,
+        quote_id,
+        revision_id,
+        part_settings=dumped(request.part_settings),
+    )
+
+
+async def _library_quote(
+    run: QuoteRun,
+    order: Order,
+    item: OrderItem,
+    file: LibraryFileRef,
+    request: SliceQuoteRequest,
+    by: Actor,
+    quote_id: str,
+) -> Quote:
+    """A library file item's quote (#5544): the file still there, sliced, its slots
+    given to an item that has none, then priced and recorded as any quote, naming no
+    revision."""
+    library = run.library
+    if library is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this run cannot read the library")
+    if not await library.exists(file.id):
+        raise library_file_gone(item.id, file)
+    subject = subject_of(item.id)
+    started = await run.slicer.start_library(file.id, request, subject)
+    sliced = await _follow(run.slicer, started, subject, run.follow_every)
+    scope = BlobScope(slug=None, title=file.filename)
+
+    async def recolour(plates: Sequence[Plate]) -> None:
+        current = await asyncio.to_thread(run.lifecycle.store.item, item.id)
+        if current is None or current.colours:
+            return
+        colours = library_colours(plates, await library.colours(file.id), request.filaments)
+        try:
+            await asyncio.to_thread(
+                lambda: run.lifecycle.update_item(order.id, item.id, by, colours=colours)
+            )
+        except LifecycleError as error:
+            raise refused(error) from None
+
+    return await _priced(
+        run,
+        order,
+        item.id,
+        sliced,
+        scope,
+        by,
+        quote_id,
+        None,
+        recolour,
+        part_settings=dumped(request.part_settings),
+    )
+
+
+async def _priced(
+    run: QuoteRun,
+    order: Order,
+    item_id: str,
+    sliced: Sequence[SlicedPlate],
+    scope: BlobScope,
+    by: Actor,
+    quote_id: str,
+    revision_id: str | None,
+    recolour: Callable[[Sequence[Plate]], Awaitable[None]] | None = None,
+    *,
+    part_settings: dict[str, dict[str, Any]] | None = None,
+) -> Quote:
+    """Each sliced plate fetched, read, kept and priced, then the quote recorded (or
+    the run's holds dropped as it fails). ``recolour`` gives an item with no slots the
+    ones its plates use, before they are checked (a library file item, #5544).
+    ``part_settings`` are the settings per slot it sliced with (#5571), recorded with it."""
+    lifecycle = run.lifecycle
+    store = lifecycle.store
+    order_id = order.id
     held = False
     try:
         plates: list[Plate] = []
@@ -624,6 +900,8 @@ async def quote_run(
             held = True
             key, sha256 = await keep_sliced(run.blobs, run.refs, payload, quote_id, scope)
             plates.append(read_plate(payload, plate.plate_id, blob_key=key, sha256=sha256))
+        if recolour is not None:
+            await recolour(plates)
         item = await asyncio.to_thread(store.item, item_id)
         assert item is not None
         unsliced_slots(plates, item)
@@ -634,7 +912,9 @@ async def quote_run(
         first = plates[0]
         assert first.sha256 is not None and first.blob_key is not None
         try:
-            return await asyncio.to_thread(
+            # To its end: a cancel (the worker stopping) waits for the commit, so the
+            # drop below sees the quote it recorded (#5353).
+            return await to_thread_to_end(
                 lambda: lifecycle.record_slice_quote(
                     order_id,
                     item_id,
@@ -643,13 +923,15 @@ async def quote_run(
                     sliced_sha256=first.sha256 or "",
                     sliced_blob_key=first.blob_key or "",
                     by=by,
+                    revision_id=revision_id,
                     quote_id=quote_id,
-                )
+                    part_settings=part_settings,
+                ),
             )
         except LifecycleError as error:
             raise refused(error) from None
     except QuoteError as error:
-        await _drop(run.refs, quote_id, held)
+        await _drop(lifecycle, order_id, quote_id, held)
         extensions: dict[str, Any] = {}
         if error.plate is not None:
             extensions["plate"] = error.plate
@@ -662,17 +944,20 @@ async def quote_run(
             **extensions,
         ) from None
     except BaseException:
-        await _drop(run.refs, quote_id, held)
+        await _drop(lifecycle, order_id, quote_id, held)
         raise
 
 
-async def _drop(refs: BlobRefs, quote_id: str, held: bool) -> None:
+async def _drop(lifecycle: Lifecycle, order_id: str, quote_id: str, held: bool) -> None:
     """A run that fails after its first add drops its own holder before it raises
-    (Ruling 3); one the drop misses is the reaper's. Off the loop, as every other store
-    call of the run: a slow database must not stall the worker."""
+    (Ruling 3), unless its quote was recorded: every attempt of one operation holds
+    under one id, and another may have recorded it (#5353). Then it drops only the
+    holds on keys that quote does not name (#5415). One the drop misses is the
+    reaper's. Off the loop, as every other store call of the run: a slow database must
+    not stall the worker."""
     if not held:
         return
     try:
-        await asyncio.to_thread(refs.drop_holder, QUOTE_HOLDER, quote_id)
+        await asyncio.to_thread(lifecycle.drop_unrecorded_quote_holds, order_id, quote_id)
     except Exception:
         logger.exception("could not drop a failed quote's hold", extra={"id": quote_id})

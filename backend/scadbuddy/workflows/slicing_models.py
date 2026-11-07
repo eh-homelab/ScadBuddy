@@ -44,6 +44,9 @@ class SliceWorkflowInput(BaseModel):
     #: The copy's ``file_hash`` the start named the execution by (Task 12 review M6):
     #: other bytes under the id are refused. None when the library stated none.
     copy_sha256: str | None = None
+    #: The dialog's Reslice (#4433): slice it, even when a completed slice of the same
+    #: bytes and presets could be reused.
+    fresh: bool = False
 
 
 class SlicePrepared(BaseModel):

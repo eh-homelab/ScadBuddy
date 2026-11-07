@@ -40,6 +40,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
 from scadbuddy.api.media import receive_upload
+from scadbuddy.api.models import PAGED_RESPONSES, TOTAL_COUNT_HEADER, PageLimit, page_window
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -84,8 +85,10 @@ from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
     LibraryEntry,
+    LibraryFileEntry,
     LibraryListing,
     LibrarySearch,
+    file_entry,
     folder_views,
     list_library,
     search_library,
@@ -158,7 +161,12 @@ from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.slicing.component import SlicingDep
-from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
+from scadbuddy.slicing.preview import (
+    FreshQuery,
+    SlicerQuery,
+    read_native_preview,
+    read_native_toolpath,
+)
 from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
@@ -197,15 +205,26 @@ FileIdPath = Annotated[int, Path(ge=1)]
 FolderIdPath = Annotated[int, Path(ge=1)]
 
 
-@router.get("", response_model=LibraryListing, summary="Bambuddy's library, one folder at a time")
+@router.get(
+    "",
+    response_model=LibraryListing,
+    summary="Bambuddy's library, one folder at a time",
+    responses=PAGED_RESPONSES,
+)
 async def get_library(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     outputs: OutputsDep,
     library: PrintLibraryDep,
+    response: Response,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
     file_id: Annotated[int | None, Query(ge=1)] = None,
+    limit: PageLimit = None,
+    after: Annotated[
+        int | None,
+        Query(ge=1, description="Start after this file (the last file of the page before)"),
+    ] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
@@ -214,23 +233,54 @@ async def get_library(
     any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
     folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
     no longer has is its 404. On ``library_backend=native`` it is ScadBuddy's own library,
-    and an id outside it, a file's or a folder's, is a 404."""
+    and an id outside it, a file's or a folder's, is a 404.
+
+    ``limit`` and ``after`` (a file id) page the folder's files (#2290), and
+    ``X-Total-Count`` counts every file the folder lists; the tree comes with every page.
+    A link to a file (``file_id``, with or without its ``folder_id``) with a ``limit``
+    answers from the top of the folder down to that file at least, so the linked file is
+    on its first page."""
     native = await library.serving_native()
     check_folder_served(folder_id, native)
+    # A file with its folder named is only where the page stretches to; without, the
+    # file's folder is what is listed.
+    linked, resolve = file_id, file_id is not None and folder_id is None
     if native is not None:
-        if file_id is not None and folder_id is None:
+        if resolve and file_id is not None:
             folder_id = (await native.library_file(file_id)).folder_id
         listing = await list_library(native, folder_id=folder_id, show_all=show_all)
+        _page_files(listing, response, linked=linked, after=after, limit=limit)
         await _name_native_outputs(native, outputs, listing.files)
         return listing
     async with client_for(store.load()) as client:
-        if file_id is not None and folder_id is None:
+        if resolve and file_id is not None:
             folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
+    _page_files(listing, response, linked=linked, after=after, limit=limit)
     made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in listing.files))
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+def _page_files(
+    listing: LibraryListing,
+    response: Response,
+    *,
+    linked: int | None,
+    after: int | None,
+    limit: int | None,
+) -> None:
+    """Keep the window of ``listing.files`` that ``after``/``limit`` ask for, the page
+    stretched down to a ``linked`` file when it starts at the top."""
+    response.headers[TOTAL_COUNT_HEADER] = str(len(listing.files))
+    if after is None and limit is None:
+        return
+    keys = [str(entry.id) for entry in listing.files]
+    if after is None and limit is not None and linked is not None and str(linked) in keys:
+        limit = max(limit, keys.index(str(linked)) + 1)
+    window = page_window(keys, None if after is None else str(after), limit, "file")
+    listing.files = listing.files[window]
 
 
 async def _name_native_outputs(
@@ -358,6 +408,45 @@ async def get_library_search(
     for entry in found.files:
         entry.output_id = made.get(entry.id)
     return found
+
+
+# After `/names` and `/search`: a path parameter declared first would take those words.
+@router.get(
+    "/{file_id}",
+    response_model=LibraryFileEntry,
+    summary="One library file, whatever its type, with its folder's path",
+)
+async def get_library_file_entry(
+    file_id: FileIdPath,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    library: PrintLibraryDep,
+) -> LibraryFileEntry:
+    """The file as the listing gives it, with ``all`` (a sliced file or an STL too), plus
+    ``folder_path``, the names of its folder from the top (#5321): what the Library page's
+    details read for a file no listing on screen holds. Read from the file's folder, as a
+    ``file_id`` link to the listing is; a file Bambuddy (or, on ``library_backend=native``,
+    ScadBuddy's own library) does not have is a 404."""
+    native = await library.serving_native()
+    if native is not None:
+        folder_id = (await native.library_file(file_id)).folder_id
+        listing = await list_library(native, folder_id=folder_id, show_all=True)
+        entry = file_entry(listing, file_id)
+        if entry is not None:
+            await _name_native_outputs(native, outputs, [entry])
+    else:
+        async with client_for(store.load()) as client:
+            folder_id = (await client.library_file(file_id)).folder_id
+            listing = await list_library(client, folder_id=folder_id, show_all=True)
+        entry = file_entry(listing, file_id)
+        if entry is not None:
+            made = await live_outputs_for_files(uploads, outputs, [entry.id])
+            entry.output_id = made.get(entry.id)
+    if entry is None:
+        # Moved or deleted between the two reads.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"library file {file_id} is not listed")
+    return entry
 
 
 @router.post(
@@ -1319,6 +1408,7 @@ async def start_library_run(
     http: Request | None = None,
     native: LibraryReads | None = None,
     amend: Amend | None = None,
+    api: bool | None = None,
 ) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
@@ -1327,7 +1417,8 @@ async def start_library_run(
     ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
     calls it, the answer is always the run. ``native`` is the native library that serves,
     if one does (#3827), and a file of the library that does not serve is its 404, before
-    anything is accepted."""
+    anything is accepted. ``api`` is `accept_run`'s (#5602): a caller that is not the
+    page, when no ``http`` tells it."""
     check_served(file_id, native)
 
     async def prepare(source: SourceSpec) -> SourceSpec:
@@ -1345,6 +1436,7 @@ async def start_library_run(
         activity=activity,
         prepare=prepare,
         amend=amend,
+        api=api,
     )
 
 
@@ -1459,14 +1551,20 @@ async def post_library_preview_slice(
     response: Response,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
+    fresh: FreshQuery = False,
 ) -> PreviewStarted | JSONResponse:
-    """As ``/print/outputs/{id}/preview-slice``, for a file in Bambuddy's library (#2169)."""
+    """As ``/print/outputs/{id}/preview-slice``, for a file in Bambuddy's library (#2169),
+    ``fresh`` included (#4433)."""
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["preview_slice"],
         subject=library_slug(PrintSubject.library(file_id)),
-        request={"library_file_id": file_id, "request": body.model_dump(mode="json")},
+        request={
+            "library_file_id": file_id,
+            "request": body.model_dump(mode="json"),
+            **({"fresh": True} if fresh else {}),
+        },
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, PreviewStarted)
@@ -1551,7 +1649,12 @@ async def post_library_check(
     settings = store.load()
     native = await library.serving_native()
     route = await dialog_route(
-        settings, printers.store, printers.reports, printer=body.printer, printer_id=body.printer_id
+        settings,
+        printers.store,
+        printers.reports,
+        printer=body.printer,
+        printer_id=body.printer_id,
+        asked=body.path,
     )
     # Naming no printer, the check judges nothing (`check_print`): the file is still
     # read, which the native library does with no client.

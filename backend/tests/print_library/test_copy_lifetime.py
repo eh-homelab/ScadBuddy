@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,7 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.sweep import (
     COPY_ORPHAN_GRACE,
     COPY_REUSE_GRACE,
+    SUBJECT_PAGE,
     CopySweep,
     sweep_print_copies,
 )
@@ -96,6 +98,7 @@ async def sweep(
     in_use: Iterable[str] = (),
     slicing: NativeSliceStore | None = None,
     reuse_grace: timedelta = timedelta(0),
+    page: int = SUBJECT_PAGE,
 ) -> CopySweep:
     busy = set(in_use)
 
@@ -109,6 +112,7 @@ async def sweep(
         slicing.slicing if slicing is not None else no_slices,
         now=datetime.now(UTC) + after,
         reuse_grace=reuse_grace,
+        page=page,
     )
 
 
@@ -256,11 +260,17 @@ async def test_a_copy_moved_before_the_release_is_released_by_the_sweep(
 
 @pytest.mark.parametrize("how", ["moved", "restored"])
 async def test_a_recorded_copy_made_the_persons_is_released_with_its_slices(
-    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes, how: str
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    payload: bytes,
+    how: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A recorded copy that no longer carries its mark is a person's: one a move cleared
     whose release never ran (`release_moved` after the move), or one restored from the
-    trash. Its slices are released with it, never left marked under it for good."""
+    trash. Its slices are released with it, never left marked under it for good. One
+    found unmarked in its own folder is counted and logged apart (#5156): an earlier
+    build's unmarked upload looks the same, and nothing sweeps it once released."""
     copy_id = await copy_of(native, uploads, payload)
     sliced = await slice_of(native, uploads, copy_id)
     if how == "moved":
@@ -270,9 +280,17 @@ async def test_a_recorded_copy_made_the_persons_is_released_with_its_slices(
         await native.trash([copy_id])
         await native.restore([copy_id])
 
-    done = await sweep(native, uploads, after=LATER)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.print_library.sweep"):
+        done = await sweep(native, uploads, after=LATER)
 
     assert done.released == 1
+    in_place = how == "restored"
+    assert done.released_in_place == int(in_place)
+    assert done.released_in_place <= done.released
+    warned = [
+        r for r in caplog.records if r.getMessage().startswith("released a recorded native copy")
+    ]
+    assert [getattr(r, "library_file_id", None) for r in warned] == ([copy_id] if in_place else [])
     assert live(native, copy_id) and live(native, sliced)
     row = native.rows.file(sliced)
     assert row is not None and row.print_subject is None
@@ -579,3 +597,88 @@ async def test_a_run_that_takes_the_subject_up_under_the_lock_keeps_its_copies(
     )
 
     assert done.superseded == 0 and live(native, old)
+
+
+@pytest.mark.parametrize("count", [3, 2])
+async def test_a_pass_reads_its_subjects_a_page_at_a_time(
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    payload: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+) -> None:
+    """#5156: each read takes a page of subjects, and every page is swept: a subject on
+    the last page gets the same judgement as one on the first. A short page is the last
+    read; a full one (exactly ``page`` subjects) takes one more read, which finds none,
+    and the pass stops there."""
+    subjects = [f"out-page-{n}" for n in range(count)]
+    olds: list[int] = []
+    news: list[int] = []
+    for key in subjects:
+        olds.append(await copy_of(native, uploads, payload, key=key))
+        news.append(await copy_of(native, uploads, payload, target=X1C, key=key))
+    read = native.rows.print_subjects
+    reads: list[tuple[str | None, list[str]]] = []
+
+    def print_subjects(after: str | None, limit: int) -> list[str]:
+        found = read(after, limit)
+        reads.append((after, found))
+        return found
+
+    monkeypatch.setattr(native.rows, "print_subjects", print_subjects)
+
+    done = await sweep(native, uploads, page=2)
+
+    assert done.superseded == len(subjects)
+    assert all(trashed(native, i) for i in olds)
+    assert all(live(native, i) for i in news)
+    assert reads == [(None, subjects[:2]), (subjects[1], subjects[2:])]
+
+
+async def test_a_copy_marked_by_a_subject_on_another_page_is_never_released(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5156 review: a copy recorded under two subjects and marked by the first is that
+    subject's to judge. On the other subject's page it is not among the marked files read,
+    and is still never released: it stays marked and recorded under both."""
+    shared = await copy_of(native, uploads, payload)
+    [copy] = await uploads.for_output(KEY, native=True)
+    await uploads.record(OTHER, copy)
+    others = await copy_of(native, uploads, payload, target=X1C, key=OTHER)
+
+    done = await sweep(native, uploads, after=LATER, page=1)
+
+    assert done == CopySweep(superseded=0, orphans=0, released=0)
+    row = native.rows.file(shared)
+    assert row is not None and row.print_subject == KEY
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [shared]
+    assert shared in {c.id for c in await uploads.for_output(OTHER, native=True)}
+    assert live(native, others)
+
+
+async def test_a_copy_its_subject_uploads_after_the_read_is_never_released(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5416: a dialog or quote slice (#5189) uploads a copy with no run after the page's
+    marked files were read. The copy is recorded under the subject and marked by it, but
+    not among the files read: it is never released, and the next pass judges it."""
+    old = await copy_of(native, uploads, payload)
+    new: list[int] = []
+
+    async def subjects_in_use() -> set[str]:
+        if not new:
+            new.append(await copy_of(native, uploads, payload, target=X1C))
+        return set()
+
+    done = await sweep_print_copies(
+        native, uploads, subjects_in_use, no_slices, now=datetime.now(UTC), reuse_grace=NONE
+    )
+
+    assert done == CopySweep(superseded=0, orphans=0, released=0)
+    [copy_id] = new
+    row = native.rows.file(copy_id)
+    assert row is not None and row.print_subject == KEY
+    assert copy_id in {c.id for c in await uploads.for_output(KEY, native=True)}
+    assert live(native, old)
+    assert (await sweep(native, uploads)).superseded == 1
+    assert trashed(native, old) and live(native, copy_id)

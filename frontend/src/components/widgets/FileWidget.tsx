@@ -18,7 +18,14 @@ const SAMPLE_KEY = 'sample:'
 const PICKER_ACCEPT: Record<string, string> = {
   svg: '.svg,image/svg+xml',
   png: '.png,image/png',
+  stl: '.stl,model/stl',
+  '3mf': '.3mf,model/3mf',
+  obj: '.obj,model/obj',
 }
+
+/** The kinds an `<img>` cannot show (#959): a mesh's picture is its server-drawn preview. */
+const MESH_KINDS = new Set(['stl', '3mf', 'obj'])
+const isMeshName = (name: string) => MESH_KINDS.has(name.split('.').pop()?.toLowerCase() ?? '')
 
 /**
  * #204 — a `// file:svg,png` parameter. The value is an uploaded asset's id (the
@@ -68,8 +75,10 @@ export function FileWidget({
   const asset = isAsset ? (known[value] ?? lookup.data) : undefined
   const isSample = !isAsset && samples.includes(value)
   const previewUrl = isAsset
-    ? api.assetContentUrl(slug, value)
-    : isSample
+    ? asset && MESH_KINDS.has(asset.kind)
+      ? api.assetPreviewUrl(slug, value)
+      : api.assetContentUrl(slug, value)
+    : isSample && !isMeshName(value)
       ? api.sampleContentUrl(slug, value, version)
       : undefined
 
@@ -121,7 +130,7 @@ export function FileWidget({
   const sections: PickerSection[] = [
     {
       title: 'Samples',
-      items: samples.map((name) => ({
+      items: samples.filter((name) => !isMeshName(name)).map((name) => ({
         key: `${SAMPLE_KEY}${name}`,
         src: api.sampleContentUrl(slug, name, version),
         label: name,
@@ -190,9 +199,31 @@ export function FileWidget({
                 </span>
               </Hint>
               {asset && (
-                <span className="sb-num text-muted-foreground">
+                <span className="sb-num block text-muted-foreground">
                   {asset.kind.toUpperCase()}
                   {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
+                  {asset.view_box ? ` · viewBox ${asset.view_box.join(' ')}` : ''}
+                  {asset.triangles ? ` · ${asset.triangles.toLocaleString()} triangles` : ''}
+                  {asset.bounds
+                    ? ` · ${[0, 1, 2].map((i) => +(asset.bounds![i + 3]! - asset.bounds![i]!).toFixed(2)).join('×')} mm`
+                    : ''}
+                </span>
+              )}
+              {asset && (asset.licence || asset.source_url) && (
+                <span className="block truncate text-muted-foreground">
+                  {asset.licence && (
+                    <span>
+                      {[asset.licence.spdx ?? asset.licence.name, asset.licence.author].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                  {asset.source_url && (
+                    <>
+                      {asset.licence ? ' · ' : ''}
+                      <a href={asset.source_url} target="_blank" rel="noreferrer" className="underline">
+                        Source
+                      </a>
+                    </>
+                  )}
                 </span>
               )}
             </>
@@ -273,12 +304,18 @@ export function FileWidget({
                   className="h-auto w-[72px] flex-col gap-1 p-1 text-[10px] font-normal data-[state=on]:border-primary data-[state=on]:bg-primary/10"
                 >
                   <span className="grid size-10 place-items-center overflow-hidden rounded-md bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:10px_10px]">
-                    <img
-                      src={api.sampleContentUrl(slug, name, version)}
-                      alt=""
-                      loading="lazy"
-                      className="size-full object-contain"
-                    />
+                    {isMeshName(name) ? (
+                      <span aria-hidden className="text-[10px] text-muted-foreground uppercase">
+                        {name.split('.').pop()}
+                      </span>
+                    ) : (
+                      <img
+                        src={api.sampleContentUrl(slug, name, version)}
+                        alt=""
+                        loading="lazy"
+                        className="size-full object-contain"
+                      />
+                    )}
                   </span>
                   <span className="w-full truncate text-center">{name}</span>
                 </ToggleGroupItem>
@@ -305,6 +342,7 @@ export function FileWidget({
           accept: accept.map((kind) => PICKER_ACCEPT[kind] ?? `.${kind}`).join(','),
           hint: `${accept.join(' or ').toUpperCase()}, up to 8 MB`,
           onFile: store,
+          workspace: { resource: { type: 'model', id: slug }, label: 'this model' },
         }}
       />
     </Field>

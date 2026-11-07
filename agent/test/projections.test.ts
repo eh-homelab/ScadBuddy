@@ -48,6 +48,15 @@ describe('registry projections', () => {
       const { 'anthropic/alwaysLoad': _load, ...meta } = _meta ?? {}
       return { ...rest, _meta: Object.keys(meta).length ? meta : undefined }
     }
+    // Settings → Tools & plugins' loadings (#838) move a tool in or out of the upfront set.
+    const loaded = await listVia(
+      createHarnessServer(ALL_TOOLS, svc, { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') }, undefined, undefined, undefined, undefined, {
+        list_models: 'searchable',
+        list_outputs: 'base',
+      }).instance,
+    )
+    const base = loaded.filter((t) => t._meta?.['anthropic/alwaysLoad'] === true).map((t) => t.name)
+    expect(base).toEqual([...[...UPFRONT_TOOLS].filter((n) => n !== 'list_models'), 'list_outputs'].sort())
     // The SDK's in-process tool has no top-level `title`; the label is in annotations.title on both.
     expect(inProcess.map(loading)).toEqual(external.map(({ title: _title, ...rest }) => rest))
     expect(external.map((t) => t.title)).toEqual(external.map((t) => ALL_TOOLS.find((x) => x.name === t.name)?.label))
@@ -140,8 +149,10 @@ describe('registry projections', () => {
     // The backend routes that call Bambuddy (backend/scadbuddy/api/printing.py,
     // outputs.py `send`, settings.py `test`/`targets`); `remember_*` only write
     // ScadBuddy's own settings.json, `/print/runs/` only reads its database, and
-    // `/print/filament-profiles` lists ScadBuddy's built-in profiles (#717).
-    const bambuddyRoutes = /\/print\/(?!runs\/|filament-profiles$)|\/send$|\/settings\/(test|targets)$/
+    // a revision's `/send` goes to the customer, not Bambuddy (#5280),
+    // `/print/filament-profiles` lists ScadBuddy's built-in profiles (#717), and a
+    // library copy's status (`/print/library-copies/{copy_id}`) only reads its rows (#5355).
+    const bambuddyRoutes = /\/print\/(?!runs\/|filament-profiles$|library-copies\/\{)|(?<!\{revision_id\})\/send$|\/settings\/(test|targets)$/
     for (const tool of ALL_TOOLS) {
       if (tool.routes.some((r) => bambuddyRoutes.test(r.split(' ')[1]!)) && !tool.name.startsWith('remember_')) {
         expect(tool.bambuddyScope.length, tool.name).toBeGreaterThan(0)
