@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, status
+from fastapi import APIRouter, Path, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -30,7 +30,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
-from scadbuddy.api.printing import ACCEPT_BUDGET
+from scadbuddy.api.printing import ACCEPT_BUDGET, asked_by_api
 from scadbuddy.bambuddy.print_run import DISAGREEING_PRINTER_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
 from scadbuddy.batches.component import PrintBatchesDep
@@ -273,6 +273,7 @@ async def post_batch_queue(
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
+    http: Request,
     from_position: Annotated[int, Query(ge=0)] = 0,
 ) -> PrintBatch | JSONResponse:
     """Starts each file's library run, in order, and records what happened to each: the
@@ -300,6 +301,9 @@ async def post_batch_queue(
             "Every file is skipped or removed, so there is nothing to queue.",
         )
     native = await library.serving_native()
+    # #5625: a caller other than the page is told of `path` in a refusal, as the order
+    # routes are. Each file's run starts in this request, so it is decided here.
+    api = asked_by_api(http)
     began, sent, slowest = time.monotonic(), 0, ACCEPT_BUDGET
     for item in batch.items:
         if item.position < from_position or item.skipped or item.removed:
@@ -327,7 +331,7 @@ async def post_batch_queue(
             continue  # its choices changed since the read: the next Queue all sends them
         starting = time.monotonic()
         outcome = await _queue_one(
-            batch_id, item, attempt, runs, activity, store, paths, budget, downloads, native
+            batch_id, item, attempt, runs, activity, store, paths, budget, downloads, native, api
         )
         slowest = max(slowest, time.monotonic() - starting)
         await batches.record_outcome(batch_id, item.position, outcome)
@@ -360,6 +364,7 @@ async def _queue_one(
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     native: LibraryReads | None = None,
+    api: bool = False,
 ) -> BatchOutcome:
     if item.request is None:
         return UNCHOSEN
@@ -376,6 +381,7 @@ async def _queue_one(
             budget=budget,
             downloads=downloads,
             native=native,
+            api=api,
         )
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
