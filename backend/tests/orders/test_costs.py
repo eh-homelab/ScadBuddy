@@ -586,8 +586,7 @@ async def test_an_order_whose_every_item_is_cancelled_is_charged_nothing(shop: S
     costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
 
     assert costs is not None
-    assert costs.revenue_minor == 0
-    assert costs.margin_state != "ok"
+    assert (costs.revenue_minor, costs.margin_minor, costs.margin_state) == (0, 0, None)
 
 
 async def test_a_custom_item_costs_only_its_entries(shop: Shop) -> None:

@@ -104,6 +104,23 @@ describe('OrderCosts', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it.each([
+    // The mock's own refusal, typed order_not_found.
+    ['a missing order', () => { state.orders = state.orders.filter((o) => o.id !== ORDER_ACCEPTED) }, `no order ${ORDER_ACCEPTED}`],
+    // A proxy's plain 404, with no problem type.
+    ['an untyped 404', () => { server.use(http.delete('/api/v1/orders/:id/cost-entries/:entry', () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 }))) }, 'Not Found'],
+  ])('shows %s as an error, not as removed', async (_name, break404, text) => {
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'material', amount_minor: 125 })
+    const { user } = renderPage(<Card />)
+    const remove = await screen.findByRole('button', { name: 'Remove Materials cost, $1.25' })
+    break404()
+
+    await user.click(remove)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(text)
+    expect(screen.getByRole('button', { name: 'Remove Materials cost, $1.25' })).toBeInTheDocument()
+  })
+
   it('says the timer is still running when Stop fails', async () => {
     window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 5 * 60_000).toISOString())
     server.use(http.post('/api/v1/orders/:id/time-entries', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))

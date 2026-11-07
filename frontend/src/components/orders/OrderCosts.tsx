@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react'
-import { api, ApiError } from '../../api/client'
+import { api } from '../../api/client'
 import type { AttemptCost, CostEntry, ItemCost, OrderCosts as Costs, TimeEntry } from '../../api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 import { formatDuration } from '../../lib/format'
 import { formatMoney } from '../../lib/money'
 import { AddCost, COST_KINDS, LogTime, readTimer, TIME_KINDS } from './CostEntryForms'
-import { refusalText } from './refusal'
+import { refusalSlug, refusalText } from './refusal'
 
 type MarginView = Pick<Costs, 'margin_minor' | 'margin_percent' | 'margin_state' | 'estimated' | 'unknown'>
 
@@ -87,8 +87,10 @@ function Entries({
     run()
       .then(onChanged)
       .catch((e: unknown) => {
-        // Already gone (a second tab, or a click whose reply was lost): nothing to say.
-        if (e instanceof ApiError && e.status === 404) onChanged()
+        // The entry already gone (a second tab, or a click whose reply was lost): nothing
+        // to say. Any other refusal, a missing order's included, is shown.
+        const slug = refusalSlug(e)
+        if (slug === 'time_entry_not_found' || slug === 'cost_entry_not_found') onChanged()
         else setError(refusalText(e))
       })
       .finally(() => setRemoving(null))
