@@ -703,7 +703,10 @@ def test_only_the_revision_writer_sets_an_items_design() -> None:
             r"UPDATE order_items SET[^\"]*\b(slug|commit|inputs|render_key|colours)\b", text
         )
     }
-    assert store_writers == {"set_design"}
+    # A library file item (#5544) has no revisions: its slots are its own, written only
+    # where the row is one.
+    assert store_writers == {"set_design", "set_library_colours"}
+    assert "kind = 'library_file'" in inspect.getsource(OrderStore.set_library_colours)
     # The generic writer's fields come from dict keys, not SQL text.
     generic = {
         fn.name: _keys_written(fn) & DESIGN_COLUMNS

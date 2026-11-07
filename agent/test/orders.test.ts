@@ -318,6 +318,34 @@ describe('order tools (#4249)', () => {
     expect(firstText(gone)).toEqual({ deleted: ITEM })
   })
 
+  it('adds a library file as an item, its tier unchanged (#5544)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'library_file', status: 'draft' }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'library_file', status: 'draft' }, { status: 201 })
+      }),
+    )
+    const add = tool('order_item_add')
+    expect(add.risk).toBe('write')
+    await add.execute({ order_id: ORDER, library_file_id: 89, quantity: 2 }, ctx())
+    await tool('order_item_add_after_acceptance').execute(
+      { order_id: ORDER, kind: 'library_file', library_file_id: 89, title: 'Bracket' },
+      ctx(),
+    )
+    // The body is sent as given: no `accept`, which only a custom item takes.
+    expect(sent).toEqual([
+      { library_file_id: 89, quantity: 2, notes: '' },
+      { kind: 'library_file', library_file_id: 89, title: 'Bracket', quantity: 1, notes: '' },
+    ])
+    expect(add.summarize({ order_id: ORDER, library_file_id: 89 })).toContain('"library_file_id":89')
+    expect(() => z.object(add.shape).parse({ order_id: ORDER, library_file_id: 0 })).toThrow()
+  })
+
   it('adds an item after acceptance on its own route, as an outward step (#5349)', async () => {
     const sent: unknown[] = []
     server.use(

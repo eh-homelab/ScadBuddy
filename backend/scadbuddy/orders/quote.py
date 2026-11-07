@@ -18,6 +18,12 @@ Slots: the sliced file numbers its filament slots from 1, as the 3MF does
 (``orders/reference.py`` ``colours_of``), so the sliced file's slot ``n`` is the item's
 colour slot ``n - 1``. Everything an order records (``filaments``, a quote's ``plates``)
 is in the item's numbering.
+
+A library file item (#5544) names a file of the library, not a template: the run checks
+the file is still there (:class:`LibraryFiles`, 409 ``library_file_gone`` when it is not),
+slices it as the dialog slices a library file (``Slicer.start_library``), gives the item
+the slots its plates use when it has none (:func:`library_colours`), and records a quote
+that names no revision, since such an item has none.
 """
 
 from __future__ import annotations
@@ -52,7 +58,9 @@ from scadbuddy.orders.lifecycle import (
 )
 from scadbuddy.orders.models import (
     Actor,
+    ColourSlot,
     Filament,
+    LibraryFileRef,
     Order,
     OrderItem,
     PricingPolicy,
@@ -142,6 +150,28 @@ def reference_of(item: OrderItem) -> Reference:
     return item.reference
 
 
+def check_design(item: OrderItem) -> None:
+    """:func:`reference_of`'s refusals, except for a library file item (#5544), which
+    names its file instead of a reference."""
+    if item.library_file is None:
+        reference_of(item)
+
+
+def library_file_gone(item_id: str, file: LibraryFileRef) -> ApiError:
+    """409 ``library_file_gone``: the library file a library file item names was deleted,
+    or is not in the library that serves now (#5544)."""
+    where = "Bambuddy's library" if file.library == "bambuddy" else "ScadBuddy's library"
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        f"item {item_id}'s library file {file.filename} (id {file.id}) is no longer in"
+        f" {where}: it was deleted, or the library that serves changed. Add the file again"
+        " as a new item",
+        type_=PROBLEMS + "library_file_gone",
+        items=[item_id],
+        library_file_id=file.id,
+    )
+
+
 def _unprocessable(field: str, message: str) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -209,7 +239,7 @@ def quote_check(
             f"item {item_id} is {item.status}",
             type_=PROBLEMS + "item_not_open",
         )
-    reference_of(item)
+    check_design(item)
     known = {slot.slot for slot in item.colours}
     unknown = sorted(set(request.filaments) - known) if item.colours else []
     if unknown:
@@ -486,6 +516,25 @@ class Slicer(Protocol):
 
     async def fetch(self, sliced: SlicedPlate) -> bytes: ...
 
+    async def start_library(
+        self, file_id: int, request: SliceQuoteRequest, subject: str
+    ) -> list[PreviewStarted]:
+        """Every plate of a library file (#5544), as :meth:`start` slices an output's."""
+        ...
+
+
+class LibraryFiles(Protocol):
+    """What a library file item's quote reads of the library that serves (#5544)."""
+
+    async def exists(self, file_id: int) -> bool:
+        """Whether the file is in the library that serves; false for a deleted file and
+        for one of the other library. Any other failure (Bambuddy away) raises."""
+        ...
+
+    async def colours(self, file_id: int) -> dict[int, str]:
+        """The file's slot colours as ``#RRGGBB``, by its slot id (from 1)."""
+        ...
+
 
 async def slice_item(
     slicer: Slicer,
@@ -498,6 +547,13 @@ async def slice_item(
     """Every plate of the output sliced (``start_preview_plates``) and followed to its
     end, in plate order; a plate that fails fails the quote with the slicer's text."""
     started = await slicer.start(output_id, request, subject)
+    return await _follow(slicer, started, subject, follow_every)
+
+
+async def _follow(
+    slicer: Slicer, started: list[PreviewStarted], subject: str, follow_every: float
+) -> list[SlicedPlate]:
+    """Each started plate followed to its end, in plate order."""
     sliced: list[SlicedPlate] = []
     for one in started:
         while (done := await slicer.poll(one, subject)) is None:
@@ -544,6 +600,33 @@ def read_plate(
         blob_key=blob_key,
         sha256=sha256,
     )
+
+
+def library_colours(
+    plates: Sequence[Plate], colours: Mapping[int, str], filaments: Mapping[int, str]
+) -> list[ColourSlot]:
+    """A library file item's slots from its first slice quote (#5544): every slot a
+    plate uses, from 0, coloured as the file names it (``colours`` by slot id from 1; grey
+    when it names none), priced with the body's filament."""
+    used = sorted({filament.slot for plate in plates for filament in plate.filaments})
+    return [
+        ColourSlot(
+            slot=slot,
+            colour=_hex(colours.get(slot + 1)) or "#808080",
+            filament_id=filaments.get(slot),
+        )
+        for slot in used
+    ]
+
+
+def _hex(colour: str | None) -> str | None:
+    """``#RRGGBB`` of a colour the file names (``#RRGGBBAA`` drops its alpha)."""
+    if colour is None:
+        return None
+    text = colour if colour.startswith("#") else f"#{colour}"
+    if len(text) in (7, 9) and all(c in "0123456789abcdefABCDEF" for c in text[1:]):
+        return text[:7].upper()
+    return None
 
 
 def unsliced_slots(plates: Sequence[Plate], item: OrderItem) -> None:
@@ -636,6 +719,8 @@ class QuoteRun:
     #: The schema of a reference's commit (None for a pipeline template, or none to
     #: read), so `output_matches` compares inputs at their defaults (#4774).
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None
+    #: The library that serves, for a library file item's quote (#5544).
+    library: LibraryFiles | None = None
 
 
 def operation_quote_id(operation: str | None) -> str:
@@ -688,6 +773,8 @@ async def quote_run(
     item = await asyncio.to_thread(store.item, item_id)
     if order is None or item is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order_id!r}")
+    if item.library_file is not None:
+        return await _library_quote(run, order, item, item.library_file, request, by, quote_id)
     reference = reference_of(item)
     try:
         # The revision the run quotes, read before the render: a revision made while
@@ -718,6 +805,63 @@ async def quote_run(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
+    return await _priced(run, order, item_id, sliced, scope, by, quote_id, revision_id)
+
+
+async def _library_quote(
+    run: QuoteRun,
+    order: Order,
+    item: OrderItem,
+    file: LibraryFileRef,
+    request: SliceQuoteRequest,
+    by: Actor,
+    quote_id: str,
+) -> Quote:
+    """A library file item's quote (#5544): the file still there, sliced, its slots
+    given to an item that has none, then priced and recorded as any quote, naming no
+    revision."""
+    library = run.library
+    if library is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this run cannot read the library")
+    if not await library.exists(file.id):
+        raise library_file_gone(item.id, file)
+    subject = subject_of(item.id)
+    started = await run.slicer.start_library(file.id, request, subject)
+    sliced = await _follow(run.slicer, started, subject, run.follow_every)
+    scope = BlobScope(slug=None, title=file.filename)
+
+    async def recolour(plates: Sequence[Plate]) -> None:
+        current = await asyncio.to_thread(run.lifecycle.store.item, item.id)
+        if current is None or current.colours:
+            return
+        colours = library_colours(plates, await library.colours(file.id), request.filaments)
+        try:
+            await asyncio.to_thread(
+                lambda: run.lifecycle.update_item(order.id, item.id, by, colours=colours)
+            )
+        except LifecycleError as error:
+            raise refused(error) from None
+
+    return await _priced(run, order, item.id, sliced, scope, by, quote_id, None, recolour)
+
+
+async def _priced(
+    run: QuoteRun,
+    order: Order,
+    item_id: str,
+    sliced: Sequence[SlicedPlate],
+    scope: BlobScope,
+    by: Actor,
+    quote_id: str,
+    revision_id: str | None,
+    recolour: Callable[[Sequence[Plate]], Awaitable[None]] | None = None,
+) -> Quote:
+    """Each sliced plate fetched, read, kept and priced, then the quote recorded (or
+    the run's holds dropped as it fails). ``recolour`` gives an item with no slots the
+    ones its plates use, before they are checked (a library file item, #5544)."""
+    lifecycle = run.lifecycle
+    store = lifecycle.store
+    order_id = order.id
     held = False
     try:
         plates: list[Plate] = []
@@ -728,6 +872,8 @@ async def quote_run(
             held = True
             key, sha256 = await keep_sliced(run.blobs, run.refs, payload, quote_id, scope)
             plates.append(read_plate(payload, plate.plate_id, blob_key=key, sha256=sha256))
+        if recolour is not None:
+            await recolour(plates)
         item = await asyncio.to_thread(store.item, item_id)
         assert item is not None
         unsliced_slots(plates, item)

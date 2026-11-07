@@ -152,8 +152,9 @@ pickers, and `POST /customers/{id}/unarchive` clears it, putting them back. A cu
   The reference is complete without it; a deleted output leaves the item renderable
   (F2, F3).
 
-The reference is the one way a line item names what to make. **Nothing on an order is a
-file path or a Bambuddy id.** The `// file` assets an item's inputs name are kept alive
+The reference is the one way a template's line item names what to make. **Nothing on an
+order is a file path or a Bambuddy id**, except the file a library file item names
+(#5544, below). The `// file` assets an item's inputs name are kept alive
 by adding `order_items.inputs` to `referenced_asset_ids`
 (`library/assets.py:766-780`), so the asset sweep never takes an ordered upload.
 
@@ -187,6 +188,43 @@ the asset sweep reads nothing of it. It is made by hand: the drawer's **Mark don
 it, and it then ships as any fulfilled item. The grid shows a "Custom" badge in place
 of its picture and an entry row under the items (title, SKU, notes, quantity, unit
 price, "Requires printing"; Enter saves).
+
+**As built: a library file as a line item (#5544).** A shop sells a model that is not a
+catalogue template: a file of the library (`/library`, Bambuddy's or ScadBuddy's own).
+`kind` `library_file` names the file by `library_file_id`, `library_filename` (its name
+when the item was added, for display after a delete or a rename) and `library_source`
+(`bambuddy` or `native`, which the id's range gives); the wire shape is
+`OrderItem.library_file` `{id, filename, library}`. It has no reference, no inputs, no
+output and no revisions, and it always prints; the check `order_items_library_file`
+keeps the three columns whole on such an item and null on any other (migration
+`20261107T0732Z_order_items_library_file.sql`). This is the one place an order names a
+Bambuddy id: the file is not ScadBuddy's to keep, so the item points at it and the
+refusals below cover it going away.
+
+- `POST /orders/{id}/items` (and `…/items/after-acceptance`, with the same rules) takes
+  `library_file_id`, with `kind` left out or `library_file`. Any other source (`output_id`,
+  `slug`, `commit`, `inputs`), another `kind`, or a custom item's fields is 422. The route
+  reads the file from the library that serves, as `POST /print/library/{file_id}/run` does
+  (`check_served`, `served_reads`; `orders/bambuddy.py` `ServedLibrary`): a file it does
+  not have (deleted, trashed, the other library's) or does not print (not a 3MF or STL)
+  is 422 on `library_file_id`. The title defaults to the file's name. The item starts
+  `draft`, approved with its quote.
+- Pricing is a manual quote, or a slice quote of the file: `quote.py` `_library_quote`
+  slices every plate through the dialog's background slice of a library file
+  (`Slicer.start_library`, `orders/bambuddy.py` `start_library_quote_preview`), and its
+  first quote gives the item the colour slots its plates use (`library_colours`: colours
+  from the file's filament requirements, grey where it names none), priced with the
+  body's filaments. The quote names no revision. A sliced file has nothing to slice (the
+  dialog's 422); it takes a manual quote. A later filament change writes the slots on
+  the item (`update_item`, no revision) and drops the accepted quote, as a quantity does.
+- Printing starts the library print route's own run (`start_library_run`, run subject
+  `library:<file id>`, the file's filament slots read as that route reads them), so the
+  item follows its print as any other (`print_runs.output_id` is the run subject).
+- A file gone since it was added is 409 `library_file_gone` (naming the item) in the
+  quote's check and run and in the print's check, before anything starts; the item can
+  still be priced by hand, cancelled, or replaced by a new item. A revision, a reference
+  `PATCH` or `approval: design_first` is refused (`item_library_file`, 422 `reference`,
+  422 `approval`), and so is a test print, which prints a revision.
 
 ### 3.4 Quotes
 

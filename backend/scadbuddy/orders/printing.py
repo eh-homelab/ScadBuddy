@@ -34,6 +34,11 @@ choices, as the dialog's run does; when those are the quote's, the run reuses th
 quote's own background slice (``bambuddy/preview.py``), otherwise it is a slice of the
 same output. Each slot's spool is filled from the item's filaments in the operation's
 check (``orders/spools.py``, #4251): ``needs_spool_choice``, ``spool_not_filament``.
+
+A library file item (#5544) prints its file as ``POST /print/library/{file_id}/run``
+does (``api/library_print.py`` ``start_library_run``), on the run subject
+``library:<file id>``. The check reads the file from the library that serves, as that
+route does: one deleted, or of the other library, is 409 ``library_file_gone``.
 """
 
 from __future__ import annotations
@@ -69,7 +74,14 @@ from scadbuddy.orders.lifecycle import (
 )
 from scadbuddy.orders.models import Actor, Fulfilment, Order, OrderItem, Quote, Reference
 from scadbuddy.orders.problems import PROBLEMS, refused
-from scadbuddy.orders.quote import SLICED_NAME, OutputsRead, output_matches, reference_of
+from scadbuddy.orders.quote import (
+    SLICED_NAME,
+    LibraryFiles,
+    OutputsRead,
+    library_file_gone,
+    output_matches,
+    reference_of,
+)
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.store import BlobStore
@@ -135,6 +147,7 @@ async def print_check(
     order_id: str,
     item_id: str,
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
+    library: LibraryFiles | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
     unknown order or item; 409 ``order_<status>`` for an ended order,
@@ -147,7 +160,9 @@ async def print_check(
     reference's, or a slice quote whose sliced file is gone or reads to another digest.
     What the run needs: the output, the template, ``copies`` and the quote's file.
     ``schema_of`` is the reference commit's schema, as the quote's ``output_matches``
-    reads it."""
+    reads it. A library file item (#5544) is checked against its file in ``library``
+    instead of an output: ``library_file_gone`` once it is not there; what the run needs
+    is then ``library_file_id`` in place of ``output_id``."""
     order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
         raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
@@ -157,7 +172,7 @@ async def print_check(
         )
     if order.on_hold:
         raise _refused("order_on_hold", f"order {order.number} is on hold")
-    reference = reference_of(item)
+    reference = None if item.library_file is not None else reference_of(item)
     if item.status not in FULFILLABLE:
         raise _refused(
             "item_not_open" if item.status in SETTLED else "item_not_approved",
@@ -176,6 +191,8 @@ async def print_check(
     quote = accepted_quote(await asyncio.to_thread(store.quotes, item.id))
     if quote is None:
         raise requote(item, "it has no accepted quote")
+    if reference is None:
+        return await _library_stands(library, blobs, item, quote, copies)
     return await _stands(outputs, blobs, item, reference, quote, copies, schema_of)
 
 
@@ -287,14 +304,7 @@ async def _stands(
     if not await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         raise requote(item, "its output is gone or is no longer its reference's render")
     assert item.output_id is not None
-    if quote.source == "slice":
-        if quote.sliced_blob_key is None or quote.sliced_sha256 is None:
-            raise requote(item, "its quote names no sliced file")
-        digest = await quoted_file_digest(blobs, quote.sliced_blob_key)
-        if digest is None:
-            raise requote(item, "its quote's sliced file is gone")
-        if digest != quote.sliced_sha256:
-            raise requote(item, "its quote's sliced file is not the file it priced")
+    await _quoted_file_stands(blobs, item, quote)
     return {
         "output_id": item.output_id,
         "slug": reference.slug,
@@ -303,6 +313,45 @@ async def _stands(
         "sliced_sha256": quote.sliced_sha256,
         "sliced_blob_key": quote.sliced_blob_key,
     }
+
+
+async def _library_stands(
+    library: LibraryFiles | None,
+    blobs: BlobStore,
+    item: OrderItem,
+    quote: Quote,
+    copies: int,
+) -> dict[str, Any]:
+    """A library file item's (#5544): its file still in the library that serves
+    (``library_file_gone``), and a slice quote's file as :func:`_stands` checks it."""
+    file = item.library_file
+    assert file is not None
+    if library is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this check cannot read the library")
+    if not await library.exists(file.id):
+        raise library_file_gone(item.id, file)
+    await _quoted_file_stands(blobs, item, quote)
+    return {
+        "library_file_id": file.id,
+        "slug": f"library-{file.id}",
+        "copies": copies,
+        "quote_id": quote.id,
+        "sliced_sha256": quote.sliced_sha256,
+        "sliced_blob_key": quote.sliced_blob_key,
+    }
+
+
+async def _quoted_file_stands(blobs: BlobStore, item: OrderItem, quote: Quote) -> None:
+    """``requote_needed`` unless a slice quote's file is there and is the file it
+    priced."""
+    if quote.source == "slice":
+        if quote.sliced_blob_key is None or quote.sliced_sha256 is None:
+            raise requote(item, "its quote names no sliced file")
+        digest = await quoted_file_digest(blobs, quote.sliced_blob_key)
+        if digest is None:
+            raise requote(item, "its quote's sliced file is gone")
+        if digest != quote.sliced_sha256:
+            raise requote(item, "its quote's sliced file is not the file it priced")
 
 
 # -- the follow ------------------------------------------------------------------------------

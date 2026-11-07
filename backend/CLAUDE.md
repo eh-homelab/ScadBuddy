@@ -728,6 +728,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
   `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
   (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.
+  A library file item (#5544, spec §3.3 "As built"): `kind` `library_file`,
+  `OrderItem.library_file` `{id, filename, library}` (columns `library_file_id`,
+  `library_filename`, `library_source`, check `order_items_library_file`); no reference,
+  output or revisions (`lifecycle.py` `NO_REVISIONS`, `has_design`). `POST …/items` and
+  `…/items/after-acceptance` take `library_file_id` (any other source or kind is 422), read
+  the file from the library that serves as the library print route does (`orders/bambuddy.py`
+  `ServedLibrary`: 422 on `library_file_id` for one it lacks or does not print), then
+  `Lifecycle.add_library_item`. The slice quote is `quote.py` `_library_quote`
+  (`Slicer.start_library`; the first quote gives the item its slots, `library_colours`; the
+  quote names no revision); the print starts `api/library_print.py` `start_library_run`
+  (subject `library:<id>`; the check returns `library_file_id`). A file gone since is 409
+  `library_file_gone` in the quote's check and run and the print's check. Its slots'
+  filaments are written on the item (`OrderStore.set_library_colours`). Agent
+  `order_item_add`'s `library_file_id`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for

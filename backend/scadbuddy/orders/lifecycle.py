@@ -54,6 +54,7 @@ from scadbuddy.orders.models import (
     Fulfilment,
     FulfilmentPurpose,
     ItemStatus,
+    LibraryFileRef,
     Money,
     Order,
     OrderItem,
@@ -337,6 +338,17 @@ def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
     if order.status in OPEN_FOR_EDITS:
         return True
     return order.status in TAKES_ITEMS and not any(quote.accepted for quote in quotes)
+
+
+#: The kinds that never take a design revision: a custom item names nothing (#4954), a
+#: library file item names its file (#5544).
+NO_REVISIONS: frozenset[str] = frozenset({"custom", "library_file"})
+
+
+def has_design(item: OrderItem) -> bool:
+    """Whether the item names something to slice and print: a template reference, or a
+    library file (#5544)."""
+    return item.reference is not None or item.library_file is not None
 
 
 #: The states an accepted item goes back to `draft` from when it is revised after
@@ -1075,7 +1087,7 @@ class Lifecycle:
             route = (
                 f"; revise it with POST /orders/{order.id}/items/{item.id}"
                 "/revisions/after-acceptance"
-                if order.status in TAKES_ITEMS and item.kind != "custom"
+                if order.status in TAKES_ITEMS and item.kind not in NO_REVISIONS
                 else ""
             )
             raise LifecycleError(
@@ -1306,6 +1318,13 @@ class Lifecycle:
             item = self._item_of(conn, order, item_id)
             if item.kind == "custom":
                 raise LifecycleError("item_custom", f"item {item_id} is a custom item")
+            if item.kind == "library_file":
+                raise LifecycleError(
+                    "item_library_file",
+                    f"item {item_id} prints a library file: it has no design revisions;"
+                    " add a new item to order something else",
+                    items=[item.id],
+                )
             if item.status in SETTLED:
                 raise LifecycleError(
                     "item_not_open", f"item {item_id} is {item.status}", items=[item.id]
@@ -1473,6 +1492,48 @@ class Lifecycle:
         self._told(_Change(order, [(item, None)]))
         return item
 
+    def add_library_item(
+        self,
+        order_id: str,
+        by: Actor,
+        file: LibraryFileRef,
+        *,
+        quantity: int,
+        title: str | None = None,
+        notes: str = "",
+        sku: str | None = None,
+        after_acceptance: bool = False,
+    ) -> OrderItem:
+        """A library file item (#5544): the file's id, name and library, with no template
+        commit and no inputs. It starts `draft`, unpriced, approved with its quote (it has
+        no design to approve first), and takes a slice quote of the file or a manual one.
+        The caller has read the file from the library that serves. ``after_acceptance``
+        as `add_item`'s."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._takes_item(order, after_acceptance)
+            item = self.store.insert_library_item(
+                conn,
+                order.id,
+                file=file,
+                quantity=quantity,
+                title=title,
+                notes=notes,
+                sku=sku,
+            )
+            self._added(
+                conn,
+                order,
+                item,
+                by,
+                after_acceptance,
+                item_kind="library_file",
+                library_file_id=file.id,
+            )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return item
+
     def add_custom_item(
         self,
         order_id: str,
@@ -1620,6 +1681,20 @@ class Lifecycle:
                     f"item {item_id} has a newer revision than the one rendered",
                     items=[item.id],
                 )
+            library = item.kind == "library_file"
+            if library and reference is not None:
+                raise LifecycleError(
+                    "reference",
+                    "reference: a library file item prints its file; add a new item to order"
+                    " a template",
+                    unprocessable=True,
+                )
+            if library and approval == "design_first":
+                raise LifecycleError(
+                    "approval",
+                    "approval: a library file item has no design to approve first",
+                    unprocessable=True,
+                )
             custom = item.kind == "custom" and reference is None
             for name, value in (
                 ("unit_price_minor", unit_price_minor),
@@ -1670,7 +1745,11 @@ class Lifecycle:
                 or slots != item.colours
             )
             revised = not amend and (changed or refiled or filled)
-            design = revised or amend
+            # A library file item (#5544) has no revisions: its slots are written on it.
+            recolour = library and (refiled or filled)
+            if library:
+                amend, revised = False, refiled
+            design = not library and (revised or amend)
             repins = revised or quantity is not None or price is not None
             if repins and (quantity is not None or price is not None):
                 self._open_for_item(
@@ -1700,7 +1779,7 @@ class Lifecycle:
                 fields["requires_printing"] = requires_printing
             if approval is not None and approval != item.approval:
                 fields["approval"] = approval
-            if not fields and price is None and not design:
+            if not fields and price is None and not design and not recolour:
                 # Nothing changes (the item's own filaments sent again): nothing written.
                 return item
             if design:
@@ -1715,8 +1794,11 @@ class Lifecycle:
                     output_id=output_id,
                     amend=amend,
                 )
-            if repins and not revised:
-                # A revision drops the quotes itself; a quantity or price change here.
+            if recolour:
+                item = self.store.set_library_colours(conn, item.id, slots)
+            if repins and (library or not revised):
+                # A revision drops the quotes itself; a quantity or price change here, and
+                # any repin of a library file item, which has no revisions.
                 self.store.unaccept_quotes(conn, item.id)
                 fields["status"] = "draft"
             if fields:
@@ -1858,7 +1940,7 @@ class Lifecycle:
                     " (PATCH the item's unit_price_minor)",
                     items=[item.id],
                 )
-            if item.reference is None:
+            if not has_design(item):
                 raise LifecycleError(
                     "item_has_no_design", f"item {item_id} has no design yet", items=[item.id]
                 )
@@ -1913,7 +1995,7 @@ class Lifecycle:
         sliced_sha256: str,
         sliced_blob_key: str,
         by: Actor,
-        revision_id: str,
+        revision_id: str | None,
         quote_id: str | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
@@ -1928,7 +2010,8 @@ class Lifecycle:
         holds may be a sibling attempt's that still runs; that attempt's own record is
         answered with this quote too, so it never needs them (#5448). The quote's holds
         are taken again in its own transaction, so a row never commits without them,
-        whatever another attempt dropped before it."""
+        whatever another attempt dropped before it. A library file item's quote (#5544)
+        names no revision (``revision_id`` None): the item has none."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -2019,7 +2102,7 @@ class Lifecycle:
                 "quote_stale",
                 f"quote {quote.id} priced {quote.quantity}, the item is now {item.quantity}",
             )
-        if item.kind != "custom":
+        if item.kind not in NO_REVISIONS:
             if quote.revision_id is not None and quote.revision_id != item.current_revision_id:
                 raise LifecycleError(
                     "quote_stale", f"quote {quote.id} prices an earlier revision of the design"
@@ -2723,6 +2806,11 @@ class Lifecycle:
             )
         if item.kind == "custom":
             raise LifecycleError("item_custom", f"item {item_id} is a custom item")
+        if item.kind == "library_file":
+            raise LifecycleError(
+                "item_library_file",
+                f"item {item_id} prints a library file: it has no revision to test print",
+            )
         if item.reference is None:
             raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
         self._newest(conn, item, revision_id)
