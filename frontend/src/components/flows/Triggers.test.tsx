@@ -162,10 +162,54 @@ describe('FlowTriggers', () => {
     expect(flowTriggerRequests()).toEqual([
       {
         path: '/flow-triggers',
-        body: { definition_id: 'def-swap', overlap: 'skip', event: { kind: 'print.failed', slug: 'coaster' } },
+        body: { definition_id: 'def-swap', overlap: 'skip', event: { kind: 'print.failed', subject: { kind: 'template', id: 'coaster' } } },
       },
     ])
     expect(await row(/When a print fails \(coaster\)/)).toBeInTheDocument()
+  })
+
+  it('makes a trigger that fires when an item of one order prints or fails (#4252)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'New trigger…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New trigger' })
+    await user.click(within(dialog).getByLabelText('On an event'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "A line item's status changes")
+    await user.type(within(dialog).getByLabelText('Only for order id (optional)'), 'o1')
+    await user.click(within(dialog).getByLabelText('printed'))
+    await user.click(within(dialog).getByLabelText('failed'))
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(flowTriggerRequests()).toEqual([
+      {
+        path: '/flow-triggers',
+        body: {
+          definition_id: 'def-swap',
+          overlap: 'skip',
+          event: {
+            kind: 'order_item.changed',
+            subject: { kind: 'order', id: 'o1' },
+            match: { status: ['printed', 'failed'] },
+          },
+        },
+      },
+    ])
+    expect(await row(/When a line item's status changes \(order o1\): printed, failed/)).toBeInTheDocument()
+  })
+
+  it('forgets an item id once the subject is an order (review of #5644)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'New trigger…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New trigger' })
+    await user.click(within(dialog).getByLabelText('On an event'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "A line item's status changes")
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Narrow by' }), 'The item itself')
+    await user.type(within(dialog).getByLabelText('Only for item id (optional)'), 'i1')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "An order's status changes")
+    expect(within(dialog).getByLabelText('Only for order id (optional)')).toHaveValue('')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "A line item's status changes")
+    await user.type(within(dialog).getByLabelText('Only for item id (optional)'), 'i2')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Narrow by' }), 'Its order')
+    expect(within(dialog).getByLabelText('Only for order id (optional)')).toHaveValue('')
   })
 
   // The browser bridge acts in the person's tab as the browser user: everything but

@@ -236,7 +236,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
-  event bus to `FlowTriggerFire`, one per trigger and event); the workflow and the
+  event bus to `FlowTriggerFire`, one per trigger and event, an order event one per
+  trigger and status change, `_change_fires`); the workflow and the
   Schedules are `workflows/flow_triggers.py`, routes `api/flow_triggers.py`. A fire reads
   everything from the trigger's row (the Schedule carries the trigger id only) and runs
   as its creator, with a run grant only from a standing grant a person approved; never
@@ -251,6 +252,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_item_print` with the call's key and follows the attempt's run; a refusal before
   it starts is the outcome `refused` with `problem` (`requote_needed`), and
   `RouteRefusedError.problem` carries a route's problem `type`.
+  Order events (#4252, orders spec §7.1): the kinds `order.changed` and
+  `order_item.changed` fire once per row of `order_status_changes` (kept by a trigger on
+  `orders` and `order_items`; keys `order:<id>:<status>:<change>` and
+  `order_item:<id>:<status>:<change>`), never per event: an event reads the newest
+  `CHANGES_HEARD` rows of its order or item (`events.py` `_change_fires`), so a plain edit,
+  a hold or a release fires nothing, a return to a status fires again, and a change before
+  the trigger's `live_since` (made, its event last edited, or last resumed) or already fired is
+  skipped. An item
+  attempt recorded with no status change fires nothing. `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
+  or sent `slug` reads as a template subject; no migration) and `match` (`status` only,
+  values checked against `OrderStatus`/`ItemStatus`), both applied in
+  `TriggerStore.event_triggers` before a fire starts; an order fire's `customer_id` is
+  read from the order's row (`order_facts`), and an item event for an item gone since
+  fires nothing. `trigger()` returns `OrderChanged` /
+  `OrderItemChanged`.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A

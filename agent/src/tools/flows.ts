@@ -125,7 +125,9 @@ export const flowTools: Tool[] = [
       "script reads with `inputs()` (a TypedDict `FlowInputs`, defaults filled in); a 422 lists the schema's " +
       'problems with `file` inputs.json. `trigger()` returns the event a flow trigger started the run on ' +
       "({kind: 'model.changed', slug, commit}, {kind: 'render.finished', slug, job_id}, or " +
-      "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}; narrow by `kind`), or None. " +
+      "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}, " +
+      "{kind: 'order.changed', order_id, status, customer_id}, or " +
+      "{kind: 'order_item.changed', order_id, item_id, status, attempt}; narrow by `kind`), or None. " +
       '`message` and `body` name the version\'s commit; `display_name` and `description` set the flow\'s ' +
       'details (as update_flow_details does, in a commit of their own after the version\'s); a `details_error` ' +
       'in the answer means the version was saved but they were not: call update_flow_details, never register again. ' +

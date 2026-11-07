@@ -10,15 +10,24 @@ import hashlib
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.grants import GrantSpec, GrantStatus, RuleUse
+from scadbuddy.orders.models import ItemStatus, OrderStatus
 
-EventKind = Literal["render.finished", "model.changed", "print.finished", "print.failed"]
+EventKind = Literal[
+    "render.finished",
+    "model.changed",
+    "print.finished",
+    "print.failed",
+    "order.changed",
+    "order_item.changed",
+]
+SubjectKind = Literal["template", "order", "order_item"]
 Overlap = Literal["skip", "allow_all"]
 TriggerKind = Literal["schedule", "event"]
 #: `admitted`: past the overlap and the rate cap, its run not yet started.
@@ -39,6 +48,8 @@ MAX_CRON = 4
 #: (`ScheduleSpec.cron_expressions`); Temporal checks the rest when it takes the Schedule.
 _CRON_FIELD = re.compile(r"^[0-9A-Za-z*?/,#\-]+$")
 _SLUG = r"^[a-z0-9][a-z0-9-]{0,62}$"
+#: A template slug, or an order's or a line item's id (text uuids).
+_ID = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 
 
 def timeout_seconds(value: ApprovalTimeout | None) -> int | None:
@@ -92,13 +103,88 @@ class ScheduleTiming(BaseModel):
         return self
 
 
+class Subject(BaseModel):
+    """What an event trigger is narrowed to (orders spec §7.1): a template by its slug, an
+    order or a line item by its id. Without an id, any of that kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: SubjectKind
+    id: str | None = Field(default=None, pattern=_ID)
+
+    @model_validator(mode="after")
+    def _slug(self) -> Subject:
+        if self.kind == "template" and self.id is not None and not re.match(_SLUG, self.id):
+            raise ValueError(f"not a template slug: {self.id!r}")
+        return self
+
+
+#: The subjects each event kind can be narrowed to: an item's event to its order or itself.
+SUBJECTS: dict[str, frozenset[str]] = {
+    "render.finished": frozenset({"template"}),
+    "model.changed": frozenset({"template"}),
+    "print.finished": frozenset({"template"}),
+    "print.failed": frozenset({"template"}),
+    "order.changed": frozenset({"order"}),
+    "order_item.changed": frozenset({"order", "order_item"}),
+}
+#: The event fields a `match` may name, and the values each may take (Ruling 13).
+MATCHABLE: dict[str, dict[str, frozenset[str]]] = {
+    "order.changed": {"status": frozenset(get_args(OrderStatus))},
+    "order_item.changed": {"status": frozenset(get_args(ItemStatus))},
+}
+MAX_MATCH_VALUES = 32
+
+
 class EventTiming(BaseModel):
-    """When an event trigger fires: on each event of `kind`, for `slug` only if set."""
+    """When an event trigger fires: on each event of `kind`, for `subject` only if set,
+    and only when the event's fields hold one of the values `match` lists for each.
+
+    A `slug` (the form before #4252, still in stored rows) reads as a template subject."""
 
     model_config = ConfigDict(extra="forbid")
 
     kind: EventKind
-    slug: str | None = Field(default=None, pattern=_SLUG)
+    subject: Subject | None = None
+    match: dict[str, list[str]] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_slug(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "slug" in value:
+            value = dict(value)
+            slug = value.pop("slug")
+            if slug is not None and value.get("subject") is not None:
+                raise ValueError("give subject or slug, not both")
+            if slug is not None:
+                if not isinstance(slug, str) or not re.match(_SLUG, slug):
+                    raise ValueError(f"not a template slug: {slug!r}")
+                value["subject"] = {"kind": "template", "id": slug}
+        return value
+
+    @model_validator(mode="after")
+    def _fits(self) -> EventTiming:
+        if self.subject is not None and self.subject.kind not in SUBJECTS[self.kind]:
+            raise ValueError(f"a {self.kind} trigger has no {self.subject.kind} subject")
+        if self.match is not None:
+            fields = MATCHABLE.get(self.kind, {})
+            if not self.match:
+                raise ValueError(
+                    "match names at least one field; leave it out to match every event"
+                )
+            for field, values in self.match.items():
+                if field not in fields:
+                    raise ValueError(f"a {self.kind} event has no field {field!r} to match")
+                if not 1 <= len(values) <= MAX_MATCH_VALUES:
+                    raise ValueError(f"match.{field} lists 1 to {MAX_MATCH_VALUES} values")
+                if unknown := sorted(set(values) - fields[field]):
+                    raise ValueError(f"match.{field}: {', '.join(unknown)} is not one it takes")
+        return self
+
+
+def matches(timing: EventTiming, facts: dict[str, Any]) -> bool:
+    """Whether an event with these facts passes the trigger's `match`."""
+    return all(facts.get(field) in values for field, values in (timing.match or {}).items())
 
 
 class _Timing(BaseModel):

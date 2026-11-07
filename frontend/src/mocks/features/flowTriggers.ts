@@ -85,7 +85,7 @@ function defaults(): FlowTrigger[] {
       version: 1,
       kind: 'event',
       schedule: null,
-      event: { kind: 'render.finished', slug: 'coaster' },
+      event: { kind: 'render.finished', subject: { kind: 'template', id: 'coaster' } },
       overlap: 'allow_all',
       inputs: null,
       paused: false,
