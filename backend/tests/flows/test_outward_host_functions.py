@@ -94,6 +94,29 @@ async def test_print_waits_for_approval_then_runs_once_under_its_key(
     assert [(s.fn, s.outward, s.status) for s in run.steps] == [("queue_print", True, "succeeded")]
 
 
+async def test_a_line_items_print_follows_its_run_and_a_stale_quote_is_an_outcome(
+    outward: Outward, api: FakeApi
+) -> None:
+    """#4252 (orders spec §7.2): `queue_print` of a line item posts to its print route
+    with the call's key, and follows the run; `requote_needed` reaches the script as the
+    outcome's `problem`, never as a print."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'i1'}}, {PLAN!r})",
+            f"b = await queue_print({{'order_id': 'ord1', 'order_item_id': 'stale'}}, {PLAN!r})",
+            "return [a['status'], b['status'], b['problem'], b['run_id']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    await outward.row(run_id, lambda r: len(r.steps) == 2 and len(r.waiting_on) == 1)
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['succeeded', 'refused', 'requote_needed', '']", run.result
+    [(body, key)] = api.to("/api/v1/orders/ord1/items/i1/print")
+    assert body == PLAN and key is not None
+    assert list(api.runs) == [f"run-{key}"]
+
+
 async def test_a_print_refusal_fails_its_step(outward: Outward) -> None:
     run_id = await outward.run(
         script(

@@ -19,6 +19,7 @@ function bounds(rule: FlowGrantRule): string[] {
   if (rule.printers) out.push(rule.printers.length ? `printers ${rule.printers.join(', ')}` : 'no printer')
   if (rule.models) out.push(rule.models.length ? `models ${rule.models.join(', ')}` : 'no model')
   if (rule.library_files) out.push(rule.library_files.length ? `library files ${rule.library_files.join(', ')}` : 'no library file')
+  if (rule.orders) out.push(rule.orders === 'any' ? 'any order' : `orders ${rule.orders.join(', ')}`)
   for (const arg of rule.args ?? []) out.push(`${arg.path} in ${arg.in.map((v) => JSON.stringify(v)).join(', ')}`)
   return out
 }

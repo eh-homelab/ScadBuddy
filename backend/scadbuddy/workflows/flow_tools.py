@@ -111,7 +111,9 @@ class RenderResult(BaseModel):
 
 class PrintOutcome(BaseModel):
     """A print run once it settled: `succeeded` or `failed`. A failed run with
-    `may_have_queued` may be on Bambuddy's queue anyway."""
+    `may_have_queued` may be on Bambuddy's queue anyway. A line item's print that
+    ScadBuddy refused before it started is `refused`, with no run and the order's
+    `problem` (`requote_needed` when its accepted quote no longer stands)."""
 
     run_id: str
     status: str
@@ -119,6 +121,8 @@ class PrintOutcome(BaseModel):
     error: str | None = None
     #: Who narrowed the print before it was approved (`session:<id>`, `browser`).
     narrowed_by: str | None = None
+    #: Why a line item's print was refused: the orders problem's name (#4252).
+    problem: str | None = None
 
 
 class ArrangeResult(BaseModel):
@@ -151,7 +155,12 @@ class ToolResult(BaseModel):
 
 
 class RouteRefusedError(Exception):
-    """ScadBuddy refused the call; the message is the problem's `detail`."""
+    """ScadBuddy refused the call; the message is the problem's `detail`, and `problem`
+    its `type` when the route named one (#4252)."""
+
+    def __init__(self, detail: str, problem: str | None = None) -> None:
+        super().__init__(detail)
+        self.problem = problem
 
 
 class ToolFailedError(Exception):
@@ -279,7 +288,8 @@ _TIER_TIMEOUT = timedelta(seconds=30)
 def _refusal(err: ActivityError) -> BaseException:
     cause = err.cause
     if isinstance(cause, ApplicationError) and cause.type in {ROUTE_REFUSED, API_URL_MISSING}:
-        return RouteRefusedError(cause.message)
+        kind = cause.details[0] if cause.details else None
+        return RouteRefusedError(cause.message, kind if isinstance(kind, str) else None)
     return err
 
 
@@ -437,10 +447,20 @@ async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRe
     return read
 
 
+#: An orders problem's `type` (`api/orders.py`), whose last segment names it.
+_ORDERS_PROBLEM = "https://scadbuddy.dev/problems/orders/"
+
+
 def _print_path(source: dict[str, Any]) -> str:
     output_id, file_id = source.get("output_id"), source.get("file_id")
-    if (output_id is None) == (file_id is None):
-        raise ValueError("source names one of output_id or file_id")
+    item_id = source.get("order_item_id")
+    if sum(v is not None for v in (output_id, file_id, item_id)) != 1:
+        raise ValueError("source names one of output_id, file_id or order_item_id")
+    if (item_id is None) != (source.get("order_id") is None):
+        raise ValueError("a line item's source names its order_id with its order_item_id")
+    if item_id is not None:
+        order = _segment(source["order_id"], "order id")
+        return f"/api/v1/orders/{order}/items/{_segment(item_id, 'item id')}/print"
     if file_id is not None:
         return f"/api/v1/print/library/{int(file_id)}/run"
     return f"/api/v1/print/outputs/{_segment(output_id, 'output id')}/run"
@@ -456,6 +476,8 @@ async def approved_print(call: str, path: str, request: dict[str, Any]) -> Print
         # Narrowed: what the decision approved, source and request alike.
         path, request = _print_path(read.args["source"]), read.args["request"]
     owner: StepOwner = workflow.instance()
+    if path.startswith("/api/v1/orders/"):
+        return await _item_print(call_id, path, request, read.narrowed_by)
     body = {**request, "request_id": route_key(owner.run_id, workflow.info().run_id, call_id)}
     accepted = await _send(call_id, path, body, outward="queue_print")
     run = accepted
@@ -468,6 +490,56 @@ async def approved_print(call: str, path: str, request: dict[str, Any]) -> Print
         may_have_queued=bool(run.get("may_have_queued")),
         error=(run.get("error") or {}).get("detail"),
         narrowed_by=read.narrowed_by,
+    )
+
+
+async def _item_print(
+    call_id: str, path: str, request: dict[str, Any], narrowed_by: str | None
+) -> PrintOutcome:
+    """A line item's print (#4252, orders spec §5.4, §7.2): `order_item_print`, which
+    fills the run from the accepted quote (its key, from the call, is the run's), then
+    the run followed. A refusal before anything printed (`requote_needed`, `order_on_hold`,
+    ...) is an outcome the script reads, not an error."""
+    try:
+        sent = await _post(call_id, path, request, outward="queue_print")
+        attempt = sent.body
+        if sent.status == 202:
+            operation = await _follow(
+                f"/api/v1/operations/{_segment(attempt['id'], 'operation id')}",
+                _RUN_SETTLED,
+                timedelta(minutes=30),
+            )
+            if operation["status"] == "failed":
+                error = operation.get("error") or {}
+                raise RouteRefusedError(
+                    error.get("detail") or "the print did not start", error.get("type")
+                )
+            attempt = operation["result"] or {}
+    except RouteRefusedError as refused:
+        kind = refused.problem or ""
+        return PrintOutcome(
+            run_id="",
+            status="refused",
+            error=str(refused),
+            narrowed_by=narrowed_by,
+            problem=kind.removeprefix(_ORDERS_PROBLEM)
+            if kind.startswith(_ORDERS_PROBLEM)
+            else None,
+        )
+    run_id = attempt.get("print_run_id")
+    if not run_id:
+        return PrintOutcome(
+            run_id="", status="failed", error="the print did not start", narrowed_by=narrowed_by
+        )
+    run = await _follow(
+        f"/api/v1/print/runs/{_segment(run_id, 'run id')}", _RUN_SETTLED, timedelta(hours=24)
+    )
+    return PrintOutcome(
+        run_id=run["id"],
+        status=run["status"],
+        may_have_queued=bool(run.get("may_have_queued")),
+        error=(run.get("error") or {}).get("detail"),
+        narrowed_by=narrowed_by,
     )
 
 
@@ -638,7 +710,11 @@ async def queue_print(
 ) -> PrintOutcome:
     """Once a person approves it, slice and queue `source` ({"output_id": ...} or
     {"file_id": ...}) with `request`, the print dialog's body (`filament_plan`,
-    `choices`, ...), and wait until the run settles."""
+    `choices`, ...), and wait until the run settles. A line item's source,
+    {"order_id": ..., "order_item_id": ...}, prints the item's accepted quote, every
+    plate, the copies still to make: the request's spools are filled from the item's
+    filaments and must be of them. Refused before it starts, the outcome is `refused`
+    with the order's `problem` (`requote_needed`: quote it again)."""
     path = _print_path(source)
     call_id = str(workflow.uuid4())
     outcome: PrintOutcome = await _gated(

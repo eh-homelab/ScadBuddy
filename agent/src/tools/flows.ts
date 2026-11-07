@@ -28,6 +28,13 @@ export const grantRule = z
     printers: z.array(z.number().int()).optional().describe('queue_print: printer ids it may use'),
     models: z.array(z.string()).optional().describe('queue_print, arrange: template slugs'),
     library_files: z.array(z.number().int()).optional().describe("queue_print: Bambuddy library file ids"),
+    orders: z
+      .union([z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)).min(1).max(256), z.literal('any')])
+      .optional()
+      .describe(
+        "queue_print of a line item, tool: the orders the call may name (a print's source `order_id`, an order " +
+          "tool's `order_id`), or \"any\" order; a run a trigger fired for an order gets that order only",
+      ),
     max_prints: z.number().int().min(0).optional(),
     max_filament_g: z.number().min(0).optional(),
     max_calls: z.number().int().min(0).optional(),
