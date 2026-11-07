@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
 
 import psycopg
 import psycopg_pool
 import pytest
+import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -23,8 +25,16 @@ from scadbuddy.storefront.settings import (
     StorefrontSettings,
     check_environment,
 )
+from scadbuddy.storefront.visitors import VISITOR_COOKIE
+from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 BACKEND = Path(__file__).resolve().parents[2]
+API = "http://api.internal:8000"
+TOKEN = "sbsvc_" + "0" * 16 + "." + "t" * 43
+CRUD = {"X-ScadBuddy-Crud": "1"}
+LISTINGS = {"listings": [], "requests_enabled": False}
+#: The browser's address, as the edge's peer.
+CLIENT = ("203.0.113.9", 50000)
 
 
 def load(**overrides: object) -> StorefrontSettings:
@@ -48,7 +58,23 @@ def edge_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def edge_app(edge_env: None) -> FastAPI:
+def crud_mock() -> Iterator[respx.Router]:
+    """The CRUD service: the exchange, the storefront's areas and its listings."""
+    with respx.mock(base_url=API, assert_all_called=False) as router:
+        router.post("/api/v1/auth/service-token", name="exchange").respond(
+            200, json={"access_token": TOKEN, "expires_in": 900}
+        )
+        router.get("/api/v1/internal/storefront/areas", name="areas").respond(
+            200, json={"areas": []}, headers=CRUD
+        )
+        router.get("/api/v1/internal/storefront/listings", name="listings").respond(
+            200, json=LISTINGS, headers=CRUD
+        )
+        yield router
+
+
+@pytest.fixture
+def edge_app(edge_env: None, crud_mock: respx.Router) -> FastAPI:
     return create_app(load())
 
 
@@ -93,15 +119,57 @@ def test_main_exits_2_with_a_database_url(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_the_edge_starts_and_opens_no_database_connection(
-    edge_env: None, monkeypatch: pytest.MonkeyPatch
+    edge_env: None, monkeypatch: pytest.MonkeyPatch, crud_mock: respx.Router
 ) -> None:
     def refuse(*_a: object, **_k: object) -> NoReturn:
         raise AssertionError("the storefront opened a database connection")
 
     monkeypatch.setattr(psycopg.Connection, "connect", refuse)
     monkeypatch.setattr(psycopg_pool.ConnectionPool, "__init__", refuse)
-    with TestClient(create_app(load())) as c:
+    with TestClient(create_app(load()), client=CLIENT) as c:
         assert c.get("/healthz").status_code == 200
+        r = c.get("/api/store/v1/listings")
+        assert r.status_code == 200
+        assert r.json() == LISTINGS
+    sent = crud_mock["listings"].calls.last.request
+    assert sent.headers["Authorization"] == f"Bearer {TOKEN}"
+    cookie = r.headers["set-cookie"]
+    assert cookie.startswith(f"{VISITOR_COOKIE}=v1.")
+    visitor = cookie.split(";")[0].split("=", 1)[1].split(".")[1]
+    assert sent.headers[VISITOR_HEADER] == visitor
+    assert sent.headers[CLIENT_HEADER] == CLIENT[0]
+    # The lifespan waited for the API's storefront areas before it served.
+    assert crud_mock["areas"].called
+
+
+def test_a_crud_refusal_passes_through_with_its_retry_after(
+    edge_env: None, crud_mock: respx.Router
+) -> None:
+    limited = {"type": "https://scadbuddy.dev/problems/storefront/render_limited", "status": 429}
+    crud_mock["listings"].respond(429, json=limited, headers={**CRUD, "Retry-After": "7"})
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        r = c.get("/api/store/v1/listings")
+    assert r.status_code == 429
+    assert r.headers["Retry-After"] == "7"
+    assert r.headers["content-type"] == "application/problem+json"
+    assert r.json() == limited
+
+
+def test_a_good_cookie_keeps_its_visitor(edge_env: None, crud_mock: respx.Router) -> None:
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        first = c.get("/api/store/v1/listings").headers["set-cookie"].split(";")[0]
+        name, value = first.split("=", 1)
+        r = c.get("/api/store/v1/listings", cookies={name: value})
+    assert "set-cookie" not in r.headers
+    sent = crud_mock["listings"].calls.last.request
+    assert sent.headers[VISITOR_HEADER] == value.split(".")[1]
+
+
+def test_a_forged_cookie_gets_a_new_visitor(edge_env: None, crud_mock: respx.Router) -> None:
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        r = c.get("/api/store/v1/listings", cookies={VISITOR_COOKIE: "v1." + "a" * 43 + ".forged"})
+    assert f"{VISITOR_COOKIE}=v1." in r.headers["set-cookie"]
+    assert crud_mock["listings"].calls.last.request.headers[VISITOR_HEADER] != "a" * 43
 
 
 def test_the_edge_imports_nothing_that_touches_the_database() -> None:

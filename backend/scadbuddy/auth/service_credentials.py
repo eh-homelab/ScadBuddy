@@ -77,7 +77,8 @@ logger = logging.getLogger(__name__)
 
 CALLERS: tuple[ServiceCaller, ...] = get_args(ServiceCaller)
 #: The callers the API mints sealed 30-day credentials for, read through their views.
-#: The render worker is a caller of the exchange only (spec 2026-11-05 §11 D8).
+#: The render worker is a caller of the exchange only (spec 2026-11-05 §11 D8), as is the
+#: storefront edge (#5282).
 LegacyCaller = Literal["agent", "print", "projects"]
 LEGACY_CALLERS: tuple[LegacyCaller, ...] = get_args(LegacyCaller)
 
@@ -89,12 +90,14 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 #: What each caller may reach, as route classes (§7.1, `auth/routes.py`). The projects
 #: worker reaches only the public routes its flow host functions call (`flow.host`, #5298),
 #: not `api`. The `crud.<caller>` classes are the CRUD routes under
-#: `/internal/crud/<caller>/` (#5298); the render worker has no other class.
+#: `/internal/crud/<caller>/` (#5298); the render worker has no other class. The
+#: storefront edge (#5282) reaches only its own, `/internal/storefront/`.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
     "projects": frozenset({"flow.host", "crud.projects"}),
     "render": frozenset({"crud.render"}),
+    "storefront": frozenset({"crud.storefront"}),
 }
 #: The Postgres role of each caller, granted its view when the deployment made it.
 ROLES: Mapping[ServiceCaller, str] = {

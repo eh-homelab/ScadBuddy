@@ -144,6 +144,7 @@ def hs256(service_account: str) -> str:
         ("system:serviceaccount:bambuddy:scadbuddy-projects", "projects"),
         ("system:serviceaccount:bambuddy:scadbuddy-agent-worker", "agent"),
         ("system:serviceaccount:bambuddy:scadbuddy", "agent"),
+        ("system:serviceaccount:bambuddy:scadbuddy-storefront", "storefront"),
         # Every pod that names no ServiceAccount runs as `default`: never a caller.
         ("system:serviceaccount:bambuddy:default", None),
         ("system:serviceaccount:bambuddy:pgadmin", None),
@@ -521,6 +522,18 @@ def test_an_exchanged_credential_lives_15_minutes_bound_to_its_pod(
     assert (row["secret_sealed"], row["dek_sealed"], row["kek_id"]) == (None, None, None)
     (listed,) = store.list()
     assert (listed.proof, listed.pod_name, listed.pod_uid) == ("k8s", "p", "u")
+
+
+@pg
+def test_the_storefront_gets_an_exchanged_credential_and_can_be_suspended(
+    store: ServiceCredentialStore,
+) -> None:
+    """#5282: the storefront edge is an exchange-only caller, scoped to its CRUD routes."""
+    issued = store.issue("storefront", "k8s", pod_name="p", pod_uid="u")
+    assert issued.scopes == SCOPES["storefront"] == frozenset({"crud.storefront"})
+    assert store.resolve(issued.token) == Service("storefront", SCOPES["storefront"])
+    store.suspend("storefront", by="user:i#s")
+    assert store.resolve(issued.token) is None
 
 
 @pg

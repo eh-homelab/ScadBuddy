@@ -1,6 +1,7 @@
 """The CRUD routers' guard (#5298, plan decisions D1, D2, D4).
 
-A route under ``/api/v1/internal/crud/<caller>/`` is class ``crud.<caller>``
+A route under ``/api/v1/internal/crud/<caller>/`` (the storefront's: under
+``/api/v1/internal/storefront/``, `CRUD_PREFIXES`) is class ``crud.<caller>``
 (`auth/routes.py`). ``require_crud`` refuses it unless the request carries a live service
 credential of that caller whose scopes hold the class, in every ``SCADBUDDY_AUTH_MODE``:
 these routes are new, so no client needs ``off`` or ``observe`` to let it through. A
@@ -19,7 +20,7 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
 from fastapi import APIRouter, Depends, Request, Response
@@ -31,17 +32,14 @@ from scadbuddy.auth.check import FORBIDDEN, SIGNED_OUT
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.wire import CRUD_HEADER as CRUD_HEADER
+from scadbuddy.crud.wire import CRUD_HEADERS as CRUD_HEADERS
+from scadbuddy.crud.wire import CRUD_PREFIXES as CRUD_PREFIXES
+from scadbuddy.crud.wire import DATABASE_UNAVAILABLE as DATABASE_UNAVAILABLE
+from scadbuddy.crud.wire import PREFIX as PREFIX
+from scadbuddy.crud.wire import CrudCaller as CrudCaller
 
 logger = logging.getLogger(__name__)
-
-#: The reason of the 503 a CRUD route answers on a `psycopg.OperationalError`.
-DATABASE_UNAVAILABLE = "database-unavailable"
-
-#: The callers with CRUD routes; `auth/routes.py` `CRUD_CLASSES` has the same keys.
-CrudCaller = Literal["projects", "render", "print"]
-CRUD_HEADER = "X-ScadBuddy-Crud"
-CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}
-PREFIX = "/internal/crud"
 
 
 def require_crud(caller: CrudCaller) -> Any:
@@ -146,10 +144,10 @@ def _registered_handler(request: Request, error: Exception) -> Callable[..., Any
 
 
 def crud_router(caller: CrudCaller) -> APIRouter:
-    """A router for ``/api/v1/internal/crud/<caller>``: hidden from the schema, guarded
-    by :func:`require_crud`, answering with the CRUD headers."""
+    """A router for ``/api/v1`` plus the caller's `CRUD_PREFIXES` entry: hidden from the
+    schema, guarded by :func:`require_crud`, answering with the CRUD headers."""
     return APIRouter(
-        prefix=f"{PREFIX}/{caller}",
+        prefix=CRUD_PREFIXES[caller],
         include_in_schema=False,
         dependencies=[require_crud(caller)],
         route_class=_CrudRoute,
