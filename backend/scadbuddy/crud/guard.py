@@ -5,9 +5,9 @@ A route under ``/api/v1/internal/crud/<caller>/`` is class ``crud.<caller>``
 credential of that caller whose scopes hold the class, in every ``SCADBUDDY_AUTH_MODE``:
 these routes are new, so no client needs ``off`` or ``observe`` to let it through. A
 missing or dead credential is 401 ``…/auth/signed-out``; any other is 403 ``…/auth/forbidden``.
-A database error that passes (`psycopg.OperationalError`: out of reach, a cancelled statement,
-a deadlock, a serialization failure) is a 503 with reason
-A database out of reach (`psycopg.OperationalError`) is a 503 with reason
+
+A database error that passes (`psycopg.OperationalError`: out of reach, a cancelled
+statement, a deadlock, a serialization failure) is a 503 with reason
 ``database-unavailable``; an exception the app has a handler for gets that handler's
 answer; any other is a 500. Every response of a CRUD router, a refusal and an error's
 included, carries ``X-ScadBuddy-Crud: 1`` and ``Cache-Control: no-store``, so a client
