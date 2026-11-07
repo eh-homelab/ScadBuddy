@@ -1,28 +1,34 @@
 """The workers' CRUD routes served for a test (#5298): the routes of `api/crud_projects.py`
 over a real `FlowStore` and `OperationStore`, or `api/crud_render.py` over a settings pool
-(its blob refs and piece geometry too) and a `JobProjection`, and `api/crud_areas.py`,
-behind the real `auth_check` and gate and the CRUD listener on a local port, and a client
-that reaches them with an in-process credential, as the worker does. `api_payload_keys`
-gives the routes the API's payload keys on a store's schema, and `served_projects` serves a
-projects worker's store and payload keys as the worker's. With a bootstrap verifier the app
-also takes the service-token exchange, so a worker can get its own credential as it does
-with no database. `static_render_crud` is a render worker's client of a stand-in API that
-answers fixed store settings and serves no job route, for a test of the worker that renders
-nothing. `FakeClock` is a client clock that moves only by the client's own waits, so a
-test's count of tries does not depend on wall time."""
+(its blob refs, piece geometry and blob index too) and a `JobProjection`, and
+`api/crud_areas.py`, behind the real `auth_check` and gate and the CRUD listener on a
+local port, and a client that reaches them with an in-process credential, as the worker
+does. `api_payload_keys` gives the routes the API's payload keys on a store's schema, and
+`served_projects` serves a projects worker's store and payload keys as the worker's. With
+a bootstrap verifier the app also takes the service-token exchange, so a worker can get its
+own credential as it does with no database. `static_render_crud` is a render worker's
+client of a stand-in API that answers fixed store settings and serves no job route, for a
+test of the worker that renders nothing. `threaded_render_index` is the worker's
+`RemoteBlobIndex` over the render routes served on a thread of their own, for a test that
+calls the index from its event loop, as `tests/store` calls the SQL one. `FakeClock` is a
+client clock that moves only by the client's own waits, so a test's count of tries does
+not depend on wall time."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
 import psycopg
+import uvicorn
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
@@ -41,10 +47,15 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64, seal_bytes
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud import listener
-from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.client import CrudClient, CrudSyncClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
-from scadbuddy.crud.render import RemoteBlobRefs, RemoteGeometryIndex, RemoteJobProjection
+from scadbuddy.crud.render import (
+    RemoteBlobIndex,
+    RemoteBlobRefs,
+    RemoteGeometryIndex,
+    RemoteJobProjection,
+)
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.settings_store import RenderStoreSettings, SettingsStore
@@ -224,7 +235,7 @@ def render_crud_app(
 ) -> FastAPI:
     """The render routes, reading the store settings from ``pool`` under ``settings``
     (none: a test of the job routes only), writing the job rows through ``projection``,
-    and the blob refs and piece geometry on ``pool``."""
+    and the blob refs, piece geometry and blob index on ``pool``."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
     app.state.scadbuddy = SimpleNamespace(
@@ -295,6 +306,36 @@ async def served_render_refs(
             client.close()
 
 
+@contextmanager
+def threaded_render_index(pool: Pool) -> Iterator[RemoteBlobIndex]:
+    """`RemoteBlobIndex` over the render routes on ``pool``, served by a server on a
+    thread and event loop of its own, so a blocking call from the test's loop is answered."""
+    credentials = ServiceCredentialStore(pool)
+    app = render_crud_app(pool, None, credentials)
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
+    )
+    thread = threading.Thread(target=server.run, name="crud blob index", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 30
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
+        time.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    client = CrudSyncClient(
+        f"http://127.0.0.1:{port}",
+        "render",
+        ServiceAuth(InProcessProvider("render", lambda: credentials)),
+        unavailable_budget=5,
+    )
+    try:
+        yield RemoteBlobIndex(client)
+    finally:
+        client.close()
+        server.should_exit = True
+        thread.join(30)
+
+
 class FixedToken:
     """A render credential the stand-in API takes."""
 
@@ -305,15 +346,17 @@ class FixedToken:
 
 
 def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient:
-    """A render worker's client of an API that lists the ``settings``, ``jobs`` and
-    ``refs`` areas and answers ``current`` (the defaults: the local store) as the store
-    settings. Its job, ref and geometry routes are missing (a 404)."""
+    """A render worker's client of an API that lists the ``settings``, ``jobs``, ``refs``
+    and ``blob-index`` areas and answers ``current`` (the defaults: the local store) as
+    the store settings. Its job, ref, geometry and index routes are missing (a 404)."""
     body = (current or RenderStoreSettings()).model_dump(mode="json")
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/render/areas"):
             return httpx.Response(
-                200, json={"areas": ["settings", "jobs", "refs"]}, headers=CRUD_HEADERS
+                200,
+                json={"areas": ["settings", "jobs", "refs", "blob-index"]},
+                headers=CRUD_HEADERS,
             )
         if request.url.path.endswith("/render/settings"):
             return httpx.Response(200, json=body, headers=CRUD_HEADERS)

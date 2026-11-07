@@ -33,9 +33,27 @@ RETENTION: Final = timedelta(hours=24)
 #: The advisory lock class of a ``(caller, key)`` ("SCRQ").
 LOCK_CLASS: Final = 0x5343_5251
 KEY_PROBLEM: Final = "https://scadbuddy.dev/problems/crud/idempotency-key-reused"
+#: A write sent without its ``Idempotency-Key`` (`required_key`): nothing was done.
+KEY_REQUIRED_PROBLEM: Final = "https://scadbuddy.dev/problems/crud/idempotency-key-required"
 
 #: The header a non-natural write route takes.
 IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)]
+#: The same, for a route that answers a request without it with a 428 (`required_key`)
+#: rather than a 422 of its shape.
+MaybeIdempotencyKey = Annotated[
+    str | None, Header(alias="Idempotency-Key", min_length=1, max_length=200)
+]
+
+
+def required_key(key: str | None) -> str:
+    """``key``, or a 428 problem when the request carried none."""
+    if key is None:
+        raise ApiError(
+            428,
+            "This write needs an Idempotency-Key header. Nothing was done.",
+            type_=KEY_REQUIRED_PROBLEM,
+        )
+    return key
 
 
 @dataclass(frozen=True)

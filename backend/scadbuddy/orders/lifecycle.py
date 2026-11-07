@@ -1381,17 +1381,12 @@ class Lifecycle:
                 f" POST /orders/{order.id}/items/{item.id}/revisions",
                 items=[item.id],
             )
-        if item.status in ("queued", "printing"):
-            raise LifecycleError(
-                "print_in_flight",
-                f"item {item.id} is {item.status}: settle its print first",
-                items=[item.id],
-            )
-        self._none_in_flight(conn, item)
         accepted = [f for f in self.store.fulfilments(item.id, conn=conn) if f.accepted_at]
         if accepted:
             # #5592: the accepted units are real goods of the agreed design. A new design
             # would count them as made of it, or leave them uncounted; neither is true.
+            # This refusal is permanent and `print_in_flight` is transient, so it answers
+            # first: a caller that waits for the print to end is not refused after (#5598).
             made = sum(f.quantity for f in accepted)
             raise LifecycleError(
                 "item_partly_fulfilled",
@@ -1399,6 +1394,13 @@ class Lifecycle:
                 " agreed design): cancel the item and add one with the new design",
                 items=[item.id],
             )
+        if item.status in ("queued", "printing"):
+            raise LifecycleError(
+                "print_in_flight",
+                f"item {item.id} is {item.status}: settle its print first",
+                items=[item.id],
+            )
+        self._none_in_flight(conn, item)
 
     def add_item(
         self,

@@ -14,25 +14,38 @@ answer, the route answers as it did the first time. The finish sends an
 `RemoteBlobRefs` and `RemoteGeometryIndex` are `store/refs.py` `BlobRefs.add` and
 `store/geometry.py` `GeometryIndex` (get, put, forget) over the routes, with the same
 names, signatures and answers. Every write is natural.
+
+`RemoteBlobIndex` is `store/index.py` `BlobIndex` (the part `ContentStore` and its callers
+use, `IndexesBlobs`) over the routes, with the same answers: a `put` the object it
+replaced, a delete the row it took, `ReuseLostError` and, once the API's own retries are
+spent, `DeadlockDetected` as over SQL. Its non-natural writes send an
+``Idempotency-Key`` each (`WriteKeys`).
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
+from psycopg.errors import DeadlockDetected
+from temporalio import activity
 
-from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
+from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.guard import PREFIX
+from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
 from scadbuddy.store.bambuddy import StoreSettingsSource
+from scadbuddy.store.content_models import BlobRef, BlobStat, ReuseLostError
 from scadbuddy.store.geometry import GeometryRow
 
 logger = logging.getLogger(__name__)
@@ -40,6 +53,12 @@ logger = logging.getLogger(__name__)
 BASE = f"/api/v1{PREFIX}/render"
 #: `api/crud_render.py` `QUEUE_FULL`.
 QUEUE_FULL = "queue-full"
+#: `api/crud_render.py` `REUSE_LOST` and `DEADLOCK`.
+REUSE_LOST = "reuse-lost"
+DEADLOCK = "deadlock"
+#: How many activity attempts `WriteKeys` counts writes for at once; the oldest is
+#: forgotten first (an attempt long finished).
+WRITE_KEYS_KEPT = 1024
 #: How long a `project` write tries again after a failed try, inside its 10 s attempt
 #: (`pipelines.PROJECT_TIMEOUT`). Each wait of a try (connect, send, read) lasts at most
 #: `PROJECT_POOL_TIMEOUT` (5 s), as the SQL store's pool wait does; a credential exchange
@@ -241,5 +260,180 @@ class RemoteGeometryIndex:
         )
 
 
+class WriteKeys:
+    """The ``Idempotency-Key`` of each blob-index write (plan D5).
+
+    Inside a Temporal activity, `activity_key` of the write's ordinal in this attempt of
+    the activity: a retried attempt sends its writes under the same keys, in the same
+    order while its code path is the same, so a write whose answer the last attempt lost
+    is answered as it was (a `put` the object it replaced, which this attempt then
+    releases). A retried attempt's write is often not the same request (a new upload, or
+    a reuse of the object the last attempt stored): the ledger refuses the key for it
+    (422), and `RemoteBlobIndex` sends that write again under a new key, as a write of
+    its own. Outside an activity (a sweep on the worker's own timer), a new UUID per
+    write. Either way the client sends the key again on every retry of that call."""
+
+    def __init__(self) -> None:
+        self._ordinals: OrderedDict[tuple[str | None, str | None, str, int], int] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def next(self) -> str:
+        if not activity.in_activity():
+            return uuid.uuid4().hex
+        info = activity.info()
+        attempt = (info.workflow_id, info.workflow_run_id, info.activity_id, info.attempt)
+        with self._lock:
+            ordinal = self._ordinals.pop(attempt, 0)
+            self._ordinals[attempt] = ordinal + 1
+            while len(self._ordinals) > WRITE_KEYS_KEPT:
+                self._ordinals.popitem(last=False)
+        return activity_key(ordinal)
+
+
+class RemoteBlobIndex:
+    """`BlobIndex` over the routes. Each call has the client's own budget, as each SQL
+    call waited the pool's default for a connection."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+        self._keys = WriteKeys()
+
+    def _read(self, path: str, **query: Any) -> Any:
+        return self._client.request("GET", _with(f"{BASE}/blob-index{path}", query)).json()
+
+    def _write(self, method: str, path: str, *, json: Any = None, **query: Any) -> Any:
+        url = _with(f"{BASE}/blob-index{path}", query)
+        try:
+            try:
+                response = self._client.request(
+                    method, url, json=json, idempotency_key=self._keys.next()
+                )
+            except CrudRefusedError as error:
+                if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
+                    raise
+                # An earlier attempt of this activity sent another write under this
+                # ordinal (`WriteKeys`): this one is a write of its own.
+                response = self._client.request(
+                    method, url, json=json, idempotency_key=uuid.uuid4().hex
+                )
+        except CrudRefusedError as error:
+            reason = error.problem.get("reason") if error.status == 409 else None
+            if reason == REUSE_LOST:
+                raise ReuseLostError(str(error.problem.get("detail", ""))) from error
+            if reason == DEADLOCK:
+                raise DeadlockDetected(str(error.problem.get("detail", ""))) from error
+            raise
+        return response.json()
+
+    def get(self, key: str) -> BlobStat | None:
+        body = self._read(f"/{_part(key)}")
+        return None if body is None else BlobStat.model_validate(body)
+
+    def by_sha(self, sha256: str, kind: str, backend: str) -> BlobRef | None:
+        body = self._read("", sha256=sha256, kind=kind, backend=backend)
+        return None if body is None else BlobRef.model_validate(body)
+
+    def put(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> BlobRef | None:
+        body = self._write(
+            "PUT",
+            f"/{_part(key)}",
+            json={"ref": ref.model_dump(mode="json"), "slug": slug, "meta": meta, "reuse": reuse},
+        )
+        previous = body["previous"]
+        return None if previous is None else BlobRef.model_validate(previous)
+
+    def swap(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        expected: str | None,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
+    ) -> bool:
+        body = self._write(
+            "POST",
+            f"/{_part(key)}/swap",
+            json={
+                "ref": ref.model_dump(mode="json"),
+                "expected": expected,
+                "slug": slug,
+                "meta": meta,
+                "reuse": reuse,
+            },
+        )
+        return bool(body["swapped"])
+
+    def now(self) -> datetime:
+        return datetime.fromisoformat(self._read("/now")["now"])
+
+    def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
+        self._write(
+            "POST",
+            "/mark",
+            json={
+                "keys": list(keys),
+                "backend": backend,
+                "cutoff": cutoff.isoformat(),
+                "meta": meta,
+            },
+        )
+
+    def touch(self, key: str) -> None:
+        self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/touch")
+
+    def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
+        body = self._write("DELETE", f"/{_part(key)}", backend=backend)
+        return None if body is None else BlobStat.model_validate(body)
+
+    def delete_if_stale(
+        self, key: str, cutoff: datetime, *, backend: str | None = None
+    ) -> BlobStat | None:
+        body = self._write(
+            "DELETE", f"/{_part(key)}/stale", before=cutoff.isoformat(), backend=backend
+        )
+        return None if body is None else BlobStat.model_validate(body)
+
+    def shares_backend_id(self, backend: str, backend_id: str) -> bool:
+        return bool(self._read(f"/backends/{_part(backend)}/{_part(backend_id)}")["shared"])
+
+    def recorded(self, backend: str, backend_id: str) -> bool:
+        path = f"/backends/{_part(backend)}/{_part(backend_id)}"
+        return bool(self._read(path, copies="false")["shared"])
+
+    def stats(
+        self,
+        kinds: Sequence[str] | None,
+        slug: str | None = None,
+        *,
+        backend: str | None = None,
+    ) -> list[BlobStat]:
+        if kinds is not None and not kinds:
+            return []
+        body = self._read(
+            "/stats", kind=None if kinds is None else list(kinds), slug=slug, backend=backend
+        )
+        return [BlobStat.model_validate(row) for row in body]
+
+    def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
+        body = self._read("/usage", backend=backend)
+        return int(body["count"]), int(body["bytes"]), dict(body["by_kind"])
+
+
 def _part(value: str) -> str:
     return quote(value, safe="")
+
+
+def _with(path: str, query: dict[str, Any]) -> str:
+    """``path`` with the query's set values; a list is one parameter per item."""
+    present = {name: value for name, value in query.items() if value is not None}
+    return f"{path}?{urlencode(present, doseq=True)}" if present else path

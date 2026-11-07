@@ -389,11 +389,14 @@ def test_a_sync_refusal_raises() -> None:
 def test_activity_key_is_a_hash_of_the_activity_and_ordinal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = SimpleNamespace(workflow_id="wf", activity_id="7")
+    info = SimpleNamespace(workflow_id="wf", workflow_run_id="run", activity_id="7")
     monkeypatch.setattr(activity, "info", lambda: info)
     key = activity_key(2)
-    assert key == hashlib.sha256(b"wf\x007\x002").hexdigest()
+    assert key == hashlib.sha256(b"wf\x00run\x007\x002").hexdigest()
     assert key != activity_key(3)
+    # A workflow's next run numbers its activities from 1 again: not a retry.
+    info.workflow_run_id = "run-2"
+    assert activity_key(2) != key
 
 
 def _clocked(script: Script, clock: FakeClock, budget: float) -> CrudSyncClient:

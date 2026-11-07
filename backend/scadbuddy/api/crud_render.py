@@ -1,7 +1,8 @@
 """The render worker's CRUD routes (#5298): the store settings it renders with (inventory
 R2), for `crud/render.py` `RemoteRenderSettingsSource`, its jobs' rows (R3-R10), for
 `RemoteJobProjection`, and its jobs' blob refs and the piece geometry (R11, R12), for
-`RemoteBlobRefs` and `RemoteGeometryIndex`.
+`RemoteBlobRefs` and `RemoteGeometryIndex`, and the blob index (R13-R16), for
+`RemoteBlobIndex`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.render`` (plan D8): the
 render key (or the full key while no render key is saved) and the S3 keys. The CRUD
@@ -13,10 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from collections.abc import Callable
+from datetime import datetime
+from typing import Annotated, Any
 
 from fastapi import Query, Request, status
 from psycopg import Connection
+from psycopg.errors import DeadlockDetected
 from psycopg.rows import DictRow
 from pydantic import BaseModel
 
@@ -25,12 +29,21 @@ from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
-from scadbuddy.crud.idempotency import IdempotencyKey, Replay, idempotent_write
+from scadbuddy.crud.idempotency import (
+    IdempotencyKey,
+    MaybeIdempotencyKey,
+    Replay,
+    idempotent_write,
+    required_key,
+)
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
+from scadbuddy.store.content_models import BlobRef as IndexedRef
+from scadbuddy.store.content_models import BlobStat, ReuseLostError
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.index import BlobIndex
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +54,11 @@ QUEUE_FULL = "queue-full"
 HOLDER_KIND = "holder-kind"
 #: The finish's name in the idempotency ledger.
 FINISH_ROUTE = "POST /jobs/{job_id}/finish"
+#: An index write whose reused object was freed first: `crud/render.py` `REUSE_LOST`.
+REUSE_LOST = "reuse-lost"
+#: An index write Postgres picked as a deadlock's victim on every try:
+#: `crud/render.py` `DEADLOCK`.
+DEADLOCK = "deadlock"
 
 
 def released(current: RenderStoreSettings) -> list[str]:
@@ -256,3 +274,252 @@ async def put_geometry(geometry_key: str, body: Geometry, state: StateDep) -> No
 async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Query()) -> None:
     """R12: drop the row, unless another piece has replaced it since it was read."""
     await asyncio.to_thread(_geometry(state).forget, geometry_key, piece_key)
+
+
+# -- the blob index (inventory R13-R16) ------------------------------------------
+#
+# Each route is the API's own `BlobIndex` method, so the row locks are taken in the order
+# an older worker still writing over SQL during a roll takes them. `put`, `swap`, `mark`
+# and both deletes are not natural (a `put` answers the object it replaced, a delete the
+# row it took), so each takes an ``Idempotency-Key`` (a 428 without one) and writes its
+# ledger row in the index write's transaction, inside the deadlock retry, so a victim
+# rolls back whole and is tried again whole. A key or object id may hold slashes.
+
+
+class IndexPut(BaseModel):
+    ref: IndexedRef
+    slug: str | None
+    meta: dict[str, Any]
+    reuse: bool = False
+
+
+class IndexSwap(IndexPut):
+    expected: str | None
+
+
+class IndexMark(BaseModel):
+    keys: list[str]
+    backend: str
+    cutoff: datetime
+    meta: dict[str, Any]
+
+
+class Previous(BaseModel):
+    previous: IndexedRef | None
+
+
+class Swapped(BaseModel):
+    swapped: bool
+
+
+class Shared(BaseModel):
+    shared: bool
+
+
+class IndexNow(BaseModel):
+    now: datetime
+
+
+class IndexUsage(BaseModel):
+    count: int
+    bytes: int
+    by_kind: dict[str, int]
+
+
+def _index(state: AppState) -> BlobIndex:
+    return BlobIndex(state.settings_store.pool)
+
+
+def _indexed(
+    state: AppState,
+    lock_key: str,
+    key: str | None,
+    route: str,
+    body: dict[str, Any],
+    write: Callable[[BlobIndex, Connection[DictRow]], Any],
+) -> Any:
+    """``write``'s JSON answer, once per Idempotency-Key ``key``: ``write`` and its ledger
+    row in one transaction, run again whole when Postgres picks it as a deadlock's victim
+    (`BlobIndex.retrying`). ``body`` is the request, its index key included."""
+    idempotency_key = required_key(key)
+    index = _index(state)
+
+    def attempt(conn: Connection[DictRow]) -> Replay:
+        return idempotent_write(
+            conn, "render", idempotency_key, route, body, lambda: Replay(200, write(index, conn))
+        )
+
+    try:
+        return index.retrying(lock_key, attempt).body
+    except ReuseLostError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=REUSE_LOST) from None
+    except DeadlockDetected as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=DEADLOCK) from None
+
+
+def _json(model: BaseModel | None) -> dict[str, Any] | None:
+    return None if model is None else model.model_dump(mode="json")
+
+
+@router.get("/blob-index/now", name="crud_render_index_now")
+async def index_now(state: StateDep) -> IndexNow:
+    """R13: the database's clock, which every ``touched_at`` is stamped with."""
+    return IndexNow(now=await asyncio.to_thread(_index(state).now))
+
+
+@router.get("/blob-index/usage", name="crud_render_index_usage")
+async def index_usage(state: StateDep, backend: str = Query()) -> IndexUsage:
+    """R13: the distinct objects on ``backend`` and their bytes, in all and per kind."""
+    count, total, by_kind = await asyncio.to_thread(_index(state).usage, backend)
+    return IndexUsage(count=count, bytes=total, by_kind=by_kind)
+
+
+@router.get("/blob-index/stats", name="crud_render_index_stats")
+async def index_stats(
+    state: StateDep,
+    kind: Annotated[list[str] | None, Query()] = None,
+    slug: str | None = None,
+    backend: str | None = None,
+) -> list[BlobStat]:
+    """R13: the rows by kind (any, without one), template and backend."""
+    return await asyncio.to_thread(_index(state).stats, kind, slug, backend=backend)
+
+
+@router.get("/blob-index", name="crud_render_index_by_sha")
+async def index_by_sha(
+    state: StateDep, sha256: str = Query(), kind: str = Query(), backend: str = Query()
+) -> IndexedRef | None:
+    """R13: an object already stored with these bytes, or null."""
+    return await asyncio.to_thread(_index(state).by_sha, sha256, kind, backend)
+
+
+@router.get("/blob-index/backends/{backend}/{backend_id:path}", name="crud_render_index_shared")
+async def index_shared(
+    backend: str, backend_id: str, state: StateDep, copies: bool = True
+) -> Shared:
+    """R16: whether a row names the object, as its own or, with ``copies``, as its
+    migrated copy (`shares_backend_id`); without, as its own only (`recorded`)."""
+    index = _index(state)
+    named = index.shares_backend_id if copies else index.recorded
+    return Shared(shared=await asyncio.to_thread(named, backend, backend_id))
+
+
+@router.post("/blob-index/mark", name="crud_render_index_mark")
+async def index_mark(
+    body: IndexMark, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """R15: merge ``meta`` into the rows of ``keys`` on ``backend`` untouched since
+    ``cutoff``."""
+    await asyncio.to_thread(
+        _indexed,
+        state,
+        ",".join(sorted(body.keys)),
+        idempotency_key,
+        "POST /blob-index/mark",
+        body.model_dump(mode="json"),
+        lambda index, conn: BlobIndex.mark_in(
+            conn, body.keys, backend=body.backend, cutoff=body.cutoff, meta=body.meta
+        ),
+    )
+
+
+@router.get("/blob-index/{key:path}", name="crud_render_index_get")
+async def index_get(key: str, state: StateDep) -> BlobStat | None:
+    """R13: ``key``'s row, or null."""
+    return await asyncio.to_thread(_index(state).get, key)
+
+
+@router.put("/blob-index/{key:path}", name="crud_render_index_put")
+async def index_put(
+    key: str, body: IndexPut, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
+) -> Previous:
+    """R14: point ``key`` at ``ref``; ``previous``, what it named before. A reuse of an
+    object freed first is a 409 ``reuse-lost`` with nothing written."""
+    answer = await asyncio.to_thread(
+        _indexed,
+        state,
+        key,
+        idempotency_key,
+        "PUT /blob-index/{key}",
+        {"key": key, **body.model_dump(mode="json")},
+        lambda index, conn: {
+            "previous": _json(
+                index.put_in(conn, key, body.ref, slug=body.slug, meta=body.meta, reuse=body.reuse)
+            )
+        },
+    )
+    return Previous.model_validate(answer)
+
+
+@router.post("/blob-index/{key:path}/swap", name="crud_render_index_swap")
+async def index_swap(
+    key: str, body: IndexSwap, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
+) -> Swapped:
+    """R14: point ``key`` at ``ref`` only if it still names ``expected`` (null: no row)."""
+    answer = await asyncio.to_thread(
+        _indexed,
+        state,
+        key,
+        idempotency_key,
+        "POST /blob-index/{key}/swap",
+        {"key": key, **body.model_dump(mode="json")},
+        lambda index, conn: {
+            "swapped": index.swap_in(
+                conn,
+                key,
+                body.ref,
+                expected=body.expected,
+                slug=body.slug,
+                meta=body.meta,
+                reuse=body.reuse,
+            )
+        },
+    )
+    return Swapped.model_validate(answer)
+
+
+@router.post("/blob-index/{key:path}/touch", name="crud_render_index_touch")
+async def index_touch(key: str, state: StateDep) -> None:
+    """R15: mark ``key`` wanted now. Natural: a resend stamps it again."""
+    await asyncio.to_thread(_index(state).touch, key)
+
+
+@router.delete("/blob-index/{key:path}/stale", name="crud_render_index_delete_stale")
+async def index_delete_stale(
+    key: str,
+    state: StateDep,
+    before: Annotated[datetime, Query()],
+    backend: str | None = None,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> BlobStat | None:
+    """R15: drop ``key``'s row if untouched since ``before``; the row taken, or null."""
+    answer = await asyncio.to_thread(
+        _indexed,
+        state,
+        key,
+        idempotency_key,
+        "DELETE /blob-index/{key}/stale",
+        {"key": key, "before": before.isoformat(), "backend": backend},
+        lambda index, conn: _json(BlobIndex.delete_if_stale_in(conn, key, before, backend=backend)),
+    )
+    return None if answer is None else BlobStat.model_validate(answer)
+
+
+@router.delete("/blob-index/{key:path}", name="crud_render_index_delete")
+async def index_delete(
+    key: str,
+    state: StateDep,
+    backend: str | None = None,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> BlobStat | None:
+    """R15: drop ``key``'s row (with ``backend``, only a row on it); the row, or null."""
+    answer = await asyncio.to_thread(
+        _indexed,
+        state,
+        key,
+        idempotency_key,
+        "DELETE /blob-index/{key}",
+        {"key": key, "backend": backend},
+        lambda index, conn: _json(BlobIndex.delete_in(conn, key, backend=backend)),
+    )
+    return None if answer is None else BlobStat.model_validate(answer)

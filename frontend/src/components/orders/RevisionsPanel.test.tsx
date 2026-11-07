@@ -166,6 +166,21 @@ describe('RevisionsPanel (#5280)', () => {
     expect(within(panel).queryByRole('button', { name: 'New revision' })).toBeNull()
   })
 
+  it.each([
+    ['on hold', () => { state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true }],
+    ['printing', () => { state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'printing' }],
+  ])('gives no partly-fulfilled hint while the item is %s: that is the reason (#5598)', async (_, block) => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.quantity = 3
+    const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
+    block()
+    render(ORDER_ACCEPTED, ITEM_APPROVED)
+    const panel = await screen.findByTestId('revisions-panel')
+    await within(panel).findByRole('combobox', { name: 'Approval' })
+    expect(within(panel).queryByRole('button', { name: 'New revision' })).toBeNull()
+    expect(within(panel).queryByTestId('partly-fulfilled')).toBeNull()
+  })
+
   it('locks the approval for a settled item', async () => {
     state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
     render(ORDER_ACCEPTED, ITEM_APPROVED)

@@ -1062,6 +1062,30 @@ describe('design revisions (#5280)', () => {
     )
   })
 
+  it('names item_partly_fulfilled in the after-acceptance revision, and order_get passes `stale` through (#5592, #5598)', async () => {
+    const revise = tool('order_item_revision_add_after_acceptance')
+    expect(revise.description).toContain('`item_partly_fulfilled` once an attempt of it is accepted')
+    expect(revise.description).toContain('cancel the item and add one with the new design')
+    // order_item_fulfil tells the model that order_get marks an attempt of the old design.
+    expect(tool('order_item_fulfil').description).toContain('order_get marks such an attempt `stale: true`')
+    const attempts = [
+      { id: 'f1', attempt: 1, purpose: 'production', accepted_at: null, stale: true },
+      { id: 'f2', attempt: 2, purpose: 'production', accepted_at: null, stale: false },
+    ]
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({ order: { id: ORDER }, items: [{ id: ITEM, fulfilments: attempts }] }),
+      ),
+    )
+    const read = firstText(await tool('order_get').execute({ order_id: ORDER }, ctx())) as {
+      items: { fulfilments: { id: string; stale: boolean }[] }[]
+    }
+    expect(read.items[0]!.fulfilments.map((f) => [f.id, f.stale])).toEqual([
+      ['f1', true],
+      ['f2', false],
+    ])
+  })
+
   it('tiers the revision tools', () => {
     expect(tool('order_item_revision_send').risk).toBe('outward')
     expect(tool('order_item_revision_add').risk).toBe('write')
