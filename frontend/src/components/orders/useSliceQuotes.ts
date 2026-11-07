@@ -293,7 +293,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     const failedOf = () =>
       (failures ??= api.failedQuotes(items).catch((cause: unknown) => {
         // `failedQuotes` catches each chunk's failed request itself (#5599), so this runs only
-        // on an unexpected throw outside the request, such as a malformed `created_at`.
+        // on an unexpected throw outside the request, such as a page row without a `subject`.
         console.debug('could not read the failed slice quotes; the items show none', cause)
         return new Map<string, Activity>()
       }))
