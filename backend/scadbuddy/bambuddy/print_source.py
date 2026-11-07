@@ -492,7 +492,7 @@ class PrintPipeline:
                 self._part_slots_refused = refused
             self._part_slots_read = True
         if self._part_slots_refused is not None:
-            raise self._part_slots_refused
+            raise self._part_slots_refused.with_traceback(None)
         return self._part_slots
 
     async def recorded_slice(
