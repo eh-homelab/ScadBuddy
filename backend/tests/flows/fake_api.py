@@ -103,6 +103,16 @@ class FakeApi:
         return JSONResponse({"id": f"out-{body['job_id']}"}, status_code=201)
 
     async def operation(self, request: Request) -> JSONResponse:
+        if request.path_params["op"] == "op-broken":
+            # A failure no refusal names (#4252): it may have failed past the run's start.
+            return JSONResponse(
+                {
+                    "id": "op-broken",
+                    "kind": "order_item_print",
+                    "status": "failed",
+                    "error": {"type": "about:blank", "detail": "attaching the run failed"},
+                }
+            )
         return JSONResponse(
             {"id": "op-1", "kind": "output_create", "status": "succeeded", "result": {"id": "o-9"}}
         )
@@ -131,6 +141,11 @@ class FakeApi:
                 409,
                 "item stale's quote no longer stands",
                 "https://scadbuddy.dev/problems/orders/requote_needed",
+            )
+        if request.path_params["item_id"] == "broken":
+            return JSONResponse(
+                {"id": "op-broken", "kind": "order_item_print", "status": "running"},
+                status_code=202,
             )
         run_id = f"run-{request.headers['Idempotency-Key']}"
         self.runs.setdefault(run_id, {"id": run_id, "status": "running", "may_have_queued": False})

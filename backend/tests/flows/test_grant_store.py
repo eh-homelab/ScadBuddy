@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 
 from scadbuddy.flows.grants import (
@@ -19,6 +20,7 @@ from scadbuddy.flows.grants import (
 )
 from scadbuddy.flows.store import FlowStore, GrantStateError
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, ProjectionWrite
 from tests.flows.flows_support import define
 
@@ -225,6 +227,37 @@ async def test_a_lookup_that_fails_is_outside(store: FlowStore) -> None:
 
     verdict = await match(store, run_id, "flow:r:w:0", facts_of=failing)
     assert isinstance(verdict, Outside) and "OSError" in verdict.reason
+    assert await store.grant_uses(run_id) == []
+
+
+async def test_a_line_item_not_on_its_order_goes_to_a_person(store: FlowStore) -> None:
+    """#4252 (review of #5645): an `order_item_id` the named order lacks fails the facts
+    lookup by name, which leaves the call outside every grant, for a person."""
+    run_id = await run_row(store)
+    await store.insert_grant(
+        run_id,
+        spec({"fn": "queue_print", "orders": "any"}),
+        status="approved",
+        requested_by={"kind": "browser"},
+    )
+
+    def api(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": [{"id": "i1", "quantity": 1}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api), base_url="http://a") as c:
+        grants = FlowGrants(store, c, None)
+        verdict = await match_grant(
+            store,
+            grants.facts_of,
+            hash_of,
+            run_id=run_id,
+            request_id="flow:r:w:gone",
+            fn="queue_print",
+            tool=None,
+            args={"source": {"order_id": "ord1", "order_item_id": "i9"}, "request": {}},
+            now=datetime.now(UTC),
+        )
+    assert isinstance(verdict, Outside) and "LookupError" in verdict.reason
     assert await store.grant_uses(run_id) == []
 
 

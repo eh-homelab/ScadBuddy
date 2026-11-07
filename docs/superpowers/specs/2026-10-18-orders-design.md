@@ -938,11 +938,11 @@ in Code Mode over the host functions, does what a person would:
 
 ```python
 ev = trigger()                       # OrderChanged, status "accepted" by the trigger's match
-order = tool("order_get", {"id": ev.order_id})
+order = tool("order_get", {"order_id": ev.order_id})
 for item in order["items"]:
     if item["status"] != "approved":
         continue
-    request = print_request(item)   # the dialog's body from remembered choices (as built)
+    request = print_request(item)   # a helper the built-in will define: the dialog's body
     source = {"order_id": order["id"], "order_item_id": item["id"]}
     out = queue_print(source, request)   # §5.4: the accepted quote's file
     if out["problem"] == "requote_needed":   # a refusal: status "refused", its name in problem
@@ -980,10 +980,13 @@ What this relies on, and what the design adds for it:
   As built (#4252): the source is `{"order_id", "order_item_id"}` (the item's route is
   under its order, and the grant's `orders` bound reads the order from the source). The
   request is the print dialog's body (`filament_plan`, `choices`, ...), as
-  `order_item_print` takes it, since a quote does not store the choices; the built-in
-  flow builds it from the model's remembered print choices. A refusal before anything
-  printed is `status` `refused` with `error` the problem's detail and `problem` the last
-  segment of its `type` (`requote_needed`, `order_on_hold`, `needs_spool_choice`, ...).
+  `order_item_print` takes it, since a quote does not store the choices; a later PR of
+  #4252 builds the built-in flow, which will make it from the model's remembered print
+  choices. A refusal before anything printed is `status` `refused` with `error` the
+  problem's detail and `problem` the last segment of its `type` (`requote_needed`,
+  `order_on_hold`, `needs_spool_choice`, ...); an operation that failed with no named
+  problem is `failed` with `may_have_queued`, since it may have failed after its run
+  started.
 - A person is asked only where the grant does not cover the call: `queue_print` is
   covered by the trigger's standing grant (`printers`, `max_prints`, `max_filament_g`,
   F13), and the order tools that are `outward` (§7.3: `order_accept`,

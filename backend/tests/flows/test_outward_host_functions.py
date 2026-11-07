@@ -117,6 +117,23 @@ async def test_a_line_items_print_follows_its_run_and_a_stale_quote_is_an_outcom
     assert list(api.runs) == [f"run-{key}"]
 
 
+async def test_a_line_items_print_that_failed_unnamed_may_have_queued(
+    outward: Outward, api: FakeApi
+) -> None:
+    """Review of #5645: an operation that failed with no named refusal may have failed
+    after its run started, so the outcome is `failed` and `may_have_queued`, never
+    `refused`."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'broken'}}, {PLAN!r})",
+            "return [a['status'], a['may_have_queued'], a['problem'], a['error']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['failed', True, None, 'attaching the run failed']", run.result
+
+
 def test_a_refusals_problem_is_the_name_its_type_ends_in() -> None:
     """Any route's named problem reaches a script by name, an order's and the print
     route's alike; a plain one has none."""

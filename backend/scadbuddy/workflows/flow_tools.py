@@ -519,9 +519,18 @@ async def _item_print(
             )
             if operation["status"] == "failed":
                 error = operation.get("error") or {}
-                raise RouteRefusedError(
-                    error.get("detail") or "the print did not start", error.get("type")
-                )
+                detail = error.get("detail") or "the print did not start"
+                if problem_name(error.get("type")) is None:
+                    # No named refusal (`requote_needed`, ...): it may have failed after
+                    # the run started, so the script must not take it as nothing printed.
+                    return PrintOutcome(
+                        run_id="",
+                        status="failed",
+                        may_have_queued=True,
+                        error=detail,
+                        narrowed_by=narrowed_by,
+                    )
+                raise RouteRefusedError(detail, error.get("type"))
             attempt = operation["result"] or {}
     except RouteRefusedError as refused:
         return PrintOutcome(
