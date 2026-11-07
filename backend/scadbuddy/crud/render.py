@@ -10,10 +10,15 @@ activities call (accept, claims, `project`), with the same names, signatures and
 answers. Every write but the finish is natural (plan D5): sent again after a lost
 answer, the route answers as it did the first time. The finish sends an
 ``Idempotency-Key`` of its own, so a resend replays whether this call settled the row.
+
+`RemoteBlobRefs` and `RemoteGeometryIndex` are `store/refs.py` `BlobRefs.add` and
+`store/geometry.py` `GeometryIndex` (get, put, forget) over the routes, with the same
+names, signatures and answers. Every write is natural.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Callable
@@ -28,6 +33,9 @@ from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
 from scadbuddy.store.bambuddy import StoreSettingsSource
+from scadbuddy.store.geometry import GeometryRow
+
+logger = logging.getLogger(__name__)
 
 BASE = f"/api/v1{PREFIX}/render"
 #: `api/crud_render.py` `QUEUE_FULL`.
@@ -164,6 +172,66 @@ class RemoteJobProjection:
                 raise JobNotFoundError(job_id) from error
             raise
         return Job.model_validate(response.json())
+
+
+class RemoteBlobRefs:
+    """The render worker holds blobs for its jobs only: the route refuses any other
+    holder kind (a 403 ``holder-kind``) and a holder that is no render job (a 404)."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+        """Bounded as a `project` write: `project` holds a done job's blobs inside its
+        10 s attempt. A job that is gone (pruned while it ran) is no refusal: the SQL
+        write held a blob for any holder id, and the sweep dropped that orphan ref, so a
+        ref for it holds nothing and the render goes on."""
+        body = {"key": key, "holder_kind": holder_kind, "holder_id": holder_id}
+        try:
+            self._client.request(
+                "POST",
+                f"{BASE}/blob-refs",
+                json=body,
+                timeout=PROJECT_POOL_TIMEOUT,
+                budget=PROJECT_BUDGET,
+            )
+        except CrudRefusedError as error:
+            if error.status != 404:
+                raise
+            logger.warning(
+                "no render job holds this blob: the job is gone",
+                extra={"job_id": holder_id, "key": key},
+            )
+
+
+class RemoteGeometryIndex:
+    """A hint, as `GeometryIndex` is: each call has the client's own budget, as the SQL
+    store's waited the pool's default for a connection."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    def get(self, geometry_key: str) -> GeometryRow | None:
+        response = self._client.request("GET", f"{BASE}/geometry/{_part(geometry_key)}")
+        body = response.json()
+        if body is None:
+            return None
+        return GeometryRow(body["piece_key"], list(body["colours"]), dict(body["main"]))
+
+    def put(
+        self, geometry_key: str, piece_key: str, colours: list[str], main: dict[str, Any]
+    ) -> None:
+        self._client.request(
+            "PUT",
+            f"{BASE}/geometry/{_part(geometry_key)}",
+            json={"piece_key": piece_key, "colours": colours, "main": main},
+        )
+
+    def forget(self, geometry_key: str, piece_key: str) -> None:
+        self._client.request(
+            "DELETE",
+            f"{BASE}/geometry/{_part(geometry_key)}?piece_key={_part(piece_key)}",
+        )
 
 
 def _part(value: str) -> str:

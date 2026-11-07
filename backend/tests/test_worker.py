@@ -66,7 +66,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.guard import CRUD_HEADERS
-from scadbuddy.crud.render import RemoteJobProjection
+from scadbuddy.crud.render import RemoteBlobRefs, RemoteGeometryIndex, RemoteJobProjection
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
@@ -507,7 +507,8 @@ async def test_a_stop_ends_the_render_workers_first_settings_read(
     async def answer(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
         if request.url.path.endswith("/areas"):
-            return httpx.Response(200, json={"areas": ["settings", "jobs"]}, headers=CRUD_HEADERS)
+            areas = {"areas": ["settings", "jobs", "refs"]}
+            return httpx.Response(200, json=areas, headers=CRUD_HEADERS)
         await asyncio.Event().wait()  # the settings never come
         raise AssertionError("unreachable")
 
@@ -2399,8 +2400,15 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     """`build_worker_deps` on the default store settings (the local store), read once."""
     source, current = StoreSettingsSource(), RenderStoreSettings()
     source.seed(current)
-    jobs = RemoteJobProjection(static_render_crud().blocking())
-    return worker_module.build_worker_deps(settings, source, current, jobs=jobs)
+    remote = static_render_crud().blocking()
+    return worker_module.build_worker_deps(
+        settings,
+        source,
+        current,
+        jobs=RemoteJobProjection(remote),
+        refs=RemoteBlobRefs(remote),
+        geometry=RemoteGeometryIndex(remote),
+    )
 
 
 class _RecordingPool(PgPool):
@@ -2487,22 +2495,27 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
         assert checkout.read_text() == "// std\n"
     finally:
         await store.aclose()
-        deps.refs.pool.close()
+        assert deps.pool is not None
+        deps.pool.close()
 
 
 @pytest.mark.requires_postgres
 async def test_the_render_workers_job_rows_go_through_the_api(
     settings: Settings, pg_pool: PgPool, tmp_path: Path
 ) -> None:
-    """#5298: the worker writes no job row, event or activity row over SQL; the API's
-    projection writes them, activity included (`tests/crud/test_crud_render_jobs.py`)."""
+    """#5298: the worker writes no job row, event, activity row, blob ref or piece
+    geometry over SQL; the API writes them (`tests/crud/test_crud_render_jobs.py`,
+    `tests/crud/test_crud_render_refs.py`)."""
     cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
     deps, store = _built(cfg)
     try:
         assert isinstance(deps.projection, RemoteJobProjection)
+        assert isinstance(deps.refs, RemoteBlobRefs)
+        assert isinstance(deps.geometry, RemoteGeometryIndex)
     finally:
         await store.aclose()
-        deps.refs.pool.close()
+        assert deps.pool is not None
+        deps.pool.close()
 
 
 @pytest.mark.parametrize(

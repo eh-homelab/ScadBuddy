@@ -34,13 +34,10 @@ RENDER_ROLE = "scadbuddy_render"
 RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # No `render_jobs`, `events` or `activity`: the job's row, its job.* events and its
     # activity row go through the API's CRUD routes (#5298, `crud/render.py`
-    # `RemoteJobProjection`). A role granted them before keeps them until #5298 Task 22
+    # `RemoteJobProjection`). Nor `blob_refs` or `piece_geometry`: a finished job's
+    # blob refs and a finished piece's geometry go through them too (`RemoteBlobRefs`,
+    # `RemoteGeometryIndex`). A role granted them before keeps them until #5298 Task 22
     # revokes them.
-    # A finished job's blobs (`store/refs.py` `add`).
-    "blob_refs": ("INSERT",),
-    # A finished piece's geometry (`store/geometry.py`): read before rendering, written
-    # by `finish_piece`, and forgotten when the piece it names is gone.
-    "piece_geometry": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
     # object is gone.
     "store_blobs": ("SELECT", "INSERT", "UPDATE", "DELETE"),
