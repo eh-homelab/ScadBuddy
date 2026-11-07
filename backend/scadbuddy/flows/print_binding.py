@@ -108,7 +108,15 @@ async def bind_call(
         # #5352: the call asked for Bambuddy's queue, so the run goes through Bambuddy.
         summary = f"Prints on {row.name} (Bambuddy printer {row.bambuddy_printer_id})"
     else:
-        summary = f"Prints on {row.name}{await _path_of(row, native)}"
+        lan = await _lan_of(row, native)
+        if lan is False and args.get("path") == "native":
+            # #5602: the run refuses it (`print_run.LAN_PATH_REFUSAL`): nothing goes out.
+            summary = (
+                f"Refused: {row.name} prints through Bambuddy (Bambuddy printer"
+                f" {row.bambuddy_printer_id}), so it cannot print over the LAN as the call asks"
+            )
+        else:
+            summary = f"Prints on {row.name}{_path_named(row, lan)}"
     if "printer_id" in args:
         # The script sent the pair: bound as sent. The agent refuses a pair that disagrees.
         return BoundCall(args, summary)
@@ -116,16 +124,20 @@ async def bind_call(
     return BoundCall({**args, "printer_id": linked}, summary)
 
 
-async def _path_of(row: PrinterRow, native: NativeCheck | None) -> str:
-    """How a linked row's line names the path its run takes."""
+async def _lan_of(row: PrinterRow, native: NativeCheck | None) -> bool | None:
+    """Whether a run on a linked row goes over the LAN; None when it cannot be read."""
     if native is None:
-        return ""
+        return None
     try:
-        lan = await native(row.id)
+        return await native(row.id)
     except Exception:
         # Only the line's wording: the binding stands, and the line says no path.
         logger.warning("could not read whether a run on a printer goes over the LAN", exc_info=True)
-        return ""
+        return None
+
+
+def _path_named(row: PrinterRow, lan: bool | None) -> str:
+    """How a linked row's line names the path its run takes."""
     if lan is None:
         return ""
     return " over the LAN" if lan else f" (Bambuddy printer {row.bambuddy_printer_id})"

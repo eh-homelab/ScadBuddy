@@ -45,7 +45,7 @@ import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
-import { lanHonours, resolveOptions, type OptionName, type OptionValue } from '../lib/printOptions'
+import { lanClearedNotice, lanHonours, resolveOptions, type OptionName, type OptionValue } from '../lib/printOptions'
 import {
   attachPrintToProject,
   optionsSubject,
@@ -519,15 +519,26 @@ export function PrintPicker({
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /** #5602 — the values the LAN route cleared, kept to show and to put back off it. */
+  const [lanCleared, setLanCleared] = useState<PrintOptions>({})
   // #5352 — on a native route the LAN refuses a calibration value it cannot honour, so
   // one this print set (before the route turned native, or from a seed) is dropped.
+  // #5602 — the dialog says so, and a switch back to a Bambuddy printer puts each back,
+  // unless the user chose that option again since.
   useEffect(() => {
-    if (!native) return
-    const kept = Object.entries(options).filter(([name, value]) =>
-      lanHonours(name as OptionName, (value ?? null) as OptionValue),
-    )
-    if (kept.length !== Object.keys(options).length) setOptions(Object.fromEntries(kept) as PrintOptions)
-  }, [native, options])
+    if (!native) {
+      if (Object.keys(lanCleared).length === 0) return
+      setOptions((current) => ({ ...lanCleared, ...current }))
+      setLanCleared({})
+      return
+    }
+    const honoured = (name: string, value: unknown) => lanHonours(name as OptionName, (value ?? null) as OptionValue)
+    const dropped = Object.entries(options).filter(([name, value]) => !honoured(name, value))
+    if (dropped.length === 0) return
+    setLanCleared((cleared) => ({ ...cleared, ...Object.fromEntries(dropped) }))
+    setOptions(Object.fromEntries(Object.entries(options).filter(([name, value]) => honoured(name, value))))
+  }, [native, options, lanCleared])
+  const lanClearedText = lanClearedNotice(lanCleared)
   /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
   // Memoised: it is a dependency of the run and of the background analysis.
   // Seeded only while it was never chosen. `null` is the user handing it back to the
@@ -934,6 +945,7 @@ export function PrintPicker({
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
+    setLanCleared({})
     setSupports(null)
     setPrimeTower(null)
     resetProfiles()
@@ -1285,6 +1297,7 @@ export function PrintPicker({
       changeQuality({ tier: seedChoices.tier ?? null, processName: seedChoices.process_name ?? null })
     }
     setOptions(seed.options ?? {})
+    setLanCleared({})
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
     // A step's own seed is its sequence, Default included; another step's names one only
     // when it has one, and otherwise leaves the subject's remembered one (#4970).
@@ -1417,6 +1430,7 @@ export function PrintPicker({
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
+    setLanCleared({})
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
@@ -1965,6 +1979,11 @@ export function PrintPicker({
                     </p>
                   )}
 
+                  {!handing && native && lanClearedText !== null && (
+                    <p className="text-sm text-muted-foreground" role="status" data-testid="print-lan-cleared">
+                      {lanClearedText}
+                    </p>
+                  )}
                   {/* #3635 — Simple mode shows no Options, but never hides a remembered
                       one that holds the job. */}
                   {!handing && !picker.advanced && (

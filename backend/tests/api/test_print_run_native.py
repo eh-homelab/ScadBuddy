@@ -26,6 +26,12 @@ from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.context import AnalysisContext
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, change
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.options import (
+    LAN_CALIBRATION_API_HINT,
+    LAN_CALIBRATION_PROBLEM,
+    PrintOptions,
+    lan_calibration_refusal,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
@@ -754,3 +760,54 @@ def test_an_analysis_asked_through_bambuddy_reads_bambuddy(
         )
         assert asked.status_code == 200, asked.text
         assert _bambuddy_calls() > before
+
+
+def test_a_calibration_over_the_lan_is_refused_in_words_for_its_caller(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,
+    tmp_path: Path,
+    library: FakeLibrary,
+) -> None:
+    """#5602: the run's 422 for a calibration the LAN cannot set. The print dialog's
+    request (``X-ScadBuddy-Request: 1``) gets the Settings wording alone; a caller of the
+    API also gets `path: "bambuddy"`. The dialog's background slice is refused too."""
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        output_id = prepared(client, model)
+        row = _lan_routed(client)
+        request = {k: v for k, v in body().items() if k != "printer_id"}
+        asked = {**request, "printer": row, "options": {"flow_cali": "on"}}
+        refusal = lan_calibration_refusal(PrintOptions.model_validate(asked["options"]))
+        assert refusal is not None
+
+        api = client.post(
+            f"/api/v1/print/outputs/{output_id}/run", json={**asked, "request_id": "api"}
+        )
+        assert api.status_code == 422, api.text
+        assert api.json()["type"] == LAN_CALIBRATION_PROBLEM
+        assert api.json()["detail"] == refusal + LAN_CALIBRATION_API_HINT
+        assert 'path "bambuddy"' in api.json()["detail"]
+
+        page = client.post(
+            f"/api/v1/print/outputs/{output_id}/run",
+            json={**asked, "request_id": "page"},
+            headers={"X-ScadBuddy-Request": "1"},
+        )
+        assert page.status_code == 422, page.text
+        assert page.json()["detail"] == refusal
+        assert "path" not in page.json()["detail"]
+
+        sliced = client.post(
+            f"/api/v1/print/outputs/{output_id}/preview-slice",
+            json=asked,
+            headers={**press(), "X-ScadBuddy-Request": "1"},
+        )
+        if sliced.status_code == 202:
+            op = follow_operation(client, sliced.json(), timeout=60, poll=0.1)
+            assert op["status"] == "failed", op
+            problem = op["error"]
+        else:
+            problem = sliced.json()
+        assert (problem["status"], problem["detail"]) == (422, refusal), problem
+        assert library.sliced_names == []

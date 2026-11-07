@@ -97,7 +97,11 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan_inputs
-from scadbuddy.bambuddy.options import PrintOptions, lan_calibration_refusal
+from scadbuddy.bambuddy.options import (
+    LAN_CALIBRATION_PROBLEM,
+    PrintOptions,
+    lan_calibration_refusal,
+)
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
     not_resliced,
@@ -715,8 +719,8 @@ class RunRefusalError(ApiError):
     through as an :class:`ApiError` of the same status: the check says this one before
     Print, and lets that one fail the check as an outage."""
 
-    def __init__(self, detail: str) -> None:
-        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
+    def __init__(self, detail: str, *, type_: str = "about:blank") -> None:
+        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail, type_=type_)
 
 
 class PrintCheck(BaseModel):
@@ -2007,13 +2011,21 @@ LAN_PATH_REFUSAL = (
 )
 
 
-def asked_path_refusal(request: PrintRunRequest, native: bool) -> str | None:
+def asked_path_problem(request: PrintRunRequest, native: bool) -> RunRefusalError | None:
     """Why a run whose route is ``native`` (or not) refuses ``request`` (#5352): it asked
     for the LAN and would not go over it, or it goes over the LAN and its own options set
-    a calibration only Bambuddy's queue takes. ``None`` when neither."""
+    a calibration only Bambuddy's queue takes (``LAN_CALIBRATION_PROBLEM``, #5602).
+    ``None`` when neither."""
     if request.path == "native" and not native:
-        return LAN_PATH_REFUSAL
-    return lan_calibration_refusal(request.options) if native else None
+        return RunRefusalError(LAN_PATH_REFUSAL)
+    refusal = lan_calibration_refusal(request.options) if native else None
+    return None if refusal is None else RunRefusalError(refusal, type_=LAN_CALIBRATION_PROBLEM)
+
+
+def asked_path_refusal(request: PrintRunRequest, native: bool) -> str | None:
+    """:func:`asked_path_problem`'s text, as the dialog's check lists it."""
+    problem = asked_path_problem(request, native)
+    return None if problem is None else problem.detail
 
 
 async def ensured_route(
@@ -2190,7 +2202,7 @@ async def prepare_run(
             raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
         refusal = lan_calibration_refusal(request.options)
         if refusal is not None:
-            raise RunRefusalError(refusal)
+            raise RunRefusalError(refusal, type_=LAN_CALIBRATION_PROBLEM)
         if request.folder_id is not None:
             await require_native_folder(native, request.folder_id)
     elif request.folder_id is not None:

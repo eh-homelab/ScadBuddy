@@ -117,6 +117,19 @@ before. The refusal is in `prepare_run`, in the dialog's check (`check_print`,
 `asked_path_refusal`) and in the run's `print_check` activity, before anything is
 recorded.
 
+The refusal's problem type is `options.LAN_CALIBRATION_PROBLEM` (#5602). Its text names
+the Settings > Printers control, which the dialog shows as it is. For a caller of the API
+or the agent, the print route adds one sentence, `LAN_CALIBRATION_API_HINT`: send
+`path: "bambuddy"` for this one print (`api/printing.py` `_answered`). The route tells
+the two apart with `asked_by_api`: an agent's call names its author (`core/authorship.py`),
+and the page sends `X-ScadBuddy-Request: 1` on every request
+(`frontend/src/lib/requestHeader.ts`). When the route turns native, the dialog shows
+which values it cleared ("Flow calibration On was cleared: the LAN cannot set it."). If
+the user then picks a Bambuddy printer in the same dialog, each value comes back, unless
+the user set that option again in the meantime (`PrintPicker` `lanCleared`). A flow's
+approval line for a `path: "native"` call on a printer that prints through Bambuddy
+says "Refused" (`flows/print_binding.py` `bind_call`).
+
 Every reader that takes the request judges the route as the run does. The dialog's
 checks (`POST /print/outputs/{id}/check`, `POST /print/library/{id}/check`) pass `path` to
 `dialog_route`: with `bambuddy` it answers `None`, so the check builds a client and is
