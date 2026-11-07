@@ -8,6 +8,9 @@ view (`grant_caller_views`). A worker on its own role never migrates: it waits u
 API has migrated and granted (`open_for_caller`), while a worker on the API's own role
 (the deployment before it makes the roles) migrates as it always did.
 
+The projects worker has no list and no role: it holds no database (#5298), and the API
+takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`).
+
 A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
 its list.
@@ -36,15 +39,16 @@ Grants = Mapping[str, tuple[str, ...]]
 _ALL = ("SELECT", "INSERT", "UPDATE", "DELETE")
 _READ = ("SELECT",)
 
-#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. Its
-#: `settings` reads are the whole snapshot (the Bambuddy key among them), and a printer
-#: merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `ensure_bambuddy`)
+#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. It reads
+#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route), but a
+#: printer merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `ensure_bambuddy`)
 #: rewrites every table `PRINTER_REFERENCES` names, `settings` and `activity` included.
 PRINT_GRANTS: Grants = {
-    # The settings snapshot (`library/settings_store.py` `snapshot`), and the merge's
-    # rewrite of a printer's stored choices (`printers/store.py`).
+    # The merge's rewrite of a printer's stored choices and plates (`printers/store.py`
+    # `_merge`) until #5298 Task 29. The worker reads the settings through the API's CRUD
+    # route (`crud/print.py`, #5298), so `model_print_choices` is gone from the list; an
+    # existing role keeps it until the revoke.
     "settings": ("SELECT", "UPDATE"),
-    "model_print_choices": _READ,
     "printer_bed_types": ("SELECT", "UPDATE", "DELETE"),
     # Whether the API has migrated (`wait_until_ready`).
     "scadbuddy_migrations": _READ,
@@ -96,14 +100,6 @@ PRINT_SEQUENCES = (
     "native_slices_id_seq",
 )
 
-#: What the projects worker (`--queue projects`, flow runs) touches of the backend's:
-#: nothing. It holds no database (#5298): its flow runs, decisions, grants, operations
-#: and payload keys go through the API's CRUD routes (`crud/projects.py`,
-#: `crud/operations.py`). An existing role keeps the grants it held: they are never
-#: revoked from a live role here, but by the role's revoke (#5298, plan 2026-11-06
-#: Task 11).
-PROJECTS_GRANTS: Grants = {}
-
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads
 #: flow runs and their decisions, and its session files' trigger
 #: (`ai_session_files_hold_blob`, not SECURITY DEFINER) holds and drops `blob_refs`.
@@ -119,7 +115,6 @@ AGENT_GRANTS: Grants = {
 GRANTS: Mapping[ServiceCaller, Grants] = {
     "agent": AGENT_GRANTS,
     "print": PRINT_GRANTS,
-    "projects": PROJECTS_GRANTS,
 }
 SEQUENCES: Mapping[ServiceCaller, tuple[str, ...]] = {"print": PRINT_SEQUENCES}
 

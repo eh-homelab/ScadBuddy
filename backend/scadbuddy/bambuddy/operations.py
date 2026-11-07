@@ -51,7 +51,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.virtual_printers import virtual_printer_kinds
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.reads import NativeLibraries, no_native_copies, reads_for
@@ -95,7 +95,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
 
 def bambuddy_kinds_over(
     *,
-    settings_store: SettingsStore,
+    settings_store: SettingsReader,
     outputs: OutputReader,
     uploads: BambuddyUploadStore,
     links: PrintLinkStore,

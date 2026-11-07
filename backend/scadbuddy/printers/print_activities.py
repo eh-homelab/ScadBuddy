@@ -60,7 +60,7 @@ from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
 from scadbuddy.bambuddy.print_run import LAN_NEEDS_KEK
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.printers.ams_mapping import ams_mapping
@@ -182,7 +182,7 @@ def project_filament_count(file: IO[bytes]) -> int:
 @dataclass
 class LanDeps:
     printers: PrinterStore
-    settings_store: SettingsStore
+    settings_store: SettingsReader
     #: Where a native library file is read (#3827); ``None`` reads Bambuddy's only.
     library: LibraryReads | None = None
     #: A native slice's blob (plan 2026-10-16-native-slicer-rust-worker): the API's
@@ -197,6 +197,9 @@ class LanDeps:
     reports: PrinterReportStore | None = None
     #: Seconds between ``lan_wait``'s reads of the report.
     wait_poll: float = LAN_WAIT_POLL
+    #: Where a start saves what it uses of ScadBuddy's own spools (#4643); ``None``
+    #: saves nothing.
+    native_spools: NativeSpoolStore | None = None
 
 
 class LanActivities:
@@ -356,10 +359,10 @@ class LanActivities:
         (`spools.spool_providers.native_use_hook`). Advisory, never raising."""
         run_id = input.uploaded.run_id
         uses = spool_uses(input.spools, input.uploaded.grams_by_slot)
-        if run_id is None or not uses:
+        store = self.d.native_spools
+        if run_id is None or not uses or store is None:
             return
         try:
-            store = NativeSpoolStore(self.d.settings_store.pool)
             await asyncio.to_thread(store.record_uses, run_id, input.subtask_name, uses)
         except Exception as error:
             logger.warning(

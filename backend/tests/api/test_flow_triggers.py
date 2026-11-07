@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,12 +25,14 @@ from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.core.events import EventBus, JobEvent, VersionCommitted
+from scadbuddy.core.events import EventBus, JobEvent, OrderChanged, VersionCommitted
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.fire import ensure_trigger_schedules
 from scadbuddy.workflows.flow_triggers import schedule_id
 from tests.api.conftest import FakeAgentTools
+from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, until
+from tests.api.test_orders import create_order
 from tests.support.temporal import WorkflowReaper
 
 __all__ = ["settings"]
@@ -666,6 +669,10 @@ READS_EVENT = script(
     "    return [t['kind'], t['slug'], t['commit']]",
     "if t['kind'] == 'render.finished':",
     "    return [t['kind'], t['slug'], t['job_id']]",
+    "if t['kind'] == 'order.changed':",
+    "    return [t['kind'], t['order_id'], t['status'], t['customer_id']]",
+    "if t['kind'] == 'order_item.changed':",
+    "    return [t['kind'], t['item_id'], t['status']]",
     "return [t['kind'], t['slug'], t['run_id']]",
 )
 
@@ -695,6 +702,55 @@ def test_a_run_reads_the_event_that_started_it(
     assert results[changed["id"]] == "result: ['model.changed', 'box', 'c9']"
     assert results[rendered["id"]] == "result: ['render.finished', 'lid', 'j9']"
     assert results[scheduled["id"]] == "result: 'none'"
+
+
+@pytest.mark.usefixtures("triggers")
+def test_an_order_trigger_runs_on_the_status_it_matches_with_the_customer_from_the_row(
+    client: TestClient, bus: EventBus, pg_conninfo: str
+) -> None:
+    """#4252 (orders spec §7.1): `order.changed` narrowed by `match`; one fire per
+    status change, however often the order is edited in it; the customer read from the
+    row."""
+    customer = create_customer(client)
+    order = create_order(client, customer["id"])
+    definition = register(client, READS_EVENT)
+    accepted = create(
+        client,
+        definition["id"],
+        schedule=None,
+        event={
+            "kind": "order.changed",
+            "subject": {"kind": "order", "id": order["id"]},
+            "match": {"status": ["accepted"]},
+        },
+    )
+    assert accepted["event"] == {
+        "kind": "order.changed",
+        "subject": {"kind": "order", "id": order["id"]},
+        "match": {"status": ["accepted"]},
+    }
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("UPDATE orders SET status = 'accepted' WHERE id = %s", (order["id"],))
+    bus.publish(OrderChanged(order_id=order["id"], status="accepted"))
+    bus.publish(OrderChanged(order_id=order["id"], status="accepted"))  # an edit in it
+    fired = decided(client, accepted["id"], 1)
+    assert fired["outcome"] == "started", fired
+    run = until(client, fired["run_id"], lambda v: v["status"] == "succeeded")
+    expected = ["order.changed", order["id"], "accepted", customer["id"]]
+    assert run["run"]["result"] == f"result: {expected!r}"
+    assert len(view(client, accepted["id"])["fires"]) == 1
+
+
+def test_a_match_the_kind_cannot_have_is_422(client: TestClient) -> None:
+    definition = register(client, READS_EVENT)
+    response = client.post(
+        "/api/v1/flow-triggers",
+        json={
+            "definition_id": definition["id"],
+            "event": {"kind": "order.changed", "match": {"status": ["printed"]}},
+        },
+    )
+    assert response.status_code == 422, response.text
 
 
 READS_PRINT = script(

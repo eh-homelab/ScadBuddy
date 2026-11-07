@@ -63,7 +63,7 @@ from scadbuddy.slicing.profiles import (
 )
 
 if TYPE_CHECKING:
-    from scadbuddy.library.settings_store import SettingsStore
+    from scadbuddy.library.settings_store import SettingsReader
     from scadbuddy.slicing.held_presets import HeldRow
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ def native_catalogue(profiles: Profiles) -> Catalogue:
     return built
 
 
-def slices_native(store: SettingsStore) -> Callable[[], bool]:
+def slices_native(store: SettingsReader) -> Callable[[], bool]:
     """Whether ``slicer_backend`` is ``native`` now, read from ``store`` (blocking): what
     the API and the print worker give :func:`warm_catalogue`, so both read it alike."""
     return lambda: store.load().slicer_backend == "native"

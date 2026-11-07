@@ -28,7 +28,7 @@ from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy import print_run as print_run_module
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.settings_store import PrintSettings, StoredSettings
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
@@ -50,6 +50,7 @@ from scadbuddy.workflows.operation_models import (
     PreludeStep,
 )
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.crud.crud_support import static_print_crud
 from tests.slicing.conftest import PROFILES
 from tests.support.recent_runs import assert_hears, record_recent_runs
 from tests.support.temporal import temporal_client
@@ -226,7 +227,13 @@ async def test_the_print_worker_is_current_serves_a_prelude_and_stops(
     async with temporal_client() as client:
         stop = asyncio.Event()
         worker = asyncio.create_task(
-            run_print_worker(settings, stop=stop, health_port=health_socket, client=client)
+            run_print_worker(
+                settings,
+                stop=stop,
+                health_port=health_socket,
+                client=client,
+                crud=static_print_crud(),
+            )
         )
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
@@ -266,7 +273,9 @@ async def test_the_print_worker_never_drains(
     monkeypatch.setattr(worker_module, "bambuddy_worker", lambda *_a, **_k: "bambuddy")
     monkeypatch.setattr(worker_module, "follow_worker", lambda *_a, **_k: "follow")
     settings = print_settings(pg_conninfo, tmp_path, revision="b1")
-    await run_print_worker(settings, health_port=None, client=cast(Client, object()))
+    await run_print_worker(
+        settings, health_port=None, client=cast(Client, object()), crud=static_print_crud()
+    )
     assert served["drain_timeout"] is None
     assert served["deployment_name"] == PRINT_DEPLOYMENT_NAME
     assert served["workers"] == ["bambuddy", "follow"]
@@ -302,9 +311,13 @@ async def test_the_print_worker_serves_before_the_native_catalogue_is_built(
     settings = print_settings(
         pg_conninfo, tmp_path, revision="b1", slicer_profiles_dir=root, slicer_backend="native"
     )
+    # The worker reads `slicer_backend` from the API's settings, not its environment.
+    native = static_print_crud(PrintSettings(slicer_backend="native"))
     try:
         async with asyncio.timeout(30):
-            await run_print_worker(settings, health_port=None, client=cast(Client, object()))
+            await run_print_worker(
+                settings, health_port=None, client=cast(Client, object()), crud=native
+            )
     finally:
         release.set()
     assert warming == [False]

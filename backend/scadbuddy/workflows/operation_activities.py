@@ -22,7 +22,7 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.operations.kinds import (
     CHECK_ON_BAMBUDDY,
     OPERATION_RUN,
@@ -56,7 +56,7 @@ CHECK_BUDGET_SECONDS = 6.0
 
 def operation_activities(
     store: OperationStore | RemoteOperationStore,
-    settings_store: SettingsStore | None,
+    settings_store: SettingsReader | None,
     kinds: Mapping[str, OperationKind],
 ) -> list[Callable[..., Any]]:
     """``settings_store`` is None with a `RemoteOperationStore`: the API prunes past its

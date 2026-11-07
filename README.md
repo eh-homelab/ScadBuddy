@@ -595,7 +595,7 @@ store or another caller's credential:
 |---|---|---|
 | render worker | `scadbuddy_render` | `scadbuddy-render.yaml` |
 | print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
-| flow runs' worker | `scadbuddy_projects`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-projects.yaml` |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
@@ -608,7 +608,8 @@ migrates: it waits until the API has migrated and granted it. The agent's role o
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
-On 2026-11-05 the render, print and projects workers connected as their own roles, and
+On 2026-11-05 the render, print and projects workers connected as their own roles (the
+projects worker has made no connection since 2026-11-07, #5298), and
 the agent sidecar and the agent workers still connected as the owner. **The target
 (#5295) replaces these roles.** A role per caller in one database is not a boundary, so
 only the CRUD service (the API) will hold a database secret. Every other caller becomes an
@@ -944,12 +945,16 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
-- **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
-  included, are read from it on every use), `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **Environment:** `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
-  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and the Bambuddy
-  URL and key as the API has them (they only seed a database never saved). Its build id
-  is `SCADBUDDY_REVISION`, stamped in the image.
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` and `SCADBUDDY_API_INTERNAL_URL`. It reads the
+  settings, the Bambuddy key included, from the API's CRUD route
+  `GET /api/v1/internal/crud/print/settings` on every use (#5298), as the API resolves
+  them, so its own Bambuddy URL and key variables are not read. That answer is
+  `no-store`. Every other sealed setting (the render key, the S3 secret) is null in it,
+  and so is the rest of the S3 store's connection (`PRINT_UNREAD`; the fields that take
+  no null keep their defaults). The worker waits until the API lists the `settings` area before it serves. Its
+  build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
   AUTO_UPGRADE: a run moves to each new build (#2066). They were pinned, and the
