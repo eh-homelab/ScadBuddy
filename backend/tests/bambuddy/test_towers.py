@@ -86,7 +86,7 @@ def test_a_tower_the_h2c_cannot_reach_is_moved_beside_each_plates_objects(
     boxes = plate_boxes(moved).boxes
     reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
     for index, (x, y) in enumerate(_towers(moved), start=1):
-        assert tower_reaches((x, y), H2C)
+        assert tower_reaches((x, y), H2C, height=20.0)
         (low, high), (ox, oy) = boxes[index], plate_origin(index, 2, A1_MINI)
         x0, y0 = x - PRIME_TOWER_BRIM, y - PRIME_TOWER_BRIM
         footprint = Rect(x0, y0, x0 + reserved, y0 + reserved)
@@ -145,7 +145,7 @@ def test_a_file_with_no_model_settings_is_one_plate_and_still_sends(tmp_path: Pa
     """Read as every reader reads one: a single plate holding every build item."""
     bare = _without_settings(_laid_out_on_an_a1_mini(tmp_path), None)
     moved = towers_within_reach(bare, H2C)
-    assert tower_reaches(_towers(moved)[0], H2C)
+    assert tower_reaches(_towers(moved)[0], H2C, height=20.0)
 
 
 def test_objects_that_leave_no_room_keep_the_authors_tower(tmp_path: Path) -> None:
@@ -175,6 +175,48 @@ def test_objects_that_leave_no_room_keep_the_authors_tower(tmp_path: Path) -> No
     assert plate_boxes(crowded).boxes[1] is not None
 
     assert towers_within_reach(crowded, H2C) is crowded
+
+
+def _one_plate_on_the_h2c(tmp_path: Path, height: float, tower: tuple[str, str]) -> bytes:
+    body = trimesh.creation.box(extents=(30, 30, height))
+    eye = trimesh.creation.box(extents=(4, 4, 4))
+    out = tmp_path / f"tall-{height:g}.3mf"
+    write_plates_3mf(
+        [
+            PlateParts(
+                (ColourPart(1, "Body", "#D3CFB5", body), ColourPart(2, "Eye", "#27272C", eye)),
+                (1, 2),
+            )
+        ],
+        ["#D3CFB5", "#27272C"],
+        out,
+        thumbnails=None,
+        plate=H2C,
+    )
+    payload = out.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings.update(wipe_tower_x=[tower[0]], wipe_tower_y=[tower[1]], prime_tower_width="60")
+    return rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+
+
+def test_a_tall_plates_tower_at_the_front_edge_is_moved_inward(tmp_path: Path) -> None:
+    """#5545: at (145, 5) a 133 mm plate's auto brim (8 mm) reaches y -3.2; the slicer
+    refuses it with -104, "G-code outside of the printable area". The tower moves to
+    the front edge plus 2 mm plus that brim."""
+    payload = _one_plate_on_the_h2c(tmp_path, 133.0, ("145", "5"))
+
+    moved = _towers(towers_within_reach(payload, H2C))
+
+    assert moved[0][1] == 2.0 + 8.0
+    assert tower_reaches(moved[0], H2C, height=133.0)
+
+
+def test_a_short_plates_tower_at_the_front_edge_stays(tmp_path: Path) -> None:
+    """A 20 mm plate's auto brim is 1.6 mm, under the 3 mm reserved: (145, 5) fits,
+    as the 21 mm nameplate of #5545 sliced there."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("145", "5"))
+    assert towers_within_reach(payload, H2C) is payload
 
 
 def test_a_painted_mirrored_object_is_boxed(tmp_path: Path) -> None:
