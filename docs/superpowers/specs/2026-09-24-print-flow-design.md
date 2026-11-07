@@ -316,24 +316,29 @@ one that sends others is `requote_needed` (`printing.py` `_same_part_settings`).
 `PrintRunRequest.part_settings` is in `run_key` only when it sets something, so every
 older run keeps its key.
 
-The dialog sets them (#5627). In the filament step, each slot row of an output has a
-"Settings for this colour" disclosure (`components/print/PartSettingsDisclosure.tsx`). A
-library or sliced file has none. Each control opens on the process's value, which the
-check reads with the preset's other values (`PrintCheck.process_part_settings`,
-`part_settings.process_part_settings`; `None` when the preset cannot be read, and then the
-controls are empty). A value set back to the process's, or reset, is unset, and only what
-is set is sent (`lib/partSettings.ts` `sentPartSettings`). The check, the background
-slice, the run, a batch step and the quote send the same field (`sliceOverrides`), so the
-check lists a slot the output lacks. A print remembers them with the model's other choices
-(`ModelPrintChoices.part_settings`). They are kept per model only, never at the print
-options' global or printer scope: a slot number names one model's colour. A quote opens on
-the item's newest slice quote's settings. An item's print opens on the accepted quote's
-(a test print on the newest slice quote's) and sends none while they are unchanged. Other
-settings would print what was not priced, so Print waits until they are put back. An item
-print that sends `{}` also prints with the quote's (`print_body` reads it as none sent).
-The run's result records them (`PrintRunResult.part_settings`), and `GET
-/prints/{archive_id}` lists them as `part_settings`, found through the queue item's send
-and its run, so a reprint can send them again.
+The dialog sets them (#5627). In the filament step, each slot row of an output or a
+library file (#5628) has a "Settings for this colour" disclosure
+(`components/print/PartSettingsDisclosure.tsx`). A sliced file has none. Each control
+opens on the process's value. Once a slot's disclosure is open, the dialog's check asks for
+it (`?process_values=true` on `POST …/check`), and the check reads it with the preset's
+other values (`PrintCheck.process_part_settings`, `part_settings.process_part_settings`).
+A check that does not ask reads nothing more, since the read can be one more Bambuddy call.
+The value is `None` when the preset cannot be read; the controls are then empty. They stay
+off until a check that asked has answered. A value set back to the process's, or reset, is
+unset, and only what is set is sent (`lib/partSettings.ts` `sentPartSettings`). The check,
+the background slice, the run, a batch step and the quote send the same field
+(`sliceOverrides`), so the check lists a slot the file lacks. A print remembers them with
+the model's or file's other choices (`ModelPrintChoices.part_settings`, left out of the
+entry when none are set). They are kept per model or file only, never at the print options'
+global or printer scope: a slot number names one file's colour. A quote opens on the item's
+newest slice quote's settings. An item's print opens on the accepted quote's (a test print
+on the newest slice quote's) and sends none while they are unchanged. Other settings would
+print what was not priced, so Print waits until they are put back. An item print that sends
+`{}` also prints with the quote's (`print_body` reads it as none sent). The run's result
+records them (`PrintRunResult.part_settings`), and `GET /prints/{archive_id}` lists them as
+`part_settings`, found through the queue item's send and its run. Every answer gives a
+slot's settings with only what is set (`PartSettings` leaves an unset one out), so a reprint
+can send them again as they are.
 
 Bambu Studio honours them. Its 3MF loader reads every `<part>` metadata key that is not
 one of its own (name, subtype, source, matrix …) into the volume's config

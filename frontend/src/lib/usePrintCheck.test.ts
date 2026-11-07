@@ -50,7 +50,7 @@ describe('usePrintCheck', () => {
     check.mockResolvedValue(verdict('refused'))
     const { result } = renderHook(() => usePrintCheck(SOURCE, request('0.4')))
     await settle()
-    expect(check).toHaveBeenCalledWith(OUTPUT.id, request('0.4'))
+    expect(check).toHaveBeenCalledWith(OUTPUT.id, request('0.4'), false)
     expect(result.current.verdict).toEqual(verdict('refused'))
     expect(result.current.current).toBe(true)
     expect(result.current.error).toBeUndefined()
@@ -104,7 +104,7 @@ describe('usePrintCheck', () => {
     expect(result.current.verdict).toBeNull()
     expect(result.current.current).toBe(false)
     await settle()
-    expect(library).toHaveBeenCalledWith(89, request('0.4'))
+    expect(library).toHaveBeenCalledWith(89, request('0.4'), false)
   })
 
   it('reports a failed read as an error, with no verdict, and reads again on reload', async () => {

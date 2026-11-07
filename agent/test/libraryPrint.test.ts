@@ -66,11 +66,11 @@ describe('one source per call', () => {
     expect(() => t.parse({ slug: 'lid', library_file_id: FILE })).toThrow(/slug or library_file_id/)
   })
 
-  it("remember_model_print_choices keeps a model's part settings, never a library file's (#5627)", () => {
+  it("remember_model_print_choices keeps a model's or a library file's part settings (#5627, #5628)", () => {
     const t = tool('remember_model_print_choices')
     const part_settings = { '2': { top_shell_layers: 8 } }
     expect(() => t.parse({ slug: 'lid', part_settings })).not.toThrow()
-    expect(() => t.parse({ library_file_id: FILE, part_settings })).toThrow(/library file takes none/)
+    expect(() => t.parse({ library_file_id: FILE, part_settings })).not.toThrow()
   })
 })
 

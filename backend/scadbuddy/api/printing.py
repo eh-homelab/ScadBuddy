@@ -90,6 +90,7 @@ from scadbuddy.bambuddy.preview import (
     read_toolpath,
 )
 from scadbuddy.bambuddy.print_run import (
+    PROCESS_VALUES_QUERY,
     PrintCheck,
     PrintRunRequest,
     RunRoute,
@@ -1363,6 +1364,7 @@ async def post_check(
     printers: PrintersDep,
     slicing: SlicingDep,
     library: PrintLibraryDep,
+    process_values: Annotated[bool, Query(description=PROCESS_VALUES_QUERY)] = False,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -1413,6 +1415,7 @@ async def post_check(
             # A native run's check (plan 2026-10-18 D2) reads these, never `client`.
             profiles=slicing.profiles,
             native=await library.serving_native(),
+            process_values=process_values,
         )
 
 

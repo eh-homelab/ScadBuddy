@@ -15,7 +15,7 @@ import type {
   SlotChoice,
 } from '../api/types'
 import { type PlateChoice, plateFields, plateKey } from './plateChoice'
-import { sentPartSettings } from './partSettings'
+import { samePartSettings } from './partSettings'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -238,7 +238,6 @@ export function useRunPrint({
       tier,
       process_name: processName,
       print_sequence: printSequence,
-      part_settings: partSettings,
     }
     const before = {
       printer_id: last?.printer_id ?? null,
@@ -248,10 +247,10 @@ export function useRunPrint({
       tier: last?.tier ?? null,
       process_name: last?.process_name ?? null,
       print_sequence: last?.print_sequence ?? null,
-      part_settings: sentPartSettings(last?.part_settings),
     }
-    if (JSON.stringify(next) === JSON.stringify(before)) return
-    if (source) void sourceApi(source).remember(next).catch(() => undefined)
+    // #5627: the settings per slot compared by what they set, not by key order.
+    if (JSON.stringify(next) === JSON.stringify(before) && samePartSettings(partSettings, last?.part_settings)) return
+    if (source) void sourceApi(source).remember({ ...next, part_settings: partSettings }).catch(() => undefined)
   }
 
   /**

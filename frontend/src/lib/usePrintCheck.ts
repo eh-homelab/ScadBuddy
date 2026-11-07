@@ -9,6 +9,8 @@ import { useLatest } from './useLatest'
 interface Answer {
   source: string | undefined
   request: string
+  /** #5627 — the check asked for the process's part settings. */
+  processValues: boolean
   verdict: PrintCheck
 }
 
@@ -22,17 +24,21 @@ export interface PrintCheckState {
   error: Error | undefined
   /** Read the verdict again, as after a failed read. */
   reload: () => void
+  /** #5627 — `verdict` came from a check that read the process's part settings. */
+  processValuesRead: boolean
 }
 
 /**
  * #755, #760 — what the run would refuse for the print the dialog would send, read
  * before Print (`POST …/check`, the run's own pre-upload refusals). The choices
  * settle for as long as the analyzers' do before it is read. `request: null` reads
- * nothing.
+ * nothing. `processValues` (#5627) asks for the process's part settings too; asking
+ * reads again, though the request is the same.
  */
 export function usePrintCheck(
   source: PrintSource | undefined,
   request: PrintRunRequest | null,
+  processValues = false,
 ): PrintCheckState {
   const latest = useLatest(source)
   const own = sourceKey(source)
@@ -41,9 +47,9 @@ export function usePrintCheck(
   const state = useAsync<Answer | null>(async () => {
     const current = latest.current
     if (key === null || !current) return null
-    const verdict = await sourceApi(current).check(JSON.parse(key) as PrintRunRequest)
-    return { source: own, request: key, verdict }
-  }, [own, key])
+    const verdict = await sourceApi(current).check(JSON.parse(key) as PrintRunRequest, processValues)
+    return { source: own, request: key, processValues, verdict }
+  }, [own, key, processValues])
 
   // Kept across re-checks of the same source, so a change of choice does not blank the
   // verdict while the new one is on its way.
@@ -57,5 +63,6 @@ export function usePrintCheck(
     request: wanted,
     error: state.error,
     reload: state.reload,
+    processValuesRead: !state.error && answer?.processValues === true,
   }
 }

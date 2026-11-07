@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_serializer
 
 from scadbuddy.render.bambu3mf import PartOverrides
 
@@ -57,6 +57,11 @@ SparseInfillPattern = Literal[
 IroningType = Literal["no ironing", "top", "topmost", "solid"]
 
 
+def without_unset(dumped: dict[str, Any]) -> dict[str, Any]:
+    """``dumped`` without its unset (``None``) values."""
+    return {key: value for key, value in dumped.items() if value is not None}
+
+
 class PartSettings(BaseModel):
     """The process settings for the parts of one slot; each omitted one is the
     process's."""
@@ -70,6 +75,13 @@ class PartSettings(BaseModel):
     sparse_infill_density: int | None = Field(default=None, ge=0, le=100)
     sparse_infill_pattern: SparseInfillPattern | None = None
     ironing_type: IroningType | None = None
+
+    # Only the settings set (#5627): an unset one is the process's, and is left out, so
+    # what a read gives back (`get_print`, `model_choices`) is a value a request takes
+    # again, the agent's strict `part_settings` among them. A lambda, so the serializer
+    # has no return annotation: with one, pydantic gives the answer a schema of its own
+    # (`PartSettings-Output`), and the API's request and answer types would part.
+    _set_only = model_serializer(mode="wrap")(lambda self, handler: without_unset(handler(self)))
 
     def metadata(self) -> tuple[tuple[str, str], ...]:
         """Each setting sent, as the 3MF stores it, sorted by key."""

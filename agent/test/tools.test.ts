@@ -2659,6 +2659,29 @@ describe('prints (#308)', () => {
     expect(asked).toEqual(['', '?printer_media=true'])
   })
 
+  it("gives part settings print_output takes again, for an exact reprint (#5627)", async () => {
+    // As `GET /prints/{archive_id}` answers them: only the settings set
+    // (`backend/scadbuddy/bambuddy/part_settings.py` `PartSettings._set_only`).
+    const recorded = { '2': { top_shell_layers: 8, ironing_type: 'top' }, '3': { sparse_infill_density: 20 } }
+    server.use(http.get(`${BACKEND}/api/v1/prints/35`, () => HttpResponse.json({ archive_id: 35, part_settings: recorded })))
+    const read = firstText(await runTool(tool('get_print'), { archive_id: 35 }, ctx())) as { part_settings: unknown }
+    const reprint = {
+      output_id: '0123456789abcdef0123456789abcdef',
+      printer_id: 2,
+      filament_plan: { slots: [] },
+      nozzles: [{ size: '0.4' }],
+      tier: 'standard',
+      bed_type: 'Cool Plate',
+      part_settings: read.part_settings,
+    }
+    const parsed = z.object(tool('print_output').shape).safeParse(reprint)
+    expect(parsed.success).toBe(true)
+    expect(parsed.data?.part_settings).toEqual(recorded)
+    // What the record must never give back: a null for an unset setting is refused.
+    const nulls = { ...reprint, part_settings: { '2': { top_shell_layers: 8, wall_loops: null } } }
+    expect(z.object(tool('print_output').shape).safeParse(nulls).success).toBe(false)
+  })
+
   it('reads only', () => {
     expect(tool('list_prints').risk).toBe('read')
     expect(tool('get_print').risk).toBe('read')

@@ -52,6 +52,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -250,6 +251,13 @@ class BambuddyIds(BaseModel):
     printer_id: int | None = None
 
 
+def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
+    """A choices entry as stored and answered: no ``part_settings`` key for none (#5627)."""
+    if dumped.get("part_settings") is None:
+        dumped.pop("part_settings", None)
+    return dumped
+
+
 class ModelPrintChoices(BaseModel):
     """What the print dialog last chose for one model (#78). ``printer_id`` is the
     printer it printed on. ``filament_plan`` is only a plan the user moved off the
@@ -259,9 +267,9 @@ class ModelPrintChoices(BaseModel):
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
     (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
     the template's or the process's. ``part_settings`` are its slicer settings per
-    filament slot (#5627, ``bambuddy/part_settings.py``), only a model's: a library file
-    takes none. Kept per model only, never at the print options' global or printer scope,
-    since a slot number means one model's colour. All default to "nothing remembered", so
+    filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
+    (#5628). Kept per model or file only, never at the print options' global or printer
+    scope, since a slot number means one file's colour. All default to "nothing remembered", so
     a settings file written before them still loads; an empty ``nozzles`` means the
     dialog's default.
     """
@@ -289,6 +297,13 @@ class ModelPrintChoices(BaseModel):
     def _settings_set(cls, value: PartSettingsMap | None) -> PartSettingsMap | None:
         """Only slots that set something (#5627): none set is nothing remembered."""
         return normalised(value)
+
+    # `part_settings` only when some are remembered (#5627): an entry with none reads as
+    # it did before the field existed. A lambda with no return annotation, so the schema
+    # stays the model's (`part_settings.PartSettings._set_only` says why).
+    _parts_when_set = model_serializer(mode="wrap")(
+        lambda self, handler: _parts_only_when_set(handler(self))
+    )
 
     @field_validator("nozzles")
     @classmethod

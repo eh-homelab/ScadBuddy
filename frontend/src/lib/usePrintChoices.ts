@@ -144,7 +144,7 @@ export function usePrintChoices(
    * that printer's defaults instead.
    */
   const defaulted = useRef(false)
-  function seedDialog(next: ChoicesView, output: boolean, partSeedNow: PartSettingsMap | null | undefined) {
+  function seedDialog(next: ChoicesView, partSeedNow: PartSettingsMap | null | undefined) {
     const last = next.model_choices
     const remembered = last?.nozzles ?? []
     // A remembered choice wins, a Standard one included: the run still warns when the
@@ -160,7 +160,7 @@ export function usePrintChoices(
     setProcessName(nextProcess)
     setPrintSequence(nextSequence)
     const seededParts = partSeedNow === undefined ? last?.part_settings : partSeedNow
-    setPartSettings(next.sliced || !output ? {} : (sentPartSettings(seededParts) ?? {}))
+    setPartSettings(next.sliced ? {} : (sentPartSettings(seededParts) ?? {}))
     // A named process, a different flow per side and a print sequence (#4970) are
     // Advanced choices; opening in Simple would send them unseen. One flow for both is
     // Simple's own choice (#2166).
@@ -186,7 +186,7 @@ export function usePrintChoices(
           carry.markReady()
         } else if (!seeded.current) {
           seeded.current = true
-          seedDialog(next, current.kind === 'output', partSeedLatest.current)
+          seedDialog(next, partSeedLatest.current)
         } else if (defaulted.current) {
           const defaults = defaultsOf(next)
           setNozzles(defaults)

@@ -34,7 +34,6 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import MODEL_NAME
-from tests.api.test_print_part_settings import UNSET
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -1020,7 +1019,8 @@ def test_the_detail_lists_the_part_settings_its_run_set(client: TestClient, mode
 
     body = client.get("/api/v1/prints/35").json()
 
-    assert body["part_settings"] == {"2": {**UNSET, "top_shell_layers": 8}}
+    # Only what is set: a request (the agent's `print_output`) takes it as it is.
+    assert body["part_settings"] == {"2": {"top_shell_layers": 8}}
 
 
 @respx.mock

@@ -1216,10 +1216,10 @@ export const printTools: Tool[] = [
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
       'time: the printer, per-slot spools, nozzles, the quality tier or named process, the print sequence, and ' +
-      "a model's slicer settings per filament slot (`part_settings`, #5627). Replaces the entry whole: an omitted " +
+      'the slicer settings per filament slot (`part_settings`, #5627). Replaces the entry whole: an omitted ' +
       'part is forgotten, and passing nothing forgets them all (get_print_choices shows the current ' +
-      '`model_choices`). Settings per slot are kept per model only, never by set_print_options: a slot number ' +
-      "names one model's colour.",
+      '`model_choices`). Settings per slot are kept per model or library file only, never by set_print_options: ' +
+      "a slot number names one file's colour.",
     input: z
       .object({
         slug: slug.optional(),
@@ -1244,10 +1244,6 @@ export const printTools: Tool[] = [
       })
       .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
         message: 'name one: slug or library_file_id',
-      })
-      // A library file takes none (#5571): its author's parts are printed as they are.
-      .refine((o) => o.library_file_id === undefined || o.part_settings === undefined, {
-        message: 'part_settings are a model output\'s only: a library file takes none',
       }),
     risk: 'write',
     routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],

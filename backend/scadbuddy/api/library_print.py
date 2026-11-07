@@ -107,6 +107,7 @@ from scadbuddy.bambuddy.preview import (
     read_toolpath,
 )
 from scadbuddy.bambuddy.print_run import (
+    PROCESS_VALUES_QUERY,
     PrintCheck,
     PrintRunRequest,
     check_for_library,
@@ -1641,6 +1642,7 @@ async def post_library_check(
     library: PrintLibraryDep,
     printers: PrintersDep,
     slicing: SlicingDep,
+    process_values: Annotated[bool, Query(description=PROCESS_VALUES_QUERY)] = False,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550), and its
@@ -1688,4 +1690,5 @@ async def post_library_check(
                 catalogue_refresh_claim(store.defaults.database_url),
             ),
             profiles=slicing.profiles,
+            process_values=process_values,
         )

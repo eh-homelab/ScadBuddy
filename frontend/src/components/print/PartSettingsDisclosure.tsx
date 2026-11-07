@@ -16,7 +16,18 @@ type Props = {
   value: PartSettings | undefined
   /** The process's own values (the check's `process_part_settings`); `null` while unknown. */
   process: PartSettings | null
+  /** Held until a check has read the process's values. */
+  disabled?: boolean
+  /** The disclosure opened: the dialog then asks the check for the process's values. */
+  onOpen?: () => void
   onChange: (next: PartSettings) => void
+}
+
+/** A typed number as a setting: whole, within `0..max`; `null` for blank or not a number. */
+function parsed(text: string, max: number): number | null {
+  if (text.trim() === '') return null
+  const read = Math.round(Number(text))
+  return Number.isNaN(read) ? null : Math.min(max, Math.max(0, read))
 }
 
 /**
@@ -25,12 +36,25 @@ type Props = {
  * on the process's value, and only a setting changed from it is sent; a setting set back
  * to the process's value, or reset, is unset.
  */
-export function PartSettingsDisclosure({ slotId, value, process, onChange }: Props) {
+export function PartSettingsDisclosure({ slotId, value, process, disabled = false, onOpen, onChange }: Props) {
   const [open, setOpen] = useState(false)
+  /**
+   * The text of the number field being typed in, while it has the focus: a controlled
+   * field showing the setting would put the process's value back the moment it is
+   * cleared, so backspace and then a new number could not be typed. It becomes the
+   * setting as soon as it parses, and on blur.
+   */
+  const [draft, setDraft] = useState<{ key: string; text: string } | null>(null)
   const changed = changedCount(value)
   const id = `part-settings-${slotId}`
   return (
-    <Collapsible open={open} onOpenChange={setOpen}>
+    <Collapsible
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) onOpen?.()
+      }}
+    >
       <CollapsibleTrigger asChild>
         <Button
           type="button"
@@ -63,13 +87,19 @@ export function PartSettingsDisclosure({ slotId, value, process, onChange }: Pro
                     min={0}
                     max={max}
                     step={1}
-                    value={own ?? fromProcess ?? ''}
+                    disabled={disabled}
+                    value={draft?.key === key ? draft.text : String(own ?? fromProcess ?? '')}
                     placeholder="Process"
+                    onFocus={(event) => setDraft({ key, text: event.target.value })}
                     onChange={(event) => {
                       const text = event.target.value
-                      const read = text === '' ? null : Math.round(Number(text))
-                      const bounded = read === null || Number.isNaN(read) ? null : Math.min(max, Math.max(0, read))
-                      onChange(withSetting(value, key, bounded, fromProcess))
+                      setDraft({ key, text })
+                      const read = parsed(text, max)
+                      if (read !== null) onChange(withSetting(value, key, read, fromProcess))
+                    }}
+                    onBlur={(event) => {
+                      setDraft(null)
+                      onChange(withSetting(value, key, parsed(event.target.value, max), fromProcess))
                     }}
                     className="sb-num w-24 text-right"
                   />
@@ -79,7 +109,11 @@ export function PartSettingsDisclosure({ slotId, value, process, onChange }: Pro
                       variant="link"
                       size="sm"
                       className="h-auto px-0 text-xs"
-                      onClick={() => onChange(withSetting(value, key, null, fromProcess))}
+                      disabled={disabled}
+                      onClick={() => {
+                        setDraft(null)
+                        onChange(withSetting(value, key, null, fromProcess))
+                      }}
                       data-testid={`${id}-${key}-reset`}
                     >
                       Reset
@@ -99,6 +133,7 @@ export function PartSettingsDisclosure({ slotId, value, process, onChange }: Pro
                   {own !== null && <span className="text-foreground"> · changed</span>}
                 </Label>
                 <Select
+                  disabled={disabled}
                   value={own ?? PROCESS}
                   onValueChange={(next) =>
                     onChange(

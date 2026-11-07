@@ -519,10 +519,15 @@ export function PrintPicker({
   /** Nothing prints while every plate is unticked (#3652). */
   const noPlate = plate !== 'all' && plate.length === 0
   /**
-   * #5627 — only an output the run lays out takes settings per slot (print-flow spec §4):
-   * a library file keeps its author's parts, and a sliced file prints as it was sliced.
+   * #5627 — a file the run lays out takes settings per slot (print-flow spec §4): an
+   * output, or a library file (#5628); a sliced file prints as it was sliced.
    */
-  const takesParts = source?.kind === 'output' && choices !== null && !sliced
+  const takesParts = source !== undefined && choices !== null && !sliced
+  /**
+   * #5627 — a slot's "Settings for this colour" was opened: from then on the check also
+   * reads the process's part settings, which a dialog that never opens one does not pay for.
+   */
+  const [partsOpened, setPartsOpened] = useState(false)
   const sentParts = takesParts ? sentPartSettings(picker.partSettings) : null
   /** #5627 — an item's print with settings other than its accepted quote's. */
   const partsUnquoted = itemPrint !== undefined && takesParts && !samePartSettings(picker.partSettings, itemPrint.quoted)
@@ -1135,7 +1140,7 @@ export function PrintPicker({
           ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower, sentParts),
         }
       : null
-  const check = usePrintCheck(source, checkRequest)
+  const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
   /**
    * #2169 — the choices on screen, sliced in the background once the check finds nothing
    * the run would refuse. A run of the same choices queues that slice.
@@ -1458,6 +1463,7 @@ export function PrintPicker({
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
+    setPartsOpened(false)
     setPicked(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -1815,6 +1821,10 @@ export function PrintPicker({
                                 slotId={slotId}
                                 value={picker.partSettings[String(slotId)]}
                                 process={check.verdict?.process_part_settings ?? null}
+                                // Until a check has read the process's values, a value typed
+                                // could not be told from the process's own.
+                                disabled={!check.processValuesRead}
+                                onOpen={() => setPartsOpened(true)}
                                 onChange={(next) => picker.setSlotPartSettings(slotId, next)}
                               />
                             )

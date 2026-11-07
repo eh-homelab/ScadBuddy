@@ -791,6 +791,14 @@ async def part_settings_refusal(
     )
 
 
+#: The check routes' ``process_values`` query parameter (#5627).
+PROCESS_VALUES_QUERY = (
+    "Also read the process's own value of each part setting (`process_part_settings`,"
+    " #5627), which the dialog's Settings for this colour open on: one more read of the"
+    " process preset's values."
+)
+
+
 class PrintCheck(BaseModel):
     """What the run would refuse for the dialog's choices before Print (#755, #760).
     ``errors`` holds the run's 422 detail word for word (#758 review); ``warnings`` what
@@ -809,8 +817,9 @@ class PrintCheck(BaseModel):
     objects: int | None = None
     #: The process's own value of each part setting (#5627), which the dialog's
     #: "Settings for this colour" controls open on; a value it has none of is left out.
-    #: ``None`` when the process was not read: a library or sliced file, which takes no
-    #: part settings, or a preset whose values cannot be read.
+    #: ``None`` when the process was not read: a check that did not ask
+    #: (``process_values``), a sliced file, which takes no part settings, or a preset
+    #: whose values cannot be read.
     process_part_settings: PartSettings | None = None
 
 
@@ -1067,6 +1076,7 @@ async def check_print(
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -1104,7 +1114,11 @@ async def check_print(
     On a printer a run reaches natively (`run_route`, plan 2026-10-18 D2) the check is
     the native run's own, and reads nothing of Bambuddy (D3): the image's presets
     (``profiles``, D5), the report's trays (D1) and ``source``'s native library for the
-    folder (D6). ``client`` is used only off that path."""
+    folder (D6). ``client`` is used only off that path.
+
+    ``process_values`` asks for the process's values of the part settings too
+    (``PrintCheck.process_part_settings``, #5627): only a dialog showing its "Settings
+    for this colour" asks, since the read can be one more Bambuddy call."""
     named = request.printer is not None and printers is not None
     if (
         not named
@@ -1129,7 +1143,15 @@ async def check_print(
     if refusal is not None:
         return PrintCheck(errors=[refusal])
     if route is not None and route.native:
-        return await _native_check(source, settings, request, route, rack=rack, profiles=profiles)
+        return await _native_check(
+            source,
+            settings,
+            request,
+            route,
+            rack=rack,
+            profiles=profiles,
+            process_values=process_values,
+        )
     client = bambuddy_client(client)
     # The 3MF's download and the inventory wait on nothing `prepare_run` reads, so they
     # are read beside it (#4196): awaited after it in the order they were read in, so a
@@ -1298,7 +1320,9 @@ async def check_print(
         rack=rack_view,
         nozzle_plan=nozzle_plan,
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
-        process_part_settings=await _process_part_settings(source, process, read),
+        process_part_settings=(
+            await _process_part_settings(source, process, read) if process_values else None
+        ),
     )
 
 
@@ -1310,6 +1334,7 @@ async def _native_check(
     *,
     rack: RackUsage | None,
     profiles: Profiles | None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """:func:`check_print` on a native run: its refusals and advisories, judged on the
     report's status, the trays and the image's presets, with no Bambuddy client."""
@@ -1424,18 +1449,20 @@ async def _native_check(
         rack=rack_view,
         nozzle_plan=nozzle_plan,
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
-        process_part_settings=await _process_part_settings(source, process, read),
+        process_part_settings=(
+            await _process_part_settings(source, process, read) if process_values else None
+        ),
     )
 
 
 async def _process_part_settings(
     source: PrintSource, process: PresetRef | None, read: ReadPresetValues
 ) -> PartSettings | None:
-    """The process's values of the part settings (#5627), for an output the run lays out;
-    ``None`` for any other source, which takes none (:func:`part_settings_refusal`), and
-    when the preset's values cannot be read. Only an advisory read: a failed one never
-    fails the check."""
-    if process is None or not isinstance(source, OutputSource) or source.is_sliced:
+    """The process's values of the part settings (#5627), for a file the run lays out (an
+    output or a library file, #5628); ``None`` for a sliced file, which takes none
+    (:func:`part_settings_refusal`), and when the preset's values cannot be read. Only an
+    advisory read: a failed one never fails the check."""
+    if process is None or source.is_sliced:
         return None
     try:
         answer = await read(process)
@@ -1793,6 +1820,7 @@ async def check_for_output(
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
     native: NativeCopies | None = None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered, with its template's
     ``print_settings`` as the run reads them, so a template that prints by object is
@@ -1815,6 +1843,7 @@ async def check_for_output(
         reports=reports,
         catalogue=catalogue,
         profiles=profiles,
+        process_values=process_values,
     )
 
 
@@ -1832,6 +1861,7 @@ async def check_for_library(
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
     slots read from the file itself (#2550): from their cache, else from the download
@@ -1854,6 +1884,7 @@ async def check_for_library(
         reports=reports,
         catalogue=catalogue,
         profiles=profiles,
+        process_values=process_values,
     )
 
 

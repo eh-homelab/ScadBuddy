@@ -24,9 +24,12 @@ async function loaded() {
   await screen.findByTestId('filament-slot-1')
 }
 
+/** Opens a slot's settings, and waits for the check that reads the process's values. */
 async function openSlot(slot: number): Promise<HTMLElement> {
   fireEvent.click(await screen.findByTestId(`part-settings-toggle-${slot}`))
-  return screen.findByTestId(`part-settings-${slot}`)
+  const settings = await screen.findByTestId(`part-settings-${slot}`)
+  await waitFor(() => expect(within(settings).getByLabelText(/Top shell layers/)).toBeEnabled())
+  return settings
 }
 
 function printButton() {
@@ -67,8 +70,11 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     await loaded()
     await waitFor(() => expect(check).toHaveBeenCalled())
     expect(check.mock.calls.at(-1)?.[1]).not.toHaveProperty('part_settings')
+    // The process's values are asked for only once a slot's settings are open.
+    expect(check.mock.calls.every((call) => !call[2])).toBe(true)
 
     const slot = await openSlot(1)
+    expect(check.mock.calls.at(-1)?.[2]).toBe(true)
     fireEvent.change(within(slot).getByLabelText(/Bottom shell layers/), { target: { value: '6' } })
     await waitFor(() =>
       expect(check.mock.calls.at(-1)?.[1]).toMatchObject({ part_settings: { '1': { bottom_shell_layers: 6 } } }),
@@ -100,7 +106,7 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { wall_loops: 4 } } })
   })
 
-  it('shows no controls for a library file, which keeps its author’s parts', async () => {
+  it('offers the controls for a library file too (#5628)', async () => {
     renderPage(
       <PrintPicker
         open
@@ -110,7 +116,46 @@ describe('PrintPicker · settings per colour (#5627)', () => {
       />,
     )
     await loaded()
-    expect(screen.queryByTestId('part-settings-toggle-1')).toBeNull()
+    const slot = await openSlot(1)
+    expect(within(slot).getByLabelText(/Top shell layers/)).toHaveValue(5)
+  })
+
+  it('opens a library file on its remembered settings (#5628)', async () => {
+    server.use(
+      http.get('/api/v1/print/library/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          model_choices: { printer_id: null, filament_plan: [], part_settings: { '1': { wall_loops: 4 } } },
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    expect(await screen.findByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
+  })
+
+  it('takes backspace and a new number in a field, and a cleared field is the process value on blur', async () => {
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const slot = await openSlot(1)
+    const walls = within(slot).getByLabelText(/Wall loops/)
+    await waitFor(() => expect(walls).toHaveValue(2))
+    fireEvent.focus(walls)
+    fireEvent.change(walls, { target: { value: '' } })
+    expect(walls).toHaveValue(null)
+    fireEvent.change(walls, { target: { value: '4' } })
+    expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
+    fireEvent.change(walls, { target: { value: '' } })
+    fireEvent.blur(walls)
+    expect(walls).toHaveValue(2)
+    expect(screen.getByTestId('part-settings-toggle-1')).not.toHaveTextContent('changed')
   })
 
   it('an item print opens on the quote’s settings, sends none while unchanged, and holds Print when changed', async () => {

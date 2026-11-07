@@ -2059,8 +2059,10 @@ export const api = {
    * #755 — the check before Print for the body the run would take: `errors` are what
    * it would refuse as a 422, `warnings` its advisories. Reads only.
    */
-  checkPrint: (outputId: string, body: PrintRunRequest) =>
-    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
+  /** `processValues` (#5627) also reads the process's part settings, which the dialog's
+   * "Settings for this colour" open on: asked only once one is open. */
+  checkPrint: (outputId: string, body: PrintRunRequest, processValues = false) =>
+    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check${processValues ? '?process_values=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2771,8 +2773,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
-    request<PrintCheck>(`/print/library/${fileId}/check`, {
+  checkLibraryPrint: (fileId: number, body: PrintRunRequest, processValues = false) =>
+    request<PrintCheck>(`/print/library/${fileId}/check${processValues ? '?process_values=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

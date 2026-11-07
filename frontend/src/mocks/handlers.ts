@@ -3592,8 +3592,13 @@ export const handlers = [
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
     // #836 — the mock H2C's rack preview, so the dialog's rack step can be exercised.
     const body = (await request.json()) as { rack_position?: number | null }
-    // #5627 — the process's own part settings, which "Settings for this colour" opens on.
-    return HttpResponse.json({ ...mockRackCheck(body.rack_position ?? null), process_part_settings: MOCK_PROCESS_PARTS })
+    // #5627 — the process's own part settings, which "Settings for this colour" opens on,
+    // only for a check that asks for them.
+    const asked = new URL(request.url).searchParams.get('process_values') === 'true'
+    return HttpResponse.json({
+      ...mockRackCheck(body.rack_position ?? null),
+      process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
+    })
   }),
 
   // --- #79 projects -----------------------------------------------------------------
