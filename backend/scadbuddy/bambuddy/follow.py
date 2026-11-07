@@ -207,8 +207,13 @@ class Follower:
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
         last_read: PrintProgress | None = None
+        #: Whether the newest run's settled read is recorded. A failed record is retried
+        #: on each pass that reads it settled, as an older run's is (#5621).
+        recorded = False
         #: Each older open run's last read, by run id (#5613).
         older_reads: dict[str, PrintProgress | None] = {}
+        #: The older runs whose settled hooks have run, by run id (#5621).
+        older_hooked: set[str] = set()
         while True:
             if read_now:
                 read_now = False
@@ -253,16 +258,21 @@ class Follower:
             changed = published if failed is None else progress != last_read
             moved = progress != last_read
             last_read = progress
+            if moved:
+                recorded = False
             if progress is not None and moved:
                 await self._read_hooks(key, progress, active, heartbeat)
-            if progress is not None and progress.settled and moved:
+            if progress is not None and progress.settled and (moved or not recorded):
                 # After observe, so print.settled is already published (#836). Not on
-                # progress None: a print never queued has no picks. Once per settle: a
-                # follow kept open by an older run (#5613) reads it again unmoved.
-                await self._record(key, slug, progress, active, heartbeat)
+                # progress None: a print never queued has no picks. A follow kept open by
+                # an older run (#5613) reads the settle again unmoved: it records it
+                # again only while the record has failed (#5621).
+                recorded = await self._record(key, slug, progress, active, heartbeat)
+            if progress is not None and progress.settled and moved:
+                # Once per settle.
                 await self._settled(subject, active, heartbeat)
             older_open, older_moved = await self._older(
-                subject, key, slug, older_reads, active, heartbeat
+                subject, key, slug, older_reads, older_hooked, active, heartbeat
             )
             if (progress is None or progress.settled) and not older_open:
                 return "settled"
@@ -280,12 +290,14 @@ class Follower:
         key: str,
         slug: str,
         reads: dict[str, PrintProgress | None],
+        hooked: set[str],
         active: datetime,
         heartbeat: Callable[[datetime], None],
     ) -> tuple[bool, bool]:
         """Read each of the subject's older runs still open by its own run (#5613), run
-        the read hooks on each that moved, and record each settled one against its run,
-        then run the settled hooks.
+        the read hooks on each that moved, and record each settled one against its run.
+        On the pass its record succeeds, moved or not, run the settled hooks once for
+        that run (``hooked``, by run id, #5621).
         Whether one is still open (a read that failed counts as open: it is read again),
         and whether one moved. Nothing is published: the subject's topic shows its newest
         print, as before."""
@@ -335,8 +347,9 @@ class Follower:
                 )
                 still_open = True
                 continue
-            if moved:
+            if run.id not in hooked:
                 # The subject's own hooks (the rack's archives), idempotent as they are.
+                hooked.add(run.id)
                 await self._settled(subject, active, heartbeat)
         return still_open, moved_any
 
@@ -371,18 +384,23 @@ class Follower:
         progress: PrintProgress,
         active: datetime,
         heartbeat: Callable[[datetime], None],
-    ) -> None:
+    ) -> bool:
+        """Record the newest run's settled read. Whether it is recorded (True also when
+        there is nothing to record it with)."""
         if self.record_outcome is None:
-            return
+            return True
         try:
             await self._bounded(self.record_outcome(key, slug, progress), active, heartbeat)
         except Exception as exc:
-            # Type only, as the hooks (#836). Not retried now: the next settled read of
+            # Type only, as the hooks (#836). The follow records it again on its next
+            # pass while it stays open (#5621); after it ends, the next settled read of
             # this print (the progress route's follow, a retried attempt) records it.
             logger.warning(
                 "a settled print's outcome could not be recorded",
                 extra={"subject": key, "error": type(exc).__name__},
             )
+            return False
+        return True
 
     async def _read_hooks(
         self,

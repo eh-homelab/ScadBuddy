@@ -297,3 +297,146 @@ async def test_record_run_records_only_that_runs_print(pg_pool: PgPool) -> None:
     assert event is not None and event.run_id == "r-older"
     assert await outcomes.record_run(older, SLUG, done(51)) is None
     assert await outcomes.older_open(SUBJECT.run_subject) == []
+
+
+def queue_item(item: int, *, settled: bool) -> PrintProgress:
+    return PrintProgress(
+        route="slice_queue",
+        stage="done" if settled else "running",
+        settled=settled,
+        queue_item_id=item,
+        bambuddy_url="http://bambuddy.test/queue",
+    )
+
+
+class FlakyOutcomes(PrintOutcomeStore):
+    """The real store. Its first ``fail_record`` newest-run records and its first
+    ``fail_record_run`` older-run records raise."""
+
+    def __init__(self, pool: PgPool, *, fail_record: int = 0, fail_record_run: int = 0) -> None:
+        super().__init__(pool, None)
+        self.fail_record = fail_record
+        self.fail_record_run = fail_record_run
+        self.record_calls = 0
+        self.record_run_calls = 0
+
+    async def record(self, run_subject: str, slug: str, progress: PrintProgress) -> Any:
+        self.record_calls += 1
+        if self.record_calls <= self.fail_record:
+            raise RuntimeError("the database blinked")
+        return await super().record(run_subject, slug, progress)
+
+    async def record_run(self, run: PrintRun, slug: str, progress: PrintProgress) -> Any:
+        self.record_run_calls += 1
+        if self.record_run_calls <= self.fail_record_run:
+            raise RuntimeError("the database blinked")
+        return await super().record_run(run, slug, progress)
+
+
+async def two_runs(pool: PgPool) -> None:
+    for run_id, item in (("r-older", 51), ("r-newer", 52)):
+        await succeeded(
+            pool, run_id, PrintRunResult(library_file_id=7, copies=1, queue_item_ids=[item])
+        )
+
+
+def flaky_follower(
+    outcomes: FlakyOutcomes,
+    read_library: Callable[[PrintSubject], Awaitable[PrintProgress | None]],
+    read_run: Callable[[PrintSubject, PrintRun], Awaitable[PrintProgress | None]],
+    settled: list[str],
+) -> Follower:
+    async def hook(subject: PrintSubject) -> None:
+        settled.append(subject.key)
+
+    return Follower(
+        outputs=LocalOutputs(None, None),  # type: ignore[arg-type]
+        observer=ProgressObserver(InProcessEventBus()),
+        read=unused,
+        read_library=read_library,
+        events=None,
+        record_outcome=outcomes.record,
+        older_runs=outcomes,
+        read_run=read_run,
+        on_settled=[hook],
+        **FAST,  # type: ignore[arg-type]
+    )
+
+
+async def test_an_older_run_whose_read_raises_is_read_again(pg_pool: PgPool) -> None:
+    """The older run's read fails twice. The follow keeps going, reads it again, and
+    records it once the read answers (#5621)."""
+    await two_runs(pg_pool)
+    reads = 0
+
+    async def read_library(subject: PrintSubject) -> PrintProgress:
+        return queue_item(52, settled=True)
+
+    async def read_run(subject: PrintSubject, run: PrintRun) -> PrintProgress:
+        nonlocal reads
+        assert run.id == "r-older"
+        reads += 1
+        if reads <= 2:
+            raise httpx.ConnectError("Bambuddy is down")
+        return queue_item(51, settled=True)
+
+    settled: list[str] = []
+    follow = flaky_follower(FlakyOutcomes(pg_pool), read_library, read_run, settled)
+    ended = await asyncio.wait_for(follow.follow(SUBJECT.run_subject, datetime.now(UTC)), 10)
+    assert ended == "settled"
+    assert reads == 3
+    assert recorded(pg_pool) == {"r-newer": "finished", "r-older": "finished"}
+    # Once for the newest run's settle, once for the older run's.
+    assert settled == [SUBJECT.key, SUBJECT.key]
+
+
+async def test_an_older_runs_failed_record_is_retried_and_its_hooks_run_once(
+    pg_pool: PgPool,
+) -> None:
+    """The older run's first two records fail. A later pass, on which nothing moved,
+    records it and runs the settled hooks for it once (#5621)."""
+    await two_runs(pg_pool)
+
+    async def read_library(subject: PrintSubject) -> PrintProgress:
+        return queue_item(52, settled=True)
+
+    async def read_run(subject: PrintSubject, run: PrintRun) -> PrintProgress:
+        return queue_item(51, settled=True)
+
+    settled: list[str] = []
+    outcomes = FlakyOutcomes(pg_pool, fail_record_run=2)
+    follow = flaky_follower(outcomes, read_library, read_run, settled)
+    ended = await asyncio.wait_for(follow.follow(SUBJECT.run_subject, datetime.now(UTC)), 10)
+    assert ended == "settled"
+    assert outcomes.record_run_calls == 3
+    assert recorded(pg_pool) == {"r-newer": "finished", "r-older": "finished"}
+    assert settled == [SUBJECT.key, SUBJECT.key]
+
+
+async def test_the_newest_runs_failed_record_is_retried_while_an_older_run_is_open(
+    pg_pool: PgPool,
+) -> None:
+    """The newest run's first record fails while an older run keeps the follow open.
+    The next pass records it, though it did not move, and its hooks run once (#5621)."""
+    await two_runs(pg_pool)
+    older = queue_item(51, settled=False)
+
+    async def read_library(subject: PrintSubject) -> PrintProgress:
+        return queue_item(52, settled=True)
+
+    async def read_run(subject: PrintSubject, run: PrintRun) -> PrintProgress:
+        return older
+
+    settled: list[str] = []
+    outcomes = FlakyOutcomes(pg_pool, fail_record=1)
+    follow = flaky_follower(outcomes, read_library, read_run, settled)
+    following = asyncio.create_task(follow.follow(SUBJECT.run_subject, datetime.now(UTC)))
+    await until(lambda: "r-newer" in recorded(pg_pool))
+    await asyncio.sleep(0.1)
+    assert not following.done()
+    assert outcomes.record_calls == 2
+    assert settled == [SUBJECT.key]
+    older = queue_item(51, settled=True)
+    assert await asyncio.wait_for(following, 10) == "settled"
+    assert recorded(pg_pool) == {"r-newer": "finished", "r-older": "finished"}
+    assert settled == [SUBJECT.key, SUBJECT.key]
