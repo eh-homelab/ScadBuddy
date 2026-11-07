@@ -119,8 +119,8 @@ async def test_a_failed_print_fires_print_failed_not_print_finished(pg_pool: PgP
     assert recorded is not None and recorded.outcome == "failed"
     found = trigger_event(recorded)
     assert found is not None
-    kind, slug, key, facts = found
-    assert (kind, slug, key) == ("print.failed", "library-7", "print:r1")
+    kind, subjects, key, facts = found
+    assert (kind, subjects, key) == ("print.failed", {"template": "library-7"}, "print:r1")
     assert facts == {
         "kind": "print.failed",
         "slug": "library-7",

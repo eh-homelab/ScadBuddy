@@ -238,6 +238,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   take an author or a grant status from a body. A trigger pins a version; any edit
   returns its standing grant to requested, and an approval names the state it saw
   (`seen`); a fire is admitted, and a standing grant spent, under row locks.
+  Order events (#4252, orders spec §7.1): the kinds `order.changed` (key
+  `order:<id>:<status>`) and `order_item.changed` (`order_item:<id>:<status>:<attempt>`,
+  `-` for none); `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
+  or sent `slug` reads as a template subject; no migration) and `match` (`status` only,
+  values checked against `OrderStatus`/`ItemStatus`), both applied in
+  `TriggerStore.event_triggers` before a fire starts; an order fire's `customer_id` is
+  read from the order's row (`order_facts`). `trigger()` returns `OrderChanged` /
+  `OrderItemChanged`.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A

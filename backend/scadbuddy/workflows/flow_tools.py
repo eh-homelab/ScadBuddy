@@ -1343,16 +1343,49 @@ class PrintFailed(BaseModel):
     printer: str | None = None
 
 
+class OrderChanged(BaseModel):
+    """An order's status changed (#4252, orders spec §7.1); re-read it with
+    `tool("order_get", {"order_id": ...})`."""
+
+    kind: Literal["order.changed"]
+    order_id: str
+    #: The status it changed to.
+    status: str
+    #: Its customer, read from the order when the trigger fired.
+    customer_id: str
+
+
+class OrderItemChanged(BaseModel):
+    """A line item's status changed, or an attempt of it was recorded (#4252)."""
+
+    kind: Literal["order_item.changed"]
+    order_id: str
+    item_id: str
+    status: str
+    #: The attempt just recorded or accepted, else None.
+    attempt: int | None = None
+
+
 def trigger_tool(event: dict[str, Any] | None = None) -> Any:
     """`trigger()` (#2666): the event a trigger fired this run on, as the fire recorded
     it, or None. It reads the run's own message, so it records no step. Data only: who
     the run acts as, and its grant, are the trigger's record (spec 2026-10-11 §12.4)."""
 
-    async def trigger() -> ModelChanged | RenderFinished | PrintFinished | PrintFailed | None:
+    async def trigger() -> (
+        ModelChanged
+        | RenderFinished
+        | PrintFinished
+        | PrintFailed
+        | OrderChanged
+        | OrderItemChanged
+        | None
+    ):
         """The event that started this run, told apart by `kind`: a template changed
         (`commit`), a render finished (`job_id`), or a print finished or failed
-        (`run_id`, `output_id`, `printer`), each with its template's `slug`. None for a
-        run started by hand or on a schedule."""
+        (`run_id`, `output_id`, `printer`), each with its template's `slug`; or an
+        order's status changed (`order_id`, `status`, `customer_id`), or a line item's
+        (`order_id`, `item_id`, `status`, `attempt`). None for a run started by hand or
+        on a schedule."""
         if event is None:
             return None
         match event.get("kind"):
@@ -1362,8 +1395,14 @@ def trigger_tool(event: dict[str, Any] | None = None) -> Any:
                 return PrintFinished.model_validate(event)
             case "print.failed":
                 return PrintFailed.model_validate(event)
-            case _:
+            case "order.changed":
+                return OrderChanged.model_validate(event)
+            case "order_item.changed":
+                return OrderItemChanged.model_validate(event)
+            case "render.finished":
                 return RenderFinished.model_validate(event)
+            case _:
+                return None
 
     return agent.tool_defn(inherently_safe=True)(trigger)
 
