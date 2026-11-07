@@ -51,6 +51,12 @@ describe('orders mock (#4249)', () => {
     expect(plain?.problem.detail).toMatch(/PUT \/orders\/.+\/charges\/after-acceptance/)
     const early = await failure(api.replaceChargesAfterAcceptance(ORDER_DRAFT, [post]))
     expect(early?.problem.type).toBe(`${PROBLEMS}order_not_accepted`)
+    // Each charge is checked as the backend's `ChargeInput` is (#5563).
+    for (const bad of [{ ...post, kind: 'gift' }, { ...post, label: '' }, { ...post, amount_minor: 1.5 }, { ...post, note: 'x' }]) {
+      const refused = await failure(api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [post, bad as typeof post]))
+      expect(refused?.status).toBe(422)
+      expect(refused?.problem.detail).toMatch(/^charges\.1: /)
+    }
     const changed = await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [post, cap])
     expect(changed.status).toBe('accepted')
     const detail = await api.order(ORDER_ACCEPTED)

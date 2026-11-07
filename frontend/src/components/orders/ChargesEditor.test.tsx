@@ -69,6 +69,22 @@ describe('ChargesEditor', () => {
     expect(after).not.toHaveBeenCalled()
   })
 
+  it('asks again after a refused save (#5563)', async () => {
+    const after = vi.spyOn(api, 'replaceChargesAfterAcceptance').mockRejectedValueOnce(new Error('order ORD-2026-2 is on hold'))
+    const { user } = show(order(ORDER_ACCEPTED, 'accepted'))
+    const region = screen.getByRole('region', { name: 'Charges' })
+    await user.clear(within(region).getByLabelText('Charge 1 amount'))
+    await user.type(within(region).getByLabelText('Charge 1 amount'), '4')
+    await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+    await user.click(within(region).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(after).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(within(region).queryByRole('alert', { name: 'Confirm the change' })).toBeNull())
+    // The retry arms the confirm again instead of sending at once.
+    await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+    expect(within(region).getByRole('alert', { name: 'Confirm the change' })).toBeInTheDocument()
+    expect(after).toHaveBeenCalledTimes(1)
+  })
+
   it('saves a draft order with the plain PATCH and no confirm', async () => {
     const plain = vi.spyOn(api, 'updateOrder')
     const after = vi.spyOn(api, 'replaceChargesAfterAcceptance')

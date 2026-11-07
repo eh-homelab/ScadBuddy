@@ -94,7 +94,10 @@ export function ChargesEditor({
               setConfirming(false)
               onChanged()
             })
-            .catch((err: unknown) => setError(refusalText(err)))
+            .catch((err: unknown) => {
+              setError(refusalText(err))
+              setConfirming(false)
+            })
             .finally(() => setBusy(false))
         }}
       >
