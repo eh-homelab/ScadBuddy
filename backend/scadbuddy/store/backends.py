@@ -35,7 +35,7 @@ def build_backend(
     backend: StoreBackend,
     current: RenderStoreSettings,
     source: StoreSettingsSource,
-    pool: Pool,
+    pool: Pool | None,
     index: IndexesBlobs | None = None,
     folders: KeepsFolders | None = None,
 ) -> RemoteBackend:

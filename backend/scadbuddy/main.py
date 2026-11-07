@@ -1794,8 +1794,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
-    # The render worker's own role, if the deployment made one, gets what this
-    # build's worker touches (#601); the worker waits for it.
+    # The render worker's old role, if the deployment made one, gets `RENDER_GRANTS`
+    # (#601), now empty: the worker holds no database (#5298), and the role keeps what
+    # it was granted before until #5298 Task 22 revokes it.
     await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)

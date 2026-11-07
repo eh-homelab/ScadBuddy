@@ -64,7 +64,6 @@ from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.core.tracing import configure_tracing
@@ -87,7 +86,6 @@ from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.library.assets import RemoteAssetStore
 from scadbuddy.library.fonts import FontService
-from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     CheckoutFetcher,
     CheckoutGate,
@@ -113,8 +111,6 @@ from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.usage import RackUsageStore, lan_settle_hook, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.runner import probe_openscad_version
-from scadbuddy.render.solids import WRAPPER_PREFIX
-from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
 from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.profiles import Profiles
@@ -129,7 +125,6 @@ from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.store.geometry import GeometryIndex
-from scadbuddy.store.index import Pool
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
@@ -169,8 +164,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_PORT = 9090
-#: How long the render worker's pool waits for its first connection.
-POOL_CONNECT_TIMEOUT = 30.0
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
 #: How long a stopping worker whose build is still current, and polled by another
@@ -219,6 +212,18 @@ def worker_metrics(settings: Settings, role: MetricsRole) -> Metrics:
     return metrics
 
 
+class LocalStoreRefusedError(ValueError):
+    """The render worker was asked to start on the local store (#5298 plan D11)."""
+
+
+LOCAL_STORE_REFUSED = (
+    "store_backend is local, and the render worker holds no database (#5298): the local"
+    " backend runs only in-process, in the API (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), whose"
+    " volume and git it shares (plan D11). A render worker Deployment needs a remote store:"
+    " choose bambuddy or s3 in Settings, or run the renders in-process."
+)
+
+
 def build_worker_deps(
     settings: Settings,
     source: StoreSettingsSource,
@@ -233,14 +238,16 @@ def build_worker_deps(
     leases: RemoteCheckoutLeases,
     slots: RemoteInstallSlots,
     metrics: Metrics | None = None,
-    stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
-    """``current`` is ``source``'s first read, which the store is built from. ``jobs``
-    writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry,
-    ``index`` the blob index, ``folders`` the Bambuddy store's folders, ``assets`` the
-    uploads' rows, ``leases`` the library leases and pin holds, ``slots`` the install
-    slots; its caller closes their clients. ``stopping`` ends the wait
-    for the API's schema and grants (`WorkerStoppedError`)."""
+    """``current`` is ``source``'s first read, which the store is built from: a remote
+    one (`LocalStoreRefusedError`). ``jobs`` writes the job rows, ``refs`` the job's blob
+    refs, ``geometry`` the piece geometry, ``index`` the blob index, ``folders`` the
+    Bambuddy store's folders, ``assets`` the uploads' rows, ``leases`` the library leases
+    and pin holds, ``slots`` the install slots, each through the API's CRUD routes
+    (#5298): the worker holds no database. Its caller closes their clients."""
+    backend = current.store_backend
+    if backend == "local":
+        raise LocalStoreRefusedError(LOCAL_STORE_REFUSED)
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
     paths = DataPaths(root=settings.data_dir)
@@ -253,22 +260,7 @@ def build_worker_deps(
             seed_libraries(paths, seed_libraries_dir)
         except OSError:
             logger.exception("could not seed library checkouts from the image")
-    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = metrics or worker_metrics(settings, "render")
-    # For the stores still on SQL, until #5298 Task 20 moves them to CRUD routes: the
-    # job rows, their events and activity rows (``jobs``), the blob refs (``refs``), the
-    # piece geometry (``geometry``), the blob index (``index``), the Bambuddy store's
-    # folders (``folders``), the uploads' rows (``assets``) and the library leases, pin
-    # holds and install slots (``leases``, ``slots``) already go through them.
-    pool: Pool = row_pool(
-        settings.database_url,
-        name="scadbuddy-render",
-        min_size=1,
-        max_size=settings.database_pool_size,
-    )
-    # Never migrated here (#601): the worker's own role may not, and in a rollout the
-    # API, which does, may not have started yet. Wait for it instead.
-    pool.open(wait=True, timeout=POOL_CONNECT_TIMEOUT)
     # The leases on the API, where its removals see them (#872, #5298).
     checkouts = CheckoutGate(leases)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -277,31 +269,24 @@ def build_worker_deps(
     )
     # The files on this volume, the rows the API's: a worker never uploads, so no caps.
     uploads = RemoteAssetStore(paths.assets, assets, metrics=metrics)
-    try:
-        wait_until_ready(pool, stopping=stopping)
-        backend = current.store_backend
-        store = build_store(
-            backend=backend,
-            current=current,
-            config=config,
-            paths=paths,
-            pool=pool,
-            index=index,
-            folders=folders,
-            # The worker writes no upload's index key: the API drops a bad copy (#5298).
-            drop_asset_copy=assets.drop_copy,
-            source=source,
-            # On bambuddy a worker has no git: the API makes the snapshots it renders from.
-            history=None,
-            fonts=FontService(settings.data_dir),
-            metrics=metrics,
-            # #2788: none unless set, and never one the API reads (README).
-            downloads_dir=config.download_cache_dir,
-        )
-    except BaseException:
-        # A refused start (an unready store) closes what it opened before propagating.
-        pool.close()
-        raise
+    store = build_store(
+        backend=backend,
+        current=current,
+        config=config,
+        paths=paths,
+        pool=None,
+        index=index,
+        folders=folders,
+        # The worker writes no upload's index key: the API drops a bad copy (#5298).
+        drop_asset_copy=assets.drop_copy,
+        source=source,
+        # A worker has no git: the API makes the snapshots it renders from.
+        history=None,
+        fonts=FontService(settings.data_dir),
+        metrics=metrics,
+        # #2788: none unless set, and never one the API reads (README).
+        downloads_dir=config.download_cache_dir,
+    )
     deps = WorkerDeps(
         config=config,
         paths=paths,
@@ -310,8 +295,6 @@ def build_worker_deps(
         refs=refs,
         projection=jobs,
         geometry=geometry,
-        pool=pool,
-        history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
         thumbnail_executor=ThreadPoolExecutor(
@@ -1074,8 +1057,8 @@ RENDER_CRUD_AREAS = frozenset(
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
     """The render worker's client of the API's CRUD routes, with its service credential,
-    which it exchanges for its proof (#5494). The exchange is its only source: it has no
-    view to fall back to, and holds no KEK."""
+    which it exchanges for its proof (#5494). The exchange is its only source: it holds no
+    database to read a view from (#5298), and no KEK."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
             "SCADBUDDY_API_INTERNAL_URL is required for the render worker: it reads the"
@@ -1095,9 +1078,17 @@ async def run_worker(
     client: Client | None = None,
     crud: CrudClient | None = None,
 ) -> None:
-    """``crud``, the client of the API's CRUD routes, defaults to `render_crud`'s; the
-    worker closes it when it ends."""
+    """``python -m scadbuddy.worker``: the render worker. No database and no KEK
+    (#5298): its store settings, job rows, refs, geometry, blob index, store folders,
+    uploads and library leases go through the API's CRUD routes, with a credential it
+    exchanges its proof for, and it runs only on a remote store (plan D11). ``crud``, the
+    client of those routes, defaults to `render_crud`'s; the worker closes it when it
+    ends."""
     stop = stop or asyncio.Event()
+    if settings.database_url:
+        logger.warning(
+            "ignoring SCADBUDDY_DATABASE_URL: the render worker holds no database (#5298)"
+        )
     metrics = worker_metrics(settings, "render")
     crud = crud or render_crud(settings, metrics)
     try:
@@ -1123,30 +1114,23 @@ async def run_worker(
         remote = crud.blocking()
         jobs = RemoteJobProjection(remote)
         try:
-            # Off the loop, as the API's boot seeds its libraries: the seed copies trees,
-            # and the rest opens the pool and waits for the API's schema and grants (#601).
-            # A stop meanwhile ends the wait.
-            try:
-                deps, store = await asyncio.to_thread(
-                    build_worker_deps,
-                    settings,
-                    source,
-                    current,
-                    jobs=jobs,
-                    refs=RemoteBlobRefs(remote),
-                    geometry=RemoteGeometryIndex(remote),
-                    index=RemoteBlobIndex(remote),
-                    # On the loop, as the store calls it: the async client.
-                    folders=RemoteStoreFolders(crud, source=source),
-                    assets=RemoteAssetRows(remote),
-                    leases=RemoteCheckoutLeases(remote),
-                    slots=RemoteInstallSlots(remote),
-                    metrics=metrics,
-                    stopping=stop.is_set,
-                )
-            except WorkerStoppedError:
-                logger.info("stopped before the database was ready for this worker")
-                return
+            # Off the loop, as the API's boot seeds its libraries: the seed copies trees.
+            deps, store = await asyncio.to_thread(
+                build_worker_deps,
+                settings,
+                source,
+                current,
+                jobs=jobs,
+                refs=RemoteBlobRefs(remote),
+                geometry=RemoteGeometryIndex(remote),
+                index=RemoteBlobIndex(remote),
+                # On the loop, as the store calls it: the async client.
+                folders=RemoteStoreFolders(crud, source=source),
+                assets=RemoteAssetRows(remote),
+                leases=RemoteCheckoutLeases(remote),
+                slots=RemoteInstallSlots(remote),
+                metrics=metrics,
+            )
             await _serve_render(settings, deps, store, stop, stop_now, health_port, client)
         finally:
             jobs.close()
@@ -1197,8 +1181,6 @@ async def _serve_render(
             with contextlib.suppress(asyncio.CancelledError):
                 await evicting
         await store.aclose()
-        if deps.pool is not None:
-            deps.pool.close()
         deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -1704,7 +1686,7 @@ def parse_queue(argv: Sequence[str] | None = None) -> Queue:
 
 def main() -> None:
     queue = parse_queue()
-    settings = NoDatabaseSettings() if queue == "projects" else Settings()
+    settings = NoDatabaseSettings() if queue in ("render", "projects") else Settings()
     configure_logging(settings.log_level)
     # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
     if queue not in SERVICE_NAMES:

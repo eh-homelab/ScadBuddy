@@ -218,7 +218,7 @@ class BambuddyContentBackend:
     def __init__(
         self,
         target: Callable[[], Awaitable[BambuddyTarget]],
-        pool: Pool,
+        pool: Pool | None,
         *,
         http: httpx.AsyncClient | None = None,
         index: IndexesBlobs | None = None,
@@ -226,10 +226,19 @@ class BambuddyContentBackend:
     ) -> None:
         """``index`` says whether a row names an uploaded file (`sweep_unrecorded`);
         ``folders`` finds, records and forgets the store's folders. Each is SQL on
-        ``pool`` unless given (the render worker's are its CRUD routes', #5298)."""
+        ``pool`` unless given (the render worker's are its CRUD routes', #5298); with no
+        ``pool`` (the render worker, which holds no database) both must be given."""
+        if index is None:
+            if pool is None:
+                raise ValueError("a Bambuddy store with no pool needs its index")
+            index = BlobIndex(pool)
+        if folders is None:
+            if pool is None:
+                raise ValueError("a Bambuddy store with no pool needs its folders")
+            folders = FolderFinder(pool)
         self._target = target
-        self._index: IndexesBlobs = index if index is not None else BlobIndex(pool)
-        self._kept: KeepsFolders = folders if folders is not None else FolderFinder(pool)
+        self._index: IndexesBlobs = index
+        self._kept: KeepsFolders = folders
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._folders: dict[tuple[str, int, str, str], int] = {}
