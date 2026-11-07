@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,10 @@ from scadbuddy.bambuddy.runs import run_key
 from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, Target, _laid_out_for
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import (
+    MAX_MODEL_SETTINGS_BYTES,
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
+    PartSettingsUnwritableError,
     layout_of,
     part_settings_slots,
     printed_part_slots,
@@ -420,3 +423,90 @@ def test_a_real_library_files_parts_take_their_slots_settings(name: str) -> None
         for entry in a.namelist():
             if entry != MODEL_SETTINGS_NAME:
                 assert a.read(entry) == b.read(entry), entry
+
+
+# ── #5628 review: an untrusted model_settings.config costs linear time, or is refused ──
+
+#: Many tags opened and never closed, in a comment so the file is still well-formed XML:
+#: the patterns of #5571 scanned to the end from each one, quadratic in the file.
+UNCLOSED = "<part " * 150_000 + "<object " * 150_000 + "<part id='1'>" * 50_000
+
+
+def _crafted(where: str) -> str:
+    """A well-formed config whose one real part is slot 1's, with :data:`UNCLOSED` in a
+    comment at the top level (``top``) or inside the object (``object``)."""
+    junk = f"<!-- {UNCLOSED} -->"
+    return (
+        "<config>\n"
+        + (junk if where == "top" else "")
+        + '<object id="1">\n  <metadata key="extruder" value="1"/>\n'
+        + (junk if where == "object" else "")
+        + '  <part id="1" subtype="normal_part">\n'
+        + '   <metadata key="name" value="a"/>\n  </part>\n</object>\n</config>\n'
+    )
+
+
+@pytest.mark.parametrize("where", ["top", "object"])
+def test_many_unclosed_tags_are_read_and_written_in_linear_time(where: str) -> None:
+    """At the top level the real part is written. Inside the object the ``<object``
+    openings stop the object's pattern before its ``</object>``, so its part is not
+    written, and the check after the write refuses it: never a copy without them."""
+    text = _crafted(where)
+    assert len(text) < MAX_MODEL_SETTINGS_BYTES
+    started = time.monotonic()
+
+    slots = printed_part_slots(text)
+    try:
+        written: str | None = set_part_settings(text, ((1, (("wall_loops", "3"),)),))
+    except PartSettingsUnwritableError:
+        written = None
+
+    assert time.monotonic() - started < 5, "the patterns are not linear"
+    assert slots == {1}
+    if where == "top":
+        assert written is not None
+        assert written.count('<metadata key="wall_loops" value="3"/>') == 1
+    else:
+        assert written is None
+
+
+def test_unclosed_tags_that_are_not_xml_are_refused_at_once() -> None:
+    text = "<config><object id='1'>" + "<part " * 300_000
+    started = time.monotonic()
+    with pytest.raises(PartSettingsUnwritableError):
+        printed_part_slots(text)
+    with pytest.raises(PartSettingsUnwritableError):
+        set_part_settings(text, ((1, (("wall_loops", "3"),)),))
+    assert time.monotonic() - started < 5
+
+
+def test_a_config_past_its_cap_or_with_a_doctype_takes_no_settings(tmp_path: Path) -> None:
+    """Past :data:`MAX_MODEL_SETTINGS_BYTES` (read in chunks, never whole) or with a
+    DOCTYPE (an entity bomb): no slots, the run's 422, and ``_laid_out_for`` refuses."""
+    padded = SETTINGS.replace("<config>", "<config>" + " " * MAX_MODEL_SETTINGS_BYTES)
+    bomb = '<?xml version="1.0"?>\n<!DOCTYPE c [<!ENTITY a "aaaa">]>\n' + SETTINGS.split("\n", 1)[1]
+    plate = plate_for("H2C")
+    for config in (padded, bomb):
+        with pytest.raises(PartSettingsUnwritableError):
+            printed_part_slots(config)
+        payload = author_two_colours(tmp_path, config)
+        assert part_settings_slots(payload) is None
+        with pytest.raises(PartSettingsUnwritableError):
+            with_part_settings(payload, ((2, (("wall_loops", "3"),)),))
+        with pytest.raises(ApiError) as refused:
+            _laid_out_for(
+                payload, Target(plate, "0.4", part_settings=((2, (("wall_loops", "3"),)),))
+            )
+        assert (refused.value.status, refused.value.detail) == (422, PART_SETTINGS_AS_IS)
+
+
+def test_a_part_the_writer_cannot_read_is_refused_not_left_without_its_settings() -> None:
+    """ElementTree reads a single-quoted ``extruder``; the writer's patterns do not. The
+    check after the write refuses it, so no copy's key names settings its bytes lack."""
+    text = (
+        '<config>\n <object id="1">\n  <part id="1" subtype="normal_part">\n'
+        "   <metadata key='extruder' value='2'/>\n  </part>\n </object>\n</config>\n"
+    )
+    assert printed_part_slots(text) == {2}
+    with pytest.raises(PartSettingsUnwritableError):
+        set_part_settings(text, ((2, (("wall_loops", "3"),)),))

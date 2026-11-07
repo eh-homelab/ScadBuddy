@@ -274,6 +274,18 @@ library; a sliced file prints as it was sliced, so it is refused (422,
 the 3MF (`fetched_3mf`, which the run's other reads share) and opens its archive once
 for the layout and the parts (`render/bambu3mf.py` `part_settings_slots`, #5637).
 
+A library file's `model_settings.config` is untrusted, so it is read in chunks up to
+`MAX_MODEL_SETTINGS_BYTES` (4 MiB; the largest MakerWorld fixture's is 231,209 bytes,
+`2178-find-100-mini-frogs-spot-search-game.3mf`) and its slots are read with
+ElementTree. One past the cap, not well-formed, or with a DOCTYPE takes no settings per
+part (422, `send.PART_SETTINGS_AS_IS`). The writer rewrites the text in place with
+patterns that stay linear in the file: a tag is `[^<>]*`, and a body is a possessive run
+that stops at the next `<part`, `<object` or `</object>`. The patterns of #5571 scanned to
+the end of the file from each unclosed `<part`: 20,000 of them took 63 s, measured on the
+dev machine on 2026-11-07. After the write the result is read back with ElementTree. A
+printed part of a slot that lacks its settings (a file written in a way the patterns do
+not read) is the same 422, so the copy's key never names settings its bytes lack.
+
 They are written into the laid-out copy, not the process. `send._laid_out_for` adds
 each slot's settings to every printed `<part>` of that slot in
 `Metadata/model_settings.config` (`render/bambu3mf.py` `set_part_settings`), as

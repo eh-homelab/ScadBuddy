@@ -40,6 +40,7 @@ from scadbuddy.render.bambu3mf import (
     ArchiveTooLargeError,
     FilamentMap,
     PartOverrides,
+    PartSettingsUnwritableError,
     hint_painted_slots,
     layout_of,
     plate_origin,
@@ -366,6 +367,16 @@ def _plate_for_model(model: str | None) -> PlateGeometry:
     return plate
 
 
+def _with_parts(payload: bytes, overrides: PartOverrides | None) -> bytes:
+    """:func:`with_part_settings`, its refusal (a ``model_settings.config`` past its cap,
+    not XML, or a part it could not write) a 422 (:data:`PART_SETTINGS_AS_IS`), never a
+    copy whose key names settings its bytes lack (#5628 review)."""
+    try:
+        return with_part_settings(payload, overrides)
+    except PartSettingsUnwritableError:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_AS_IS) from None
+
+
 def _laid_out_for(payload: bytes, target: Target) -> bytes:
     """Lay the 3MF out for ``target`` as whoever laid it out allows (:func:`layout_of`),
     the same for a render and a library file (#1752).
@@ -409,7 +420,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             logger.warning("the 3MF inflates past the cap; printing it as it is")
             laid = payload
         # Outside the guard: a copy keyed with its part settings always carries them.
-        return with_part_settings(laid, target.part_settings)
+        return _with_parts(laid, target.part_settings)
     try:
         payload = replate_3mf(
             payload,
@@ -426,7 +437,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
-    return with_part_settings(hint_painted_slots(payload), target.part_settings)
+    return _with_parts(hint_painted_slots(payload), target.part_settings)
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
