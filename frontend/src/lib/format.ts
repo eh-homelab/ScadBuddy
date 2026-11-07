@@ -103,3 +103,18 @@ export function formatBytes(bytes: number): string {
   }
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
 }
+
+/**
+ * #5554 — a moment in the viewer's local time: `09:04` (as the locale writes it) on the
+ * day of `now`, `Nov 5, 09:04` on another day. `formatFullTime` is the full timestamp the
+ * hover shows, with the date, the seconds and the zone.
+ */
+export function formatLocalTime(at: number, now = Date.now()): string {
+  const when = new Date(at)
+  const today = when.toDateString() === new Date(now).toDateString()
+  return when.toLocaleString([], today ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+export function formatFullTime(at: number): string {
+  return new Date(at).toLocaleString([], { dateStyle: 'full', timeStyle: 'long' })
+}

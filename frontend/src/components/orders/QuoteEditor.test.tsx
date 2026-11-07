@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client'
 import type { Quote, SliceQuoteRequest } from '../../api/types'
 import { reset, seedUnitCost } from '../../mocks/features/orders/history'
@@ -9,6 +9,7 @@ import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../.
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
+import type { SliceQuoteRun } from './useSliceQuotes'
 
 /** Long enough for a debounced price check to be sent and its answer to land. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEBOUNCE_MS))
@@ -316,5 +317,97 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     await user.type(screen.getByLabelText('Price per unit (USD)'), '1')
     await settled()
     expect(screen.queryByTestId('quote-warning')).toBeNull()
+  })
+})
+
+// #5554 — a quote, a running slice and a failed one each say when, in the viewer's local
+// time, with the full timestamp on hover. The cases run in New York (EST in November), so
+// 14:04Z reads 09:04 whether the locale writes 12 or 24 hours.
+describe('QuoteEditor · times (#5554)', () => {
+  const zone = process.env.TZ
+  const NOW = Date.parse('2026-11-06T14:07:00Z')
+  beforeEach(() => {
+    resetMockState()
+    process.env.TZ = 'America/New_York'
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    if (zone === undefined) delete process.env.TZ
+    else process.env.TZ = zone
+  })
+
+  const at = (iso: string) => Date.parse(iso)
+
+  function quote(id: string, createdAt: string, accepted: boolean): Quote {
+    return {
+      id,
+      order_item_id: ITEM_DRAFT,
+      created_at: createdAt,
+      source: 'manual',
+      accepted,
+      sliced_sha256: null,
+      sliced_blob_key: null,
+      plates: [],
+      lines: [{ kind: 'manual', label: 'Quoted by hand', quantity: 1, unit_minor: 900, amount_minor: 900 }],
+      unit_cost_minor: 900,
+      unit_price_minor: 900,
+      quantity: 1,
+      total_minor: 900,
+      created_by: { kind: 'browser', principal: null, session: null },
+    }
+  }
+
+  function editor(quotes: Quote[], run?: SliceQuoteRun) {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    return renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={quotes}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run, start: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+  }
+
+  it('shows when a running slice started and how long it has run', () => {
+    editor([], { startedAt: at('2026-11-06T14:04:00Z'), error: null, known: [] })
+    const running = screen.getByTestId('quote-running')
+    expect(running).toHaveTextContent(/Started 09:04/)
+    expect(screen.getByTestId('quote-elapsed')).toHaveTextContent('3m')
+    const time = within(running).getByText(/09:04/)
+    expect(time.tagName).toBe('TIME')
+    expect(time).toHaveAttribute('dateTime', '2026-11-06T14:04:00.000Z')
+    expect(time.getAttribute('title')).toMatch(/2026.*9:04:00.*(EST|GMT-5)/)
+  })
+
+  it('shows when a failed slice started and ended, with its error', () => {
+    editor([], { startedAt: at('2026-11-06T14:04:00Z'), finishedAt: at('2026-11-06T14:06:00Z'), error: 'No printer.', known: [] })
+    expect(screen.getByTestId('quote-error')).toHaveTextContent('The slice quote failed: No printer.')
+    expect(screen.getByTestId('quote-error-times')).toHaveTextContent(/Started 09:04.*ended 09:06/)
+  })
+
+  it('shows when each quote was made, and marks the newest and the accepted one', () => {
+    editor([quote('q-old', '2026-11-05T13:00:00Z', true), quote('q-new', '2026-11-06T14:00:00Z', false), quote('q-mid', '2026-11-06T13:30:00Z', false)])
+    const old = screen.getByTestId('quote-q-old')
+    const fresh = screen.getByTestId('quote-q-new')
+    // Another day carries its date.
+    expect(old).toHaveTextContent(/Quoted Nov 5, 08:00/)
+    expect(old).toHaveTextContent('Accepted')
+    expect(within(old).queryByTestId('quote-newest')).toBeNull()
+    expect(fresh).toHaveTextContent(/Quoted 09:00/)
+    expect(within(fresh).getByTestId('quote-newest')).toHaveTextContent('Newest')
+    expect(screen.getAllByTestId('quote-newest')).toHaveLength(1)
+  })
+
+  it('marks no newest quote when there is only one', () => {
+    editor([quote('q-only', '2026-11-06T14:00:00Z', false)])
+    expect(screen.queryByTestId('quote-newest')).toBeNull()
   })
 })

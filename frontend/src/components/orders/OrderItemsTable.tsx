@@ -10,12 +10,14 @@ import { Input } from '@/components/ui/input'
 import { CELL, DataTable, ROW, type Column } from '../records/DataTable'
 import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
-import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT, unitPrice } from './price'
+import { byCreated, itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT, unitPrice } from './price'
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalText } from './refusal'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from './itemLink'
 import { addItem, afterAcceptanceWarning, type AddMode } from './afterAcceptance'
-import type { SliceQuoteRuns } from './useSliceQuotes'
+import type { SliceQuoteRun, SliceQuoteRuns } from './useSliceQuotes'
+import { elapsed, useNow } from './useNow'
+import { When } from './When'
 import { UnfulfilDialog } from './Unfulfil'
 import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from './unfulfilRules'
 import { Link } from 'react-router'
@@ -95,20 +97,7 @@ export function OrderItemsTable({
     {
       key: 'status',
       header: 'Status',
-      cell: (item) => {
-        const run = quoting?.get(item.id)
-        return (
-          <span className="flex flex-col items-start gap-0.5">
-            <ItemStatusBadge status={item.status} />
-            {run && !run.error && (
-              <span className="text-[11px] text-muted-foreground" data-testid={`item-quoting-${item.id}`}>
-                Quoting…
-              </span>
-            )}
-            {run?.error && <span className="text-[11px] text-warn">Quote failed</span>}
-          </span>
-        )
-      },
+      cell: (item) => <ItemStatus item={item} run={quoting?.get(item.id)} />,
     },
     { key: 'quantity', header: 'Qty', className: 'sb-num', cell: (item) => item.quantity },
     {
@@ -198,6 +187,43 @@ export function OrderItemsTable({
         ) : undefined
       }
     />
+  )
+}
+
+/**
+ * #5554 — an item's status, with when its quotes were made (the newest, and the accepted one
+ * when it is another) and its slice quote's run: started and running for, or started, ended
+ * and failed.
+ */
+function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun | undefined }) {
+  const running = run && !run.error ? run : undefined
+  const now = useNow(running !== undefined)
+  const newest = [...item.quotes].sort(byCreated).at(-1)
+  const accepted = item.quotes.find((quote) => quote.accepted)
+  return (
+    <span className="flex flex-col items-start gap-0.5">
+      <ItemStatusBadge status={item.status} />
+      {newest && (
+        <span className="text-[11px] text-muted-foreground" data-testid={`item-quoted-${item.id}`}>
+          {accepted?.id === newest.id ? 'Accepted quote' : 'Newest quote'} <When at={newest.created_at} />
+        </span>
+      )}
+      {accepted && accepted.id !== newest?.id && (
+        <span className="text-[11px] text-muted-foreground" data-testid={`item-accepted-${item.id}`}>
+          Accepted quote <When at={accepted.created_at} />
+        </span>
+      )}
+      {running && (
+        <span className="text-[11px] text-muted-foreground" data-testid={`item-quoting-${item.id}`}>
+          <span>Quoting…</span> since <When at={running.startedAt} /> ({elapsed(running.startedAt, now)})
+        </span>
+      )}
+      {run?.error && (
+        <span className="text-[11px] text-warn" data-testid={`item-quote-failed-${item.id}`} title={run.error}>
+          <span>Quote failed</span> <When at={run.finishedAt ?? run.startedAt} />
+        </span>
+      )}
+    </span>
   )
 }
 

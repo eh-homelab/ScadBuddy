@@ -225,6 +225,52 @@ describe('useSliceQuotes (#4693)', () => {
     await waitFor(() => expect(result.current.runs.get('item-1')?.error).toContain('No printer takes this plate.'))
   })
 
+  // #5554 — a failure the page did not start (over MCP, in another tab) shows with its times.
+  const FAILED: Activity = { ...ROW, status: 'failed', created_at: '2026-11-06T14:04:00Z', finished_at: '2026-11-06T14:06:00Z' }
+  const ITEM = { id: 'item-1', order_id: 'order-1', created_at: '2026-11-06T09:00:00Z', quotes: [] }
+
+  it('shows the newest failed quote of an item from the activity index, with its start, end and error (#5554)', async () => {
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [], next_cursor: null })
+    const failed = vi.spyOn(api, 'failedQuotes').mockResolvedValue({
+      items: [
+        { ...FAILED, id: 'operation:op-new', subject: 'order_item:item-1' },
+        { ...FAILED, id: 'operation:op-old', subject: 'order_item:item-1', created_at: '2026-11-06T12:00:00Z', finished_at: '2026-11-06T12:01:00Z' },
+      ],
+      next_cursor: null,
+    })
+    const followed = vi.spyOn(api, 'followQuote').mockRejectedValue(new ApiError(422, 'No printer takes this plate.'))
+    const items = [ITEM] as unknown as OrderItemDetail[]
+    const { result } = renderHook(() => useSliceQuotes('order-1', items, vi.fn()))
+    await waitFor(() => expect(result.current.runs.get('item-1')?.error).toContain('No printer takes this plate.'))
+    expect(failed).toHaveBeenCalledWith('2026-11-06T09:00:00Z')
+    expect(followed).toHaveBeenCalledTimes(1)
+    expect(followed).toHaveBeenCalledWith('op-new', expect.any(AbortSignal))
+    expect(result.current.runs.get('item-1')).toMatchObject({ startedAt: Date.parse('2026-11-06T14:04:00Z'), finishedAt: Date.parse('2026-11-06T14:06:00Z') })
+  })
+
+  it('shows no failure that a quote made since answers, nor one of an item still quoting (#5554)', async () => {
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-running', subject: 'order_item:item-2' }], next_cursor: null })
+    vi.spyOn(api, 'failedQuotes').mockResolvedValue({
+      items: [
+        { ...FAILED, id: 'operation:op-1', subject: 'order_item:item-1' },
+        { ...FAILED, id: 'operation:op-2', subject: 'order_item:item-2' },
+      ],
+      next_cursor: null,
+    })
+    const followed = vi.spyOn(api, 'followQuote').mockImplementation(stillRunning(() => new Promise<Quote>(() => undefined)))
+    const items = [
+      { ...ITEM, quotes: [{ id: 'q-after', source: 'slice', created_at: '2026-11-06T14:30:00Z' }] },
+      { ...ITEM, id: 'item-2' },
+    ] as unknown as OrderItemDetail[]
+    const { result } = renderHook(() => useSliceQuotes('order-1', items, vi.fn()))
+    await waitFor(() => expect(result.current.runs.get('item-2')).toMatchObject({ error: null }))
+    await act(async () => {})
+    // Only the running quote is followed; no failure is read.
+    expect(followed).toHaveBeenCalledTimes(1)
+    expect(followed).toHaveBeenCalledWith('op-running', expect.any(AbortSignal), expect.any(Function))
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
   it('ends its follows with the page', () => {
     let signal: AbortSignal | undefined
     vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, _accepted, given) => {

@@ -13,13 +13,11 @@ import { byCreated, parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price
 import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
+import { elapsed, useNow } from './useNow'
+import { When } from './When'
 
 /** How long the typed price must stay still before the warning asks the route about it. */
 export const CHECK_DEBOUNCE_MS = 300
-
-function startTime(at: number): string {
-  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
 
 /** A quote line's kind as the drawer names it (§3.4, #4250 Ruling 5). */
 const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
@@ -88,6 +86,10 @@ export function QuoteEditor({
   const slug = editable ? item?.reference?.slug : undefined
   const pending = quotes.some((q) => q.accepted) ? undefined : [...quotes].sort(byCreated).at(-1)
   const current = price.trim() ? parseUnitPrice(price, exponent) : (pending?.unit_price_minor ?? null)
+  // #5554 — the newest quote is marked when there are several to tell apart.
+  const newest = quotes.length > 1 ? [...quotes].sort(byCreated).at(-1)?.id : undefined
+  const running = slice?.run && !slice.run.error ? slice.run : undefined
+  const now = useNow(running !== undefined)
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
   const history = useAsync(
     () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked, itemId) : Promise.resolve(null)),
@@ -140,6 +142,10 @@ export function QuoteEditor({
                   {quote.source === 'slice' ? 'From a slice' : (quote.lines[0]?.label ?? quote.source)}
                   {quote.sliced_sha256 ? <span className="font-mono text-xs"> · {quote.sliced_sha256.slice(0, 12)}</span> : null}
                 </span>
+                <span className="text-xs text-muted-foreground">
+                  Quoted <When at={quote.created_at} />
+                </span>
+                {quote.id === newest && <span className="text-xs text-foreground" data-testid="quote-newest">Newest</span>}
                 {quote.accepted ? (
                   <span className="text-xs text-primary">Accepted</span>
                 ) : (
@@ -166,14 +172,20 @@ export function QuoteEditor({
           ))}
         </ul>
       )}
-      {slice?.run && !slice.run.error && (
-        <p role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
+      {slice && running && (
+        <p role="status" className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
-          {slice.run.detached
-            ? `No answer from the quote started at ${startTime(slice.run.startedAt)}: it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.`
-            : `Slicing every plate and pricing it, since ${startTime(slice.run.startedAt)}…`}
+          {running.detached ? (
+            <span>
+              No answer from the quote started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.
+            </span>
+          ) : (
+            <span>
+              Slicing every plate and pricing it. Started <When at={running.startedAt} />, running for <span data-testid="quote-elapsed">{elapsed(running.startedAt, now)}</span>…
+            </span>
+          )}
           {/* No longer followed, so a failure would never show: the user may stop waiting. */}
-          {slice.run.detached && (
+          {running.detached && (
             <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
               Stop waiting
             </Button>
@@ -182,7 +194,17 @@ export function QuoteEditor({
       )}
       {slice?.run?.error && (
         <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn" data-testid="quote-error">
-          The slice quote failed: {slice.run.error}
+          <span>
+            The slice quote failed: {slice.run.error}
+          </span>
+          <span className="text-xs text-muted-foreground" data-testid="quote-error-times">
+            Started <When at={slice.run.startedAt} />
+            {slice.run.finishedAt !== undefined && (
+              <>
+                , ended <When at={slice.run.finishedAt} />
+              </>
+            )}
+          </span>
           <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
             Dismiss
           </Button>
