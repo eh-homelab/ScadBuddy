@@ -391,6 +391,9 @@ describe('order tools (#4249)', () => {
     expect(() =>
       add.execute({ order_id: ORDER, output_id: 'out1', items: [{ output_id: 'out2' }] }, ctx()),
     ).toThrow(/items/)
+    // A top-level quantity or notes would be dropped: each item carries its own.
+    expect(() => add.execute({ order_id: ORDER, quantity: 3, items: [{ output_id: 'out2' }] }, ctx())).toThrow(/items/)
+    expect(() => add.execute({ order_id: ORDER, notes: 'rush', items: [{ output_id: 'out2' }] }, ctx())).toThrow(/items/)
     expect(sent).toHaveLength(2)
     expect(() => shape.parse({ order_id: ORDER, items: [] })).toThrow()
     expect(() => shape.parse({ order_id: ORDER, items: Array(51).fill({ output_id: 'a' }) })).toThrow()

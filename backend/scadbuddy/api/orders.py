@@ -1631,12 +1631,27 @@ async def _add_items(
                 title=error.title,
                 type_=error.type,
                 headers=error.headers,
-                **error.extensions,
+                **{**error.extensions, **_in_item(error.extensions, index)},
                 item_index=index,
             ) from None
     return await _run(
         lambda: orders.lifecycle.add_items(order_id, by, entries, after_acceptance=after_acceptance)
     )
+
+
+def _in_item(extensions: dict[str, Any], index: int) -> dict[str, Any]:
+    """A field refusal's ``errors`` with each body ``loc`` inside ``items[index]``."""
+    errors = extensions.get("errors")
+    if not isinstance(errors, list):
+        return {}
+    return {
+        "errors": [
+            {**e, "loc": ["body", "items", index, *e["loc"][1:]]}
+            if isinstance(e, dict) and list(e.get("loc", []))[:1] == ["body"]
+            else e
+            for e in errors
+        ]
+    }
 
 
 async def _new_item(

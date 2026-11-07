@@ -140,10 +140,12 @@ const itemsAddInput = itemAddInput
       .optional()
       .describe(
         `Several items in one request (at most ${MAX_BATCH_ITEMS}), each what a single call takes, added in order, all or none: ` +
-          'a refused one adds none and names its place (`item_index`). With `items`, leave the single-item fields out',
+          'a refused one adds none and names its place (`item_index`). With `items`, leave the single-item fields out: ' +
+          'each item carries its own `quantity` and `notes`, and a top-level one is refused',
       ),
   })
-  .refine((o) => o.items === undefined || SINGLE_FIELDS.every((f) => o[f] === undefined), {
+  // `quantity` and `notes` have defaults, so only a value other than the default is told apart.
+  .refine((o) => o.items === undefined || (SINGLE_FIELDS.every((f) => o[f] === undefined) && o.quantity === 1 && o.notes === ''), {
     message: 'with items, name each item inside items: leave the single-item fields out',
     path: ['items'],
   })
