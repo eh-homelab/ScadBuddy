@@ -23,9 +23,9 @@ print's outcome (``print_outcomes``, #2665, which the follow of every path write
 native LAN print's too, so a native print settles by itself), heard on the event bus
 (``print.run``, ``print.outcome``, and ``print.progress``, which makes a `queued` item
 `printing`) and reconciled on start and on every ``bus.resync``
-(``Lifecycle.follow_print``, idempotent). A print whose outcome is never recorded (its
-subject printed again before it settled, so the outcome went to the newer run) is
-settled by hand, ``PATCH``ing the attempt.
+(``Lifecycle.follow_print``, idempotent). A print whose outcome is never recorded (an
+``unknown`` end, or a follow that stopped before the print settled) is settled by hand,
+``PATCH``ing the attempt.
 
 What it does not do yet: print the quote's sliced file itself. A slice quote is checked
 (its file still there, its digest the quote's, else ``requote_needed``) and the attempt
@@ -39,13 +39,13 @@ A library file item (#5544) prints its file as ``POST /print/library/{file_id}/r
 does (``api/library_print.py`` ``start_library_run``), on the run subject
 ``library:<file id>``. The check reads the file from the library that serves, as that
 route does: one deleted, or of the other library, is 409 ``library_file_gone``.
-Every print of one file shares that subject, and the follow reads and records only the
-subject's newest run's print (``bambuddy/follow.py``, ``bambuddy/progress.py``
-``library_progress``, ``bambuddy/outcomes.py``). So of two items of one file printing at
-once (two items of one order, the file on two orders, or a dialog print of it), only the
-newer attempt settles by itself; the older one stays `unknown` and is settled by hand
-(#5611). Making the outcome reach each attempt by its own run needs a follow per run,
-not per subject, through the follow workflow, the progress reads and the LAN reads.
+Every print of one file shares that subject. The follow reads the subject's newest run,
+and each older run still open by its own run (#5613, ``bambuddy/follow.py``
+``Follower.read_run``, ``bambuddy/progress.py`` ``run_reader``: the run's own sends on
+Bambuddy's queue, or its LAN start), and records each outcome against its run
+(``bambuddy/outcomes.py`` ``record_run``). So two items of one file printing at once
+(two items of one order, the file on two orders, or a dialog print of it) each settle by
+themselves. An older run is read for ``OPEN_RUN_WINDOW`` (3 days) after it started.
 """
 
 from __future__ import annotations

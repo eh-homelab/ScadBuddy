@@ -55,6 +55,7 @@ from scadbuddy.bambuddy.progress import (
     lan_first,
     library_progress,
     progress_for,
+    run_reader,
 )
 from scadbuddy.bambuddy.runs import PrintRunStore, RecentRuns, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -1321,6 +1322,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         store=SpoolStore(pool),
         providers=discover_providers(SettingsOnly(settings_store), None),
     )
+    outcomes = PrintOutcomeStore(pool, events)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1337,7 +1339,10 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         newest_failed=newest_failed_from(
             print_runs, settings_store.load, latest=recent_runs.latest
         ),
-        record_outcome=PrintOutcomeStore(pool, events).record,
+        record_outcome=outcomes.record,
+        # Each older run of a subject is settled on its own (#5613).
+        older_runs=outcomes,
+        read_run=run_reader(lan, lambda: client_for(settings_store.load()), links, uploads=uploads),
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys,
     # with the kept copy of Bambuddy's local presets (#4645).

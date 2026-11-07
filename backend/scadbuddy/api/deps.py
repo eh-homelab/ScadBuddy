@@ -25,6 +25,7 @@ from scadbuddy.bambuddy.progress import (
     lan_first,
     library_progress,
     progress_for,
+    run_reader,
 )
 from scadbuddy.bambuddy.runs import (
     PrintRunStore,
@@ -431,6 +432,7 @@ def _build_core(settings: Settings) -> AppState:
 
         return await lan_first(lan, subject.run_subject, bambuddy)
 
+    outcomes = PrintOutcomeStore(pool, transactional_events(events))
     return AppState(
         settings=settings,
         config=config,
@@ -463,10 +465,15 @@ def _build_core(settings: Settings) -> AppState:
             newest_failed=newest_failed_from(
                 print_run_store, settings_store.load, latest=recent_runs.latest
             ),
-            record_outcome=PrintOutcomeStore(pool, transactional_events(events)).record,
+            record_outcome=outcomes.record,
             # A LAN print's last print follows its reads (#4644); the rack registers its
             # own read hook (`rack/component.py`, #4543).
             on_read=[lan_last_print(OutputPrintStore(pool))],
+            # Each older run of a subject is settled on its own (#5613).
+            older_runs=outcomes,
+            read_run=run_reader(
+                lan, lambda: client_for(settings_store.load()), print_links, uploads=uploads
+            ),
         ),
         print_runs=PrintCommands(
             store=print_run_store,
