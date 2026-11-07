@@ -106,6 +106,7 @@ from scadbuddy.bambuddy.options import (
 from scadbuddy.bambuddy.part_settings import (
     PartSettings,
     PartSettingsMap,
+    laid_under,
     normalised,
     overrides_of,
     process_part_settings,
@@ -123,6 +124,7 @@ from scadbuddy.bambuddy.print_source import (
     FilamentReader,
     LibrarySource,
     OutputSource,
+    PrintPipeline,
     PrintSource,
     ReadOutOfMemoryError,
     SharedFilamentReader,
@@ -777,8 +779,7 @@ async def part_settings_refusal(
         return None
     if source.is_sliced:
         return PART_SETTINGS_SLICED
-    payload = await source.fetched_3mf(client)
-    slots = None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
+    slots = await _part_slots(source, client)
     if slots is None:
         return PART_SETTINGS_AS_IS
     unknown = unknown_slots(request.part_settings, slots)
@@ -797,6 +798,31 @@ PROCESS_VALUES_QUERY = (
     " #5627), which the dialog's Settings for this colour open on: one more read of the"
     " process preset's values."
 )
+
+
+async def _part_slots(source: PrintSource, client: BambuddyClient | None) -> set[int] | None:
+    """``part_settings_slots`` of the source's 3MF, read once per source
+    (``PrintPipeline.part_slots``); ``None`` when nothing can be written into it."""
+    if isinstance(source, PrintPipeline):
+        return await source.part_slots(client)
+    payload = await source.fetched_3mf(client)
+    return None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
+
+
+async def run_part_settings(
+    source: PrintSource, request: PrintRunRequest, client: BambuddyClient | None
+) -> PartSettingsMap | None:
+    """The settings per slot the run's copy carries: the template's (#5626,
+    ``OutputSource.part_settings``) with the request's ``part_settings`` over them, per
+    key. The template's go only where a copy can carry them: an output whose 3MF is laid
+    out (not ``as_is``), on the slots a printed part is made in. Elsewhere they set
+    nothing, so a template's settings never refuse a run; the request's were judged by
+    :func:`part_settings_refusal`."""
+    template = source.part_settings if isinstance(source, OutputSource) else None
+    if template is not None:
+        slots = await _part_slots(source, client) or set()
+        template = {slot: value for slot, value in template.items() if slot in slots}
+    return laid_under(template, request.part_settings)
 
 
 class PrintCheck(BaseModel):
@@ -3064,8 +3090,9 @@ async def plan_run(
             [slot.spool_id for slot in request.filament_plan.slots], printer_status
         ),
         filament_map=filament_map,
-        # #5571: the same copy for the quote, the background slice and the print.
-        part_settings=overrides_of(request.part_settings),
+        # #5571: the same copy for the quote, the background slice and the print; with
+        # the template's own under the request's (#5626).
+        part_settings=overrides_of(await run_part_settings(source, request, client)),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last

@@ -41,6 +41,7 @@ from scadbuddy.bambuddy.filaments3mf import (
 from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
+from scadbuddy.bambuddy.part_settings import PartSettingsMap
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
@@ -71,6 +72,7 @@ from scadbuddy.render.bambu3mf import (
     MAX_UNCOMPRESSED_BYTES,
     FilamentMap,
     PartOverrides,
+    part_settings_slots,
     plates_of,
     stl_3mf,
 )
@@ -390,6 +392,9 @@ class PrintPipeline:
     _fetch_client: BambuddyClient | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    #: :meth:`part_slots`, once read (#5626 review).
+    _part_slots: set[int] | None = field(default=None, init=False, repr=False, compare=False)
+    _part_slots_read: bool = field(default=False, init=False, repr=False, compare=False)
 
     async def _fetch(self: _Fetching, client: BambuddyClient | None) -> _Fetched:
         """:meth:`fetch_3mf`, made once per source and shared. Any failure is kept as its
@@ -465,6 +470,18 @@ class PrintPipeline:
 
     async def fetched_3mf(self: _Fetching, client: BambuddyClient | None) -> bytes | None:
         return (await PrintPipeline._fetch(self, client)).payload
+
+    async def part_slots(self, client: BambuddyClient | None) -> set[int] | None:
+        """``part_settings_slots`` of :meth:`fetched_3mf` (``None`` for no 3MF), read
+        once per source: the request's refusal and the template's settings (#5626) on
+        one source (the dialog's background slice) share it."""
+        if not self._part_slots_read:
+            payload = await self.fetched_3mf(client)  # type: ignore[misc]
+            self._part_slots = (
+                None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
+            )
+            self._part_slots_read = True
+        return self._part_slots
 
     async def recorded_slice(
         self: _Fetching, client: BambuddyClient | None, library_file_id: int, preset_key: str
@@ -763,6 +780,9 @@ class OutputSource(PrintPipeline):
     meta: OutputMeta
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
     print_settings: dict[str, str] = field(default_factory=dict)
+    #: The template's settings per slot as they are now (#5626, ``OutputNaming``), under
+    #: the request's ``part_settings`` (``print_run.run_part_settings``).
+    part_settings: PartSettingsMap | None = None
     #: The 3MF's filament slots, once :meth:`read_local` has read them (#2720).
     local: LocalFilaments | None = None
     _local_unreadable: bool = field(default=False, repr=False)

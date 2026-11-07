@@ -220,6 +220,7 @@ class PreviewSlicer:
             # The quote's copy goes to the inbox, as the dialog's does.
             stem=None,
             print_settings=naming.print_settings,
+            part_settings=naming.part_settings,
             # A native run's copy goes into the native library (D6).
             native=native_reads if lan else None,
         )

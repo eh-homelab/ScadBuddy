@@ -266,6 +266,7 @@ class PrintActivities:
             settings=settings,
             stem=spec.stem,
             print_settings=spec.print_settings,
+            part_settings=spec.part_settings,
             prints=self.d.prints,
             sends=self.d.links,
             native=self.d.library,
@@ -375,6 +376,7 @@ class PrintActivities:
                         update={
                             "stem": naming.stem if project.project_id is not None else None,
                             "print_settings": naming.print_settings,
+                            "part_settings": naming.part_settings,
                         }
                     )
                 source = await self._source(client, spec, settings)

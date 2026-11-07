@@ -32,6 +32,7 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.bambuddy.part_settings import ColourParameter, PartSettings
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
@@ -95,6 +96,7 @@ from scadbuddy.library.upstream import (
     state_of,
 )
 from scadbuddy.meshmodel.scene import SceneSource
+from scadbuddy.render.schema import find_annotations
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -469,6 +471,46 @@ class ModelMeta(BaseModel):
                 raise ValueError(problem)
         return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
 
+    #: The template's slicer settings per colour part (#5626): each key a ``// color``
+    #: parameter of its source, each value the settings for the parts of that colour,
+    #: with the keys and limits of a print's ``part_settings``
+    #: (``bambuddy/part_settings.py`` ``PartSettings``). Not in `ModelPatch` either.
+    #: Stored as plain dicts of the settings set, so a plain ``model_dump`` is the
+    #: model.json shape (an operation's stored result is sent as it is).
+    part_print_settings: dict[ColourParameter, dict[str, int | str]] = Field(
+        default_factory=dict,
+        description=(
+            "The template's own slicer settings per colour part, from its model.json: each"
+            " key a colour parameter, each value the settings for the parts in that colour."
+            " The server lays a print request's part_settings over them, per key, on a slice"
+            " of an output where the copy can carry them (not an arranged output, not a 3MF"
+            " that prints as it is); for clients they are informational, and no request sets"
+            " them."
+        ),
+    )
+
+    @field_validator("part_print_settings", mode="before")
+    @classmethod
+    def _set_part_print_settings(cls, value: Any) -> Any:
+        """Each parameter's settings checked by ``PartSettings``: an unknown key or a
+        value out of range is refused, as an unknown print setting is. Only the settings
+        set are kept, and a parameter that sets nothing is dropped."""
+        if not isinstance(value, dict):
+            return value  # the field's own type check refuses it
+        kept: dict[Any, dict[str, Any]] = {}
+        for name, raw in value.items():
+            try:
+                settings = PartSettings.model_validate(raw)
+            except ValidationError as error:
+                problems = "; ".join(
+                    f"{name}.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                    for detail in error.errors()
+                )
+                raise ValueError(problems) from None
+            if settings.metadata():
+                kept[name] = settings.model_dump(exclude_none=True)
+        return kept
+
     @field_validator("media", mode="before")
     @classmethod
     def _readable_media(cls, value: Any) -> list[MediaItem]:
@@ -492,7 +534,7 @@ class ModelMeta(BaseModel):
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
 DEFAULTED_META_FIELDS = frozenset(
-    {"name", "description", "tags", "libraries", "media", "print_settings"}
+    {"name", "description", "tags", "libraries", "media", "print_settings", "part_print_settings"}
 )
 
 
@@ -964,6 +1006,38 @@ class Catalogue:
         :class:`InvalidModelMetaError`, naming the key."""
         return self._meta(slug, self.read_raw_meta(slug)).print_settings
 
+    def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
+        """The template's ``part_print_settings`` as its model.json has them now
+        (#5626), by colour parameter; read and refused as :meth:`print_settings`.
+
+        A key that is not a ``// color`` parameter of the template's ``model.scad`` is
+        refused too, naming it, so a typo never sets nothing in silence. A template
+        with a pipeline (whose params need not be ``model.scad``'s) or with no
+        ``model.scad`` is only warned about."""
+        meta = self._meta(slug, self.read_raw_meta(slug))
+        declared = meta.part_print_settings
+        if declared:
+            try:
+                source = self.paths.model_source(slug).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                source = None
+            colours = (
+                {n for n, a in find_annotations(source).items() if a.kind == "color"}
+                if source is not None
+                else set()
+            )
+            unknown = [name for name in declared if name not in colours]
+            if unknown:
+                problem = (
+                    f"part_print_settings names {', '.join(map(repr, unknown))}, which is not a"
+                    " // color parameter of model.scad"
+                )
+                if source is None or meta.pipeline is not None:
+                    logger.warning("template %s: %s", slug, problem)
+                else:
+                    raise InvalidModelMetaError(slug, problem)
+        return {name: PartSettings.model_validate(raw) for name, raw in declared.items()}
+
     def _record(
         self,
         slug: str,
@@ -1177,6 +1251,8 @@ class Catalogue:
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            if not meta.part_print_settings:
+                excluded.add("part_print_settings")  # #5626, as print_settings
             if meta.mesh_source is None:
                 excluded.add("mesh_source")
             raw = meta.model_dump(exclude=excluded)
