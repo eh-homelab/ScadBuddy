@@ -432,7 +432,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); every
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
+  settings, the Bambuddy key among them, come from the API's CRUD route
+  (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
+  every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
   behavior), so an `Operation` moves to the current build, which #4139's deferral

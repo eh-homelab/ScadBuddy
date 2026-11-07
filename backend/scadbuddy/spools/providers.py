@@ -15,11 +15,17 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Protocol
 
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
+
 import scadbuddy
 from scadbuddy.core.components import Components, feature_exports
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import SettingsReader, StoredSettings
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import SeenTray, SpoolSnapshot
+
+Pool = ConnectionPool[Connection[DictRow]]
 
 PROVIDER_MODULE = "spool_providers"
 PROVIDER_ATTR = "SPOOL_PROVIDERS"
@@ -56,20 +62,42 @@ class TraySource(Protocol):
     async def latest(self) -> list[SeenTray]: ...
 
 
+class ProviderSettings(Protocol):
+    """What a provider's build reads: the settings, and the pool its own tables are on.
+    The API's `SettingsStore` is one, and so is :class:`SplitSettings`."""
+
+    @property
+    def pool(self) -> Pool: ...
+
+    def load(self, timeout: float | None = None) -> StoredSettings: ...
+
+
+@dataclass(frozen=True)
+class SplitSettings:
+    """The print worker's :class:`ProviderSettings`: the settings read through the API's
+    CRUD route (#5298), the spool tables on the worker's own pool."""
+
+    settings: SettingsReader
+    pool: Pool
+
+    def load(self, timeout: float | None = None) -> StoredSettings:
+        return self.settings.load(timeout)
+
+
 class ProviderCore(Protocol):
     """What a provider's build may read of the core services: `Core` is one, and so is
     :class:`SettingsOnly`, so the print worker, which has no `Core`, finds the same
     providers (#4551: a run's plan reads the overlay there)."""
 
     @property
-    def settings_store(self) -> SettingsStore: ...
+    def settings_store(self) -> ProviderSettings: ...
 
 
 @dataclass(frozen=True)
 class SettingsOnly:
     """The :class:`ProviderCore` of a process with no `Core` (the print worker)."""
 
-    settings_store: SettingsStore
+    settings_store: ProviderSettings
 
 
 #: Builds a feature's provider over the core services and the components, which are
