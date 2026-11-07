@@ -191,7 +191,8 @@ export const APPLICATION_NAME = 'scadbuddy-agent'
 
 /**
  * The most Postgres connections one agent process holds: the stores' pool, the lock client
- * and the LISTEN connection (events/pgListener.ts, always one). The backend's
+ * and the LISTEN connection (events/pgListener.ts, always one); briefly more while a lock
+ * client retired by an unhealthy lease still has leases out (`createLockClient`). The backend's
  * `tests/test_pg_pools.py` sums the API process's the same way; README "Running it" gives both.
  */
 export const AGENT_DB_CONNECTIONS = SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS + 1

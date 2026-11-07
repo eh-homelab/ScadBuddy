@@ -635,8 +635,10 @@ class Metrics:
 
 class _PoolCollector(Collector):
     """This process's Postgres pools and its ``LISTEN`` connection, by pool name: the
-    connections each holds now and the most it may. ``sum by (pod)`` of the second is
-    what a pod may take of ``max_connections``."""
+    connections each holds now, the most it may, and the callers waiting for one.
+    ``sum by (pod)`` of the most is what a pod's pools may take of ``max_connections``;
+    the short-lived lock and claim connections opened outside any pool come on top
+    (README "Running it")."""
 
     def describe(self) -> list[Metric]:
         return list(self._families())
@@ -644,20 +646,23 @@ class _PoolCollector(Collector):
     def collect(self) -> Iterator[Metric]:
         from scadbuddy.core.pg_pool import pools
 
-        open_now, most = self._families()
+        open_now, most, waiting = self._families()
         totals: dict[str, list[int]] = {}
         for use in pools():
-            total = totals.setdefault(use.name, [0, 0])
+            total = totals.setdefault(use.name, [0, 0, 0])
             total[0] += use.open
             total[1] += use.max_size
-        for name, (now, top) in sorted(totals.items()):
+            total[2] += use.waiting
+        for name, (now, top, queued) in sorted(totals.items()):
             open_now.add_metric([name], now)
             most.add_metric([name], top)
+            waiting.add_metric([name], queued)
         yield open_now
         yield most
+        yield waiting
 
     @staticmethod
-    def _families() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
+    def _families() -> tuple[GaugeMetricFamily, GaugeMetricFamily, GaugeMetricFamily]:
         return (
             GaugeMetricFamily(
                 "scadbuddy_db_pool_connections",
@@ -669,6 +674,12 @@ class _PoolCollector(Collector):
             GaugeMetricFamily(
                 "scadbuddy_db_pool_max_connections",
                 "The most Postgres connections this process's pool may hold, by pool.",
+                labels=["pool"],
+            ),
+            GaugeMetricFamily(
+                "scadbuddy_db_pool_requests_waiting",
+                "Callers waiting for a connection from this process's pool now, by pool:"
+                " above 0 for long, the pool is too small for its load.",
                 labels=["pool"],
             ),
         )

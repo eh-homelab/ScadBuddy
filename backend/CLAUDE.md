@@ -541,8 +541,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
   customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
-  (`OrdersComponent`: `store` over a pool of its own opened on first use, `lifecycle` over the
-  core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
+  (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
+  opened on first use, `lifecycle` over the core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
   units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and
   `lock_order`; a customer's contacts and addresses replaced whole but kept by id, so an open
   order's address pointer survives an edit), `numbers.py` (`ORD-<yyyy>-<n>` from the

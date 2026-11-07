@@ -124,7 +124,10 @@ def test_the_metrics_sum_each_pool() -> None:
         s.labels["pool"]: s.value for s in families["scadbuddy_db_pool_max_connections"].samples
     }
     now = {s.labels["pool"]: s.value for s in families["scadbuddy_db_pool_connections"].samples}
-    assert most[name] == 5 and now[name] == 0
+    waiting = {
+        s.labels["pool"]: s.value for s in families["scadbuddy_db_pool_requests_waiting"].samples
+    }
+    assert most[name] == 5 and now[name] == 0 and waiting[name] == 0
     first.open()
     first.close()  # closed for good: it no longer counts
     exposed = Metrics().exposition().decode()

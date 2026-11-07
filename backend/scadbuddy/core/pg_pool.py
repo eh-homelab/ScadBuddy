@@ -53,6 +53,8 @@ class PoolUse:
     conninfo: str
     open: int
     max_size: int
+    #: Callers queued for a connection (psycopg_pool's ``requests_waiting``).
+    waiting: int = 0
 
 
 class _PoolEntry:
@@ -65,11 +67,13 @@ class _PoolEntry:
         # (psycopg_pool never reopens one).
         if pool is None or (pool.closed and getattr(pool, "_opened", False)):
             return None
+        stats = pool.get_stats() if not pool.closed else {}
         return PoolUse(
             name=pool.name,
             conninfo=pool.conninfo if isinstance(pool.conninfo, str) else "",
-            open=pool.get_stats().get("pool_size", 0) if not pool.closed else 0,
+            open=stats.get("pool_size", 0),
             max_size=pool.max_size,
+            waiting=stats.get("requests_waiting", 0),
         )
 
 
