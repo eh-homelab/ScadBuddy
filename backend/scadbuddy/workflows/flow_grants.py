@@ -106,7 +106,10 @@ class FlowGrants:
         and an arrange's are read from the API. Grams are never known here: ScadBuddy
         uploads unsliced plates, so a filament bound does not match (amendment Ruling 4)."""
         if fn == "tool":
-            return CallFacts(fn=fn, tool=tool, args=args)
+            # An order tool names its order as `order_id` (#4252, orders spec §7.2).
+            order_id = args.get("order_id")
+            named = order_id if isinstance(order_id, str) else None
+            return CallFacts(fn=fn, tool=tool, args=args, order_id=named)
         request: dict[str, Any] = args.get("request") or {}
         if fn == "arrange":
             models: set[str] = set()
@@ -129,6 +132,8 @@ class FlowGrants:
         # Several chosen plates (#3652) each print, as every plate of an all-plates one.
         chosen = _chosen_plates(request)
         plates: int | None
+        if source.get("order_item_id") is not None:
+            return await self._item_print_facts(args, source, printer)
         if source.get("output_id") is not None:
             output = await self._get(f"/api/v1/outputs/{_segment(source['output_id'])}")
             models_of, library_file = [str(output["slug"])], None
@@ -170,6 +175,41 @@ class FlowGrants:
             models=models_of,
             library_file=library_file,
             prints=None if plates is None else int(copies) * (plates if all_plates else chosen),
+        )
+
+    async def _item_print_facts(
+        self, args: dict[str, Any], source: dict[str, Any], printer: Any
+    ) -> CallFacts:
+        """A line item's print (#4252, orders spec §5.4): its order, what the item prints,
+        and its quantity as the copies, the most the run can print (it prints what is still
+        to make), so a print bound is spent no less than the print uses. A library file's
+        plates are not counted, as for a library print."""
+        order_id = str(source["order_id"])
+        order = await self._get(f"/api/v1/orders/{_segment(order_id)}")
+        item = next(i for i in order["items"] if i["id"] == source["order_item_id"])
+        models: list[str] = []
+        library_file: int | None = None
+        plates: int | None = 1
+        if item.get("library_file") is not None:
+            library_file, plates = int(item["library_file"]["id"]), None
+        else:
+            models = [str(item["reference"]["slug"])]
+            if item.get("output_id") is not None:
+                output = await self._get(f"/api/v1/outputs/{_segment(item['output_id'])}")
+                plates = len(output.get("layout_plates") or []) or 1
+        request: dict[str, Any] = args.get("request") or {}
+        pins: dict[str, Any] = {}
+        if request.get("printer_id") is None and printer is not None:
+            pins["/request/printer_id"] = int(printer)
+        return CallFacts(
+            fn="queue_print",
+            args=args,
+            pins=pins,
+            printer_id=None if printer is None else int(printer),
+            models=models,
+            library_file=library_file,
+            order_id=order_id,
+            prints=None if plates is None else int(item["quantity"]) * plates,
         )
 
     def _hash(self, key: bytes) -> Callable[[str, str | None, dict[str, Any]], str]:

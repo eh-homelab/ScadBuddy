@@ -74,6 +74,25 @@ describe('GrantEditor', () => {
     expect(grantProblems(spec, new Date(), OUTWARD)).toEqual([])
   })
 
+  it('bounds a rule by order: any order, or the ones named (#4252)', async () => {
+    const { user, onSubmit } = render()
+    const send = await rule('send_to_bambuddy')
+    await user.click(within(send).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.click(within(send).getByRole('checkbox', { name: 'Only calls that name an order' }))
+    const print = await rule('queue_print')
+    await user.click(within(print).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.click(within(print).getByRole('checkbox', { name: 'Only calls that name an order' }))
+    await user.click(within(print).getByRole('checkbox', { name: /^Any order/ }))
+    await user.type(within(print).getByLabelText('Order ids'), 'o1, o2')
+    await user.click(screen.getByRole('button', { name: 'Use grant' }))
+    const spec = onSubmit.mock.calls[0]![0]
+    expect(spec.rules).toEqual([
+      { fn: 'queue_print', orders: ['o1', 'o2'] },
+      { fn: 'tool', tool: 'send_to_bambuddy', orders: 'any' },
+    ])
+    expect(grantProblems(spec, new Date(), OUTWARD)).toEqual([])
+  })
+
   it('refuses an expiry more than 7 days away', async () => {
     const { user, onSubmit } = render()
     const expires = await screen.findByLabelText('Expires')
