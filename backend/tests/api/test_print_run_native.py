@@ -813,6 +813,54 @@ def test_a_calibration_over_the_lan_is_refused_in_words_for_its_caller(
         assert library.sliced_names == []
 
 
+def _batch_refusal(
+    client: TestClient, file_id: int, request: dict[str, Any], headers: dict[str, str]
+) -> str:
+    """The detail of a one-file batch's refused Queue all, sent with ``headers``."""
+    made = client.post(
+        "/api/v1/print/batches",
+        json={"files": [{"library_file_id": file_id, "filename": "plug.3mf"}]},
+    )
+    assert made.status_code == 201, made.text
+    batch_id = made.json()["id"]
+    chose = client.put(f"/api/v1/print/batches/{batch_id}/items/0", json={"request": request})
+    assert chose.status_code == 200, chose.text
+    sent = client.post(f"/api/v1/print/batches/{batch_id}/queue", headers=headers)
+    assert sent.status_code == 200, sent.text
+    outcome = sent.json()["items"][0]["outcome"]
+    assert outcome["status"] == "refused", outcome
+    detail: str = outcome["detail"]
+    return detail
+
+
+def test_a_batchs_calibration_over_the_lan_is_refused_in_words_for_its_caller(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,
+    tmp_path: Path,
+    library: FakeLibrary,
+) -> None:
+    """#5625: a batch's Queue all words its files' refusals as a single run does. A
+    caller of the API gets `path: "bambuddy"` in the file's refusal; the page's Queue
+    all (``X-ScadBuddy-Request: 1``) gets the Settings wording alone."""
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        prepared(client, model)
+        plug = _upload(client, _one_colour(tmp_path / "plug.3mf"))
+        row = _lan_routed(client)
+        request = {k: v for k, v in body().items() if k != "printer_id"}
+        asked = {**request, "printer": row, "options": {"flow_cali": "on"}}
+        refusal = lan_calibration_refusal(PrintOptions.model_validate(asked["options"]))
+        assert refusal is not None
+
+        api = _batch_refusal(client, plug.id, asked, {})
+        assert api == refusal + LAN_CALIBRATION_API_HINT
+        assert 'path "bambuddy"' in api
+        page = _batch_refusal(client, plug.id, asked, {"X-ScadBuddy-Request": "1"})
+        assert page == refusal
+        assert "path" not in page
+
+
 def test_a_calibration_on_a_lan_only_printer_names_no_bambuddy_path(
     model: str,
     settings: Settings,

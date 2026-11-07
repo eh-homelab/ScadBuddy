@@ -6,6 +6,7 @@ import type {
   FilamentOptions,
   LibraryEntry,
   ModelPrintChoices,
+  OrderItem,
   Output,
   OutputPlate,
   PrintCheck,
@@ -58,6 +59,18 @@ export interface SourceApi {
   toolpathUrl: (jobId: number, slicer: Slicer) => string
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
+}
+
+/**
+ * #5544 — what an order item prints or slices: a library file item's file, or a model
+ * item's output. A custom item, or a model item with no output yet, has none.
+ */
+export function orderItemSource(
+  item: Pick<OrderItem, 'output_id' | 'reference'> & Partial<Pick<OrderItem, 'kind' | 'library_file'>>,
+): PrintSource | null {
+  if (item.library_file) return { kind: 'library', file: { id: item.library_file.id, filename: item.library_file.filename } }
+  if (item.kind !== 'custom' && item.reference && item.output_id) return { kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }
+  return null
 }
 
 /** One string per source, so what belongs to one is reset when it changes. */
