@@ -5,6 +5,8 @@ import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
+import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
+import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
@@ -201,7 +203,8 @@ describe('OrderPage (#4249)', () => {
     })
     afterEach(() => {
       scrolls.mockReset()
-      delete (Element.prototype as Partial<Element>).scrollIntoView
+      // Back to vitest.setup.ts's no-op: a Radix select scrolls its options into view.
+      Element.prototype.scrollIntoView = () => {}
     })
 
     it('opens the order with the item named by ?item= marked and open', async () => {
@@ -239,5 +242,41 @@ describe('OrderPage (#4249)', () => {
       expect(screen.queryByRole('dialog')).toBeNull()
       await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(new RegExp(`^/orders/${ORDER_DRAFT}$`)))
     })
+  })
+})
+
+describe('OrderPage payment requests (#4957)', () => {
+  beforeEach(() => resetMockState())
+
+  it('records a payment for an open request and closes it', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    const { user } = render(ORDER_ACCEPTED)
+    const requests = await screen.findByRole('list', { name: 'Payment requests' })
+    expect(within(requests).getByText('Open')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Received (USD)'), '10.00')
+    await choose(user, screen.getByRole('combobox', { name: 'For request' }), /Balance .*10\.00/)
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Payment requests' })).getByText('Paid')).toBeInTheDocument())
+    expect(within(screen.getByRole('list', { name: 'Payments' })).getByText('$10.00')).toBeInTheDocument()
+    expect((await api.order(ORDER_ACCEPTED)).payment_requests?.find((r) => r.id === opened.id)?.status).toBe('paid')
+  })
+
+  it('shows a provider payment as paid by that provider', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'paid')
+    render(ORDER_ACCEPTED)
+    const payments = await screen.findByRole('list', { name: 'Payments' })
+    expect(within(payments).getByText(/Paid by Fake/)).toBeInTheDocument()
+  })
+
+  it('offers no request to record against once none is open', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    await api.cancelPaymentRequest(ORDER_ACCEPTED, opened.id)
+    render(ORDER_ACCEPTED)
+    await screen.findByLabelText('Received (USD)')
+    expect(screen.queryByRole('combobox', { name: 'For request' })).not.toBeInTheDocument()
   })
 })
