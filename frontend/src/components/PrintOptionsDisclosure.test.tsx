@@ -527,6 +527,14 @@ describe('PrintOptionsDisclosure', () => {
       server.events.removeAllListeners()
     })
 
+    it('shows the held job in Simple mode over the LAN too, with no calibration row (#5352)', async () => {
+      const known = { ...printOptionsFixture, global_options: { manual_start: true, flow_cali: 'off' as const } }
+      render(<PrintOptionsDisclosure subject={MODEL} value={{}} onChange={() => {}} heldOnly known={known} native />)
+      expect(await screen.findByTestId('holding-manual_start')).toHaveTextContent('Waits for a manual start.')
+      expect(screen.queryByRole('combobox', { name: 'Flow calibration' })).not.toBeInTheDocument()
+      expect(screen.queryByText(/Over the LAN/)).not.toBeInTheDocument()
+    })
+
     it("sets every changed option back to Bambuddy's default for this print", async () => {
       remembered()
       const user = userEvent.setup()

@@ -45,7 +45,7 @@ import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
-import { resolveOptions } from '../lib/printOptions'
+import { lanHonours, resolveOptions, type OptionName, type OptionValue } from '../lib/printOptions'
 import {
   attachPrintToProject,
   optionsSubject,
@@ -519,6 +519,15 @@ export function PrintPicker({
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  // #5352 — on a native route the LAN refuses a calibration value it cannot honour, so
+  // one this print set (before the route turned native, or from a seed) is dropped.
+  useEffect(() => {
+    if (!native) return
+    const kept = Object.entries(options).filter(([name, value]) =>
+      lanHonours(name as OptionName, (value ?? null) as OptionValue),
+    )
+    if (kept.length !== Object.keys(options).length) setOptions(Object.fromEntries(kept) as PrintOptions)
+  }, [native, options])
   /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
   // Memoised: it is a dependency of the run and of the background analysis.
   // Seeded only while it was never chosen. `null` is the user handing it back to the
@@ -1965,6 +1974,7 @@ export function PrintPicker({
                       subject={subject}
                       printerId={printerId}
                       registryPrinter={registryPrinter}
+                      native={native}
                       value={sentOptions}
                       toRemember={rememberOptions}
                       onChange={editOptions}
