@@ -647,7 +647,8 @@ colours, and the attempt records that file; the digest check applies only to a
 `slice` quote, since a manual price was never a fact about one file. The request's
 `filament_plan` maps
 each slot to a spool of the slot's filament, and `copies` is the quantity still to
-print. A flow reaches it as `queue_print({"order_item_id": id}, request)` (§7.2), so
+print. A flow reaches it as `queue_print({"order_id": o, "order_item_id": id}, request)`
+(§7.2; as built, #4252: the source names the order with the item), so
 the grant's `printers`, `max_prints` and `max_filament_g` bounds apply as they do to
 any print.
 
@@ -941,8 +942,10 @@ order = tool("order_get", {"id": ev.order_id})
 for item in order["items"]:
     if item["status"] != "approved":
         continue
-    out = queue_print({"order_item_id": item["id"]}, {})   # §5.4: the accepted quote's file
-    if out["error"] == "requote_needed":   # PrintOutcome always carries error (None when it queued)
+    request = print_request(item)   # the dialog's body from remembered choices (as built)
+    source = {"order_id": order["id"], "order_item_id": item["id"]}
+    out = queue_print(source, request)   # §5.4: the accepted quote's file
+    if out["problem"] == "requote_needed":   # a refusal: status "refused", its name in problem
         quote = tool("order_item_quote", {"order_id": order["id"], "item_id": item["id"]})
         # in a flow the tool follows its operation to the answer (§7.3); this is the quote
         rise = quote["total_minor"] - item["accepted_quote"]["total_minor"]
@@ -953,7 +956,7 @@ for item in order["items"]:
                 continue
         tool("order_item_accept_quote", {"order_id": order["id"], "item_id": item["id"],
                                          "quote_id": quote["id"]})   # covered by the grant: no second park
-        out = queue_print({"order_item_id": item["id"]}, {})
+        out = queue_print(source, request)
     if out["status"] != "succeeded":
         wait_for_human(f"Print of {item['title']} did not queue: {out['error']}")
 done = agent("Check every printed item of this order, add the finished photo and the "
@@ -967,12 +970,20 @@ if inputs().notify:
 
 What this relies on, and what the design adds for it:
 
-- `queue_print`'s source gains a third kind, `{"order_item_id"}`: the call is sent to
+- `queue_print`'s source gains a third kind, `{"order_id", "order_item_id"}`: the call is sent to
   `order_item_print` (§5.4), which fills the request from the accepted quote, checks
   the file's digest and sets the run's subject; the request argument may only narrow
   it (a printer, fewer copies, a spool of the slot's own filament, §5.4). The item's status then follows the print with no
   further script work, and a stale quote comes back as `requote_needed`, never as a
   print of the wrong file (Ruling 2).
+
+  As built (#4252): the source is `{"order_id", "order_item_id"}` (the item's route is
+  under its order, and the grant's `orders` bound reads the order from the source). The
+  request is the print dialog's body (`filament_plan`, `choices`, ...), as
+  `order_item_print` takes it, since a quote does not store the choices; the built-in
+  flow builds it from the model's remembered print choices. A refusal before anything
+  printed is `status` `refused` with `error` the problem's detail and `problem` the last
+  segment of its `type` (`requote_needed`, `order_on_hold`, `needs_spool_choice`, ...).
 - A person is asked only where the grant does not cover the call: `queue_print` is
   covered by the trigger's standing grant (`printers`, `max_prints`, `max_filament_g`,
   F13), and the order tools that are `outward` (§7.3: `order_accept`,

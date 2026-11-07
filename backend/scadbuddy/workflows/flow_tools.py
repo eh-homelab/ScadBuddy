@@ -112,7 +112,7 @@ class RenderResult(BaseModel):
 class PrintOutcome(BaseModel):
     """A print run once it settled: `succeeded` or `failed`. A failed run with
     `may_have_queued` may be on Bambuddy's queue anyway. A line item's print that
-    ScadBuddy refused before it started is `refused`, with no run and the order's
+    ScadBuddy refused before it started is `refused`, with no run and the refusal's
     `problem` (`requote_needed` when its accepted quote no longer stands)."""
 
     run_id: str
@@ -121,7 +121,7 @@ class PrintOutcome(BaseModel):
     error: str | None = None
     #: Who narrowed the print before it was approved (`session:<id>`, `browser`).
     narrowed_by: str | None = None
-    #: Why a line item's print was refused: the orders problem's name (#4252).
+    #: Why a line item's print was refused: the last segment of the problem's `type` (#4252).
     problem: str | None = None
 
 
@@ -447,8 +447,16 @@ async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRe
     return read
 
 
-#: An orders problem's `type` (`api/orders.py`), whose last segment names it.
-_ORDERS_PROBLEM = "https://scadbuddy.dev/problems/orders/"
+#: A line item's print path (`_print_path`), which `approved_print` hands to `_item_print`.
+_ITEM_PRINT_PATH = re.compile(r"^/api/v1/orders/[^/]+/items/[^/]+/print$")
+
+
+def problem_name(type_: str | None) -> str | None:
+    """The name a problem's `type` ends in (`requote_needed`, `order_on_hold`,
+    `needs_spool_choice`, ...), which a script compares; none for `about:blank`."""
+    if not type_ or "://" not in type_:
+        return None
+    return type_.rstrip("/").rpartition("/")[2] or None
 
 
 def _print_path(source: dict[str, Any]) -> str:
@@ -476,7 +484,7 @@ async def approved_print(call: str, path: str, request: dict[str, Any]) -> Print
         # Narrowed: what the decision approved, source and request alike.
         path, request = _print_path(read.args["source"]), read.args["request"]
     owner: StepOwner = workflow.instance()
-    if path.startswith("/api/v1/orders/"):
+    if _ITEM_PRINT_PATH.match(path):
         return await _item_print(call_id, path, request, read.narrowed_by)
     body = {**request, "request_id": route_key(owner.run_id, workflow.info().run_id, call_id)}
     accepted = await _send(call_id, path, body, outward="queue_print")
@@ -516,15 +524,12 @@ async def _item_print(
                 )
             attempt = operation["result"] or {}
     except RouteRefusedError as refused:
-        kind = refused.problem or ""
         return PrintOutcome(
             run_id="",
             status="refused",
             error=str(refused),
             narrowed_by=narrowed_by,
-            problem=kind.removeprefix(_ORDERS_PROBLEM)
-            if kind.startswith(_ORDERS_PROBLEM)
-            else None,
+            problem=problem_name(refused.problem),
         )
     run_id = attempt.get("print_run_id")
     if not run_id:
@@ -714,7 +719,7 @@ async def queue_print(
     {"order_id": ..., "order_item_id": ...}, prints the item's accepted quote, every
     plate, the copies still to make: the request's spools are filled from the item's
     filaments and must be of them. Refused before it starts, the outcome is `refused`
-    with the order's `problem` (`requote_needed`: quote it again)."""
+    with the refusal's `problem` (`requote_needed`: quote it again)."""
     path = _print_path(source)
     call_id = str(workflow.uuid4())
     outcome: PrintOutcome = await _gated(

@@ -186,14 +186,19 @@ class FlowGrants:
         plates are not counted, as for a library print."""
         order_id = str(source["order_id"])
         order = await self._get(f"/api/v1/orders/{_segment(order_id)}")
-        item = next(i for i in order["items"] if i["id"] == source["order_item_id"])
+        item = next((i for i in order["items"] if i["id"] == source["order_item_id"]), None)
+        if item is None:
+            # Outside every grant: the call is left for a person, who sees why.
+            raise LookupError(f"item {source['order_item_id']} is not on order {order_id}")
         models: list[str] = []
         library_file: int | None = None
         plates: int | None = 1
         if item.get("library_file") is not None:
             library_file, plates = int(item["library_file"]["id"]), None
         else:
-            models = [str(item["reference"]["slug"])]
+            # A request item with no design yet names no model; its print is refused.
+            if item.get("reference") is not None:
+                models = [str(item["reference"]["slug"])]
             if item.get("output_id") is not None:
                 output = await self._get(f"/api/v1/outputs/{_segment(item['output_id'])}")
                 plates = len(output.get("layout_plates") or []) or 1

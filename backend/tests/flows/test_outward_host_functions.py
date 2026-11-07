@@ -12,7 +12,7 @@ from temporal_agent_harness.harness.agent_client import AgentClient
 
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_routes import route_key
-from scadbuddy.workflows.flow_tools import outward_activity_id
+from scadbuddy.workflows.flow_tools import outward_activity_id, problem_name
 from tests.flows.fake_api import FakeApi, Outward, outward_worker
 from tests.flows.flows_support import script
 from tests.flows.test_project_replay import HISTORIES
@@ -115,6 +115,15 @@ async def test_a_line_items_print_follows_its_run_and_a_stale_quote_is_an_outcom
     [(body, key)] = api.to("/api/v1/orders/ord1/items/i1/print")
     assert body == PLAN and key is not None
     assert list(api.runs) == [f"run-{key}"]
+
+
+def test_a_refusals_problem_is_the_name_its_type_ends_in() -> None:
+    """Any route's named problem reaches a script by name, an order's and the print
+    route's alike; a plain one has none."""
+    assert problem_name("https://scadbuddy.dev/problems/orders/requote_needed") == "requote_needed"
+    assert problem_name("https://scadbuddy.dev/problems/lan-calibration") == "lan-calibration"
+    assert problem_name("about:blank") is None
+    assert problem_name(None) is None
 
 
 async def test_a_print_refusal_fails_its_step(outward: Outward) -> None:

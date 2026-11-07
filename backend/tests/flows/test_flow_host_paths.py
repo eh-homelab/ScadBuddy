@@ -67,6 +67,19 @@ ANSWERS: list[tuple[str, re.Pattern[str], int, dict[str, Any]]] = [
     ("POST", re.compile(r"/api/v1/outputs/arrange"), 202, {"id": "job1"}),
     ("GET", re.compile(r"/api/v1/outputs/[^/]+"), 200, {"slug": "s", "layout_plates": [{}]}),
     ("GET", re.compile(r"/api/v1/settings/print-options"), 200, {"printer_id": 1}),
+    # A line item's print (#4252): the order read for its grant check, then the print.
+    (
+        "GET",
+        re.compile(r"/api/v1/orders/[^/]+"),
+        200,
+        {"items": [{"id": "i1", "quantity": 1, "reference": {"slug": "s"}, "output_id": "o1"}]},
+    ),
+    (
+        "POST",
+        re.compile(r"/api/v1/orders/[^/]+/items/[^/]+/print"),
+        200,
+        {"print_run_id": "r1"},
+    ),
     # Not in the registry: the read is made, and the call is bound with no printer.
     ("GET", re.compile(r"/api/v1/printers/[^/]+"), 404, {"detail": "no such printer"}),
 ]
@@ -137,13 +150,21 @@ def _body(tool: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
 async def _every_call(logged: Logged) -> None:
     await flow_tools._render("c1", "s", {})
     await flow_tools._save("c2", "s", "job1", "n")
-    for source in ({"output_id": "o1"}, {"file_id": 3}):
+    for source in (
+        {"output_id": "o1"},
+        {"file_id": 3},
+        {"order_id": "ord1", "order_item_id": "i1"},
+    ):
         await _body(flow_tools.approved_print)("c3", flow_tools._print_path(source), {})
     await _body(flow_tools.approved_arrange)("c4", {"objects": [{"output_id": "o1"}]})
     client = logged.client()
     grants = FlowGrants(None, client, b"k" * 32)  # type: ignore[arg-type]
     await grants.facts_of("arrange", None, {"request": {"objects": [{"output_id": "o1"}]}})
-    for source in ({"output_id": "o1"}, {"file_id": 3}):
+    for source in (
+        {"output_id": "o1"},
+        {"file_id": 3},
+        {"order_id": "ord1", "order_item_id": "i1"},
+    ):
         await grants.facts_of("queue_print", None, {"source": source, "request": {}})
     # `flow_decide`'s binding of a print on a registry printer (#4445).
     await bind_call(PRINT_OUTPUT, {"printer": PRINTER}, api_lookup(client))
@@ -202,6 +223,11 @@ METHODS = {
     "/api/v1/settings/print-options": "GET",
     "/api/v1/outputs/{_segment(source['output_id'])}": "GET",
     "/api/v1/printers/{printer}": "GET",
+    "/api/v1/orders/{order}/items/{_segment(item_id, 'item id')}/print": "POST",
+    "/api/v1/operations/{_segment(attempt['id'], 'operation id')}": "GET",
+    "/api/v1/print/runs/{_segment(run_id, 'run id')}": "GET",
+    "/api/v1/orders/{_segment(order_id)}": "GET",
+    "/api/v1/outputs/{_segment(item['output_id'])}": "GET",
 }
 
 

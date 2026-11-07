@@ -137,6 +137,14 @@ function typingProblems(rows: RowDraft[]): string[] {
     if (row.orders !== null && row.orders !== 'any' && listOf(row.orders).length === 0) {
       problems.push(`${name}: name at least one order id, or choose any order.`)
     }
+    // The backend's `OrderId` (`flows/grants.py`): a letter or digit, then up to 63 more.
+    if (
+      row.orders !== null &&
+      row.orders !== 'any' &&
+      listOf(row.orders).some((id) => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id))
+    ) {
+      problems.push(`${name}: an order id is letters, digits, "-" and "_", at most 64.`)
+    }
   })
   return problems
 }

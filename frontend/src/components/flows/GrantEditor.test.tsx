@@ -93,6 +93,17 @@ describe('GrantEditor', () => {
     expect(grantProblems(spec, new Date(), OUTWARD)).toEqual([])
   })
 
+  it('refuses an order id the backend would refuse', async () => {
+    const { user } = render()
+    const print = await rule('queue_print')
+    await user.click(within(print).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.click(within(print).getByRole('checkbox', { name: 'Only calls that name an order' }))
+    await user.click(within(print).getByRole('checkbox', { name: /^Any order/ }))
+    await user.type(within(print).getByLabelText('Order ids'), 'o1, o 2')
+    expect(screen.getByText('queue_print: an order id is letters, digits, "-" and "_", at most 64.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Use grant' })).toBeDisabled()
+  })
+
   it('refuses an expiry more than 7 days away', async () => {
     const { user, onSubmit } = render()
     const expires = await screen.findByLabelText('Expires')

@@ -123,6 +123,9 @@ FLOW_HOST_ENDPOINTS = frozenset(
         "scadbuddy.api.printing.get_run",
         "scadbuddy.api.settings.get_print_options",
         "scadbuddy.api.printers.get_printer",
+        # A line item's print and the read its grant check makes (#4252, orders §7.2).
+        "scadbuddy.api.orders.get_order",
+        "scadbuddy.api.orders.print_item",
     }
 )
 #: The hidden internal routes, each the scope of one service credential (§7.1).
