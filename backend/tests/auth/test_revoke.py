@@ -138,8 +138,8 @@ def test_the_role_can_be_dropped_after_the_revoke(pg_conninfo: str, conn: Conn) 
 
 def test_only_what_this_connections_roles_granted_is_taken_back(conn: Conn, role: str) -> None:
     """In the deployment the agent's role owns the `ai_*` tables and grants them itself
-    (`agent/src/db/grants.ts`); the API takes back only its own grants, and does not fail
-    on the agent's."""
+    (`agent/src/db/grants.ts`); the API takes back only its own grants and the policies on
+    its own tables, and does not fail on the agent's."""
     suffix = uuid.uuid4().hex[:12]
     api, agent = f"api_{suffix}", f"agent_{suffix}"
     for name in (api, agent):
@@ -159,10 +159,18 @@ def test_only_what_this_connections_roles_granted_is_taken_back(conn: Conn, role
                 )
             )
             conn.execute("RESET ROLE")
+        # A policy for the role on a table the API does not own: only its owner may drop it.
+        conn.execute(
+            sql.SQL("CREATE POLICY {} ON ai_owned TO {} USING (true)").format(
+                sql.Identifier(f"only_{role}_elsewhere"), sql.Identifier(role)
+            )
+        )
         conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(api)))
         assert revoke_role(conn, role) == ["api_owned"]
         conn.execute("RESET ROLE")
-        assert _held(conn, role)["relations"] == {"ai_owned"}
+        held = _held(conn, role)
+        assert held["relations"] == {"ai_owned"}
+        assert held["policies"] == {f"only_{role}_elsewhere"}
     finally:
         conn.execute("RESET ROLE")
         for name in (api, agent):

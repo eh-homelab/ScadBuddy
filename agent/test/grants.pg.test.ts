@@ -1,10 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { API_AI_GRANTS, grantBackendRoles, revokeRole } from '../src/db/grants.js'
+import { API_AI_GRANTS, GRANT_LOCK, grantBackendRoles, revokeRole } from '../src/db/grants.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // #5210: the agent owns its ai_* tables and grants the backend's roles what they use of them.
+
+it('takes the same advisory lock as the backend grants', () => {
+  const source = readFileSync(new URL('../../backend/scadbuddy/render/worker_role.py', import.meta.url), 'utf8')
+  const found = /^GRANT_LOCK = (0x[0-9A-Fa-f_]+)$/m.exec(source)
+  expect(found, 'GRANT_LOCK in worker_role.py').not.toBeNull()
+  expect(BigInt(found![1]!.replaceAll('_', ''))).toBe(GRANT_LOCK)
+})
 
 const skip = TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`
 
@@ -37,16 +45,17 @@ describe.skipIf(skip !== '')(`the backend roles' ai_* grants${skip}`, () => {
     return row!.ok
   }
 
-  const asAgent = async <T>(run: (sql: postgres.ReservedSql) => Promise<T>): Promise<T> => {
-    const reserved = await t.db.sql.reserve()
+  // A client of its own whose session runs as `role` (a reserved connection has no
+  // `begin`, which `revokeRole` uses).
+  const asRole = async <T>(role: string, run: (sql: postgres.Sql) => Promise<T>): Promise<T> => {
+    const sql = postgres(t.url, { max: 1, onnotice: () => {}, connection: { role } })
     try {
-      await reserved.unsafe(`SET ROLE "${roles.agent}"`)
-      return await run(reserved)
+      return await run(sql)
     } finally {
-      await reserved.unsafe('RESET ROLE')
-      reserved.release()
+      await sql.end({ timeout: 5 })
     }
   }
+  const asAgent = <T>(run: (sql: postgres.Sql) => Promise<T>) => asRole(roles.agent, run)
 
   // What the agent granted `scadbuddy_projects` before ScadBuddy#5298.
   const OLD_PROJECTS_AI_GRANTS = ['ai_payload_keys', 'ai_forgotten_subjects', 'ai_sessions', 'ai_mcp_tokens', 'ai_settings']
@@ -89,13 +98,7 @@ describe.skipIf(skip !== '')(`the backend roles' ai_* grants${skip}`, () => {
   })
 
   it('grants nobody on one shared role', async () => {
-    const reserved = await t.db.sql.reserve()
-    try {
-      await reserved.unsafe(`SET ROLE "${roles.api}"`)
-      expect(await grantBackendRoles(reserved, `absent_${randomUUID().replaceAll('-', '').slice(0, 8)}`)).toEqual([])
-    } finally {
-      await reserved.unsafe('RESET ROLE')
-      reserved.release()
-    }
+    const absent = `absent_${randomUUID().replaceAll('-', '').slice(0, 8)}`
+    expect(await asRole(roles.api, sql => grantBackendRoles(sql, absent))).toEqual([])
   })
 })

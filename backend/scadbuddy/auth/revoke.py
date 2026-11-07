@@ -34,7 +34,8 @@ def revoke_retired(conn: Connection[Any]) -> list[str]:
 
 def revoke_role(conn: Connection[Any], role: str) -> list[str]:
     """Revoke what this connection's roles granted ``role`` in the current schema and
-    drop its ``only_<role>`` row policies, under `GRANT_LOCK` (so it waits for, never
+    drop its ``only_<role>`` row policies on the tables this connection's roles own (only
+    a table's owner may drop one), under `GRANT_LOCK` (so it waits for, never
     interleaves with, an older API's `grant_role`); the relations, schema and policies
     it took back. Idempotent; a missing role is a no-op."""
     revoked: list[str] = []
@@ -62,6 +63,7 @@ def revoke_role(conn: Connection[Any], role: str) -> list[str]:
         policies = cur.execute(
             "SELECT p.polname, c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid"
             " WHERE c.relnamespace = current_schema()::regnamespace"
+            " AND pg_has_role(current_user, c.relowner, 'MEMBER')"
             " AND (p.polname = %(bare)s OR starts_with(p.polname, %(prefix)s))"
             " ORDER BY c.relname, p.polname",
             {"bare": f"only_{role}", "prefix": f"only_{role}_"},

@@ -108,9 +108,11 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
 
 ## Known gaps
 
-1. Seven processes in six Deployments hold a Postgres secret (the table above). Four of
+1. Seven processes in six Deployments hold a Postgres secret (the table above); six in five
+   once eh-homelab/clusters drops the projects worker's (plan 2026-11-06 Task 10). Four of
    the processes (the API, the agent sidecar, the agent worker, agent-durable) use the owner.
-   The projects worker ignores its secret: it has no database client (#5298).
+   The projects worker ignores its secret: it has no database client, and the API and the
+   agent revoke its role `scadbuddy_projects` at every start (#5298).
 2. The agent and the API run SQL on each other's tables, through cross grants.
 3. Template Python shares a pod and a uid with a database secret and has no network rule
    (not tested).
