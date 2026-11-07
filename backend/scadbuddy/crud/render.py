@@ -65,6 +65,8 @@ QUEUE_FULL = "queue-full"
 #: `api/crud_render.py` `REUSE_LOST` and `DEADLOCK`.
 REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
+#: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
+BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
 #: How many activity attempts `WriteKeys` counts writes for at once; the oldest is
 #: forgotten first (an attempt long finished).
 WRITE_KEYS_KEPT = 1024
@@ -463,7 +465,10 @@ class RemoteStoreFolders:
         """``client``, the worker's Bambuddy client, is not used: the API calls Bambuddy
         with its own. A refusal (the API's Bambuddy is not the worker's, Bambuddy's own
         404) is the `ApiError` the SQL find raised, so an upload still forgets a folder
-        Bambuddy lost and makes it again."""
+        Bambuddy lost and makes it again. Bambuddy not answering comes as a 424
+        ``bambuddy-unavailable``, which the client does not retry: it is the 502 or 504
+        `ApiError` the SQL find raised, at once, and the activity's own retry takes
+        over. A lock the API waited for in vain passes, and is tried again."""
         body = {
             "slug": slug,
             "role": role,
@@ -481,10 +486,17 @@ class RemoteStoreFolders:
             )
         except CrudRefusedError as error:
             problem = error.problem
+            code = error.status
+            extensions: dict[str, Any] = {}
+            if code == 424 and problem.get("reason") == BAMBUDDY_UNAVAILABLE:
+                code = int(problem["upstream_status"])
+                if "bambuddy_status" in problem:
+                    extensions["bambuddy_status"] = problem["bambuddy_status"]
             raise ApiError(
-                error.status,
+                code,
                 str(problem.get("detail", "")),
                 type_=str(problem.get("type", "about:blank")),
+                **extensions,
             ) from error
         return int(response.json()["folder_id"])
 

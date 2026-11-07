@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ import respx
 
 from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudUnavailableError
@@ -335,3 +337,36 @@ async def test_the_bambuddy_store_finds_its_folders_through_the_api(
         await backend.aclose()
     assert upload.calls[0].request.url.params["folder_id"] == "11"
     assert created.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "down",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("slow"),
+        httpx.Response(503, json={"detail": "starting"}),
+    ],
+    ids=["unreachable", "timeout", "5xx"],
+)
+@respx.mock
+async def test_a_find_while_bambuddy_is_down_fails_at_once(
+    crud: CrudClient, store: SettingsStore, down: Exception | httpx.Response
+) -> None:
+    """As over SQL: the call fails at once with the `ApiError` Bambuddy's client raised
+    (a transient one, `is_transient`), so the activity's own retry takes over, rather
+    than the CRUD client retrying it for its whole budget."""
+    respx.route(host="127.0.0.1").pass_through()
+    listing = respx.get(f"{API}/library/folders")
+    if isinstance(down, httpx.Response):
+        listing.mock(return_value=down)
+    else:
+        listing.mock(side_effect=down)
+    started = time.monotonic()
+    with pytest.raises(ApiError) as raised:
+        await RemoteStoreFolders(crud).find(None, HERE, SLUG, "work", TITLE)
+    assert time.monotonic() - started < 5
+    assert listing.call_count == 1  # one request to the API, not a retry
+    assert raised.value.status in (502, 504)
+    assert raised.value.type == UNAVAILABLE_PROBLEM
+    assert is_transient(raised.value)
+    assert _rows(store) == []

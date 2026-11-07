@@ -28,6 +28,7 @@ from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
@@ -64,6 +65,10 @@ DEADLOCK = "deadlock"
 #: A folder find for a Bambuddy or inbox that is not the API's render target:
 #: `crud/render.py` `RemoteStoreFolders`.
 TARGET_MOVED = "target-moved"
+#: A folder find Bambuddy did not answer (unreachable, a timeout, a 5xx): a 424, which
+#: the CRUD client does not retry, so the call fails at once as the SQL find did and
+#: the activity's own retry takes over. `crud/render.py` `BAMBUDDY_UNAVAILABLE`.
+BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
 
 
 def released(current: RenderStoreSettings) -> list[str]:
@@ -564,7 +569,9 @@ async def find_store_folder(body: FolderFind, state: StateDep) -> FolderFound:
     """R17: the folder of ``slug`` in ``role``, found in Bambuddy or made there, and
     recorded. A worker whose Bambuddy or inbox is not the API's (its settings older than
     a change in Settings) is a 409 ``target-moved``: a folder id of one Bambuddy is
-    another folder on the other."""
+    another folder on the other. Bambuddy not answering is a 424
+    ``bambuddy-unavailable`` carrying the status its client raised
+    (``upstream_status``), never a 5xx the worker's client would retry."""
     pool = state.settings_store.pool
     target = render_target(
         await asyncio.to_thread(load_render_store_settings, pool, state.settings)
@@ -576,8 +583,20 @@ async def find_store_folder(body: FolderFind, state: StateDep) -> FolderFound:
             "The Bambuddy store's URL or library folder has changed in Settings.",
             reason=TARGET_MOVED,
         )
-    async with BambuddyClient(target.config) as client:
-        found = await _folders(state).find(client, inbox, body.slug, body.role, body.title)
+    try:
+        async with BambuddyClient(target.config) as client:
+            found = await _folders(state).find(client, inbox, body.slug, body.role, body.title)
+    except ApiError as error:
+        if error.type != UNAVAILABLE_PROBLEM:
+            raise
+        raise ApiError(
+            status.HTTP_424_FAILED_DEPENDENCY,
+            error.detail,
+            type_=error.type,
+            reason=BAMBUDDY_UNAVAILABLE,
+            upstream_status=error.status,
+            **error.extensions,
+        ) from error
     return FolderFound(folder_id=found)
 
 
