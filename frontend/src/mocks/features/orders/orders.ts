@@ -241,7 +241,7 @@ function detail(order: Order): OrderDetail {
   const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
   const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position)
   const payments = state.payments.filter((p) => p.order_id === order.id)
-  // `api/orders.py` `_totals`: an accepted quote's total, else the newest quote's unit
+  // `orders/totals.py` `order_totals`: an accepted quote's total, else the newest quote's unit
   // price times the quantity now; an item with no quote is in no sum.
   let subtotal = 0
   let pending = 0

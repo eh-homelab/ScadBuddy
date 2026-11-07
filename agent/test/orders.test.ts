@@ -66,6 +66,8 @@ describe('order tools (#4249)', () => {
       'order_close',
       'order_cancel',
       'order_reopen',
+      'order_request_payment',
+      'order_payment_requests',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -91,6 +93,8 @@ describe('order tools (#4249)', () => {
       order_close: 'outward',
       order_cancel: 'outward',
       order_reopen: 'outward',
+      order_request_payment: 'outward',
+      order_payment_requests: 'read',
     })
   })
 
@@ -274,6 +278,38 @@ describe('order tools (#4249)', () => {
     expect(calls).toEqual(['PATCH {"notes":"rush"}', 'HOLD', 'PAY {"amount_minor":500,"method":"cash","notes":""}'])
     expect(firstText(result)).toEqual({ order: { id: ORDER, on_hold: true }, payment: { id: 'p1', amount_minor: 500 } })
     await expect(tool('order_update').execute({ order_id: ORDER }, ctx())).rejects.toThrow('nothing to change')
+  })
+
+  it('requests a payment as an outward step, and reads the requests (#4957)', async () => {
+    const REQUEST = { id: 'r1', kind: 'deposit', amount_minor: 500, hosted_url: 'https://pay.test/r1', link_error: null }
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/payment-requests`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(REQUEST, { status: 201 })
+      }),
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/payment-requests`, () => HttpResponse.json([REQUEST])),
+    )
+    expect(tool('order_request_payment').risk).toBe('outward')
+    expect(tool('order_payment_requests').risk).toBe('read')
+    const made = await tool('order_request_payment').execute({ order_id: ORDER, kind: 'deposit', amount_minor: 500 }, ctx())
+    expect(sent).toEqual({ kind: 'deposit', amount_minor: 500 })
+    expect(firstText(made)).toEqual(REQUEST)
+    expect(firstText(await tool('order_payment_requests').execute({ order_id: ORDER }, ctx()))).toEqual([REQUEST])
+    await tool('order_request_payment').execute({ order_id: ORDER, provider: null }, ctx())
+    expect(sent).toEqual({ provider: null })
+  })
+
+  it('records a payment that closes a request (#4957)', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/payments`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 'p1' }, { status: 201 })
+      }),
+    )
+    await tool('order_update').execute({ order_id: ORDER, payment: { amount_minor: 500, payment_request_id: 'r1' } }, ctx())
+    expect(sent).toMatchObject({ amount_minor: 500, payment_request_id: 'r1' })
   })
 
   it('adds an item from an output or by hand, edits one and deletes a draft', async () => {

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { command } from './command.js'
 import {
@@ -469,6 +470,54 @@ export const orderTools: Tool[] = [
       json(await ok(backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }), `get order ${order_id}`)),
   }),
   defineTool({
+    name: 'order_request_payment',
+    label: 'Request a payment',
+    description:
+      'Ask the customer to pay (#4957): a `deposit` or a `balance` request, for `amount_minor` (the balance now when ' +
+      "left out), through `provider` (the default provider when left out; null collects by hand). This sends the " +
+      'customer something to pay, so it is outward: a person must approve it first (it returns a pending action). ' +
+      'The reply has the request with its `hosted_url` and `link_error`. ' +
+      'The link is for the shop to pass on: the tool does not send it. A failed link leaves the request open with ' +
+      '`link_error` set.',
+    input: z.object({
+      order_id: orderId,
+      kind: z.enum(['deposit', 'balance']).optional(),
+      amount_minor: money.min(1).optional(),
+      provider: z.string().min(1).max(100).nullable().optional().describe('A provider id; null collects by hand'),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/payment-requests'],
+    title: ({ order_id, kind }) => `Request a ${kind ?? 'balance'} payment on order ${order_id}`,
+    handler: async ({ order_id, ...fields }, { backend }) => {
+      const body = Object.fromEntries(
+        Object.entries(fields).filter(([, v]) => v !== undefined),
+      ) as Partial<components['schemas']['PaymentRequestCreate']> as components['schemas']['PaymentRequestCreate']
+      return json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/payment-requests', { params: { path: { order_id } }, body }),
+          `request a payment on order ${order_id}`,
+        ),
+      )
+    },
+  }),
+  defineTool({
+    name: 'order_payment_requests',
+    label: "Read an order's payment requests",
+    description:
+      "An order's payment requests (#4957): each with its kind, amount, provider, `hosted_url`, `link_error` and " +
+      'status (`open`, `paid`, `expired`, `cancelled`).',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/payment-requests'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/payment-requests', { params: { path: { order_id } } }),
+          `list the payment requests of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_costs',
     label: "Read an order's real cost",
     description:
@@ -676,6 +725,9 @@ export const orderTools: Tool[] = [
           reference: z.string().optional(),
           received_at: datetime.optional(),
           notes: z.string().default(''),
+          payment_request_id: ID.optional().describe(
+            'The payment request this money pays, as order_payment_requests lists them; it closes that request',
+          ),
         })
         .strict()
         .optional(),

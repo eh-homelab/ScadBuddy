@@ -31,6 +31,7 @@ from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.payments.registry import providers
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
 
@@ -76,6 +77,9 @@ class OrdersComponent:
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
             self._lifecycle = Lifecycle(self.store, self.core.events, self.refs)
+            self._lifecycle.offered_providers = frozenset(
+                providers(fake=self.core.settings.payments_fake_provider)
+            )
         return self._lifecycle
 
 
