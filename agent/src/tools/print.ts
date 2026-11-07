@@ -335,8 +335,9 @@ export const partSettings = z
       "process's. An output and a library file take them; a library file's slot is the filament its author gave the " +
       "part, and a setting replaces the part's own value for that key. A slot no printed part of the file is made in " +
       '(one only painted on faces among them), an unknown key or a value out of range is refused (422). A painted ' +
-      'part takes the settings of the slot it is made in, not of its painted faces. A sliced file, or one whose 3MF ' +
-      "prints as it is (another slicer's, or past the size caps), takes none (422).",
+      'part takes the settings of the slot it is made in, not of its painted faces. A sliced file, a file that ' +
+      "prints as it is (another slicer's, past the size caps, or with no 3MF to lay out), or one whose parts' " +
+      'settings file (Metadata/model_settings.config) cannot be read or written takes none (422).',
   )
 
 /** `part_settings`' phrase in an approval line. */

@@ -169,10 +169,11 @@ class Shop:
 class BambuddySlices:
     """Bambuddy's slicer as the dialog's background slice reads it: a job per plate
     posted, completed (unless ``running``) with a sliced library file whose download is
-    ``files[plate]``."""
+    ``files[plate]``. Each job names ``copy``, the uploaded file it slices."""
 
-    def __init__(self, files: Mapping[int, bytes]) -> None:
+    def __init__(self, files: Mapping[int, bytes], *, copy: int = COPY) -> None:
         self.files = dict(files)
+        self.copy = copy
         self.running = False
         self.failure: str | None = None
         self._jobs = itertools.count(9)
@@ -207,7 +208,7 @@ class BambuddySlices:
         answer: dict[str, Any] = {
             "job_id": job_id,
             "kind": "library_file",
-            "source_id": COPY,
+            "source_id": self.copy,
             "created_at": CREATED,
             "status": "running" if self.running else "completed",
         }

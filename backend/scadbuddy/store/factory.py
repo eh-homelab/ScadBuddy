@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -70,12 +71,15 @@ def build_store(
     metrics: Metrics | None,
     downloads_dir: Path | None = None,
     folders: KeepsFolders | None = None,
+    drop_asset_copy: Callable[[str], bool] | None = None,
 ) -> StoreBundle:
     """``downloads_dir`` is where this process keeps whole Bambuddy downloads (#2788),
     None for none: the API passes its default, a worker only one it is set (README).
     ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
     `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
-    folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`)."""
+    folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
+    ``drop_asset_copy`` drops an upload's unreadable copy: the render worker's
+    `RemoteAssetRows.drop_copy`, None on the API (`RemoteAssets`)."""
     local = LocalBlobStore(paths.blobs)
     downloads = (
         DownloadCache(
@@ -111,7 +115,7 @@ def build_store(
         blobs,
         content,
         SnapshotStore(content, paths, history, locks=locks),
-        RemoteAssets(content),
+        RemoteAssets(content, drop_copy=drop_asset_copy),
         FontMirror(content, fonts, locks=locks),
         source,
         remote,

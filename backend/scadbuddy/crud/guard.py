@@ -19,7 +19,7 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
 from fastapi import APIRouter, Depends, Request, Response
@@ -31,17 +31,13 @@ from scadbuddy.auth.check import FORBIDDEN, SIGNED_OUT
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.wire import CRUD_HEADER as CRUD_HEADER
+from scadbuddy.crud.wire import CRUD_HEADERS as CRUD_HEADERS
+from scadbuddy.crud.wire import DATABASE_UNAVAILABLE as DATABASE_UNAVAILABLE
+from scadbuddy.crud.wire import PREFIX as PREFIX
+from scadbuddy.crud.wire import CrudCaller as CrudCaller
 
 logger = logging.getLogger(__name__)
-
-#: The reason of the 503 a CRUD route answers on a `psycopg.OperationalError`.
-DATABASE_UNAVAILABLE = "database-unavailable"
-
-#: The callers with CRUD routes; `auth/routes.py` `CRUD_CLASSES` has the same keys.
-CrudCaller = Literal["projects", "render", "print"]
-CRUD_HEADER = "X-ScadBuddy-Crud"
-CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}
-PREFIX = "/internal/crud"
 
 
 def require_crud(caller: CrudCaller) -> Any:

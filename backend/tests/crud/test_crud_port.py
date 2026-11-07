@@ -32,6 +32,8 @@ from scadbuddy.main import create_app
         ("/api/v1/auth/service-token", True),
         ("/api/v1/internal/crud/render/areas", True),
         ("/api/v1/internal/crud/print/blob-index/k", True),
+        ("/api/v1/internal/crud/storefront/areas", True),
+        ("/api/v1/internal/storefront/areas", False),
         ("/api/v1/models", False),
         ("/api/v1/internal/blobs/x", False),
         ("/api/v1/auth/service-token/x", False),
@@ -68,7 +70,7 @@ class _Credentials:
 
 
 def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert set(CRUD_AREAS) == {"projects", "render", "print"}
+    assert set(CRUD_AREAS) == {"projects", "render", "print", "storefront"}
     monkeypatch.setitem(CRUD_AREAS, "render", ["blob-index"])
     app = FastAPI(dependencies=[Depends(auth_check)])
     app.state.scadbuddy = SimpleNamespace(settings=SimpleNamespace(auth_mode="off"))

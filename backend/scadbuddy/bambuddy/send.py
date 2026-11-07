@@ -176,10 +176,19 @@ _BED_STATED = "#bed"
 #: brim passes, and reusing it kept every quote failing after the fix (#5566).
 _TOWER_BRIM = "#brim"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
-#: written into (``layout_of`` ``as_is``): it prints as it is, so it cannot carry them.
+#: written into (``layout_of`` ``as_is``), or a library file with no 3MF to lay out: it
+#: prints as it is, so it cannot carry them.
 PART_SETTINGS_AS_IS = (
-    "This file's 3MF prints as it is (it is sliced, from another slicer, or past the size"
-    " caps), so it cannot take settings per part."
+    "This file prints as it is (it is sliced, from another slicer, past the size caps,"
+    " or has no 3MF to lay out), so it cannot take settings per part."
+)
+#: Why they are refused for a 3MF that is laid out, but whose parts' settings file
+#: (``Metadata/model_settings.config``) the writer cannot read or write
+#: (``PartSettingsUnwritableError``, #5646).
+PART_SETTINGS_UNWRITABLE = (
+    "This file's parts' settings file (Metadata/model_settings.config) cannot be read or"
+    " written (past 4 MiB, not UTF-8, not well-formed XML, with a DOCTYPE, or with a part"
+    " ScadBuddy cannot write), so it cannot take settings per part."
 )
 #: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),
 #: followed by :func:`part_settings_digest`.
@@ -369,12 +378,12 @@ def _plate_for_model(model: str | None) -> PlateGeometry:
 
 def _with_parts(payload: bytes, overrides: PartOverrides | None) -> bytes:
     """:func:`with_part_settings`, its refusal (a ``model_settings.config`` past its cap,
-    not XML, or a part it could not write) a 422 (:data:`PART_SETTINGS_AS_IS`), never a
-    copy whose key names settings its bytes lack (#5628 review)."""
+    not XML, or a part it could not write) a 422 (:data:`PART_SETTINGS_UNWRITABLE`),
+    never a copy whose key names settings its bytes lack (#5628 review)."""
     try:
         return with_part_settings(payload, overrides)
     except PartSettingsUnwritableError:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_AS_IS) from None
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_UNWRITABLE) from None
 
 
 def _laid_out_for(payload: bytes, target: Target) -> bytes:

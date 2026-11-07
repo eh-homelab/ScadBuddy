@@ -8,9 +8,10 @@ does. `api_payload_keys` gives the routes the API's payload keys on a store's sc
 a bootstrap verifier the app also takes the service-token exchange, so a worker can get its
 own credential as it does with no database. `static_render_crud` is a render worker's
 client of a stand-in API that answers fixed store settings and serves no job route, for a
-test of the worker that renders nothing. `threaded_render_index` is the worker's
-`RemoteBlobIndex` over the render routes served on a thread of their own, for a test that
-calls the index from its event loop, as `tests/store` calls the SQL one. `FakeClock` is a
+test of the worker that renders nothing. `threaded_render_crud` is a render worker's
+blocking client of the render routes served on a thread of their own, for a test that
+calls them from its event loop or a sync test; `threaded_render_index` is the worker's
+`RemoteBlobIndex` over it. `FakeClock` is a
 client clock that moves only by the client's own waits, so a test's count of tries does
 not depend on wall time."""
 
@@ -58,12 +59,14 @@ from scadbuddy.crud.render import (
 )
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.settings_store import RenderStoreSettings, SettingsStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store import BlobRefs
+from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
@@ -232,10 +235,14 @@ def render_crud_app(
     credentials: ServiceCredentialStore,
     *,
     projection: JobProjection | None = None,
+    content: ContentStore | None = None,
 ) -> FastAPI:
     """The render routes, reading the store settings from ``pool`` under ``settings``
     (none: a test of the job routes only), writing the job rows through ``projection``,
-    and the blob refs, piece geometry and blob index on ``pool``."""
+    and the blob refs, piece geometry, blob index and the uploads' rows on ``pool`` (the
+    API's upload files are not these routes': its `AssetStore` has no root to read).
+    ``content`` is the API's blob store, which drops an upload's copy (none: the local
+    store, which keeps no copies)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
     app.state.scadbuddy = SimpleNamespace(
@@ -243,6 +250,8 @@ def render_crud_app(
         settings_store=SimpleNamespace(pool=pool),
         projection=projection,
         refs=BlobRefs(pool),
+        assets=AssetStore(Path("/nonexistent/api-assets"), pool),
+        store=SimpleNamespace(content=content),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_render.router, prefix="/api/v1")
@@ -307,15 +316,18 @@ async def served_render_refs(
 
 
 @contextmanager
-def threaded_render_index(pool: Pool) -> Iterator[RemoteBlobIndex]:
-    """`RemoteBlobIndex` over the render routes on ``pool``, served by a server on a
-    thread and event loop of its own, so a blocking call from the test's loop is answered."""
+def threaded_render_crud(
+    pool: Pool, content: ContentStore | None = None
+) -> Iterator[CrudSyncClient]:
+    """A render worker's `CrudSyncClient` of the render routes on ``pool`` (the API's blob
+    store ``content``), served by a server on a thread and event loop of its own, so a
+    blocking call from the test's loop (or a sync test) is answered."""
     credentials = ServiceCredentialStore(pool)
-    app = render_crud_app(pool, None, credentials)
+    app = render_crud_app(pool, None, credentials, content=content)
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
     )
-    thread = threading.Thread(target=server.run, name="crud blob index", daemon=True)
+    thread = threading.Thread(target=server.run, name="crud render routes", daemon=True)
     thread.start()
     deadline = time.monotonic() + 30
     while not server.started:
@@ -329,11 +341,19 @@ def threaded_render_index(pool: Pool) -> Iterator[RemoteBlobIndex]:
         unavailable_budget=5,
     )
     try:
-        yield RemoteBlobIndex(client)
+        yield client
     finally:
         client.close()
         server.should_exit = True
         thread.join(30)
+
+
+@contextmanager
+def threaded_render_index(pool: Pool) -> Iterator[RemoteBlobIndex]:
+    """`RemoteBlobIndex` over `threaded_render_crud`, for a test that calls the index from
+    its event loop, as `tests/store` calls the SQL one."""
+    with threaded_render_crud(pool) as client:
+        yield RemoteBlobIndex(client)
 
 
 class FixedToken:
@@ -347,16 +367,18 @@ class FixedToken:
 
 def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient:
     """A render worker's client of an API that lists the ``settings``, ``jobs``, ``refs``,
-    ``blob-index`` and ``store-folders`` areas and answers ``current`` (the defaults: the
-    local store) as the store settings. Its job, ref, geometry, index and folder routes are
-    missing (a 404)."""
+    ``blob-index``, ``store-folders`` and ``assets`` areas and answers ``current`` (the
+    defaults: the local store) as the store settings. Its job, ref, geometry, index, folder
+    and upload routes are missing (a 404)."""
     body = (current or RenderStoreSettings()).model_dump(mode="json")
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/render/areas"):
             return httpx.Response(
                 200,
-                json={"areas": ["settings", "jobs", "refs", "blob-index", "store-folders"]},
+                json={
+                    "areas": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets"]
+                },
                 headers=CRUD_HEADERS,
             )
         if request.url.path.endswith("/render/settings"):

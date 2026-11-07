@@ -1,13 +1,16 @@
 """The workers' client of the API's CRUD routes (#5298, plan decisions D4, D5).
 
 A render, print or projects worker holds no database secret: it calls
-``/api/v1/internal/crud/<caller>/…`` with its service credential (`ServiceAuth`).
+``/api/v1/internal/crud/<caller>/…`` with its service credential (`ServiceAuth`). The
+storefront edge (#5282) calls ``/api/v1/internal/crud/storefront/…`` the same way. This
+module imports no database code (`crud/wire.py`, `auth/service_auth.py`).
 
 - A response without ``X-ScadBuddy-Crud`` did not come from a CRUD route: the route is
   missing (an old API pod during a roll). It is tried again on a new connection, and a
   route still missing after ``unavailable_budget`` seconds is `CrudUnavailableError`. A
   5xx and a transport failure retry within the same budget.
-- A 4xx with the header is `CrudRefusedError`, carrying the problem, except a stale
+- A 4xx with the header is `CrudRefusedError`, carrying the problem and any
+  ``Retry-After``, except a stale
   credential: a 401 (the credential died or none could be had) and a 403 ``out_of_scope``
   (its scopes are stale; `refresh` drops it, and only when the request carried one). A new
   worker can hold a credential from an old API pod for a moment, `ExchangeReader` holds
@@ -20,6 +23,7 @@ A render, print or projects worker holds no database secret: it calls
   callers.
 - Every retry sends the same ``Idempotency-Key``; `activity_key` builds a key that is
   the same on every attempt of one Temporal activity.
+- ``headers`` on a request are sent with it (the storefront's visitor and client).
 - ``timeout`` on a request replaces the client's per-request timeout for a route that
   answers later by design (a flow Reset waits on Temporal under the run's lock).
   ``budget`` replaces ``unavailable_budget`` for a call that must end inside a bound of
@@ -35,15 +39,15 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import Any, Literal
 
 import httpx
 from temporalio import activity
 
-from scadbuddy.auth.service_credentials import ServiceAuth
+from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.crud.guard import CRUD_HEADER, DATABASE_UNAVAILABLE, PREFIX, CrudCaller
+from scadbuddy.crud.wire import CRUD_HEADER, DATABASE_UNAVAILABLE, PREFIX, CrudCaller
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +98,16 @@ class CrudUnavailableError(Exception):
 
 
 class CrudRefusedError(Exception):
-    """The API refused the call with a 4xx problem of a CRUD route."""
+    """The API refused the call with a 4xx problem of a CRUD route. ``retry_after`` is
+    its ``Retry-After`` header (a 429's), if it had one."""
 
-    def __init__(self, status: int, problem: dict[str, Any]) -> None:
+    def __init__(
+        self, status: int, problem: dict[str, Any], retry_after: str | None = None
+    ) -> None:
         super().__init__(f"{status}: {problem.get('detail', '')}")
         self.status = status
         self.problem = problem
+        self.retry_after = retry_after
 
 
 def activity_key(ordinal: int) -> str:
@@ -173,7 +181,7 @@ class _Call:
             self.observe("reexchange", started)
             return "retry"
         self.observe("refused", started)
-        raise CrudRefusedError(status, problem)
+        raise CrudRefusedError(status, problem, response.headers.get("Retry-After"))
 
     def take_fresh_connection(self) -> bool:
         """Whether the next attempt needs a connection of its own: once per missing route."""
@@ -219,12 +227,17 @@ class _Base:
         self._clock = clock
 
     @staticmethod
-    def _kwargs(json: Any, key: str | None, timeout: float | None) -> dict[str, Any]:
+    def _kwargs(
+        json: Any, key: str | None, timeout: float | None, headers: Mapping[str, str] | None
+    ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         if json is not None:
             kwargs["json"] = json
+        sent = dict(headers or {})
         if key is not None:
-            kwargs["headers"] = {IDEMPOTENCY_HEADER: key}
+            sent[IDEMPOTENCY_HEADER] = key
+        if sent:
+            kwargs["headers"] = sent
         if timeout is not None:
             kwargs["timeout"] = timeout
         return kwargs
@@ -285,6 +298,7 @@ class CrudClient(_Base):
         idempotency_key: str | None = None,
         timeout: float | None = None,
         budget: float | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         call = _Call(self, path, budget)
         while True:
@@ -292,7 +306,7 @@ class CrudClient(_Base):
             fresh = self._build() if call.take_fresh_connection() else None
             try:
                 response = await (fresh or self._http).request(
-                    method, path, **self._kwargs(json, idempotency_key, timeout)
+                    method, path, **self._kwargs(json, idempotency_key, timeout, headers)
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)
@@ -348,6 +362,7 @@ class CrudSyncClient(_Base):
         idempotency_key: str | None = None,
         timeout: float | None = None,
         budget: float | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         call = _Call(self, path, budget)
         while True:
@@ -355,7 +370,7 @@ class CrudSyncClient(_Base):
             fresh = self._build() if call.take_fresh_connection() else None
             try:
                 response = (fresh or self._http).request(
-                    method, path, **self._kwargs(json, idempotency_key, timeout)
+                    method, path, **self._kwargs(json, idempotency_key, timeout, headers)
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)

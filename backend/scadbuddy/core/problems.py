@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match, Mount
@@ -18,10 +17,24 @@ PROBLEM_MEDIA_TYPE = "application/problem+json"
 #: A route's answer when the store's database could not be reached (#1264: shared
 #: here, not borrowed from the analyzers route).
 DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
-#: What a database that cannot be reached raises through the store.
-DATABASE_ERRORS = (psycopg.OperationalError, PoolTimeout)
+if TYPE_CHECKING:
+    from psycopg_pool import PoolTimeout
+
+    #: What a database that cannot be reached raises through the store.
+    DATABASE_ERRORS: tuple[type[Exception], ...] = (psycopg.OperationalError, PoolTimeout)
 
 logger = logging.getLogger(__name__)
+
+
+def __getattr__(name: str) -> object:
+    # `psycopg_pool` loads on first use: the storefront edge (#5282) imports this module
+    # and holds no database, so it must not load the pool.
+    if name == "DATABASE_ERRORS":
+        from psycopg_pool import PoolTimeout
+
+        return (psycopg.OperationalError, PoolTimeout)
+    raise AttributeError(name)
+
 
 _TITLES = {
     400: "Bad Request",

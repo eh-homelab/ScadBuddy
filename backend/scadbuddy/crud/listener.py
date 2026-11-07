@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from scadbuddy.crud.guard import PREFIX
+from scadbuddy.crud.wire import PREFIX
 
 logger = logging.getLogger(__name__)
 

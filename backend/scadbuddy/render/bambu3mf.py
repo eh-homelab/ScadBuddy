@@ -1441,8 +1441,8 @@ MAX_MODEL_SETTINGS_BYTES = 4 * 1024 * 1024
 
 class PartSettingsUnwritableError(ValueError):
     """A ``model_settings.config`` settings per part cannot be read or written in: past
-    :data:`MAX_MODEL_SETTINGS_BYTES`, not well-formed XML, with a DOCTYPE, or with a
-    printed part the writer did not give its settings."""
+    :data:`MAX_MODEL_SETTINGS_BYTES`, not UTF-8 or well-formed XML, with a DOCTYPE, or
+    with a part the writer did not give its own slot's settings."""
 
 
 # Each pattern is linear in its input, whatever an untrusted file holds (#5628 review):
@@ -1461,7 +1461,10 @@ _PART_BLOCK = re.compile(
     re.DOTALL,
 )
 _SUBTYPE = re.compile(r'subtype="([^"<>]*+)"')
-_EXTRUDER_METADATA = re.compile(r'<metadata key="extruder" value="(\d++)"\s*+/>')
+#: A ``<metadata …>`` tag, and its ``key`` and ``value`` attributes, in any order.
+_METADATA_TAG = re.compile(r"<metadata\b[^<>]*+>")
+_KEY_ATTRIBUTE = re.compile(r'\skey="([^"<>]*+)"')
+_VALUE_ATTRIBUTE = re.compile(r'\svalue="([^"<>]*+)"')
 
 
 @dataclass(frozen=True)
@@ -1497,23 +1500,36 @@ def _extruder_of(element: ET.Element) -> int | None:
     return None
 
 
-def _printed_parts(root: ET.Element) -> Iterator[tuple[ET.Element, int]]:
-    """Each printed ``<part>`` (no subtype, or ``normal_part``) and its slot: its
-    ``extruder`` metadata, else its object's. A part with neither is left out."""
+def _each_part_slot(root: ET.Element) -> Iterator[tuple[ET.Element, int | None, bool]]:
+    """Each ``<part>`` in document order, its slot (its ``extruder`` metadata, else its
+    object's) and whether it prints (no subtype, or ``normal_part``)."""
     for obj in root.iter("object"):
         own = _extruder_of(obj)
         for part in obj.iter("part"):
-            if part.get("subtype", "normal_part") != "normal_part":
-                continue
             slot = _extruder_of(part)
-            slot = slot if slot is not None else own
-            if slot is not None:
-                yield part, slot
+            printed = part.get("subtype", "normal_part") == "normal_part"
+            yield part, slot if slot is not None else own, printed
 
 
-def _part_extruder(text: str) -> int | None:
-    found = _EXTRUDER_METADATA.search(text)
-    return int(found.group(1)) if found is not None else None
+def _printed_parts(root: ET.Element) -> Iterator[tuple[ET.Element, int]]:
+    """Each printed ``<part>`` and its slot (:func:`_each_part_slot`). A part with no
+    slot is left out."""
+    for part, slot, printed in _each_part_slot(root):
+        if printed and slot is not None:
+            yield part, slot
+
+
+def _written_extruder(text: str) -> int | None:
+    """The first ``extruder`` metadata tag in ``text``, as a slot, read as
+    :func:`_extruder_of` reads an element's: ``None`` when its value is not a number."""
+    for tag in _METADATA_TAG.finditer(text):
+        key = _KEY_ATTRIBUTE.search(tag.group(0))
+        if key is None or key.group(1) != "extruder":
+            continue
+        value = _VALUE_ATTRIBUTE.search(tag.group(0))
+        number = value.group(1) if value is not None else ""
+        return int(number) if number.isascii() and number.isdigit() else None
+    return None
 
 
 def _each_part(model_settings: str, part: Callable[[_Part, int | None, bool], str]) -> str:
@@ -1524,8 +1540,9 @@ def _each_part(model_settings: str, part: Callable[[_Part, int | None, bool], st
 
     def object_block(match: re.Match[str]) -> str:
         head, body, tail = match.groups()
-        # The object's own extruder is its metadata before its first part.
-        own = _part_extruder(body.split("<part", 1)[0])
+        # The object's own extruder is its metadata outside its parts, before them or
+        # after, as ElementTree reads its children (#5646).
+        own = _written_extruder(_PART_BLOCK.sub("", body))
 
         def part_block(found: re.Match[str]) -> str:
             closed = found.group("self")
@@ -1539,7 +1556,7 @@ def _each_part(model_settings: str, part: Callable[[_Part, int | None, bool], st
                 close = full[len(inner) :] + "</part>"
             subtype = _SUBTYPE.search(tag)
             printed = subtype is None or subtype.group(1) == "normal_part"
-            slot = _part_extruder(inner or "")
+            slot = _written_extruder(inner or "")
             written = _Part(found.group(0), tag, inner, close)
             return part(written, slot if slot is not None else own, printed)
 
@@ -1567,10 +1584,11 @@ def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
     becomes an open and a close tag around its settings.
 
     The text is rewritten in place, so the rest of the file stays byte for byte, then
-    read back with ElementTree: a printed part of a slot in ``overrides`` that does not
-    carry each of its settings once (a file written in a way the patterns do not read)
-    raises :class:`PartSettingsUnwritableError`, so no copy's key names settings its
-    bytes lack. So does a file :func:`_parsed_model_settings` refuses.
+    read back with ElementTree (:func:`_check_written`): a printed part of a slot in
+    ``overrides`` that does not carry each of its settings once, or a part that took
+    another slot's (a file written in a way the patterns do not read), raises
+    :class:`PartSettingsUnwritableError`, so no copy's key names settings its bytes
+    lack. So does a file :func:`_parsed_model_settings` refuses.
 
     Bambu Studio v02.08.02.61 reads every key of a ``<part>`` that is not one of its own
     (name, subtype, source, matrix …) into the volume's config
@@ -1610,12 +1628,33 @@ def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
         return f"{open_tag}{inner}{lines}{close}"
 
     written = _each_part(model_settings, part)
-    for element, slot in _printed_parts(_parsed_model_settings(written)):
-        for key, value in wanted.get(slot, ()):
-            values = [m.get("value") for m in element.findall("metadata") if m.get("key") == key]
-            if values != [value]:
-                raise PartSettingsUnwritableError(f"a part of slot {slot} did not take {key}")
+    _check_written(_parsed_model_settings(model_settings), _parsed_model_settings(written), wanted)
     return written
+
+
+def _check_written(
+    before: ET.Element, after: ET.Element, wanted: Mapping[int, tuple[tuple[str, str], ...]]
+) -> None:
+    """Raise :class:`PartSettingsUnwritableError` unless each part of ``after`` is its
+    part of ``before`` with its own slot's settings, read with ElementTree: a printed
+    part of a slot in ``wanted`` carries each of that slot's settings once, and every
+    other key a slot sets keeps the values it had. So a part the patterns read as
+    another slot than ElementTree does is refused, whether it lacks its settings or
+    took another slot's (#5646)."""
+    keys = {key for settings in wanted.values() for key, _ in settings}
+
+    def values(element: ET.Element, key: str) -> list[str | None]:
+        return [m.get("value") for m in element.findall("metadata") if m.get("key") == key]
+
+    parts = list(_each_part_slot(after))
+    if len(parts) != sum(1 for _ in before.iter("part")):
+        raise PartSettingsUnwritableError("the parts changed in the write")
+    for (element, slot, printed), old in zip(parts, before.iter("part"), strict=True):
+        own = dict(wanted.get(slot, ())) if printed and slot is not None else {}
+        for key in keys:
+            expected = [own[key]] if key in own else values(old, key)
+            if values(element, key) != expected:
+                raise PartSettingsUnwritableError(f"a part of slot {slot} did not take {key}")
 
 
 def with_part_settings(payload: bytes, overrides: PartOverrides | None) -> bytes:
@@ -2324,24 +2363,33 @@ def _layout(archive: zipfile.ZipFile) -> Layout:
 
 def part_settings_slots(payload: bytes) -> set[int] | None:
     """The slots a printed part of ``payload`` is made in (:func:`printed_part_slots`),
-    or ``None`` when nothing can be written into it (:func:`layout_of` ``as_is``), so it
-    takes no settings per part (#5571). One pass over the archive judges both (#5637).
-    A file with no ``model_settings.config`` has no part to carry them: an empty set.
+    or ``None`` when nothing can be written into it (:func:`layout_of` ``as_is``, or not
+    a zip), so it takes no settings per part (#5571). One pass over the archive judges
+    both (#5637). A file with no ``model_settings.config`` has no part to carry them: an
+    empty set.
 
     ``model_settings.config`` is read in chunks against :data:`MAX_MODEL_SETTINGS_BYTES`
     and parsed with ElementTree (:func:`printed_part_slots`). One past the cap, not
-    UTF-8, not well-formed or with a DOCTYPE is ``None``, as :func:`with_part_settings`
-    would refuse to write into it (#5628 review)."""
+    UTF-8, not well-formed or with a DOCTYPE raises :class:`PartSettingsUnwritableError`,
+    as :func:`with_part_settings` would refuse to write into it (#5628 review), so the
+    caller names that file in its refusal (#5646)."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             if _layout(archive) == "as_is":
                 return None
             if MODEL_SETTINGS_NAME not in archive.namelist():
                 return set()
-            raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_MODEL_SETTINGS_BYTES)
-        return printed_part_slots(raw.decode("utf-8"))
-    except (zipfile.BadZipFile, ValueError):
+            try:
+                raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_MODEL_SETTINGS_BYTES)
+            except ValueError as error:
+                raise PartSettingsUnwritableError(str(error)) from error
+    except zipfile.BadZipFile:
         return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PartSettingsUnwritableError(str(error)) from error
+    return printed_part_slots(text)
 
 
 #: The colour an STL is wrapped in: it carries none, and a print recolors it for its

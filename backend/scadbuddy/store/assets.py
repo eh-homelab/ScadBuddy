@@ -1,20 +1,21 @@
 """`// file` uploads through the store (spec 2026-09-27 §6.1). The API's `AssetStore`
 stays the place uploads are validated, capped and swept (#204, #296); this mirrors each
-upload into the store and brings it into a worker's own `AssetStore` before a render."""
+upload into the store and brings it into a worker's own store (`UsesAssets`: on a render
+worker `RemoteAssetStore`, its files local and its rows the API's, #5298) before a render."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from scadbuddy.library.assets import (
     AssetMeta,
     AssetNotFoundError,
     AssetRejectedError,
-    AssetStore,
+    UsesAssets,
 )
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
 
@@ -30,11 +31,18 @@ def asset_key(asset_id: str) -> str:
 
 
 class RemoteAssets:
-    def __init__(self, content: ContentStore) -> None:
+    """``drop_copy``: the render worker's way to drop a copy it cannot read
+    (`crud/render.py` `RemoteAssetRows.drop_copy`): the API does it, as the worker writes
+    no upload's index key (#5298). None on the API, which drops the copy itself."""
+
+    def __init__(
+        self, content: ContentStore, *, drop_copy: Callable[[str], bool] | None = None
+    ) -> None:
         self.content = content
+        self._drop_copy = drop_copy
 
     async def mirror(
-        self, store: AssetStore, meta: AssetMeta, *, slug: str | None, title: str | None
+        self, store: UsesAssets, meta: AssetMeta, *, slug: str | None, title: str | None
     ) -> None:
         # Sent from its file a chunk at a time, never read whole (#503).
         with await asyncio.to_thread(store.blob_path(meta).open, "rb") as data:
@@ -51,7 +59,7 @@ class RemoteAssets:
         """Now, by the database's clock: a sweep's cutoff is compared with `touched_at`."""
         return await asyncio.to_thread(self.content.index.now)
 
-    async def ensure(self, store: AssetStore, ids: Iterable[str]) -> list[str]:
+    async def ensure(self, store: UsesAssets, ids: Iterable[str]) -> list[str]:
         """Bring every id the store holds into this process's ``store``; the ids it could
         not provide, each logged by id and reason: the render then refuses the parameter
         as not in the blob store."""
@@ -83,13 +91,24 @@ class RemoteAssets:
                     "an uploaded file is gone or altered in the blob store",
                     extra={"asset_id": asset_id, "reason": repr(error)},
                 )
-                await self._drop_bad(key)
+                await self._drop_bad(asset_id)
                 absent.append(asset_id)
         return absent
 
-    async def _drop_bad(self, key: str) -> None:
+    async def _drop_bad(self, asset_id: str) -> None:
         """Drop a copy that cannot be read, object too, so the API's `backfill` mirrors
-        the upload again; only the row when the object cannot be removed."""
+        the upload again; only the row when the object cannot be removed. On a render
+        worker the API drops it (`drop_copy`), and keeps the row of an object it cannot
+        release, so the object stays tracked; a failure is logged."""
+        key = asset_key(asset_id)
+        if self._drop_copy is not None:
+            try:
+                await asyncio.to_thread(self._drop_copy, asset_id)
+            except Exception:
+                logger.exception(
+                    "could not have the API drop an unreadable upload's copy", extra={"key": key}
+                )
+            return
         try:
             await self.content.delete(key)
         except Exception:
@@ -126,7 +145,7 @@ class RemoteAssets:
                 )
         return dropped
 
-    async def reconcile(self, store: AssetStore, *, cutoff: datetime) -> list[str]:
+    async def reconcile(self, store: UsesAssets, *, cutoff: datetime) -> list[str]:
         """Retry the drops a sweep decided and could not finish: copies marked swept
         whose upload ``store`` still lacks. Never a diff against the volume: a copy the
         volume merely lacks (restored from a backup) may be the only one left."""
@@ -141,7 +160,7 @@ class RemoteAssets:
         ]
         return await self.drop(orphans, cutoff=cutoff)
 
-    async def backfill(self, store: AssetStore, *, stop: threading.Event | None = None) -> int:
+    async def backfill(self, store: UsesAssets, *, stop: threading.Event | None = None) -> int:
         """Mirror every upload the store has no copy of on this backend. Once ``stop`` is
         set it mirrors no further upload (#2128): the shutdown waits for the one in hand
         rather than cancelling it with its thread still running."""
