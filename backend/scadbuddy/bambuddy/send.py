@@ -177,7 +177,7 @@ _TOWER_BRIM = "#brim"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
 #: written into (``layout_of`` ``as_is``): it prints as it is, so it cannot carry them.
 PART_SETTINGS_AS_IS = (
-    "This output's 3MF prints as it is (it is sliced, from another slicer, or past the size"
+    "This file's 3MF prints as it is (it is sliced, from another slicer, or past the size"
     " caps), so it cannot take settings per part."
 )
 #: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),

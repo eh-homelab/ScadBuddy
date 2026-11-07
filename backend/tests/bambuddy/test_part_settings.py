@@ -4,9 +4,11 @@ them and as the laid-out 3MF carries them."""
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import pytest
 import trimesh
@@ -21,13 +23,16 @@ from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
     layout_of,
+    part_settings_slots,
     printed_part_slots,
+    rezipped,
     set_part_settings,
     with_part_settings,
     write_bambu_3mf,
 )
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.split import ColourPart
+from tests.support.fixtures import makerworld_path
 
 
 def body(**extra: Any) -> dict[str, Any]:
@@ -266,3 +271,152 @@ def test_a_file_that_prints_as_it_is_refuses_part_settings(tmp_path: Path) -> No
         _laid_out_for(payload, Target(plate, "0.4", part_settings=((2, (("wall_loops", "3"),)),)))
     assert refused.value.status == 422
     assert refused.value.detail == PART_SETTINGS_AS_IS
+
+
+# ── #5628: a library file's parts; #5637: one pass over the archive ─────────────────
+
+
+def author_two_colours(tmp_path: Path, model_settings: str | None = None) -> bytes:
+    """:func:`_two_colours` as its author saved it in Bambu Studio (a real process
+    preset, so ``layout_of`` says ``author``), its ``model_settings.config`` replaced by
+    ``model_settings`` when given."""
+    payload = _two_colours(tmp_path)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["print_settings_id"] = "0.20mm Standard @BBL H2C"
+    changed = {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()}
+    if model_settings is not None:
+        changed[MODEL_SETTINGS_NAME] = model_settings.encode()
+    return rezipped(payload, changed)
+
+
+def without_model_settings(payload: bytes) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(out, "w") as copy:
+        for info in source.infolist():
+            if info.filename != MODEL_SETTINGS_NAME:
+                copy.writestr(info, source.read(info.filename))
+    return out.getvalue()
+
+
+def test_the_layout_and_the_parts_are_read_in_one_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5637: the run's check opens the 3MF once for its layout and its parts' slots."""
+    payload = author_two_colours(tmp_path)
+    assert layout_of(payload) == "author"
+    opened: list[object] = []
+    real = zipfile.ZipFile
+
+    def counted(*args: Any, **kwargs: Any) -> zipfile.ZipFile:
+        opened.append(args[0])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(zipfile, "ZipFile", counted)
+    assert part_settings_slots(payload) == {1, 2}
+    assert len(opened) == 1
+
+
+def test_a_file_nothing_can_be_written_into_has_no_slots(tmp_path: Path) -> None:
+    payload = _two_colours(tmp_path)
+    assert part_settings_slots(payload) == {1, 2}
+    # `as_is`: the run refuses it (PART_SETTINGS_AS_IS).
+    assert part_settings_slots(without_project_settings(payload)) is None
+    assert part_settings_slots(b"not a zip") is None
+    # No model_settings.config: no part carries settings, so every slot is unknown.
+    assert part_settings_slots(without_model_settings(payload)) == set()
+
+
+def _part_values(model_settings: str, key: str) -> list[tuple[int | None, list[str]]]:
+    """Each printed part's slot (its ``extruder``, else its object's) and its values for
+    ``key``, read with ElementTree rather than the writer's own regexes."""
+    found: list[tuple[int | None, list[str]]] = []
+    for obj in ET.fromstring(model_settings).iter("object"):
+        own_metadata = obj.findall("metadata")
+        own = next(
+            (int(m.get("value", "")) for m in own_metadata if m.get("key") == "extruder"), None
+        )
+        for part in obj.iter("part"):
+            if part.get("subtype", "normal_part") != "normal_part":
+                continue
+            metadata = part.findall("metadata")
+            slot = next(
+                (int(m.get("value", "")) for m in metadata if m.get("key") == "extruder"), own
+            )
+            found.append((slot, [m.get("value", "") for m in metadata if m.get("key") == key]))
+    return found
+
+
+def test_an_authors_file_keeps_its_layout_and_its_parts_take_the_settings(
+    tmp_path: Path,
+) -> None:
+    """#5628: an author's file is not re-placed; only its parts of the slot change."""
+    payload = author_two_colours(tmp_path)
+    plate = plate_for("H2C")
+    target = Target(plate, "0.4", part_settings=((2, (("top_shell_layers", "8"),)),))
+
+    laid = _laid_out_for(payload, target)
+    plain = _laid_out_for(payload, Target(plate, "0.4"))
+
+    assert layout_of(laid) == "author"
+    assert _part_values(_model_settings(laid), "top_shell_layers") == [(1, []), (2, ["8"])]
+    with zipfile.ZipFile(io.BytesIO(plain)) as a, zipfile.ZipFile(io.BytesIO(laid)) as b:
+        for name in a.namelist():
+            if name != MODEL_SETTINGS_NAME:
+                assert a.read(name) == b.read(name), name
+
+
+def test_the_requests_setting_replaces_the_parts_own_per_key(tmp_path: Path) -> None:
+    """#5628: a Bambu Studio file can set a key on a part already; the request's value
+    replaces it, and the part's other keys stay."""
+    own = _model_settings(author_two_colours(tmp_path)).replace(
+        '   <metadata key="extruder" value="2"/>\n',
+        '   <metadata key="extruder" value="2"/>\n'
+        '   <metadata key="top_shell_layers" value="3"/>\n'
+        '   <metadata key="wall_loops" value="2"/>\n',
+    )
+    payload = author_two_colours(tmp_path, own)
+    target = Target(plate_for("H2C"), "0.4", part_settings=((2, (("top_shell_layers", "8"),)),))
+
+    written = _model_settings(_laid_out_for(payload, target))
+
+    assert _part_values(written, "top_shell_layers") == [(1, []), (2, ["8"])]
+    assert _part_values(written, "wall_loops") == [(1, []), (2, ["2"])]
+
+
+@pytest.mark.requires_fixtures
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Colours by object: each part takes its object's extruder.
+        "400-blaubeere-fur-spielzeug-kaufladen-deko-blaubeere.3mf",
+        # 47 parts with their own extruders, painted, and object-wide process keys.
+        "2069-fidget-cubes-mc-edition.3mf",
+        # Painted, one part.
+        "2167-pumpkin-fidget-twist.3mf",
+        # ScadBuddy's own writer, saved in the library.
+        "411-broccoli.3mf",
+    ],
+)
+def test_a_real_library_files_parts_take_their_slots_settings(name: str) -> None:
+    """#5628 on MakerWorld files (Git LFS): every printed part of each slot carries that
+    slot's setting once, and nothing but ``model_settings.config`` differs from the copy
+    laid out without them."""
+    payload = makerworld_path(name).read_bytes()
+    slots = part_settings_slots(payload)
+    assert slots
+    overrides = tuple((slot, (("top_shell_layers", str(10 + slot)),)) for slot in sorted(slots))
+    plate = plate_for("H2C")
+
+    laid = _laid_out_for(payload, Target(plate, "0.4", part_settings=overrides))
+    plain = _laid_out_for(payload, Target(plate, "0.4"))
+
+    assert layout_of(laid) == layout_of(plain)
+    parts = _part_values(_model_settings(laid), "top_shell_layers")
+    assert parts
+    assert all(values == [str(10 + (slot or 0))] for slot, values in parts), parts
+    with zipfile.ZipFile(io.BytesIO(plain)) as a, zipfile.ZipFile(io.BytesIO(laid)) as b:
+        assert a.namelist() == b.namelist()
+        for entry in a.namelist():
+            if entry != MODEL_SETTINGS_NAME:
+                assert a.read(entry) == b.read(entry), entry

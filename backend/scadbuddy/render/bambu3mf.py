@@ -1497,9 +1497,11 @@ def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
     Bambu Studio v02.08.02.61 reads every key of a ``<part>`` that is not one of its own
     (name, subtype, source, matrix …) into the volume's config
     (``src/libslic3r/Format/bbs_3mf.cpp`` lines 5464-5471 in ``_generate_volumes_new``),
-    and slices each volume's region with that config over the process
-    (``src/libslic3r/PrintApply.cpp`` ``region_config_from_model_volume``). Measured with
-    the native slicer image: print-flow spec 2026-09-24 §4 "Settings per part (#5571)"."""
+    and slices each volume's region with that config over its object's, over the process
+    (``src/libslic3r/PrintObject.cpp`` lines 3105-3122,
+    ``region_config_from_model_volume``). Measured with the native slicer image, for an
+    output and for an author's library file (#5628): print-flow spec 2026-09-24 §4
+    "Settings per part (#5571)"."""
     wanted = dict(overrides)
 
     def part(found: re.Match[str], slot: int | None, printed: bool) -> str:
@@ -1573,21 +1575,27 @@ def nozzles_statable(payload: bytes) -> bool:
     it is."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            infos = archive.infolist()
-            names = [info.filename for info in infos]
-            if PROJECT_SETTINGS_NAME not in names or any(map(_GCODE.fullmatch, names)):
-                return False
-            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-                return False
-            if archive.getinfo(PROJECT_SETTINGS_NAME).file_size > MAX_SETTINGS_BYTES:
-                return False
-            # Reads each entry in 1 MiB chunks and checks its CRC; None when all match.
-            if archive.testzip() is not None:
-                return False
-            settings = _read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
-            return isinstance(json.loads(settings), dict)
+            return _statable(archive)
     except (zipfile.BadZipFile, ValueError):
         return False
+
+
+def _statable(archive: zipfile.ZipFile) -> bool:
+    """:func:`nozzles_statable` of an archive already open. Raises what reading it
+    raises (:class:`zipfile.BadZipFile`, :class:`ValueError`)."""
+    infos = archive.infolist()
+    names = [info.filename for info in infos]
+    if PROJECT_SETTINGS_NAME not in names or any(map(_GCODE.fullmatch, names)):
+        return False
+    if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+        return False
+    if archive.getinfo(PROJECT_SETTINGS_NAME).file_size > MAX_SETTINGS_BYTES:
+        return False
+    # Reads each entry in 1 MiB chunks and checks its CRC; None when all match.
+    if archive.testzip() is not None:
+        return False
+    settings = _read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
+    return isinstance(json.loads(settings), dict)
 
 
 class ArchiveTooLargeError(ValueError):
@@ -2202,18 +2210,52 @@ def layout_of(payload: bytes) -> Layout:
     ``as_is``: anything else (sliced, another slicer's, past the caps), which nothing
     can be stated into. The caps are checked first, so the plates are read back only
     from a file already bounded."""
-    if not nozzles_statable(payload):
-        return "as_is"
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
-            if settings.get("print_settings_id") != PRESET_PLACEHOLDER:
-                return "author"
-            if not all(each.object_files for each in laid_out_plates(archive)):
-                return "author"
+            return _layout(archive)
+    except (zipfile.BadZipFile, ValueError):
+        return "as_is"
+
+
+def _layout(archive: zipfile.ZipFile) -> Layout:
+    """:func:`layout_of` of an archive already open."""
+    try:
+        if not _statable(archive):
+            return "as_is"
+    except (zipfile.BadZipFile, ValueError):
+        return "as_is"
+    try:
+        settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+        if settings.get("print_settings_id") != PRESET_PLACEHOLDER:
+            return "author"
+        if not all(each.object_files for each in laid_out_plates(archive)):
+            return "author"
     except (KeyError, ValueError, ET.ParseError, zipfile.BadZipFile):
         return "author"
     return "scadbuddy"
+
+
+def part_settings_slots(payload: bytes) -> set[int] | None:
+    """The slots a printed part of ``payload`` is made in (:func:`printed_part_slots`),
+    or ``None`` when nothing can be written into it (:func:`layout_of` ``as_is``), so it
+    takes no settings per part (#5571). One pass over the archive judges both (#5637).
+    A file with no ``model_settings.config`` has no part to carry them: an empty set.
+
+    The archive is bounded by :func:`_statable` first, so ``model_settings.config`` is
+    read against :data:`MAX_UNCOMPRESSED_BYTES`, not the settings cap: an author's file
+    of many objects can pass 1 MiB there. One that cannot be read as UTF-8 is ``None``,
+    as :func:`with_part_settings` could not write into it."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if _layout(archive) == "as_is":
+                return None
+            if MODEL_SETTINGS_NAME not in archive.namelist():
+                return set()
+            raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_UNCOMPRESSED_BYTES)
+        text = raw.decode("utf-8")
+    except (zipfile.BadZipFile, ValueError):
+        return None
+    return printed_part_slots(text)
 
 
 #: The colour an STL is wrapped in: it carries none, and a print recolors it for its
