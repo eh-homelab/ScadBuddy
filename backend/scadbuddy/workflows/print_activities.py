@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.dispatch import (
 )
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
 from scadbuddy.bambuddy.output_reader import OutputNaming, OutputReader, invalid_meta, require
+from scadbuddy.bambuddy.part_settings import normalised
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
@@ -688,7 +689,11 @@ class PrintActivities:
                 logger.warning(
                     "run %s queued without a Bambuddy link: %s", input.run_id, error.detail
                 )
-        return finish_run(config, planned, input.outcomes, input.queued)
+        result = finish_run(config, planned, input.outcomes, input.queued)
+        # #5627: what the copy was laid out with, for the print record.
+        return result.model_copy(
+            update={"part_settings": normalised(input.input.request.part_settings)}
+        )
 
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:

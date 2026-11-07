@@ -164,6 +164,10 @@ export type PrintRunRequest = Schemas['PrintRunRequest']
  */
 export type RegistryRunRequest = PrintRunRequest & { printer?: string }
 export type PrintRunResult = Schemas['PrintRunResult']
+/** #5571, #5627 — a print's slicer settings for the parts of one filament slot. */
+export type PartSettings = Schemas['PartSettings']
+/** #5627 — the settings per slot, keyed by the slot (from 1) as a string. */
+export type PartSettingsMap = Record<string, PartSettings>
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
@@ -450,8 +454,12 @@ export type SpoolImportRow = Schemas['SpoolImportRow']
  * colour slot (`colours[].slot`, from 0). */
 export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
- * item's copies, plates and request id are the server's. */
-export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printer_id' | 'filament_plan' | 'choices'>
+ * item's copies, plates and request id are the server's. `part_settings` (#5627) only when
+ * they differ from the accepted quote's: none sent prints with the quote's. */
+export type OrderItemPrintRequest = Pick<
+  RegistryRunRequest,
+  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings'
+>
 export type OrderEstimate = Schemas['OrderEstimate']
 /** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
 export type UnitCostHistory = Schemas['UnitCostHistory']

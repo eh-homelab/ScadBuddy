@@ -18,10 +18,10 @@ takes the ``wall_loops`` bound, 1000, for them too.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.render.bambu3mf import PartOverrides
 
@@ -116,3 +116,26 @@ def dumped(value: PartSettingsMap | None) -> dict[str, dict[str, Any]] | None:
     if kept is None:
         return None
     return {str(slot): settings.model_dump(exclude_none=True) for slot, settings in kept.items()}
+
+
+def process_part_settings(values: Mapping[str, Any]) -> PartSettings:
+    """The process's own value of each part setting (#5627), from a process preset's
+    flattened values (``PresetValues.values``: a string, or a list of strings for a
+    vector option, ``slicing/presets.py`` ``apply_overrides``). The print dialog opens
+    each control on it. A value the preset leaves out, or one out of :class:`PartSettings`'
+    bounds, is left out: the dialog then shows the control empty."""
+    read: dict[str, Any] = {}
+    for key in PartSettings.model_fields:
+        value = values.get(key)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if key == "sparse_infill_density":
+            text = text.removesuffix("%").strip()
+        try:
+            read[key] = PartSettings.model_validate({key: text}).model_dump()[key]
+        except ValidationError:
+            continue
+    return PartSettings.model_validate(read)

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
   ChoicesView,
+  PartSettingsMap,
   PrintOptions,
   PrintRunRequest,
   RegistryRunRequest,
@@ -14,6 +15,7 @@ import type {
   SlotChoice,
 } from '../api/types'
 import { type PlateChoice, plateFields, plateKey } from './plateChoice'
+import { sentPartSettings } from './partSettings'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -50,6 +52,8 @@ interface RunInput {
   primeTower?: PrimeTowerChoice | null
   /** #717 — the filament profiles left on, by id. */
   filamentProfiles?: string[]
+  /** #5627 — the settings per slot, as `sentPartSettings` gives them; `null` sends none. */
+  partSettings?: PartSettingsMap | null
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
@@ -98,6 +102,7 @@ export function printRunBody({
   supports = null,
   primeTower = null,
   filamentProfiles = [],
+  partSettings = null,
   rackPosition,
   rackAlgorithm,
 }: {
@@ -115,6 +120,7 @@ export function printRunBody({
   supports?: SupportsChoice | null
   primeTower?: PrimeTowerChoice | null
   filamentProfiles?: readonly string[]
+  partSettings?: PartSettingsMap | null
   rackPosition: number | null
   rackAlgorithm: RackAlgorithm | null
 }): RegistryRunRequest {
@@ -127,7 +133,7 @@ export function printRunBody({
     ...plateFields(plate),
     ...(folderId !== null ? { folder_id: folderId } : projectId === undefined ? {} : { project_id: projectId }),
     options,
-    ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
+    ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower, partSettings),
     rack_position: rackPosition,
     rack_algorithm: rackAlgorithm,
   }
@@ -156,6 +162,7 @@ export function useRunPrint({
   supports = null,
   primeTower = null,
   filamentProfiles = NONE,
+  partSettings = null,
   rackPosition,
   rackAlgorithm,
   acceptedFixes = NONE,
@@ -167,6 +174,7 @@ export function useRunPrint({
   const profilesKey = filamentProfiles.join(',')
   const supportsKey = JSON.stringify(supports)
   const towerKey = JSON.stringify(primeTower)
+  const partsKey = JSON.stringify(partSettings)
   const fixesKey = acceptedFixes.join(',')
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
@@ -204,6 +212,7 @@ export function useRunPrint({
     printSequence,
     supportsKey,
     towerKey,
+    partsKey,
     profilesKey,
     rackPosition,
     rackAlgorithm,
@@ -214,9 +223,9 @@ export function useRunPrint({
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
-   * tier and process, the print sequence (#4970), and the spools where they differ from
-   * the suggestion (re-sending the suggestion is not a choice). Best effort, and only once
-   * the print has started.
+   * tier and process, the print sequence (#4970), the settings per slot (#5627), and the
+   * spools where they differ from the suggestion (re-sending the suggestion is not a
+   * choice). Best effort, and only once the print has started.
    */
   function rememberChoices() {
     const last = choices?.model_choices
@@ -229,6 +238,7 @@ export function useRunPrint({
       tier,
       process_name: processName,
       print_sequence: printSequence,
+      part_settings: partSettings,
     }
     const before = {
       printer_id: last?.printer_id ?? null,
@@ -238,6 +248,7 @@ export function useRunPrint({
       tier: last?.tier ?? null,
       process_name: last?.process_name ?? null,
       print_sequence: last?.print_sequence ?? null,
+      part_settings: sentPartSettings(last?.part_settings),
     }
     if (JSON.stringify(next) === JSON.stringify(before)) return
     if (source) void sourceApi(source).remember(next).catch(() => undefined)
@@ -279,6 +290,7 @@ export function useRunPrint({
           supports,
           primeTower,
           filamentProfiles,
+          partSettings,
           rackPosition,
           rackAlgorithm,
         }),

@@ -28,7 +28,7 @@ from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, ReadPresetValues, client_for
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -90,6 +90,7 @@ from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     FilamentRequirements,
     FlowType,
+    PresetRef,
     Printer,
     PrinterStatus,
     RackAlgorithm,
@@ -103,9 +104,11 @@ from scadbuddy.bambuddy.options import (
     lan_calibration_refusal,
 )
 from scadbuddy.bambuddy.part_settings import (
+    PartSettings,
     PartSettingsMap,
     normalised,
     overrides_of,
+    process_part_settings,
     unknown_slots,
 )
 from scadbuddy.bambuddy.prime_tower import (
@@ -498,6 +501,10 @@ class PrintRunResult(BaseModel):
     #: waits for someone to say its plate is clear before it starts it (#4939,
     #: ``lan_require_plate_clear``): ``POST /print/runs/{id}/plate-cleared``.
     lan_awaiting_clear: bool = False
+    #: The slicer settings per filament slot this print was laid out with (#5571,
+    #: #5627), as the request set them (``part_settings.normalised``); ``None`` for none.
+    #: The print record (``GET /prints/{archive_id}``) lists them, so a reprint is exact.
+    part_settings: PartSettingsMap | None = None
 
 
 async def known_slots(
@@ -796,6 +803,11 @@ class PrintCheck(BaseModel):
     #: (#956); ``None`` when it was not read, or when every plate was checked at once
     #: (#2976), whose warnings name each plate.
     objects: int | None = None
+    #: The process's own value of each part setting (#5627), which the dialog's
+    #: "Settings for this colour" controls open on; a value it has none of is left out.
+    #: ``None`` when the process was not read: a library or sliced file, which takes no
+    #: part settings, or a preset whose values cannot be read.
+    process_part_settings: PartSettings | None = None
 
 
 ChooseRack = Callable[[int], Awaitable[RackChoice | None]]
@@ -1281,6 +1293,8 @@ async def check_print(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # Last, so the read above (`read` keeps each preset's answer) is not made again.
+        process_part_settings=await _process_part_settings(source, process, read),
     )
 
 
@@ -1405,7 +1419,29 @@ async def _native_check(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # Last, so the read above (`read` keeps each preset's answer) is not made again.
+        process_part_settings=await _process_part_settings(source, process, read),
     )
+
+
+async def _process_part_settings(
+    source: PrintSource, process: PresetRef | None, read: ReadPresetValues
+) -> PartSettings | None:
+    """The process's values of the part settings (#5627), for an output the run lays out;
+    ``None`` for any other source, which takes none (:func:`part_settings_refusal`), and
+    when the preset's values cannot be read. Only an advisory read: a failed one never
+    fails the check."""
+    if process is None or not isinstance(source, OutputSource) or source.is_sliced:
+        return None
+    try:
+        answer = await read(process)
+    except ApiError as error:
+        logger.info(
+            "the process preset's part settings could not be read",
+            extra={"source": process.source, "status": error.status},
+        )
+        return None
+    return process_part_settings(answer.values) if answer.resolved else None
 
 
 def _listed(warning: FilamentWarning | None) -> list[FilamentWarning]:

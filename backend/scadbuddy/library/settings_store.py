@@ -63,6 +63,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
@@ -257,8 +258,12 @@ class ModelPrintChoices(BaseModel):
 
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
     (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
-    the template's or the process's. All default to "nothing remembered", so a settings
-    file written before them still loads; an empty ``nozzles`` means the dialog's default.
+    the template's or the process's. ``part_settings`` are its slicer settings per
+    filament slot (#5627, ``bambuddy/part_settings.py``), only a model's: a library file
+    takes none. Kept per model only, never at the print options' global or printer scope,
+    since a slot number means one model's colour. All default to "nothing remembered", so
+    a settings file written before them still loads; an empty ``nozzles`` means the
+    dialog's default.
     """
 
     printer_id: int | None = None
@@ -270,6 +275,7 @@ class ModelPrintChoices(BaseModel):
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
+    part_settings: PartSettingsMap | None = None
 
     @model_validator(mode="after")
     def _one_printer_key(self) -> Self:
@@ -277,6 +283,12 @@ class ModelPrintChoices(BaseModel):
         if self.printer_id is not None and self.printer is not None:
             self.printer = None
         return self
+
+    @field_validator("part_settings")
+    @classmethod
+    def _settings_set(cls, value: PartSettingsMap | None) -> PartSettingsMap | None:
+        """Only slots that set something (#5627): none set is nothing remembered."""
+        return normalised(value)
 
     @field_validator("nozzles")
     @classmethod

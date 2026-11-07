@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
+import type { OrderItem, PartSettingsMap, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
 import { orderItemSource } from '../../lib/printSource'
@@ -91,6 +91,9 @@ export function QuoteEditor({
   const current = price.trim() ? parseUnitPrice(price, exponent) : (pending?.unit_price_minor ?? null)
   // #5554 — the newest quote is marked when there are several to tell apart.
   const newest = quotes.length > 1 ? [...quotes].sort(byCreated).at(-1)?.id : undefined
+  // #5627 — a new slice quote opens on the newest one's settings per colour, so a quote
+  // made again keeps them; with none, on the model's remembered ones.
+  const lastSlice = quotes.filter((q) => q.source === 'slice').sort(byCreated).at(-1)
   const running = slice?.run && !slice.run.error ? slice.run : undefined
   const now = useNow(running !== undefined)
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
@@ -240,6 +243,7 @@ export function QuoteEditor({
             orderId,
             itemId,
             filaments: Object.fromEntries(item.colours.map((colour) => [String(colour.slot), colour.filament_id ?? null])),
+            ...(lastSlice ? { partSettings: (lastSlice.part_settings ?? null) as PartSettingsMap | null } : {}),
             start: slice.start,
           }}
         />

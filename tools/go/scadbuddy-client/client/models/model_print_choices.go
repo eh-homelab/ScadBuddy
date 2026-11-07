@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// ModelPrintChoices what the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
+// ModelPrintChoices what the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. “part_settings“ are its slicer settings per filament slot (#5627, “bambuddy/part_settings.py“), only a model's: a library file takes none. Kept per model only, never at the print options' global or printer scope, since a slot number means one model's colour. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 type ModelPrintChoices struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
@@ -15,6 +15,8 @@ type ModelPrintChoices struct {
 	filament_plan []SlotChoiceable
 	// The nozzles property
 	nozzles []NozzleChoiceable
+	// The part_settings property
+	part_settings i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The print_sequence property
 	print_sequence ModelPrintChoices_ModelPrintChoices_print_sequenceable
 	// The printer property
@@ -552,6 +554,16 @@ func (m *ModelPrintChoices) GetFieldDeserializers() map[string]func(i878a80d2330
 		}
 		return nil
 	}
+	res["part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPartSettings(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["print_sequence"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateModelPrintChoices_ModelPrintChoices_print_sequenceFromDiscriminatorValue)
 		if err != nil {
@@ -617,6 +629,12 @@ func (m *ModelPrintChoices) GetNozzles() []NozzleChoiceable {
 	return m.nozzles
 }
 
+// GetPartSettings gets the part_settings property value. The part_settings property
+// returns a UntypedNodeable when successful
+func (m *ModelPrintChoices) GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.part_settings
+}
+
 // GetPrinter gets the printer property value. The printer property
 // returns a ModelPrintChoices_ModelPrintChoices_printerable when successful
 func (m *ModelPrintChoices) GetPrinter() ModelPrintChoices_ModelPrintChoices_printerable {
@@ -669,6 +687,12 @@ func (m *ModelPrintChoices) Serialize(writer i878a80d2330e89d26896388a3f487eef27
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("nozzles", cast)
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("part_settings", m.GetPartSettings())
 		if err != nil {
 			return err
 		}
@@ -727,6 +751,11 @@ func (m *ModelPrintChoices) SetNozzles(value []NozzleChoiceable) {
 	m.nozzles = value
 }
 
+// SetPartSettings sets the part_settings property value. The part_settings property
+func (m *ModelPrintChoices) SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.part_settings = value
+}
+
 // SetPrinter sets the printer property value. The printer property
 func (m *ModelPrintChoices) SetPrinter(value ModelPrintChoices_ModelPrintChoices_printerable) {
 	m.printer = value
@@ -757,6 +786,7 @@ type ModelPrintChoicesable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetFilamentPlan() []SlotChoiceable
 	GetNozzles() []NozzleChoiceable
+	GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetPrinter() ModelPrintChoices_ModelPrintChoices_printerable
 	GetPrinterId() ModelPrintChoices_ModelPrintChoices_printer_idable
 	GetPrintSequence() ModelPrintChoices_ModelPrintChoices_print_sequenceable
@@ -764,6 +794,7 @@ type ModelPrintChoicesable interface {
 	GetTier() ModelPrintChoices_ModelPrintChoices_tierable
 	SetFilamentPlan(value []SlotChoiceable)
 	SetNozzles(value []NozzleChoiceable)
+	SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetPrinter(value ModelPrintChoices_ModelPrintChoices_printerable)
 	SetPrinterId(value ModelPrintChoices_ModelPrintChoices_printer_idable)
 	SetPrintSequence(value ModelPrintChoices_ModelPrintChoices_print_sequenceable)
