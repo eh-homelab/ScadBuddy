@@ -308,6 +308,8 @@ function CustomItemRow({
       document.getElementById(CUSTOM_ITEM_TITLE)?.focus()
     } catch (err) {
       setError(refusalText(err))
+      // A failed add asks again before the next try.
+      setConfirming(false)
     } finally {
       setBusy(false)
     }
