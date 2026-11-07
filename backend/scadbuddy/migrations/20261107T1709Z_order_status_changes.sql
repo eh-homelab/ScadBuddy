@@ -8,7 +8,9 @@ CREATE TABLE order_status_changes (
   -- NULL for the order's own status.
   item_id text,
   status text NOT NULL,
-  at timestamptz NOT NULL DEFAULT now()
+  -- When the row was written, not when its transaction began (`now()`): a trigger
+  -- made while the change's transaction was open still hears it.
+  at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX order_status_changes_subject ON order_status_changes (order_id, item_id, id);
 
@@ -30,6 +32,7 @@ CREATE TRIGGER orders_status_changed AFTER INSERT OR UPDATE OF status ON orders
 CREATE TRIGGER order_items_status_changed AFTER INSERT OR UPDATE OF status ON order_items
   FOR EACH ROW EXECUTE FUNCTION order_status_changed();
 
--- Since when a trigger has listened (made, or last resumed): a change before it is not
--- one it heard, so it never fires for it. Both clocks are this database's.
+-- Since when a trigger has listened (made, last edited, or last resumed): a change
+-- before it is not one it heard, so it never fires for it. Both clocks are this
+-- database's.
 ALTER TABLE flow_triggers ADD COLUMN live_since timestamptz NOT NULL DEFAULT now();

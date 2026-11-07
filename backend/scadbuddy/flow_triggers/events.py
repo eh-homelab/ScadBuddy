@@ -1,7 +1,8 @@
 """Event triggers on the event bus (#2484, spec 2026-10-11 §12.3), never by polling.
 
 Every replica hears each event and starts ``FlowTriggerFire`` for each matching trigger
-under one workflow id per trigger and event, with ``REJECT_DUPLICATE``, so one fire runs;
+under one workflow id per trigger and event (an order event: one per trigger and status
+change, `_change_fires`), with ``REJECT_DUPLICATE``, so one fire runs;
 the fire's own row holds it to one beyond Temporal's retention. An event lost while the
 bus was disconnected (``bus.resync``) fires nothing.
 """
@@ -100,8 +101,9 @@ async def _change_fires(
     """An order event's fires (§7.1): one per trigger and status change recorded
     (`order_status_changes`), keyed by the change, never by the event. A plain edit, a
     hold or a release records none, so it fires nothing new; a return to a status is a
-    change of its own; changes made before a trigger listened (`live_since`) and fires
-    recorded already are skipped. The facts are the row's now: none when it is gone."""
+    change of its own; changes made before a trigger listened (`live_since`: made, last
+    edited or last resumed) and fires recorded already are skipped. The facts are the
+    row's now: none when it is gone."""
     kind, subjects, key, facts = found
     order_id, item_id = facts["order_id"], facts.get("item_id")
     if kind == "order.changed":
@@ -112,17 +114,19 @@ async def _change_fires(
     elif not await store.item_exists(order_id, str(item_id)):
         return []  # the item is gone
     changes = await store.status_changes(order_id, item_id)
-    heard: dict[str, list[str]] = {}
-    planned: list[tuple[str, str, dict[str, Any], StatusChange]] = []
+    each: list[dict[str, Any]] = []
     for change in changes:
         change_facts = {**facts, "status": change.status}
         if kind == "order_item.changed" and (
             change is not changes[-1] or change.status != facts["status"]
         ):
             change_facts["attempt"] = None  # the event's attempt is its own change's
-        if change.status not in heard:
-            heard[change.status] = await store.event_triggers(kind, subjects, change_facts)
-        for trigger_id in heard[change.status]:
+        each.append(change_facts)
+    # One read of the triggers for every change.
+    heard = await store.event_triggers_each(kind, subjects, each)
+    planned: list[tuple[str, str, dict[str, Any], StatusChange]] = []
+    for change, change_facts, trigger_ids in zip(changes, each, heard, strict=True):
+        for trigger_id in trigger_ids:
             fire_key = fire_workflow_id(trigger_id, f"{key}:{change.status}:{change.id}")
             planned.append((trigger_id, fire_key, change_facts, change))
     if not planned:

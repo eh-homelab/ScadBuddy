@@ -272,19 +272,51 @@ def claim(triggers: TriggerStore, workflow_ids: list[str]) -> None:
 async def test_a_status_reached_before_the_trigger_listened_never_fires(
     triggers: TriggerStore, jobs: JobProjection
 ) -> None:
-    """Review of #5644: a trigger made (or resumed) after the order reached its status
-    fires nothing on the next edit or hold; only a change after it fires."""
+    """Review of #5644: a trigger made after the order reached its status fires nothing
+    on the next edit or hold."""
     new_order(jobs)
     set_status(jobs, "accepted")
-    trigger_id = await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
+    await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
     client = _Client()
     event = OrderChanged(order_id="o1", status="accepted")
     assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
-    # Paused, then resumed: what changed while it was paused is not heard either.
+
+
+@pg
+async def test_a_change_made_while_paused_never_fires_after_the_resume(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """Review of #5644: resumed, a trigger hears only what changes from then on."""
+    new_order(jobs)
+    trigger_id = await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
     await triggers.set_paused(trigger_id, True, {"kind": "browser"}, "a while")
-    set_status(jobs, "ready")
     set_status(jobs, "accepted")
     await triggers.set_paused(trigger_id, False, None, None)
+    client = _Client()
+    event = OrderChanged(order_id="o1", status="accepted")
+    assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
+    set_status(jobs, "ready")
+    set_status(jobs, "accepted")
+    assert len(await fire_event(client, "library", triggers, event)) == 1  # type: ignore[arg-type]
+
+
+@pg
+async def test_an_edit_that_makes_a_trigger_match_a_past_change_never_fires_it(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """Review of #5644: an order became `ready` while the trigger matched `accepted`;
+    edited to match `ready`, the next plain edit of the order fires nothing."""
+    trigger_id = await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
+    new_order(jobs)
+    set_status(jobs, "ready")
+    await triggers.update(
+        trigger_id,
+        {"event": {"kind": "order.changed", "match": {"status": ["ready"]}}},
+        {"kind": "browser"},
+        "browser",
+    )
+    client = _Client()
+    event = OrderChanged(order_id="o1", status="ready")
     assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
 
 

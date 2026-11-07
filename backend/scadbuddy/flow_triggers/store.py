@@ -179,9 +179,15 @@ class TriggerStore:
         (`order_status_changes`), oldest first: what an order event fires for (§7.1)."""
         return await self._call(self._status_changes, order_id, item_id, limit)
 
+    async def event_triggers_each(
+        self, kind: EventKind, subjects: dict[str, str], each: list[dict[str, Any]]
+    ) -> list[list[str]]:
+        """`event_triggers` for each of `each` (facts), from one read of the triggers."""
+        return await self._call(self._event_triggers_each, kind, subjects, each)
+
     async def live_since(self, trigger_ids: Collection[str]) -> dict[str, datetime]:
-        """When each trigger began to listen (made, or last resumed): it never fires for
-        a status change before then."""
+        """When each trigger began to listen (made, last edited, or last resumed): it
+        never fires for a status change before then."""
         return await self._call(self._live_since, list(trigger_ids))
 
     async def fired(self, fires: Collection[tuple[str, str]]) -> set[tuple[str, str]]:
@@ -335,7 +341,10 @@ class TriggerStore:
         with self._pool.connection() as conn, conn.transaction():
             # The row lock an approval checks what it saw under.
             row = conn.execute(
-                f"UPDATE flow_triggers SET updated_by = %(by)s, updated_at = now(){sets}"
+                # An edit listens anew (#4252): a status change made before it, which
+                # its old event did not match, never fires on its new one.
+                "UPDATE flow_triggers SET updated_by = %(by)s, updated_at = now(),"
+                f" live_since = now(){sets}"
                 f" WHERE id = %(id)s RETURNING {_TRIGGER}",
                 {**columns, "by": Jsonb(by), "id": trigger_id},
             ).fetchone()
@@ -397,13 +406,18 @@ class TriggerStore:
     ) -> list[str]:
         """The live event triggers of `kind` whose subject is one of `subjects` (by its
         kind) or unset, and whose `match` the event's `facts` pass (orders spec §7.1)."""
+        return self._event_triggers_each(kind, subjects, [facts])[0]
+
+    def _event_triggers_each(
+        self, kind: EventKind, subjects: dict[str, str], each: list[dict[str, Any]]
+    ) -> list[list[str]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, event FROM flow_triggers WHERE kind = 'event' AND NOT paused"
                 " AND event ->> 'kind' = %s",
                 (kind,),
             ).fetchall()
-        found: list[str] = []
+        timings: list[tuple[str, EventTiming]] = []
         for row in rows:
             try:
                 timing = EventTiming.model_validate(row["event"])
@@ -418,9 +432,8 @@ class TriggerStore:
                 and (subjects.get(subject.kind) != subject.id)
             ):
                 continue
-            if matches(timing, facts):
-                found.append(row["id"])
-        return found
+            timings.append((row["id"], timing))
+        return [[t for t, timing in timings if matches(timing, facts)] for facts in each]
 
     def _order_facts(self, order_id: str) -> dict[str, Any] | None:
         with self._pool.connection() as conn:
