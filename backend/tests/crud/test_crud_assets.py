@@ -24,10 +24,12 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient, CrudUnavailableError
+from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.render import BASE, RemoteAssetRows
 from scadbuddy.library import assets as assets_module
 from scadbuddy.library.assets import (
@@ -223,13 +225,18 @@ async def test_adopt_refuses_a_file_the_api_s_copy_is_not(
     meta = await _uploaded(api, remote)
     with pool.connection() as conn:
         conn.execute("DELETE FROM assets WHERE id = %s", (meta.id,))
-    with pytest.raises(AssetRejectedError):
-        rows.adopt(meta.model_copy(update={"kind": "png"}))
-    with pytest.raises(AssetRejectedError):
-        rows.adopt(meta.model_copy(update={"size": meta.size + 1}))
+    for other in ({"kind": "png"}, {"size": meta.size + 1}):
+        with pytest.raises(AssetRejectedError) as rejected:
+            rows.adopt(meta.model_copy(update=other))
+        cause = rejected.value.__cause__
+        assert isinstance(cause, CrudRefusedError)
+        assert (cause.status, cause.problem["reason"]) == (422, "copy-mismatch")
     # No copy in the blob store: nothing to adopt.
-    with pytest.raises(AssetRejectedError):
+    with pytest.raises(AssetRejectedError) as rejected:
         rows.adopt(meta.model_copy(update={"id": "e" * 64}))
+    cause = rejected.value.__cause__
+    assert isinstance(cause, CrudRefusedError)
+    assert (cause.status, cause.problem["reason"]) == (404, "no-copy")
     # A body that is not the route's id, or an id that is not one.
     with pytest.raises(CrudRefusedError) as refused:
         client.request("POST", f"{BASE}/assets/{'e' * 64}/adopt", json=meta.model_dump(mode="json"))
@@ -238,6 +245,40 @@ async def test_adopt_refuses_a_file_the_api_s_copy_is_not(
         client.request("POST", f"{BASE}/assets/x/adopt", json=meta.model_dump(mode="json"))
     assert refused.value.status == 422
     assert _count(pool, meta.id) == 0
+
+
+def _answering(response: httpx.Response) -> RemoteAssetRows:
+    """`RemoteAssetRows` of an API that answers every request with ``response``."""
+    client = CrudSyncClient(
+        "http://api",
+        "render",
+        ServiceAuth(FixedToken()),
+        transport=httpx.MockTransport(lambda request: response),
+        unavailable_budget=0.2,
+        backoff=0.01,
+    )
+    return RemoteAssetRows(client)
+
+
+def test_only_the_adopt_routes_own_refusals_reject_the_copy() -> None:
+    """Any other refusal stays a `CrudRefusedError`, so `ensure` never drops a valid copy
+    over it; a 404 without the CRUD header (a pod without the route) is retried and ends
+    as `CrudUnavailableError`, never a rejection."""
+    meta = AssetMeta(id="a" * 64, name="x.svg", kind="svg", size=3)
+    for answer in (
+        httpx.Response(404, json={"detail": "Not Found"}, headers=CRUD_HEADERS),
+        httpx.Response(422, json={"detail": "bad"}, headers=CRUD_HEADERS),
+        httpx.Response(404, json={"reason": "copy-mismatch"}, headers=CRUD_HEADERS),
+    ):
+        with pytest.raises(CrudRefusedError):
+            _answering(answer).adopt(meta)
+    with pytest.raises(CrudUnavailableError) as unavailable:
+        _answering(httpx.Response(404, json={"detail": "Not Found"})).adopt(meta)
+    assert unavailable.value.failure == "route_missing"
+    with pytest.raises(AssetRejectedError):
+        _answering(httpx.Response(404, json={"reason": "no-copy"}, headers=CRUD_HEADERS)).adopt(
+            meta
+        )
 
 
 def test_adopt_refuses_bytes_that_are_not_the_id(worker: RemoteAssetStore) -> None:

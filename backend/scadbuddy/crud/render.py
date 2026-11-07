@@ -77,6 +77,9 @@ REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
+#: `api/crud_render.py` `NO_COPY` and `COPY_MISMATCH`: an adopt's own refusals.
+NO_COPY = "no-copy"
+COPY_MISMATCH = "copy-mismatch"
 #: `api/crud_render.py` `TARGET_MOVED` and `FOLDER_LOCKED`.
 TARGET_MOVED = "target-moved"
 FOLDER_LOCKED = "folder-locked"
@@ -575,15 +578,20 @@ class RemoteAssetRows:
         return self._meta("POST", asset_id, "/use")
 
     def adopt(self, meta: AssetMeta) -> None:
-        """A refusal (no copy of the id in the API's blob store, a copy of another kind
-        or size, a malformed id) is the `AssetRejectedError` of a fetched file that does
-        not match: `RemoteAssets.ensure` then reports the upload as not in the store."""
+        """The route's own refusals, a 404 ``no-copy`` (no copy of the id in the API's
+        blob store) and a 422 ``copy-mismatch`` (a copy of another kind or size), are the
+        `AssetRejectedError` of a fetched file that does not match: `RemoteAssets.ensure`
+        then reports the upload as not in the store and drops the copy. Any other refusal
+        stays `CrudRefusedError`, so no answer but those two drops a valid copy. (A 404
+        without the CRUD header, a pod without the route, is retried and ends as
+        `CrudUnavailableError`.)"""
         try:
             self._client.request(
                 "POST", f"{BASE}/assets/{_part(meta.id)}/adopt", json=meta.model_dump(mode="json")
             )
         except CrudRefusedError as error:
-            if error.status in (404, 422):
+            reason = error.problem.get("reason")
+            if (error.status, reason) in ((404, NO_COPY), (422, COPY_MISMATCH)):
                 raise AssetRejectedError(str(error.problem.get("detail", ""))) from error
             raise
 
