@@ -2813,12 +2813,22 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             before = self._attachment_of(conn, order, attachment_id)
-            if before.revision_id is None and patch.role is not None:
-                _refuse_revision_role(patch.role)
             if (patch.role not in (None, before.role)) or (
                 patch.caption not in (None, before.caption)
             ):
                 self._refuse_sent_revision(conn, before)
+            if patch.role not in (None, before.role):
+                if before.revision_id is None:
+                    _refuse_revision_role(patch.role)
+                elif patch.role == "test_print":
+                    # A test print's photo may join the model's photos (`attachment_to_model`),
+                    # so it only ever arrives by upload: no re-role, from a render or through
+                    # another role, makes one.
+                    raise LifecycleError(
+                        "role",
+                        "only an upload is the photo of a test print: upload that photo",
+                        unprocessable=True,
+                    )
             attachment = self.store.update_attachment(
                 conn,
                 before.id,

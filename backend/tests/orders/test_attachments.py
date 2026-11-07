@@ -17,7 +17,7 @@ from scadbuddy.orders.models import (
     OrderItem,
     Revision,
 )
-from scadbuddy.orders.store import ATTACHMENT_HOLDER, OrderStore
+from scadbuddy.orders.store import ATTACHMENT_HOLDER, UNSET, OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, NOW, Shop, resolved
@@ -238,7 +238,12 @@ def test_a_file_of_a_sent_revision_stays(shop: Shop, answer: str | None) -> None
 
 @pytest.mark.requires_postgres
 @pytest.mark.parametrize(
-    "patch", [AttachmentPatch(role="test_print"), AttachmentPatch(caption="another")]
+    "patch",
+    [
+        AttachmentPatch(role="reference"),
+        AttachmentPatch(role="test_print"),
+        AttachmentPatch(caption="another"),
+    ],
 )
 def test_a_file_of_a_sent_revision_keeps_its_role_and_caption(
     shop: Shop, patch: AttachmentPatch
@@ -254,6 +259,28 @@ def test_a_file_of_a_sent_revision_keeps_its_role_and_caption(
     assert refused.value.slug == "revision_sent"
     [kept] = shop.rows.attachments(order.id)
     assert (kept.role, kept.caption) == ("render", "")
+    # Resending what it already holds is no change, so it is not refused.
+    same = shop.lifecycle.edit_attachment(
+        order.id, att.id, AttachmentPatch(role="render", caption=""), BY
+    )
+    assert (same.role, same.caption) == ("render", "")
+
+
+@pytest.mark.requires_postgres
+def test_a_render_never_becomes_a_test_print(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.edit_attachment(order.id, att.id, AttachmentPatch(role="test_print"), BY)
+    assert (refused.value.slug, refused.value.unprocessable) == ("role", True)
+    # Nor through another role first.
+    shop.lifecycle.edit_attachment(order.id, att.id, AttachmentPatch(role="other"), BY)
+    with pytest.raises(LifecycleError) as laundered:
+        shop.lifecycle.edit_attachment(order.id, att.id, AttachmentPatch(role="test_print"), BY)
+    assert laundered.value.slug == "role"
+    assert [a.role for a in shop.rows.attachments(order.id)] == ["other"]
 
 
 @pytest.mark.requires_postgres
@@ -307,6 +334,13 @@ def test_only_a_revision_takes_a_revision_role(shop: Shop, role: AttachmentRole)
         shop.lifecycle.edit_attachment(order.id, plain.id, AttachmentPatch(role=role), BY)
     assert (reroled.value.slug, reroled.value.unprocessable) == ("role", True)
     assert shop.rows.attachments(order.id)[0].role == "finished"
+    # A row from before the rule keeps its role; resending that role is no change.
+    with shop.rows.transaction() as conn:
+        shop.rows.update_attachment(conn, plain.id, caption=UNSET, role=role)
+    kept = shop.lifecycle.edit_attachment(
+        order.id, plain.id, AttachmentPatch(role=role, caption="old"), BY
+    )
+    assert (kept.role, kept.caption) == (role, "old")
 
 
 @pytest.mark.requires_postgres
