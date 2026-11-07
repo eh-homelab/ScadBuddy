@@ -184,7 +184,8 @@ CALLERS = (
     scadbuddy.flows.print_binding,
     scadbuddy.flows.operations,
 )
-_PATH = re.compile(r'f?"(/api/v1/[^"]*)"')
+#: A path literal in either quote; an f-string's `{...}` may hold the other quote.
+_PATH = re.compile(r"""f?(["'])(/api/v1/(?:\{[^}]*\}|(?!\1)[^{])*)\1""")
 #: The method each path literal in those modules is sent with, read from its call site:
 #: the source does not say it beside the literal. A new literal fails until it is here.
 METHODS = {
@@ -208,11 +209,14 @@ def test_every_path_those_modules_name_is_a_flow_host_route() -> None:
     """A path added beside these without a call above still has to be `flow.host`, for
     the method it is sent with."""
     routes = _app_routes()
-    named = {
-        path
-        for module in CALLERS
-        for path in _PATH.findall(Path(module.__file__ or "").read_text())
-    }
+    named: set[str] = set()
+    for module in CALLERS:
+        text = Path(module.__file__ or "").read_text()
+        found = [m.group(2) for m in _PATH.finditer(text)]
+        # Every literal that starts with the prefix is read whole; a path built from a
+        # bare prefix fails the comparison below.
+        assert len(found) == len(re.findall(r"""["']/api/v1/""", text)), module.__name__
+        named.update(found)
     assert named == set(METHODS)
     for path, method in METHODS.items():
         # Each `{...}` is one segment; the library's is a number.

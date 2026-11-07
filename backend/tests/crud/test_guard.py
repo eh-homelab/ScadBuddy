@@ -140,12 +140,20 @@ def test_a_path_no_route_matches_carries_no_header() -> None:
     assert "X-ScadBuddy-Crud" not in response.headers
 
 
-@pytest.mark.parametrize("route_cls", ["crud.projects", "flow.host", "internal.outputs"])
+@pytest.mark.parametrize("route_cls", ["crud.projects", "internal.outputs"])
 def test_a_service_class_refusal_asks_for_a_bearer(route_cls: str) -> None:
     """`enforce`'s 401 on a service-only class names the scheme, browser cookie or not."""
     error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
     assert error.status == 401
     assert error.headers == {"WWW-Authenticate": 'Bearer realm="scadbuddy"'}
+
+
+@pytest.mark.parametrize("route_cls", ["api", "flow.host"])
+def test_a_public_class_refusal_asks_for_a_bearer_only_from_a_bearer(route_cls: str) -> None:
+    """`flow.host` answers a browser as `api` does: no scheme without a bearer."""
+    error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
+    assert error.status == 401
+    assert "WWW-Authenticate" not in (error.headers or {})
 
 
 def test_an_unexpected_error_is_a_500_with_the_crud_headers() -> None:
