@@ -43,6 +43,7 @@ from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.part_settings import PartSettingsMap
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
@@ -116,6 +117,9 @@ class SliceQuoteRequest(BaseModel):
     #: slices on the run's route and the print can queue that slice. Omitted is the
     #: run's own choice.
     path: Literal["bambuddy", "native"] | None = None
+    #: Slicer settings for each slot's parts (#5571, `PrintRunRequest.part_settings`):
+    #: send the print the same ones, so the quote slices what prints.
+    part_settings: PartSettingsMap | None = None
 
 
 class QuoteError(ValueError):

@@ -98,6 +98,12 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan_inputs
 from scadbuddy.bambuddy.options import PrintOptions, lan_calibration_refusal
+from scadbuddy.bambuddy.part_settings import (
+    PartSettingsMap,
+    normalised,
+    overrides_of,
+    unknown_slots,
+)
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
     not_resliced,
@@ -334,6 +340,16 @@ class PrintRunRequest(BaseModel):
     #: ``native`` asks for the LAN: a run that would not go over it is refused, never
     #: sent through Bambuddy instead.
     path: RunPath | None = None
+    #: Slicer settings for the parts of each filament slot (#5571), by ``slot_id``:
+    #: written into the laid-out copy as per-part overrides over the process. Only an
+    #: output takes them; a slot the output lacks is refused (``prepare_run``).
+    part_settings: PartSettingsMap | None = None
+
+    @field_validator("part_settings")
+    @classmethod
+    def _part_settings_set(cls, value: PartSettingsMap | None) -> PartSettingsMap | None:
+        # Slots that set nothing are dropped, so they key as a request without them.
+        return normalised(value)
 
     @field_validator("accepted_fixes")
     @classmethod
@@ -717,6 +733,32 @@ class RunRefusalError(ApiError):
 
     def __init__(self, detail: str) -> None:
         super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
+
+
+#: Why a request's ``part_settings`` (#5571) are refused for a file that is not a
+#: ScadBuddy output: a library file's parts are its author's (#5628), and a sliced file
+#: prints as it was sliced.
+PART_SETTINGS_OUTPUT_ONLY = (
+    "Settings per part apply only to a ScadBuddy output: this file keeps its own."
+)
+
+
+def part_settings_refusal(source: PrintSource, request: PrintRunRequest) -> str | None:
+    """Why ``request``'s ``part_settings`` cannot print from ``source`` (#5571): it is
+    not an output, or it names a slot the output lacks. ``None`` when they can."""
+    if request.part_settings is None:
+        return None
+    if not isinstance(source, OutputSource) or source.is_sliced:
+        return PART_SETTINGS_OUTPUT_ONLY
+    unknown = unknown_slots(request.part_settings, len(source.colours))
+    if not unknown:
+        return None
+    count = len(source.colours)
+    return (
+        f"part_settings names slot {', '.join(map(str, unknown))}, but this output has"
+        f" {count} filament slot{'s' if count != 1 else ''}"
+        f" ({'1' if count == 1 else f'1-{count}'})."
+    )
 
 
 class PrintCheck(BaseModel):
@@ -2197,6 +2239,9 @@ async def prepare_run(
         await require_destination_folder(
             bambuddy_client(client), request.folder_id, settings.library_folder_id
         )
+    part_refusal = part_settings_refusal(source, request)
+    if part_refusal is not None:
+        raise RunRefusalError(part_refusal)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()
     plate_ids = laid_out if asked is None else asked
@@ -2908,6 +2953,8 @@ async def plan_run(
             [slot.spool_id for slot in request.filament_plan.slots], printer_status
         ),
         filament_map=filament_map,
+        # #5571: the same copy for the quote, the background slice and the print.
+        part_settings=overrides_of(request.part_settings),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last

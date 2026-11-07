@@ -176,6 +176,7 @@ class PreviewSlicer:
             filament_plan=request.filament_plan,
             choices=request.choices,
             path=request.path,
+            part_settings=request.part_settings,
         )
         registry = self.components.get(PRINTERS)
         # The run's own decision (plan 2026-10-18 D2), as the dialog's background slice

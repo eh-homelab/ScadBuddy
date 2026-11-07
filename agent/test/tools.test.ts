@@ -1262,6 +1262,25 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(t.summarize(args)).not.toContain('prime tower')
   })
 
+  it("sends a slot's part settings when given, names them in its approval line, and omits them otherwise (#5571)", async () => {
+    const chosen: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    const part_settings = { '2': { top_shell_layers: 8, ironing_type: 'top' } }
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, part_settings }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect((chosen.body as { part_settings?: unknown }).part_settings).toEqual(part_settings)
+    expect(plain.body).not.toHaveProperty('part_settings')
+    expect(t.summarize({ ...args, part_settings })).toContain(", with slot 2's parts at top_shell_layers 8, ironing_type top")
+    expect(t.summarize(args)).not.toContain('parts at')
+    // An unknown key or a value out of range is refused before anything is sent.
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { infill_wall_overlap: 15 } } }).success).toBe(false)
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { sparse_infill_density: 150 } } }).success).toBe(false)
+  })
+
   it('sends the accepted analyzer fixes it is given and names them in its approval line (#284)', async () => {
     const chosen: { body?: unknown } = {}
     const plain: { body?: unknown } = {}

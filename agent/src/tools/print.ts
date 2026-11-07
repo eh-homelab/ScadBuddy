@@ -295,6 +295,58 @@ export const printPath = z
       "any other calibration value in `options` is refused (422): only Bambuddy's queue takes it.",
   )
 
+/**
+ * `PrintRunRequest.part_settings` (#5571): Bambu Studio process settings for the parts of one
+ * filament slot, written into the laid-out 3MF as per-part overrides. The bounds are the
+ * backend's (`bambuddy/part_settings.py`, from Bambu Studio's PrintConfig.cpp).
+ */
+const shellLayers = z.number().int().min(0).max(1000)
+export const partSettings = z
+  .object({})
+  .catchall(
+    z
+      .object({
+        top_shell_layers: shellLayers.optional(),
+        bottom_shell_layers: shellLayers.optional(),
+        wall_loops: shellLayers.optional(),
+        sparse_infill_density: z.number().int().min(0).max(100).optional().describe('Percent'),
+        sparse_infill_pattern: z
+          .enum([
+            'concentric', 'zig-zag', 'grid', 'line', 'cubic', 'triangles', 'tri-hexagon', 'gyroid', 'honeycomb',
+            'adaptivecubic', 'alignedrectilinear', '3dhoneycomb', 'hilbertcurve', 'archimedeanchords',
+            'octagramspiral', 'supportcubic', 'lightning', 'crosshatch', 'zigzag', 'crosszag', 'lockedzag', '2dlattice',
+          ])
+          .optional()
+          .describe("Bambu Studio's names: 'zig-zag' is Rectilinear"),
+        ironing_type: z.enum(['no ironing', 'top', 'topmost', 'solid']).optional(),
+      })
+      .strict(),
+  )
+  .optional()
+  .describe(
+    'Slicer settings for the parts of one filament slot (#5571), keyed by slot id (from 1, as `filament_plan`), ' +
+      'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Each omitted setting is the ' +
+      "process's. Only a ScadBuddy output takes them; a slot the output lacks, an unknown key or a value out of range " +
+      'is refused (422). A painted part takes the settings of the slot it is made in, not of its painted faces.',
+  )
+
+/** `part_settings`' phrase in an approval line. */
+export function partSettingsPhrase(settings: Record<string, Record<string, unknown>> | undefined): string {
+  const slots = Object.entries(settings ?? {}).filter(([, values]) => Object.keys(values).length > 0)
+  if (slots.length === 0) return ''
+  return (
+    ', with ' +
+    slots
+      .map(
+        ([slot, values]) =>
+          `slot ${slot}'s parts at ${Object.entries(values)
+            .map(([key, value]) => `${key} ${String(value)}`)
+            .join(', ')}`,
+      )
+      .join('; ')
+  )
+}
+
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
 export const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
@@ -412,6 +464,7 @@ const PRINT_OUTPUT_INPUT = withSource({
       "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
         'else the process (on whenever a plate uses more than one filament).',
     ),
+  part_settings: partSettings,
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
     .max(32)
@@ -503,6 +556,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
+    `${partSettingsPhrase(args.part_settings)}` +
     `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
@@ -1492,6 +1546,7 @@ export const printTools: Tool[] = [
             }),
         // As given: the backend drops No sparse layers with the tower off (#3648 review).
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
+        ...(args.part_settings === undefined ? {} : { part_settings: args.part_settings }),
         ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }

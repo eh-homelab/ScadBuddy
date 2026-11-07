@@ -39,12 +39,14 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
     FilamentMap,
+    PartOverrides,
     hint_painted_slots,
     layout_of,
     plate_origin,
     replate_3mf,
     rezipped,
     state_nozzles,
+    with_part_settings,
 )
 from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
@@ -172,11 +174,20 @@ _BED_STATED = "#bed"
 #: its tower at ``wipe_tower_y`` 5 (3 mm reserved for its brim), which a tall plate's
 #: brim passes, and reusing it kept every quote failing after the fix (#5566).
 _TOWER_BRIM = "#brim"
+#: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),
+#: followed by :func:`part_settings_digest`.
+_PART_SETTINGS = "&parts:"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
 #: the slicer's default.
 _STANDARD = VOLUME_TYPE["standard"]
+
+
+def part_settings_digest(overrides: PartOverrides) -> str:
+    """A short, stable name for ``overrides`` in a :attr:`Target.key` (#5571)."""
+    canonical = json.dumps([[slot, list(map(list, pairs))] for slot, pairs in overrides])
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _hinted(key: str, filaments: int) -> str:
@@ -209,6 +220,9 @@ class Target:
     #: ScadBuddy's filament→extruder map (#2166), written in Manual mode. ``None`` leaves
     #: the file's own.
     filament_map: FilamentMap | None = None
+    #: Process settings for each slot's parts (#5571), written into
+    #: ``model_settings.config``. ``None`` writes none.
+    part_settings: PartOverrides | None = None
 
     @property
     def key(self) -> str:
@@ -239,6 +253,10 @@ class Target:
             if self.filament_map.pinned:
                 # A file the slicer must follow is not one it may regroup (#3955).
                 key = f"{key}!"
+        if self.part_settings:
+            # A file with settings on its parts must not be reused for one without, nor
+            # for other settings. Before the colours, so the uncoloured key has it too.
+            key = f"{key}{_PART_SETTINGS}{part_settings_digest(self.part_settings)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -260,6 +278,7 @@ class Target:
             nozzle_stats=self.nozzle_stats,
             nozzle_volume_type=self.nozzle_volume_type,
             filament_map=self.filament_map,
+            part_settings=self.part_settings,
         ).key
 
 
@@ -274,6 +293,7 @@ async def target_for(
     nozzle_volume_type: Sequence[str] | None = None,
     filament_map: FilamentMap | None = None,
     model: str | None = None,
+    part_settings: PartOverrides | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -289,12 +309,22 @@ async def target_for(
     ``model`` is the printer's model when the caller knows it (a native run's printer
     row, #3818 tier A Task 4): the plate is then read from it, and Bambuddy's printer
     list is not. Without a ``client`` a printer's plate needs it.
+
+    ``part_settings`` are the print's settings per slot (#5571), only the print run's.
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
     flows = tuple(nozzle_volume_type) if nozzle_volume_type is not None else None
     if model is not None:
-        return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
+        return Target(
+            _plate_for_model(model),
+            nozzle_diameter,
+            chosen,
+            stats,
+            flows,
+            filament_map,
+            part_settings,
+        )
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
         # An `ApiError`, so an activity that reaches it refuses once (#4312 review M6).
@@ -304,10 +334,20 @@ async def target_for(
         )
     if printer_id is None or client is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)
+        return Target(
+            _plate_for_model(None),
+            nozzle_diameter,
+            chosen,
+            stats,
+            flows,
+            filament_map,
+            part_settings,
+        )
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
+    return Target(
+        _plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map, part_settings
+    )
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -331,7 +371,8 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     keeps its placement and every plate it lays out; only the nozzles and colours are
     stated (:func:`state_nozzles`). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
-    unchanged.
+    unchanged. The print's settings per part (#5571) are written last, into whatever
+    the file's own layout came to (:func:`with_part_settings`).
     """
     layout = layout_of(payload)
     if layout == "as_is":
@@ -339,17 +380,20 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return hint_painted_slots(
-                towers_within_reach(
-                    state_nozzles(
-                        payload,
-                        nozzle_stats=target.nozzle_stats,
-                        nozzle_volume_type=target.nozzle_volume_type,
-                        filament_colour=colours,
-                        filament_map=target.filament_map,
-                    ),
-                    target.plate,
-                )
+            return with_part_settings(
+                hint_painted_slots(
+                    towers_within_reach(
+                        state_nozzles(
+                            payload,
+                            nozzle_stats=target.nozzle_stats,
+                            nozzle_volume_type=target.nozzle_volume_type,
+                            filament_colour=colours,
+                            filament_map=target.filament_map,
+                        ),
+                        target.plate,
+                    )
+                ),
+                target.part_settings,
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -372,7 +416,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
-    return hint_painted_slots(payload)
+    return with_part_settings(hint_painted_slots(payload), target.part_settings)
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:

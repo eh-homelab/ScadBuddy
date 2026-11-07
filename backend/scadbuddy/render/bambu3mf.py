@@ -1428,6 +1428,83 @@ def _pin_plates(model_settings: str, filament_map: FilamentMap) -> str:
     )
 
 
+#: Process settings for the parts of one filament slot (#5571), by slot from 1: each
+#: slot's ``(key, value)`` pairs as Bambu Studio's config stores them, sorted by key.
+PartOverrides = tuple[tuple[int, tuple[tuple[str, str], ...]], ...]
+
+_OBJECT_BLOCK = re.compile(r"(<object\b[^>]*>)(.*?)(</object>)", re.DOTALL)
+_PART_BLOCK = re.compile(r"(<part\b[^>]*>)(.*?)([ \t]*</part>)", re.DOTALL)
+_EXTRUDER_METADATA = re.compile(r'<metadata key="extruder" value="(\d+)"\s*/>')
+
+
+def _part_extruder(text: str) -> int | None:
+    found = _EXTRUDER_METADATA.search(text)
+    return int(found.group(1)) if found is not None else None
+
+
+def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
+    """``model_settings`` (``Metadata/model_settings.config``) with each printed part of
+    a slot in ``overrides`` carrying that slot's settings as ``<metadata key= value=/>``
+    (#5571), each replacing a value the part stated for the key.
+
+    A part's slot is its ``extruder`` metadata, else its object's: the 1-based filament
+    the file's writer gave it (§6 of spec 2026-09-22), the dialog's ``slot_id``. A
+    negative part or a modifier prints nothing, so it gets none.
+
+    Bambu Studio v02.08.02.61 reads every key of a ``<part>`` that is not one of its own
+    (name, subtype, source, matrix …) into the volume's config
+    (``src/libslic3r/Format/bbs_3mf.cpp`` lines 5464-5471 in ``_generate_volumes_new``),
+    and slices each volume's region with that config over the process
+    (``src/libslic3r/PrintApply.cpp`` ``region_config_from_model_volume``). Measured with
+    the native slicer image: print-flow spec 2026-09-24 §4 "Settings per part (#5571)"."""
+    wanted = dict(overrides)
+
+    def object_block(match: re.Match[str]) -> str:
+        head, body, tail = match.groups()
+        # The object's own extruder is its metadata before its first part.
+        own = _part_extruder(body.split("<part", 1)[0])
+
+        def part_block(part: re.Match[str]) -> str:
+            open_tag, inner, close = part.groups()
+            subtype = re.search(r'subtype="([^"]*)"', open_tag)
+            if subtype is not None and subtype.group(1) != "normal_part":
+                return part.group(0)
+            slot = _part_extruder(inner)
+            settings = wanted.get(slot if slot is not None else own or 0)
+            if not settings:
+                return part.group(0)
+            keys = "|".join(re.escape(key) for key, _ in settings)
+            inner = re.sub(
+                rf'[ \t]*<metadata key="(?:{keys})" value="[^"]*"\s*/>[ \t]*\r?\n?', "", inner
+            )
+            indent = re.search(r"\n([ \t]*)<metadata", inner)
+            pad = indent.group(1) if indent is not None else "   "
+            lines = "".join(
+                f"{pad}<metadata key={quoteattr(key)} value={quoteattr(value)}/>\n"
+                for key, value in settings
+            )
+            if not inner.endswith("\n"):
+                inner += "\n"
+            return f"{open_tag}{inner}{lines}{close}"
+
+        return head + _PART_BLOCK.sub(part_block, body) + tail
+
+    return _OBJECT_BLOCK.sub(object_block, model_settings)
+
+
+def with_part_settings(payload: bytes, overrides: PartOverrides | None) -> bytes:
+    """``payload`` with :func:`set_part_settings` applied to its
+    ``model_settings.config``; unchanged with no overrides or no such file."""
+    if not overrides:
+        return payload
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        if MODEL_SETTINGS_NAME not in archive.namelist():
+            return payload
+        text = archive.read(MODEL_SETTINGS_NAME).decode("utf-8")
+    changed = set_part_settings(text, overrides).encode("utf-8")
+    return rezipped(payload, {MODEL_SETTINGS_NAME: changed})
+
+
 #: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.
 MAX_SETTINGS_BYTES = 1024 * 1024
 #: An untrusted library 3MF (#484) past this is not read at all. The largest real one
