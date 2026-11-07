@@ -158,9 +158,11 @@ class RouteRefusedError(Exception):
     """ScadBuddy refused the call; the message is the problem's `detail`, and `problem`
     its `type` when the route named one (#4252)."""
 
-    def __init__(self, detail: str, problem: str | None = None) -> None:
+    def __init__(self, detail: str, problem: str | None = None, status: int | None = None) -> None:
         super().__init__(detail)
         self.problem = problem
+        #: The route's HTTP status, when the refusal carried it.
+        self.status = status
 
 
 class ToolFailedError(Exception):
@@ -288,8 +290,11 @@ _TIER_TIMEOUT = timedelta(seconds=30)
 def _refusal(err: ActivityError) -> BaseException:
     cause = err.cause
     if isinstance(cause, ApplicationError) and cause.type in {ROUTE_REFUSED, API_URL_MISSING}:
-        kind = cause.details[0] if cause.details else None
-        return RouteRefusedError(cause.message, kind if isinstance(kind, str) else None)
+        details = list(cause.details)
+        kind = details[0] if details and isinstance(details[0], str) and details[0] else None
+        # A refusal recorded before the status was carried (an older build's) has none.
+        status = details[1] if len(details) > 1 and isinstance(details[1], int) else None
+        return RouteRefusedError(cause.message, kind, status)
     return err
 
 
@@ -533,6 +538,16 @@ async def _item_print(
                 raise RouteRefusedError(detail, error.get("type"))
             attempt = operation["result"] or {}
     except RouteRefusedError as refused:
+        if problem_name(refused.problem) is None and (refused.status or 0) >= 500:
+            # An unnamed server error answered in time, as on the 202 path: the run may
+            # have started, so the script must not take it as nothing printed.
+            return PrintOutcome(
+                run_id="",
+                status="failed",
+                may_have_queued=True,
+                error=str(refused),
+                narrowed_by=narrowed_by,
+            )
         return PrintOutcome(
             run_id="",
             status="refused",

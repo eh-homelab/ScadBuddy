@@ -380,7 +380,7 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
               {row.orders !== null && (
                 <>
                   <Check checked={row.orders === 'any'} onChange={(any) => update({ orders: any ? 'any' : '' })}>
-                    Any order (a run a trigger starts for an order gets that order only)
+                    Any order (once order events start runs, a run for an order gets that order only)
                   </Check>
                   {row.orders !== 'any' && (
                     <Input

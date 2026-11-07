@@ -104,8 +104,9 @@ class RouteFollow(BaseModel):
 
 
 def _refused(response: httpx.Response) -> ApplicationError:
-    """The route's refusal: its problem's `detail` as the message, and its `type` as the
-    one detail (#4252), so a line item's print can tell `requote_needed` apart."""
+    """The route's refusal: its problem's `detail` as the message, its `type` (or "")
+    and the HTTP status as the details (#4252), so a line item's print can tell
+    `requote_needed` apart, and an unnamed server error from a refusal."""
     try:
         problem = response.json()
     except ValueError:
@@ -114,7 +115,8 @@ def _refused(response: httpx.Response) -> ApplicationError:
     kind = problem.get("type") if isinstance(problem, dict) else None
     return ApplicationError(
         str(detail) if detail else f"ScadBuddy answered HTTP {response.status_code}",
-        *([kind] if isinstance(kind, str) else []),
+        kind if isinstance(kind, str) else "",
+        response.status_code,
         type=ROUTE_REFUSED,
         non_retryable=True,
     )

@@ -117,6 +117,25 @@ async def test_a_line_items_print_follows_its_run_and_a_stale_quote_is_an_outcom
     assert list(api.runs) == [f"run-{key}"]
 
 
+async def test_an_unnamed_server_error_answered_in_time_may_have_queued(
+    outward: Outward, api: FakeApi
+) -> None:
+    """Review of #5645: a 500 with no named problem may have started the run, so it is
+    `failed` with `may_have_queued`; a plain 404 is `refused`."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'crashed'}}, {PLAN!r})",
+            f"b = await queue_print({{'order_id': 'ord1', 'order_item_id': 'unknown'}}, {PLAN!r})",
+            "return [a['status'], a['may_have_queued'], b['status'], b['may_have_queued']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    await outward.row(run_id, lambda r: len(r.steps) == 2 and len(r.waiting_on) == 1)
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['failed', True, 'refused', False]", run.result
+
+
 async def test_a_line_items_print_that_failed_unnamed_may_have_queued(
     outward: Outward, api: FakeApi
 ) -> None:

@@ -985,8 +985,10 @@ What this relies on, and what the design adds for it:
   choices. A refusal before anything printed is `status` `refused` with `error` the
   problem's detail and `problem` the last segment of its `type` (`requote_needed`,
   `order_on_hold`, `needs_spool_choice`, ...); an operation that failed with no named
-  problem is `failed` with `may_have_queued`, since it may have failed after its run
-  started.
+  problem, or a route that answered a server error (5xx) with none, is `failed` with
+  `may_have_queued`, since it may have failed after its run started. A trigger's
+  run kept to its order (`narrowed_to_order`) takes effect once order events are trigger events (#4252's trigger PR); until then no
+  trigger starts a run for an order.
 - A person is asked only where the grant does not cover the call: `queue_print` is
   covered by the trigger's standing grant (`printers`, `max_prints`, `max_filament_g`,
   F13), and the order tools that are `outward` (§7.3: `order_accept`,

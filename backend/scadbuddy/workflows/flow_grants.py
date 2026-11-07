@@ -199,7 +199,12 @@ class FlowGrants:
             # A request item with no design yet names no model; its print is refused.
             if item.get("reference") is not None:
                 models = [str(item["reference"]["slug"])]
-            if item.get("output_id") is not None:
+            # The accepted slice quote's plates are what the print prints (its output,
+            # not a newer one a revision after acceptance made); else the output's.
+            accepted = next((q for q in item.get("quotes") or [] if q.get("accepted")), None)
+            if accepted is not None and accepted.get("plates"):
+                plates = len(accepted["plates"])
+            elif item.get("output_id") is not None:
                 output = await self._get(f"/api/v1/outputs/{_segment(item['output_id'])}")
                 plates = len(output.get("layout_plates") or []) or 1
         request: dict[str, Any] = args.get("request") or {}

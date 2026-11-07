@@ -142,6 +142,11 @@ class FakeApi:
                 "item stale's quote no longer stands",
                 "https://scadbuddy.dev/problems/orders/requote_needed",
             )
+        if request.path_params["item_id"] == "crashed":
+            # An unnamed server error answered in time (review of #5645).
+            return problem(500, "the run may have started")
+        if request.path_params["item_id"] == "unknown":
+            return problem(404, "no item unknown")
         if request.path_params["item_id"] == "broken":
             return JSONResponse(
                 {"id": "op-broken", "kind": "order_item_print", "status": "running"},

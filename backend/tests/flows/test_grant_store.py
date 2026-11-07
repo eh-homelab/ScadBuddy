@@ -390,3 +390,34 @@ async def test_orphan_grants_are_swept(store: FlowStore) -> None:
     assert await store.orphan_grants(timedelta(hours=1)) == []
     await store.delete_grant(orphan)
     assert await store.get_grant(orphan) is None
+
+
+async def test_a_line_items_prints_count_the_accepted_quotes_plates(store: FlowStore) -> None:
+    """Review of #5645: the accepted slice quote's plates are what the print prints, not
+    the item's output's (a revision after acceptance may have made a new one)."""
+    seen: list[str] = []
+
+    def api(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.startswith("/api/v1/outputs/"):
+            return httpx.Response(200, json={"layout_plates": [{}] * 5})
+        item = {
+            "id": "i1",
+            "quantity": 2,
+            "reference": {"slug": "box"},
+            "output_id": "out-new",
+            "quotes": [
+                {"accepted": False, "plates": [{}] * 4},
+                {"accepted": True, "plates": [{}, {}, {}]},
+            ],
+        }
+        return httpx.Response(200, json={"items": [item]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api), base_url="http://a") as c:
+        facts = await FlowGrants(store, c, None).facts_of(
+            "queue_print",
+            None,
+            {"source": {"order_id": "ord1", "order_item_id": "i1"}, "request": {}},
+        )
+    assert facts.prints == 6
+    assert not [p for p in seen if p.startswith("/api/v1/outputs/")]
