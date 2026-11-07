@@ -729,8 +729,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
   (`http://scadbuddy:8082`; the worker reads the store settings and writes its jobs'
   `render_jobs` rows, their `job.*` events and activity rows, their `blob_refs`, the
-  `piece_geometry` rows and the blob index `store_blobs` through its CRUD routes, and the
-  API finds the Bambuddy store's folders `store_folders` for it, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
+  `piece_geometry` rows, the blob index `store_blobs` and its uploads' `assets` rows
+  through its CRUD routes, and the API finds the Bambuddy store's folders `store_folders`
+  for it, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
   `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
   credential. The proof is required: without one the worker refuses to start, since
   it has no other source of a credential. It needs no KEK
@@ -747,7 +748,7 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (`CREATE ROLE scadbuddy_render LOGIN PASSWORD '…'`; on CNPG a `managed.roles`
   entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
   up by hand. At every start the API grants that role exactly
-  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `assets`,
+  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`):
   the library leases (`library_leases`, `library_pin_holds`,
   `library_install_slots`) and the migrations ledger (read only). It gets nothing
   on `settings`: it reads the store's settings (backend, Bambuddy URL, library
@@ -756,20 +757,26 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   key **only while no render key is saved** in Settings, the fallback `/healthz`
   reports as `render_key_fallback`. Save a render key and the worker cannot read the
   full key at all. It gets nothing on `render_jobs`, `events`, `activity`, `blob_refs`,
-  `piece_geometry`, `store_blobs` or `store_folders` either: the API writes a job's row,
+  `piece_geometry`, `store_blobs`, `store_folders` or `assets` either: the API writes a job's row,
   its events and its activity row for it, through the routes under
   `/api/v1/internal/crud/render/jobs`, holds a done job's blobs and records a piece's
   geometry for it, through `/api/v1/internal/crud/render/blob-refs` and
   `…/render/geometry`, reads and writes the blob index for it, through
-  `…/render/blob-index`, and finds a template's Bambuddy folder for it, through
+  `…/render/blob-index` (it may not store or delete an upload's, font's or snapshot's
+  key, which only the API writes: the API drops or forgets a copy the worker cannot read,
+  through `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`),
+  and finds a template's Bambuddy folder for it, through
   `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
   render key in Settings, under the folder's lock, and refuses a worker whose URL or
-  library folder is not that one yet (it tries again). A role granted the older
+  library folder is not that one yet (it tries again). The API reads, marks used and
+  records, for the worker, the uploads it fetched, through `…/render/assets`; their files stay on the
+  worker's volume, and the API writes a fetched upload's row from its own copy's metadata
+  in the store. A role granted the older
   `render_settings` view or those tables keeps them until #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
-  `store-folders`) and answers its first read of
+  `store-folders`, `assets`) and answers its first read of
   the store settings, then until the API has applied every migration its build has
   and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
   worker comes up first, it starts once the API has. On the API's own role (the

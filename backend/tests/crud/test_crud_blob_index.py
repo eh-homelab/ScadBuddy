@@ -362,3 +362,51 @@ async def test_a_retried_attempt_writing_another_body_under_its_key_writes_anew(
     assert previous == _ref("a")
     named = BlobIndex(pool).get("k")
     assert named is not None and named.ref == _ref("b")
+
+
+# -- keys only the API writes (#5298 Task 18) ---------------------------------------
+
+
+@pytest.mark.parametrize("key", ["asset-" + "a" * 64, "font-dejavu", "src-demo-abc"])
+async def test_the_worker_cannot_store_a_key_only_the_api_writes(
+    index: RemoteBlobIndex, pool: Pool, key: str
+) -> None:
+    """An upload's copy is what an adopt writes the upload's row from: a render
+    credential that could store one could forge the row. Fonts and snapshots are the
+    API's too. Nor may it delete one: a delete whose object release then failed would
+    leave the object untracked, the row's restore being a write too. A touch is allowed;
+    a font's or snapshot's forget goes to the API's ``forget-copy``."""
+    sql = BlobIndex(pool)
+    sql.put(key, _ref("b"), slug=None, meta={"name": "real"})
+    for write in (
+        lambda: index.put(key, _ref("a"), slug=None, meta={"name": "forged"}),
+        lambda: index.swap(key, _ref("a"), expected=None, slug=None, meta={}),
+        lambda: index.mark([key], backend="bambuddy", cutoff=sql.now(), name="forged"),
+        lambda: index.delete(key, backend="bambuddy"),
+        lambda: index.delete_if_stale(key, sql.now(), backend="bambuddy"),
+    ):
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(write)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "api-owned-key"
+    held = sql.get(key)
+    assert held is not None and held.meta == {"name": "real"} and held.ref == _ref("b")
+    await asyncio.to_thread(index.touch, key)
+    if key.startswith("asset-"):
+        # An upload's copy is dropped through ``…/assets/{id}/drop-copy`` only.
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(index.delete, key)
+        assert refused.value.status == 403
+        assert sql.get(key) is not None
+    else:
+        forgotten = await asyncio.to_thread(index.delete, key)  # through ``forget-copy``
+        assert forgotten is not None and forgotten.ref == _ref("b")
+        assert sql.get(key) is None
+        assert await asyncio.to_thread(index.delete, key) is None  # natural
+
+
+async def test_forget_copy_takes_only_a_fonts_or_snapshots_key(client: CrudSyncClient) -> None:
+    for key in ("asset-" + "a" * 64, "piece-x"):
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(client.request, "POST", f"{BASE}/blob-index/{key}/forget-copy")
+        assert refused.value.status == 403
