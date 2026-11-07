@@ -398,6 +398,28 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
     assert result.status == outcome
 
 
+@pytest.mark.parametrize("api", [True, False])
+async def test_queue_one_passes_api_to_the_run(monkeypatch: pytest.MonkeyPatch, api: bool) -> None:
+    """`_queue_one` hands `api` to `start_library_run`, so a refusal is worded for its
+    caller (#5625, #5631)."""
+    seen: dict[str, Any] = {}
+
+    async def answers(*_: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(print_batches, "start_library_run", answers)
+    item = BatchItem(
+        position=0,
+        library_file_id=104,
+        filename="a",
+        request=PrintRunRequest.model_validate(SLICED_RUN),
+    )
+    none: Any = None
+    await print_batches._queue_one("b1", item, 0, none, none, none, none, none, none, api=api)
+    assert seen["api"] is api
+
+
 class _OneRow:
     """A registry of one row, ``Garage``, linked to ``linked`` (no Bambuddy printer by
     default, #4516)."""
