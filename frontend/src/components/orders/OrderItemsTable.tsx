@@ -14,6 +14,7 @@ import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT,
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalText } from './refusal'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from './itemLink'
+import { addItem, afterAcceptanceWarning, type AddMode } from './afterAcceptance'
 import type { SliceQuoteRuns } from './useSliceQuotes'
 import { UnfulfilDialog } from './Unfulfil'
 import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from './unfulfilRules'
@@ -35,7 +36,7 @@ export function OrderItemsTable({
   exponent,
   onOpen,
   onChanged,
-  canAdd = false,
+  addTo = null,
   selected = null,
   quoting,
   onHold = false,
@@ -54,9 +55,10 @@ export function OrderItemsTable({
   onOpen: (item: OrderItemDetail) => void
   /** After a price is recorded: the page reloads the order. */
   onChanged: () => void
-  /** The page offers Add item (`afterAcceptance.ts` `addMode`): the empty table points at it.
-   * The custom item row is offered only while the order is draft or quoted. */
-  canAdd?: boolean
+  /** The page offers Add item (`afterAcceptance.ts` `addMode`), on the route `mode` names: the
+   * empty table points at it, and the custom item row adds on that route. After acceptance
+   * (#5541) the row asks the person to confirm first, naming the order by `number`. */
+  addTo?: { mode: AddMode; number: string } | null
   /** The item open in the page's drawer (#4693). */
   selected?: string | null
   /** The page's slice quotes: a running one shows on its row (#4693). */
@@ -69,8 +71,7 @@ export function OrderItemsTable({
   unfulfilAllowed?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
-  // The custom item row adds on the plain route, which takes an item while draft or quoted only.
-  const custom = canAdd && pricing
+  const canAdd = addTo !== null
   const columns: Column<OrderItemDetail>[] = [
     {
       key: 'picture',
@@ -182,8 +183,20 @@ export function OrderItemsTable({
       rowId={(item) => itemAnchor(item.id)}
       selected={selected}
       onOpen={onOpen}
-      empty={canAdd ? (custom ? 'No items yet. Add one with Add item above, or type a custom item below.' : 'No items yet. Add one with Add item above.') : 'No items.'}
-      footer={custom ? <CustomItemRow orderId={orderId} currency={currency} exponent={exponent} actions={columns.some((column) => column.key === 'actions')} onChanged={onChanged} /> : undefined}
+      empty={canAdd ? 'No items yet. Add one with Add item above, or type a custom item below.' : 'No items.'}
+      footer={
+        addTo ? (
+          <CustomItemRow
+            orderId={orderId}
+            order={{ number: addTo.number, status: orderStatus }}
+            mode={addTo.mode}
+            currency={currency}
+            exponent={exponent}
+            actions={columns.some((column) => column.key === 'actions')}
+            onChanged={onChanged}
+          />
+        ) : undefined
+      }
     />
   )
 }
@@ -236,16 +249,37 @@ function ItemMenu({
  * #4954 — the empty row under the items: a custom item's title, quantity and unit price,
  * and optional SKU, notes and "Requires printing". Enter in any field saves it, priced
  * and accepted as it is saved (`kind: "custom"`); the row then clears for the next one.
+ * On an accepted, in-production or ready order (`mode` `after_acceptance`, #5541) the first
+ * save asks the person to confirm, as Add item does; the second adds the item on that route,
+ * its price `quoted`, not accepted. A change to the row asks again.
  */
-function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { orderId: string; currency: string; exponent: number; actions: boolean; onChanged: () => void }) {
+function CustomItemRow({
+  orderId,
+  order,
+  mode,
+  currency,
+  exponent,
+  actions,
+  onChanged,
+}: {
+  orderId: string
+  order: { number: string; status: OrderStatus }
+  mode: AddMode
+  currency: string
+  exponent: number
+  actions: boolean
+  onChanged: () => void
+}) {
   const errorId = useId()
   const blank = { title: '', quantity: '1', price: '', sku: '', notes: '', printing: false }
   const [draft, setDraft] = useState(blank)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
   const set = (fields: Partial<typeof blank>) => {
     setDraft({ ...draft, ...fields })
     setError(null)
+    setConfirming(false)
   }
 
   async function submit() {
@@ -255,10 +289,11 @@ function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { or
     if (!title) return setError('Type a title for the custom item.')
     if (quantity === null) return setError(QUANTITY_HINT)
     if (price === null) return setError(UNIT_PRICE_HINT)
+    if (mode === 'after_acceptance' && !confirming) return setConfirming(true)
     setBusy(true)
     setError(null)
     try {
-      await api.addOrderItem(orderId, {
+      await addItem(orderId, {
         kind: 'custom',
         title,
         quantity,
@@ -266,8 +301,9 @@ function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { or
         notes: draft.notes.trim(),
         ...(draft.sku.trim() ? { sku: draft.sku.trim() } : {}),
         requires_printing: draft.printing,
-      })
+      }, mode)
       setDraft(blank)
+      setConfirming(false)
       onChanged()
       document.getElementById(CUSTOM_ITEM_TITLE)?.focus()
     } catch (err) {
@@ -306,6 +342,11 @@ function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { or
             <Input aria-label="Custom item SKU" className="h-7 w-24" placeholder="SKU" value={draft.sku} onKeyDown={enter} onChange={(event) => set({ sku: event.target.value })} />
             <Input aria-label="Custom item notes" className="h-7" placeholder="Notes" value={draft.notes} onKeyDown={enter} onChange={(event) => set({ notes: event.target.value })} />
           </span>
+          {confirming && (
+            <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] whitespace-normal">
+              {afterAcceptanceWarning(order)}
+            </p>
+          )}
           {error && (
             <p id={errorId} role="alert" className="text-[11px] whitespace-normal text-warn">
               {error}
@@ -326,8 +367,8 @@ function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { or
         <Input aria-label="Custom item unit price" aria-describedby={described} inputMode="decimal" className="h-7 w-24 text-right" placeholder={currency} value={draft.price} onKeyDown={enter} onChange={(event) => set({ price: event.target.value })} />
       </td>
       <td className={`${CELL} sb-num`}>
-        <Button type="button" size="xs" aria-label="Save custom item" disabled={busy} onClick={() => void submit()}>
-          Add
+        <Button type="button" size="xs" aria-label={confirming ? 'Confirm custom item' : 'Save custom item'} disabled={busy} onClick={() => void submit()}>
+          {confirming ? 'Confirm' : 'Add'}
         </Button>
       </td>
       {actions && <td className={CELL} />}
