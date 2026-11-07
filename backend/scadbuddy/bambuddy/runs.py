@@ -35,7 +35,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta
 from typing import Any, Literal, LiteralString, Protocol
 
@@ -261,7 +261,12 @@ class PrintRunStore:
         """The output's runs that may still read a slice of it, newest first (#4312
         re-review I-a): those still ``running``, and a succeeded native run with prints
         still to start, which it starts from its sliced files later (#4541, #4337)."""
-        return await asyncio.to_thread(self._running_for, output_id)
+        return (await self.running_for_outputs([output_id]))[output_id]
+
+    async def running_for_outputs(self, output_ids: Iterable[str]) -> dict[str, list[PrintRun]]:
+        """:meth:`running_for` for several outputs in one query, not one per output; every
+        id is a key (#5403)."""
+        return await asyncio.to_thread(self._running_for, list(dict.fromkeys(output_ids)))
 
     async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
         """Every succeeded native run with prints still to start, neither all started nor
@@ -429,14 +434,19 @@ class PrintRunStore:
             self._announce(conn, run, slug, updated)
             return run
 
-    def _running_for(self, output_id: str) -> list[PrintRun]:
+    def _running_for(self, output_ids: list[str]) -> dict[str, list[PrintRun]]:
+        found: dict[str, list[PrintRun]] = {output_id: [] for output_id in output_ids}
+        if not output_ids:
+            return found
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s AND {_IN_USE}"
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = ANY(%s) AND {_IN_USE}"
                 " ORDER BY created_at DESC".encode(),
-                (output_id,),
+                (output_ids,),
             ).fetchall()
-        return [PrintRun.model_validate(row) for row in rows]
+        for row in rows:
+            found[row["output_id"]].append(PrintRun.model_validate(row))
+        return found
 
     def _lan_waiting_runs(self) -> list[tuple[str, str | None]]:
         with self._pool.connection() as conn:

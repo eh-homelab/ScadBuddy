@@ -9,7 +9,7 @@ import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
-import { OrderCosts } from '../components/orders/OrderCosts'
+import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
@@ -61,6 +61,8 @@ export function OrderPage() {
   const { id = '' } = useParams()
   const view = useAsync(() => api.order(id), [id], [`order:${id}`])
   const events = useAsync(() => api.orderEvents(id), [id], [`order:${id}`])
+  // #5326 — the money view, and the header's loss or thin-margin badge.
+  const costs = useAsync(() => api.orderCosts(id), [id], [`order:${id}`])
   // #4953 — `orders_allow_unfulfil`; on until the settings answer, as the backend's default.
   const unfulfilAllowed = useAsync(() => api.getSettings(), []).data?.orders_allow_unfulfil ?? true
   const detail = view.data
@@ -114,6 +116,7 @@ export function OrderPage() {
   function reload() {
     view.refresh()
     events.refresh()
+    costs.refresh()
   }
 
   async function act(action: () => Promise<unknown>) {
@@ -162,6 +165,7 @@ export function OrderPage() {
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{order.number}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
+          <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
             <Link to={`/customers/${order.customer_id}`} className="text-primary underline-offset-4 hover:underline">
@@ -407,12 +411,26 @@ export function OrderPage() {
           </CardContent>
         </Card>
 
-        {order.accepted_at && (
+        {costs.data?.order_id === order.id ? (
           <Card size="sm">
             <CardContent>
-              <OrderCosts orderId={order.id} />
+              <OrderCosts costs={costs.data} onChanged={reload} />
             </CardContent>
           </Card>
+        ) : (
+          costs.error && (
+            <Card size="sm">
+              <CardContent className="flex flex-col gap-2" aria-label="Cost">
+                <h2 className="text-sm font-medium">Cost and margin</h2>
+                <p role="alert" className="text-[13px] text-destructive">
+                  The order's cost could not be read: {costs.error.message}
+                </p>
+                <Button size="sm" variant="outline" className="self-start" onClick={() => costs.refresh()}>
+                  Try again
+                </Button>
+              </CardContent>
+            </Card>
+          )
         )}
 
         <section className="flex flex-col gap-1" aria-label="Audit line">

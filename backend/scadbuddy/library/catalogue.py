@@ -1764,7 +1764,9 @@ class Catalogue:
         item of that revision whose file in ``directory`` has the bytes ``sha256``. Only
         the files of that revision's items are read. ``held_id`` names a copy that a
         check before the lock found. An item's file never changes, so while that item
-        is there, no file is read again."""
+        is there, no file is read again. That shortcut assumes the item's file is still
+        present: nothing replaces or removes an item's file while the item stays, and a
+        change that does must also drop this shortcut (#5359)."""
         if source_revision_id is None or sha256 is None:
             return False
         if any(

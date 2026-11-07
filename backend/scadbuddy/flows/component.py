@@ -20,7 +20,8 @@ from temporalio.client import Client
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import transactional_events
-from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
+from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.service_credentials import InProcessProvider, ServiceAuth
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows.agent_tools import AgentTools
@@ -63,7 +64,8 @@ class Flows:
     #: The key a run's token is MACed under (`auth/run_tokens.py`); None without a KEK.
     run_key: bytes | None = None
     #: The projects credential (#4975 phase 5), which this process's own calls on the
-    #: API's routes present: the in-process worker's host calls and a grant's reads.
+    #: API's routes present: the in-process worker's host calls and a grant's reads. Minted
+    #: in process (#5494).
     api_auth: httpx.Auth | None = None
 
     @property
@@ -80,6 +82,7 @@ FLOWS: Key[Flows] = Key("flows")
 
 def _build(core: Core, components: Components) -> Flows:
     keys = payload_keys(core.settings)
+    auth = components.get(AUTH)
 
     def projects_operations() -> list[Callable[..., Any]]:
         from scadbuddy.operations.component import OPERATIONS
@@ -104,9 +107,9 @@ def _build(core: Core, components: Components) -> Flows:
         connect=keys[1] if keys is not None else None,
         operation_activities=projects_operations,
         run_key=run_key(core.settings),
-        api_auth=ServiceAuth(TokenReader("projects", core.settings.database_url, kek))
-        if (kek := core.settings_store.kek) is not None
-        else None,
+        # #5494 (spec 2026-11-05 §7.1): minted in this process, which holds the
+        # database, with `proof = inprocess`; no view, no KEK.
+        api_auth=ServiceAuth(InProcessProvider("projects", lambda: auth.credentials)),
     )
 
 

@@ -22,7 +22,7 @@ import asyncio
 import logging
 import zipfile
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
@@ -51,16 +51,25 @@ from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import SettingsPatch
+from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.costs import OrderCosts, order_costs
+from scadbuddy.orders.costs import (
+    CostRates,
+    MarginState,
+    OrderCosts,
+    OrderMargin,
+    order_costs,
+    order_margins,
+)
 from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
+    LabourRate,
     LifecycleError,
     ManualQuoteInput,
     OrderEdit,
@@ -72,6 +81,8 @@ from scadbuddy.orders.models import (
     Attachment,
     Charge,
     ChargeInput,
+    CostEntry,
+    CostEntryInput,
     Filament,
     FilamentInput,
     FilamentPatch,
@@ -87,10 +98,13 @@ from scadbuddy.orders.models import (
     Payment,
     PriceBook,
     PricingPolicy,
+    Product,
     Quote,
     Revision,
     Shipment,
     SpoolImport,
+    TimeEntry,
+    TimeEntryInput,
 )
 from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
@@ -99,9 +113,23 @@ from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.report import (
+    DEFAULT_DAYS,
+    ProfitReport,
+    ReportGroup,
+    default_period,
+    profit_report,
+)
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
-from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
+from scadbuddy.orders.store import (
+    UNSET,
+    FilamentExistsError,
+    OrderStore,
+    UnsetType,
+    decode_cursor,
+    encode_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +138,29 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
-LIST_PARAMS = frozenset({"status", "customer_id", "q", "from", "to", "cursor", "limit"})
+#: A ``margin_state`` request reads at most this many store pages of this size (#5515).
+#: When it reaches the cap, it returns the rows found so far (maybe none) and the cursor
+#: it reached, and the client carries on from there.
+#: frontend/src/mocks/features/orders/orders.ts mirrors both values: change them together.
+SCAN_PAGE_SIZE = MAX_LIMIT
+MAX_SCAN_PAGES = 10
+LIST_PARAMS = frozenset(
+    {
+        "status",
+        "customer_id",
+        "q",
+        "from",
+        "to",
+        "accepted_from",
+        "accepted_to",
+        "currency",
+        "product",
+        "margin_state",
+        "cursor",
+        "limit",
+    }
+)
+REPORT_PARAMS = frozenset({"from", "to", "group"})
 #: A line item's largest quantity: `order_items.quantity` is an `integer` column
 #: (migration 20261020T0446Z_orders.sql), so a larger one is a 422, never a 500 (#4763).
 MAX_QUANTITY = 2**31 - 1
@@ -323,8 +373,22 @@ class OrderDetail(BaseModel):
     projects: list[OrderProject] = Field(default_factory=list)
 
 
+class OrderRow(Order):
+    """A row of ``GET /orders``: the order and its margin, the same figures as its
+    ``GET /orders/{id}/costs`` (job cost spec §6.2, §7)."""
+
+    #: Charged less real cost; None without a charged figure.
+    margin_minor: Money | None = None
+    #: Of what was charged, to a tenth; None without a charged figure above zero.
+    margin_percent: float | None = None
+    #: ``loss``, ``unknown``, ``thin`` or ``ok``; None without a charged figure.
+    margin_state: MarginState | None = None
+    #: The margin is built on an estimated part (a default labour, a quote's grams).
+    margin_estimated: bool = False
+
+
 class OrderPage(BaseModel):
-    items: list[Order]
+    items: list[OrderRow]
     next_cursor: str | None
 
 
@@ -355,28 +419,120 @@ def _path(*values: str) -> None:
 # -- orders ------------------------------------------------------------------------------------
 
 
+def _cost_rates(settings: SettingsStore) -> CostRates:
+    runtime = settings.snapshot().runtime
+    return CostRates(
+        shop_currency=runtime.orders_currency,
+        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
+        labour_per_item=runtime.pricing_labour_per_item,
+        thin_margin_percent=runtime.orders_thin_margin_percent,
+    )
+
+
+def _row(order: Order, margin: OrderMargin) -> OrderRow:
+    return OrderRow(
+        **order.model_dump(exclude={"minor_exponent"}),
+        margin_minor=margin.margin_minor,
+        margin_percent=margin.margin_percent,
+        margin_state=margin.margin_state,
+        margin_estimated=bool(margin.estimated),
+    )
+
+
+def _order_page(
+    store: OrderStore,
+    filters: OrderFilter,
+    margin_state: list[MarginState] | None,
+    cursor: str | None,
+    limit: int,
+    rates: CostRates,
+) -> OrderPage:
+    """A page of rows. With ``margin_state``, the store's pages are read in turn and
+    each order's margin computed until ``limit`` orders match, none are left, or
+    ``MAX_SCAN_PAGES`` pages were read: a margin is computed on read, never stored (§5),
+    so it cannot be a SQL filter. At the cap the page can be short or empty and still
+    have a ``next_cursor``."""
+    if not margin_state:
+        orders, next_cursor = store.orders(filters, cursor, limit)
+        margins = order_margins(store, orders, rates)
+        return OrderPage(items=[_row(o, margins[o.id]) for o in orders], next_cursor=next_cursor)
+    wanted = set(margin_state)
+    found: list[OrderRow] = []
+    for _ in range(MAX_SCAN_PAGES):
+        orders, more = store.orders(filters, cursor, SCAN_PAGE_SIZE)
+        margins = order_margins(store, orders, rates)
+        for order in orders:
+            if margins[order.id].margin_state not in wanted:
+                continue
+            if len(found) == limit:
+                last = found[-1]
+                return OrderPage(items=found, next_cursor=encode_cursor(last.created_at, last.id))
+            found.append(_row(order, margins[order.id]))
+        if more is None:
+            return OrderPage(items=found, next_cursor=None)
+        cursor = more
+    return OrderPage(items=found, next_cursor=cursor)
+
+
 @router.get("", response_model=OrderPage, summary="List orders")
 async def list_orders(
     request: Request,
     orders: OrdersDep,
+    settings: SettingsStoreDep,
     status_: Annotated[list[OrderStatus] | None, Query(alias="status")] = None,
     customer_id: str | None = None,
     q: str | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: datetime | None = None,
+    accepted_from: datetime | None = None,
+    accepted_to: datetime | None = None,
+    currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
+    product: Annotated[str | None, Query(min_length=1, max_length=210)] = None,
+    margin_state: Annotated[list[MarginState] | None, Query()] = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
     """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. ``status``
-    may be repeated, for orders of any of them (#5276)."""
+    may be repeated, for orders of any of them (#5276). Each row carries its margin
+    (``margin_minor``, ``margin_percent``, ``margin_state``, ``margin_estimated``): the
+    figures ``GET /orders/{id}/costs`` gives the order, read from Postgres only (job cost
+    spec §6.2, §8). ``margin_state`` may be repeated, for orders in any of those states
+    (``margin_state=loss&margin_state=thin`` is the list's "Loss or thin"). An order with
+    no charged figure has no state and never matches it. A ``margin_state`` request reads
+    a bounded number of orders, so its page can be short or empty while ``next_cursor``
+    remains: follow the cursor until it is null. ``accepted_from`` (inclusive),
+    ``accepted_to`` (exclusive), ``currency`` and ``product`` (``model:<slug>``,
+    ``sku:<sku>`` or ``custom``) are a profit report row's orders (job cost spec §6.4)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
-    filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)
     try:
-        rows, next_cursor = await asyncio.to_thread(orders.store.orders, filters, cursor, limit)
-    except ValueError:
-        raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
-    return OrderPage(items=rows, next_cursor=next_cursor)
+        wanted = None if product is None else Product.parse(product)
+    except ValueError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            errors=[{"loc": ["query", "product"], "msg": str(error)}],
+        ) from None
+    filters = OrderFilter(
+        status=status_,
+        customer_id=customer_id,
+        q=q,
+        since=from_,
+        until=to,
+        accepted_since=accepted_from,
+        accepted_until=accepted_to,
+        currency=currency,
+        product=wanted,
+    )
+    if cursor is not None:
+        try:
+            decode_cursor(cursor)
+        except ValueError:
+            raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
+    rates = await asyncio.to_thread(_cost_rates, settings)
+    return await asyncio.to_thread(
+        _order_page, orders.store, filters, margin_state, cursor, limit, rates
+    )
 
 
 @router.post(
@@ -646,6 +802,86 @@ async def estimate(
     )
 
 
+@router.get(
+    "/history/unit-cost",
+    response_model=UnitCostHistory,
+    summary="A model's real cost per unit from its past jobs",
+    description=(
+        "The quote warning's history (job cost spec §6.3): the items of `slug` that are "
+        "fulfilled on an order that is not cancelled, in `currency` (the shop's by "
+        "default), the newest 10 whose last accepted attempt is within 365 days. "
+        "`unit_cost_minor` is their real cost (as `GET /orders/{id}/costs` gives each "
+        "item) over their units. `main_reason` is the cost part that most exceeded what "
+        "their accepted quotes priced for it; failed prints, test prints and cost entries "
+        "count in full. `suggested_unit_price_minor` is the unit cost marked up by "
+        "`pricing_markup_percent`, or with no markup the lowest price that is not thin. "
+        "With `unit_price_minor`, `warning` says that price leaves a margin below "
+        "`orders_thin_margin_percent`, and `below_cost` that it is below the unit cost "
+        "itself (a price above the cost can still warn with a thin margin). Advice only. "
+        "With no history, `jobs` is 0 and nothing warns."
+    ),
+)
+async def unit_cost(
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    slug: Annotated[str, Query(min_length=1, max_length=200)],
+    currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
+    unit_price_minor: Annotated[int | None, Query(ge=0)] = None,
+) -> UnitCostHistory:
+    _path(slug)
+    runtime = settings.snapshot().runtime
+    return await asyncio.to_thread(
+        unit_cost_history,
+        orders.store,
+        slug,
+        _cost_rates(settings),
+        markup_percent=runtime.pricing_markup_percent,
+        now=datetime.now(UTC),
+        currency=currency,
+        unit_price_minor=unit_price_minor,
+    )
+
+
+@router.get(
+    "/reports/profit",
+    response_model=ProfitReport,
+    summary="The profit report by model",
+    description=(
+        "Job cost spec §6.4: the orders accepted at or after `from` and before `to` "
+        f"(by default the last {DEFAULT_DAYS} days), cancelled ones too, per currency "
+        "(never summed across currencies) and per product: one row per model `slug`, one "
+        "per custom item `sku`, one `custom` row for items with neither. Each row has its "
+        "orders, units, what was charged, the real cost, the margin and the waste (the "
+        "cost of test and failed attempts). Each item's figures are those "
+        "`GET /orders/{id}/costs` gives it. The `order` row is the orders' own figures "
+        "(their entries, shipments' cost and charges), over the orders that have any, and "
+        "the `total` row each currency's orders' own figures summed. A product row's "
+        "`product` is its `GET /orders` filter (`custom` also matches an empty SKU). "
+        "The report reads at most `max_orders` orders, newest accepted first: "
+        "with `complete` false it covers the orders accepted from `read_from` only."
+    ),
+)
+async def profit(
+    request: Request,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    from_: Annotated[datetime | None, Query(alias="from")] = None,
+    to: datetime | None = None,
+    group: ReportGroup = "model",
+) -> ProfitReport:
+    _no_nul(request)
+    _unknown(request, REPORT_PARAMS)
+    since, until = default_period(to if to is not None else datetime.now(UTC))
+    if from_ is not None:
+        since = from_
+    if since.tzinfo is None or until.tzinfo is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from and to need a time zone")
+    if since >= until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from must be before to")
+    rates = await asyncio.to_thread(_cost_rates, settings)
+    return await asyncio.to_thread(profit_report, orders.store, rates, since=since, until=until)
+
+
 def item_price(item: ItemDetail) -> tuple[Money, bool] | None:
     """The item's price and whether an accepted quote stands behind it: the accepted
     quote's total, else the newest quote's unit price times the item's quantity now;
@@ -751,22 +987,120 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
 @router.get(
     "/{order_id}/costs",
     response_model=OrderCosts,
-    summary="The real cost: the accepted quotes beside the attempts",
+    summary="The real cost and margin of an order and each of its items",
     description=(
         "Per item, its accepted quote's seconds, grams and filament cost for the item's "
-        "quantity beside every attempt's actual seconds and grams, failures included, the "
-        "grams priced at the quote's own price per gram (a `manual` quote prices none). "
-        "With Bambuddy linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its "
-        "archives, corrected for suspect filament readings, shown and never in any sum; "
-        "`bambuddy_unavailable` says some archive could not be read. Nothing is stored."
+        "quantity beside every attempt, failures included. Each attempt is costed in "
+        "filament and machine time: its actual grams and seconds, else its quote's "
+        "(`estimated` names which), at the quote's own rates, else at the price book and "
+        "today's machine rate (also `estimated`); a figure with no source is left out and "
+        "the attempt is `unknown`. Each item adds its labour (its time entries, else a "
+        "default from its quote or `pricing_labour_per_item`, `labour_default`) and its "
+        "cost entries; the order adds its own entries and its shipments' cost. "
+        "`revenue_minor` is what was charged (an item's accepted quote, 0 once cancelled; "
+        "the order's items plus every charge but tax), and `margin_state` is `loss`, "
+        "`unknown`, `thin` (below `orders_thin_margin_percent`) or `ok`. With Bambuddy "
+        "linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its archives, shown "
+        "and never in any sum; `bambuddy_unavailable` says some archive could not be read. "
+        "Nothing is stored."
     ),
 )
-async def get_order_costs(order_id: str, orders: OrdersDep) -> OrderCosts:
+async def get_order_costs(
+    order_id: str, orders: OrdersDep, settings: SettingsStoreDep
+) -> OrderCosts:
     _path(order_id)
-    costs = await order_costs(orders.store, orders.integrations, order_id)
+    rates = _cost_rates(settings)
+    costs = await order_costs(orders.store, orders.integrations, order_id, rates)
     if costs is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     return costs
+
+
+@router.post(
+    "/{order_id}/time-entries",
+    response_model=TimeEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Log time on an order or one of its items",
+    description=(
+        "In any order status, ended and on hold included. The entry copies the labour rate "
+        "in force (`pricing_labour_rate_per_hour`) as `rate_minor_per_hour`, so a later "
+        "change never rewrites it; for an order in a currency other than the shop's, no "
+        "rate can be copied and it is null. With a `source` (a timer's "
+        "`timer:<item or order>:<started_at>`), "
+        "a second write of the same order and source returns the first entry as it was "
+        "recorded, whatever its kind, and writes nothing (200). On the audit line as "
+        "`time.added`."
+    ),
+    responses={status.HTTP_200_OK: {"model": TimeEntry, "description": "Already recorded"}},
+)
+async def add_time_entry(
+    order_id: str,
+    body: TimeEntryInput,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    response: Response,
+) -> TimeEntry:
+    _path(order_id)
+    by = current_actor()
+
+    runtime = settings.snapshot().runtime
+    rate = LabourRate(Decimal(runtime.pricing_labour_rate_per_hour), runtime.orders_currency)
+    entry, written = await _run(
+        lambda: orders.lifecycle.add_time_entry(order_id, body, by, labour_rate=rate)
+    )
+    if not written:
+        response.status_code = status.HTTP_200_OK
+    return entry
+
+
+@router.delete(
+    "/{order_id}/time-entries/{entry_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a time entry",
+)
+async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
+    _path(order_id, entry_id)
+    by = current_actor()
+    await _run(lambda: orders.lifecycle.remove_time_entry(order_id, entry_id, by))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{order_id}/cost-entries",
+    response_model=CostEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a cost to an order or one of its items",
+    description=(
+        "Money the job cost in the order's currency: the assistant's spend, a payment "
+        "fee, materials, anything else. Shipping is a shipment's `cost_minor`, never an "
+        "entry. In any order status. With a `source`, a second write of the same order, "
+        "kind and source returns the first entry as it was recorded, whatever this "
+        "call's amount, note or item, and writes nothing (200). On the audit "
+        "line as `cost.added`."
+    ),
+    responses={status.HTTP_200_OK: {"model": CostEntry, "description": "Already recorded"}},
+)
+async def add_cost_entry(
+    order_id: str, body: CostEntryInput, orders: OrdersDep, response: Response
+) -> CostEntry:
+    _path(order_id)
+    by = current_actor()
+    entry, written = await _run(lambda: orders.lifecycle.add_cost_entry(order_id, body, by))
+    if not written:
+        response.status_code = status.HTTP_200_OK
+    return entry
+
+
+@router.delete(
+    "/{order_id}/cost-entries/{entry_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a cost entry",
+)
+async def remove_cost_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
+    _path(order_id, entry_id)
+    by = current_actor()
+    await _run(lambda: orders.lifecycle.remove_cost_entry(order_id, entry_id, by))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 #: How long an accept waits for its Bambuddy projects (§8.1) before answering anyway.
@@ -1057,7 +1391,8 @@ async def patch_item(
 )
 async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Response:
     """Only while the item is `draft` (Ruling 10): else 409 ``item_not_draft`` names the
-    cancel route, and the caller decides."""
+    cancel route, and the caller decides. A draft item with time or cost entries is 409
+    ``item_has_entries`` (#5326): remove them, or cancel it."""
     _path(order_id, item_id)
     by = current_actor()
     await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))

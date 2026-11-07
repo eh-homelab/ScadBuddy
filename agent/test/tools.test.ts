@@ -2390,6 +2390,7 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     ['set_model_thumbnail', { slug: 'w', png_base64: png }],
     ['set_output_thumbnail', { output_id: 'b'.repeat(32), png_base64: png }],
     ['add_model_media', { slug: 'w', filename: 'p.png', content_base64: png }],
+    ['add_readme_image', { slug: 'w', filename: 'p.png', content_base64: png }],
     ['upload_asset', { slug: 'w', filename: 'p.png', content_base64: png }],
     ['create_model_from_mesh', { name: 'X', filename: 'x.stl', content_base64: png }],
     ['workspace_write', { path: 'p.png', content_base64: png }],
@@ -2408,7 +2409,7 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     expect(tool('create_model_from_mesh').description).toContain(BYTES_NEVER_AN_ARGUMENT)
   })
 
-  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'upload_asset'])(
+  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'add_readme_image', 'upload_asset'])(
     '%s requires workspace_path and workspace_sha256',
     (name) => {
       const schema = z.toJSONSchema(z.object(tool(name).shape), { io: 'input' })
@@ -2924,6 +2925,30 @@ describe("a model's lifecycle as operations (#1054)", () => {
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
+
+  it.each([
+    [{ slug: 'w' }, 'false'],
+    [{ slug: 'w', delete_inbox_copies: true }, 'true'],
+  ] as const)('delete_model passes delete_inbox_copies (#5371): %o', async (args, sent) => {
+    let asked: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        asked = new URL(request.url).searchParams.get('delete_inbox_copies')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(asked).toBe(sent)
+  })
+
+  it("delete_model's summary says when it trashes the library copies, on ScadBuddy's own library only (#5371, #5422)", () => {
+    const summarize = tool('delete_model').summarize!
+    expect(summarize({ slug: 'w', force: false, delete_inbox_copies: false })).toBe('Delete the model "w" and its outputs')
+    expect(summarize({ slug: 'w', force: false, delete_inbox_copies: true })).toBe(
+      "Delete the model \"w\" and its outputs; on ScadBuddy's own library, also trashing their copies there",
+    )
+  })
 })
 
 describe("a model's edits as operations (#1054)", () => {
@@ -2938,6 +2963,7 @@ describe("a model's edits as operations (#1054)", () => {
     ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
     ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
     ['set_model_thumbnail', { slug: 'w', ...pngs.ref('p.png') }, 'put', '/api/v1/models/w/thumbnail'],
+    ['add_readme_image', { slug: 'w', ...pngs.ref('p.png') }, 'post', '/api/v1/models/w/images'],
     ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
     ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
     ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],
@@ -3383,19 +3409,29 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
   })
 
   it('gives up following after its budget, saying it may still start (review #2849)', async () => {
+    // The budget's clock moves only when a follow is answered, so a slow machine cannot
+    // spend it before the first follow (#5379): the third answer ends it. The poll interval
+    // is the test's own: a pause of 10 ms or more between follows would end the budget
+    // after fewer than three (#5391).
+    let clock = 0
     let follows = 0
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
+        clock += 10
         return acceptingAnswer('op-delete_output-x', 'k')
       }),
     )
-    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 30, now: () => clock, pollIntervalMs: 1 }),
+    )
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('ScadBuddy is still starting it')
-    expect(follows).toBeGreaterThan(0)
+    expect(follows).toBe(3)
   })
 
   it('takes no pause that would end past its budget (#3039)', async () => {

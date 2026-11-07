@@ -266,13 +266,31 @@ export const catalogueTools: Tool[] = [
     name: 'delete_model',
     label: 'Delete a model',
     description: 'Delete a model and its outputs. Irreversible, so it needs a human approval.',
-    input: z.object({ slug, force: z.boolean().default(false) }),
+    input: z.object({
+      slug,
+      force: z.boolean().default(false),
+      delete_inbox_copies: z
+        .boolean()
+        .default(false)
+        .describe(
+          "On ScadBuddy's own library, also trash each output's copy still filed under the template's " +
+            'folder and its per-print copies with their slices, as an output delete with this flag does; ' +
+            'refused with 409 while one of their print runs is open. Unlike an output delete, it never ' +
+            "deletes copies in Bambuddy's inbox",
+        ),
+    }),
     risk: 'outward',
     routes: ['DELETE /api/v1/models/{slug}'],
-    summarize: ({ slug }) => `Delete the model "${slug}" and its outputs`,
-    handler: async ({ slug, force }, ctx) => {
+    summarize: ({ slug, delete_inbox_copies }) =>
+      `Delete the model "${slug}" and its outputs` +
+      // #5422 — the tool does not know the library backend; the flag does nothing on Bambuddy's.
+      (delete_inbox_copies ? "; on ScadBuddy's own library, also trashing their copies there" : ''),
+    handler: async ({ slug, force, delete_inbox_copies }, ctx) => {
       await command(ctx, `delete ${slug}`, (headers) =>
-        ctx.backend.DELETE('/api/v1/models/{slug}', { params: { path: { slug }, query: { force } }, headers }),
+        ctx.backend.DELETE('/api/v1/models/{slug}', {
+          params: { path: { slug }, query: { force, delete_inbox_copies } },
+          headers,
+        }),
       )
       return json({ deleted: slug })
     },
@@ -402,6 +420,40 @@ export const catalogueTools: Tool[] = [
           params: { path: { slug } },
           body: { file: name, caption: caption ?? null, poster: null },
           ...uploadInit(ctx, info, { name: 'file', filename: name, type: info.mediaType }, headers, caption === undefined ? {} : { caption }),
+        }),
+      )
+      return json(withSent(answer, info))
+    },
+  }),
+
+  defineTool({
+    name: 'add_readme_image',
+    label: "Add an image for a model's README",
+    description:
+      "Store an image (PNG, JPEG, WebP or GIF, at most 10 MB) in a model's `images/` folder, as one revision, for its " +
+      'README (#5475). The type comes from the bytes; SVG is refused. The name is the file name made plain, numbered ' +
+      'when taken; nothing is written over. Answers `path` (`images/<name>`) and the model: link it in the README as ' +
+      '`![alt](images/<name>)` with set_readme.' +
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        slug,
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+        filename: z.string().min(1).max(255).optional().describe('e.g. "side-view.png"; the workspace file\'s own name by default'),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['POST /api/v1/models/{slug}/images'],
+    title: ({ slug, filename, workspace_path }) => `Add README image ${filename ?? workspace_path} → ${slug}`,
+    handler: async ({ slug, workspace_path, workspace_sha256, filename }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'add_readme_image')
+      const name = filename ?? uploadName(info.path)
+      const answer = await command(ctx, `add a README image to ${slug}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/images', {
+          params: { path: { slug } },
+          body: { file: name },
+          ...uploadInit(ctx, info, { name: 'file', filename: name, type: info.mediaType }, headers),
         }),
       )
       return json(withSent(answer, info))

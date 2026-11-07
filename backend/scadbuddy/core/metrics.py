@@ -127,12 +127,18 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "worker_cache_bytes",
         "render_data_bytes",
         "store_render_key_fallback",
+        "crud_client_seconds",
     },
     "print": _WORKER_COMMON
     | _LISTENING
     | _OPERATIONS
-    | {"activity_write_failures", "print_follows_running", "rack_watch_settle_failed"},
-    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS,
+    | {
+        "activity_write_failures",
+        "print_follows_running",
+        "rack_watch_settle_failed",
+        "crud_client_seconds",
+    },
+    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS | {"crud_client_seconds"},
 }
 
 
@@ -362,6 +368,17 @@ class Metrics:
             buckets=RENDER_BUCKETS,
             registry=r,
         )
+        self.crud_client_seconds = Histogram(
+            "scadbuddy_crud_client_seconds",
+            "Each attempt of a worker's call to the API's CRUD routes (#5298), by caller, "
+            "area (the first path segment after the caller) and outcome: ok, refused, "
+            "route_missing (an old API pod), unavailable (5xx), transport or reexchange "
+            "(a 401 or out-of-scope 403: the credential is stale, so the call retries with "
+            "a backoff until a new one is exchanged or its 30 s budget ends).",
+            ["caller", "area", "outcome"],
+            buckets=HTTP_BUCKETS,
+            registry=r,
+        )
         self.stage_duration = Histogram(
             "scadbuddy_render_stage_seconds",
             "Time spent in each step of a render.",
@@ -383,7 +400,8 @@ class Metrics:
 
         # Operations (#1053, #2295): `kind` is a registered `OperationKind`'s name, a
         # closed set each process pre-creates (`operation_kinds`). Counted where the
-        # record ends (`OperationStore.finish`), in the process whose worker ran it.
+        # record ends (`OperationStore.finish`): in the process whose worker ran it, or
+        # in the API for a worker that ends it through the CRUD routes (#5298).
         self.operation_duration = Histogram(
             "scadbuddy_operation_duration_seconds",
             "Time from an operation's record to its end, by kind and outcome (succeeded, failed).",
@@ -525,6 +543,20 @@ class Metrics:
             "scadbuddy_auth_would_refuse",
             "Requests enforce would refuse, served in observe, by route class and reason.",
             ["class", "reason"],
+            registry=r,
+        )
+        # #5494 (spec 2026-11-05 §8 step 3): the service-token exchange, by caller
+        # (`unknown` for a proof that named none), proof and result. Closed sets
+        # (`api/service_token.py`).
+        self.service_token_exchanges = Counter(
+            "scadbuddy_service_token_exchanges",
+            "Service-token exchanges, by caller, proof and result.",
+            ["caller", "proof", "result"],
+            registry=r,
+        )
+        self.service_jwks_stale_uses = Counter(
+            "scadbuddy_service_jwks_stale_uses",
+            "Service tokens checked against a cluster JWKS that could not be refreshed.",
             registry=r,
         )
 

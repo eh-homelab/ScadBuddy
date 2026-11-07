@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import uuid
 from typing import Any
 
@@ -61,6 +62,11 @@ class FlowDefinitions:
         self.history = history
         self.store = store
         self.states = states
+        #: Each flow's display name as committed at one HEAD (#5357), so a run read
+        #: asks git for HEAD and nothing more until a commit moves it.
+        self._names_head: str | None = None
+        self._names: dict[str, str | None] = {}
+        self._names_lock = threading.Lock()
 
     # -- start ------------------------------------------------------------------
 
@@ -197,9 +203,35 @@ class FlowDefinitions:
 
     async def display_names(self, names: set[str]) -> dict[str, str | None]:
         """Each flow's display name now (#3186), for the runs that name it."""
-        return await asyncio.to_thread(
-            lambda: {name: self.history.details(name).display_name for name in names}
-        )
+        return await asyncio.to_thread(self._display_names, names)
+
+    def _display_names(self, names: set[str]) -> dict[str, str | None]:
+        """Read at HEAD, not from the tree, so a details write not yet committed (or
+        one whose commit fails) is never cached. Without git, or before the first
+        commit, each is read from the tree as before."""
+        try:
+            head = self.history.head()
+        except GitError:
+            head = None
+        if head is None:
+            return {name: self.history.details(name).display_name for name in names}
+        with self._names_lock:
+            if head != self._names_head:
+                self._names_head, self._names = head, {}
+            known = {name: self._names[name] for name in names if name in self._names}
+        found = {
+            name: self.history.details_at(name, head).display_name
+            for name in names
+            if name not in known
+        }
+        # details_at reads a deleted flow's details at the HEAD of the moment, not at
+        # `head`, so a commit between the two reads can store a value under the old
+        # `head`. That is harmless only because the next read that sees the new HEAD
+        # empties the map; keep that reset if this cache changes.
+        with self._names_lock:
+            if head == self._names_head:
+                self._names.update(found)
+        return known | found
 
     def _detail_fields(self, name: str) -> dict[str, Any]:
         return self._details(name).model_dump(include={"display_name", "description"})

@@ -394,6 +394,55 @@ def choose(
     return reasons[0] if len(reasons) == 1 else "no rule admits it"
 
 
+class ConsumeRequest(BaseModel):
+    """One call's match as data (#5298): the store chooses its rule from it under the
+    grant's row lock (`picker`), in the API when the store is remote."""
+
+    request_id: str
+    fn: str
+    tool: str | None = None
+    session_id: str | None = None
+    flow_call_id: str | None = None
+    narrowing: Narrowing | None = None
+    facts: CallFacts
+    input_hash: str
+
+
+def picker(
+    run_id: str, request: ConsumeRequest, now: datetime
+) -> Callable[[Grant], Consumption | str]:
+    """What `request` takes of the locked grant: its rule (and narrowing rule), or why none."""
+    facts = request.facts
+    narrowing = request.narrowing
+    flow_call_id = request.flow_call_id
+
+    def pick(locked: Grant) -> Consumption | str:
+        chosen = choose(locked, facts, narrowing=narrowing, narrowed_by=flow_call_id, now=now)
+        if isinstance(chosen, str):
+            return chosen
+        rule_index, narrowed = chosen
+        return Consumption(
+            rule_index=rule_index,
+            narrowed_key=None if narrowed is None else f"{flow_call_id}/{narrowed}",
+            use=GrantUse(
+                request_id=request.request_id,
+                grant_id=locked.id,
+                run_id=run_id,
+                fn=request.fn,
+                tool=request.tool,
+                input_hash=request.input_hash,
+                rule_index=rule_index,
+                prints=facts.prints or 0,
+                filament_g=facts.filament_g or 0,
+                session_id=request.session_id,
+                narrowed_by=flow_call_id if narrowing is not None else None,
+                pins=facts.pins,
+            ),
+        )
+
+    return pick
+
+
 FactsOf = Callable[[str, str | None, dict[str, Any]], Awaitable[CallFacts]]
 HashOf = Callable[[str, str | None, dict[str, Any]], str]
 
@@ -407,9 +456,7 @@ class GrantStore(Protocol):
 
     async def get_grant(self, run_id: str) -> Grant | None: ...
 
-    async def consume_grant(
-        self, run_id: str, request_id: str, pick: Callable[[Grant], Consumption | str]
-    ) -> GrantUse | str: ...
+    async def consume(self, run_id: str, request: ConsumeRequest) -> GrantUse | str: ...
 
 
 async def match_grant(
@@ -483,31 +530,17 @@ async def match_grant(
     pinned = apply_pins(facts.args, facts.pins)
     input_hash = hash_of(fn, tool, pinned)
 
-    def pick(locked: Grant) -> Consumption | str:
-        chosen = choose(locked, facts, narrowing=narrowing, narrowed_by=flow_call_id, now=now)
-        if isinstance(chosen, str):
-            return chosen
-        rule_index, narrowed = chosen
-        return Consumption(
-            rule_index=rule_index,
-            narrowed_key=None if narrowed is None else f"{flow_call_id}/{narrowed}",
-            use=GrantUse(
-                request_id=request_id,
-                grant_id=locked.id,
-                run_id=run_id,
-                fn=fn,
-                tool=tool,
-                input_hash=input_hash,
-                rule_index=rule_index,
-                prints=facts.prints or 0,
-                filament_g=facts.filament_g or 0,
-                session_id=session_id,
-                narrowed_by=flow_call_id if narrowing is not None else None,
-                pins=facts.pins,
-            ),
-        )
-
-    taken = await store.consume_grant(run_id, request_id, pick)
+    request = ConsumeRequest(
+        request_id=request_id,
+        fn=fn,
+        tool=tool,
+        session_id=session_id,
+        flow_call_id=flow_call_id,
+        narrowing=narrowing,
+        facts=facts,
+        input_hash=input_hash,
+    )
+    taken = await store.consume(run_id, request)
     if isinstance(taken, str):
         return outside(taken)
     return Inside(

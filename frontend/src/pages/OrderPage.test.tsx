@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
+import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
 import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
@@ -42,6 +44,27 @@ describe('OrderPage (#4249)', () => {
     expect(totals).toHaveTextContent('30.00')
     expect(totals).toHaveTextContent('35.00')
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
+  })
+
+  it('shows the money view before accept, and a Loss badge in the header (#5326)', async () => {
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    // Design time and test prints come before an accept: the card is there to log them.
+    const card = await screen.findByRole('region', { name: 'Cost' })
+    expect(within(card).getByRole('form', { name: 'Log time on the order' })).toBeInTheDocument()
+    expect(screen.queryByText('Loss')).toBeNull()
+
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 5000 })
+    render(ORDER_ACCEPTED)
+    const heading = await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(await within(heading.parentElement!).findByText('Loss')).toBeInTheDocument()
+  })
+
+  it('says so when the cost cannot be read, rather than dropping the card (#5326)', async () => {
+    server.use(http.get('/api/v1/orders/:id/costs', () => HttpResponse.json({ detail: 'Bambuddy timed out' }, { status: 500 })))
+    render(ORDER_ACCEPTED)
+    expect(await screen.findByText(/The order's cost could not be read/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
   })
 
   it("shows the lifecycle's refusal naming the items in the way", async () => {

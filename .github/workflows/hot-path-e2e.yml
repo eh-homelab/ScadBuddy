@@ -64,13 +64,30 @@ jobs:
       # On ubuntu-26.04 the apparmor package ships a `mosquitto` profile that
       # lets /usr/sbin/mosquitto read only /etc/mosquitto/*, so the fake
       # printer's config under the pytest temp folder is refused (#5343).
-      # Unload and disable it where it exists; ubuntu-24.04 has none.
+      # Disable it where it exists; ubuntu-24.04 has none. Unload it only when
+      # the kernel has it loaded (a line `mosquitto (enforce)`), and let a
+      # failed unload fail the step: the `disable/` link acts only on the next
+      # load, so a profile left loaded would still confine mosquitto.
       - name: Install mosquitto
         run: |
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mosquitto
           if [ -f /etc/apparmor.d/mosquitto ]; then
-            sudo apparmor_parser -R /etc/apparmor.d/mosquitto || true
             sudo ln -sf /etc/apparmor.d/mosquitto /etc/apparmor.d/disable/mosquitto
+            if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" != Y ]; then
+              echo "AppArmor is not enabled; nothing confines mosquitto."
+            else
+              found=0
+              sudo grep '^mosquitto ' /sys/kernel/security/apparmor/profiles || found=$?
+              case "$found" in
+                0)
+                  sudo apparmor_parser -R /etc/apparmor.d/mosquitto
+                  echo "Unloaded the mosquitto AppArmor profile." ;;
+                1) echo "The mosquitto AppArmor profile is not loaded." ;;
+                *)
+                  echo "::error::Could not read the loaded AppArmor profiles, so mosquitto's may still confine it."
+                  exit 1 ;;
+              esac
+            fi
           fi
 
       - name: ruff over e2e-stack

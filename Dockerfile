@@ -818,7 +818,8 @@ ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
     SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
 
 USER 10001:10001
-EXPOSE 8080
+# 8082 is the CRUD port (SCADBUDDY_CRUD_PORT, #5298) the lifespan opens beside 8080.
+EXPOSE 8080 8082
 VOLUME ["/data"]
 
 # tini reaps the openscad children the render runner forks. Without it PID 1 is

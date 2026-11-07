@@ -453,6 +453,24 @@ describe('/api/v1/ai/capabilities', () => {
       expect(res.status).toBe(200)
     })
 
+    it('keeps a loading across the tool being switched off and on again', async () => {
+      const { app } = rig()
+      await put(app, loadingPath(OWN, 'list_outputs'), { loading: 'base' })
+      let res = await put(app, itemPath(OWN, 'list_outputs'), { access: 'off' })
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs')).toMatchObject({ access: 'off', loading: 'base' })
+      res = await del(app, itemPath(OWN, 'list_outputs'))
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs')).toMatchObject({ access: 'read', loading: 'base' })
+    })
+
+    it('takes a loading for a tool that is already off', async () => {
+      const { app, stored } = rig()
+      await put(app, itemPath(OWN, 'list_outputs'), { access: 'off' })
+      const res = await put(app, loadingPath(OWN, 'list_outputs'), { loading: 'base' })
+      expect(res.status).toBe(200)
+      expect(itemOf((await res.json()) as SourceView, 'list_outputs')).toMatchObject({ access: 'off', loading: 'base' })
+      expect(stored.values.get('tool_loading')).toEqual({ list_outputs: 'base' })
+    })
+
     it('refuses an item with no loading, an unknown item and a bad body', async () => {
       const { app, stored } = rig()
       expect((await put(app, loadingPath(BUILTIN_SOURCES.http, 'http_request'), { loading: 'base' })).status).toBe(409)

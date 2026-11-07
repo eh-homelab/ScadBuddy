@@ -49,7 +49,12 @@ def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None,
     before a reconnect's ``pushall`` answer) keeps ``running`` and ends nothing, so the
     next whole report still ends it. Only an end seen after a run counts: a report
     naming a new ``subtask_name`` while it still says the last job's ``FINISH`` (#4935)
-    is a start, and nothing was running before it."""
+    is a start, and nothing was running before it.
+
+    Any other name ends ``running``. That relies on ScadBuddy's subtask names being
+    unique per run (they carry a run-id prefix, the plate and, past the first, the
+    copy), so a different name is always a different job, never the same print
+    renamed."""
     named, state = new.get("subtask_name"), new.get("gcode_state")
     if not named or state is None:
         return running, None

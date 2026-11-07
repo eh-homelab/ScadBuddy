@@ -10,6 +10,7 @@ import type {
   OrderItemCreate,
   OrderItemPatch,
   OrderPatch,
+  OrderRow,
   OrderStatus,
   PaymentCreate,
   Quote,
@@ -23,6 +24,8 @@ import { printersState } from '../printers'
 import { byCreated } from '../../../components/orders/price'
 import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, revisionsOf, state, UNKNOWN_PARAMETER } from './state'
 import { pushRevision } from './revisions'
+import { orderRow } from './costs'
+import { productOf } from './report'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -31,7 +34,11 @@ import { pushRevision } from './revisions'
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'cursor', 'limit'])
+const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
+/** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
+export const SCAN_PAGE_SIZE = 100
+export const MAX_SCAN_PAGES = 10
 const STATUSES = new Set<OrderStatus>(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled'])
 export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
@@ -76,8 +83,12 @@ export function reset(): void {
   printsStarting.clear()
 }
 
-/** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. */
-export const printInFlight = (itemId: string) => attemptsOf(itemId).find((f) => f.print_run_id && f.outcome === 'unknown' && f.finished_at === null)
+/** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. A claim
+ * counts by its `print_request_id`, its run attached or not yet. */
+export const printInFlight = (itemId: string) => attemptsOf(itemId).find((f) => f.print_request_id && f.outcome === 'unknown' && f.finished_at === null)
+/** `orders/printing.py` `print_request_id`: one claim per item and Idempotency-Key. The
+ * backend hashes the pair; the mock joins it. */
+export const printRequestId = (itemId: string, key: string) => `order-item-print-${itemId}-${key}`
 const shipmentsOf = (orderId: string) => state.shipments.filter((s) => s.order_id === orderId)
 
 export function lock(orderId: string): Order {
@@ -337,6 +348,9 @@ export const handlers = [
     // Repeated, any of them (#5276).
     const statuses = sp.getAll('status')
     if (statuses.some((s) => !STATUSES.has(s as OrderStatus))) return problem(request, 422, 'status is not an order status')
+    // #5327: repeated, any of them. An order with no charged figure has no state.
+    const margins = sp.getAll('margin_state')
+    if (margins.some((m) => !MARGIN_STATES.has(m))) return problem(request, 422, 'margin_state is not a margin state')
     const limit = Number(sp.get('limit') ?? '50')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return problem(request, 422, 'limit must be an integer from 1 to 100')
     let after: [string, string] | null = null
@@ -349,21 +363,51 @@ export const handlers = [
     const customer = sp.get('customer_id')
     const from = sp.get('from')
     const to = sp.get('to')
+    // #5329: a profit report row's orders, as `OrderStore.orders` narrows them.
+    const acceptedFrom = sp.get('accepted_from')
+    const acceptedTo = sp.get('accepted_to')
+    const currency = sp.get('currency')
+    if (currency !== null && !/^[A-Z]{3}$/.test(currency)) return fieldProblem(request, 'currency', 'String should match pattern')
+    const product = sp.get('product')
+    if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
       .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
       .filter((o) => !to || Date.parse(o.created_at) <= Date.parse(to))
+      .filter((o) => !acceptedFrom || (o.accepted_at != null && Date.parse(o.accepted_at) >= Date.parse(acceptedFrom)))
+      .filter((o) => !acceptedTo || (o.accepted_at != null && Date.parse(o.accepted_at) < Date.parse(acceptedTo)))
+      .filter((o) => !currency || o.currency === currency)
+      .filter((o) => !product || state.items.some((i) => i.order_id === o.id && productOf(i) === product))
       .filter((o) => {
         if (!q) return true
         const owner = state.customers.find((c) => c.id === o.customer_id)
         return o.number.toLowerCase().includes(q) || o.notes.toLowerCase().includes(q) || (owner?.display_name ?? '').toLowerCase().includes(q) || (owner?.company ?? '').toLowerCase().includes(q)
       })
       .filter((o) => !after || o.created_at < after[0] || (o.created_at === after[0] && o.id < after[1]))
-    const page = rows.slice(0, limit)
-    const last = page.at(-1)
-    return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })
+    if (margins.length === 0) {
+      const page = rows.slice(0, limit).map(orderRow)
+      const last = page.at(-1)
+      return HttpResponse.json({ items: page, next_cursor: rows.length > limit && last ? encodeCursor(last) : null })
+    }
+    // `_order_page`'s margin scan (#5515): read SCAN_PAGE_SIZE rows at a time, at most
+    // MAX_SCAN_PAGES times. At the cap the page can be short or empty, and its cursor is
+    // the last row read, not the last match.
+    const found: OrderRow[] = []
+    let stopped: Order | undefined
+    for (let start = 0; start < MAX_SCAN_PAGES * SCAN_PAGE_SIZE; start += SCAN_PAGE_SIZE) {
+      const read = rows.slice(start, start + SCAN_PAGE_SIZE)
+      for (const order of read.map(orderRow)) {
+        if (order.margin_state == null || !margins.includes(order.margin_state)) continue
+        const last = found.at(-1)
+        if (last && found.length === limit) return HttpResponse.json({ items: found, next_cursor: encodeCursor(last) })
+        found.push(order)
+      }
+      if (rows.length <= start + SCAN_PAGE_SIZE) return HttpResponse.json({ items: found, next_cursor: null })
+      stopped = read.at(-1)
+    }
+    return HttpResponse.json({ items: found, next_cursor: stopped ? encodeCursor(stopped) : null })
   }),
 
   http.post('/api/v1/orders', async ({ request }) => {
@@ -807,6 +851,13 @@ export const handlers = [
       if (found.status !== 'draft') {
         throw new Refused('item_not_draft', `item ${found.id} is ${found.status}: cancel it instead (POST /orders/${order.id}/items/${found.id}/cancel)`, [found.id])
       }
+      if (state.timeEntries.some((e) => e.order_item_id === found.id) || state.costEntries.some((e) => e.order_item_id === found.id)) {
+        throw new Refused(
+          'item_has_entries',
+          `item ${found.id} has time or cost entries: remove them or cancel it (POST /orders/${order.id}/items/${found.id}/cancel)`,
+          [found.id],
+        )
+      }
       // Its files go with it (`Lifecycle.delete_item`), each on the audit line.
       for (const attachment of state.attachments.filter((a) => a.item_id === found.id)) {
         event(order, 'attachment.removed', { attachment_id: attachment.id, item_id: found.id, filename: attachment.filename, was_delivered: found.delivered_attachment_id === attachment.id })
@@ -1038,6 +1089,7 @@ export const handlers = [
         created_by: BROWSER,
         created_at: now(),
         purpose: 'production',
+        print_request_id: printRequestId(found.id, request.headers.get('Idempotency-Key')!),
         print_run_id: newId('run'),
         copies,
         sliced_sha256: quote.sliced_sha256,

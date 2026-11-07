@@ -248,11 +248,18 @@ export function last4(secret: string): string {
   return secret.length < 12 ? '' : secret.slice(-4)
 }
 
+/**
+ * The shortest value searched for as a secret: a shorter one would match ordinary text,
+ * so redacting it would mangle output and refusing it would refuse clean files. `redact`,
+ * the upload tools' search (tools/workspaceUploads.ts) and plugins/secrets.ts use it.
+ */
+export const SECRET_MIN_CHARS = 4
+
 /** Replaces every occurrence of each secret in `text`; for error messages and logs. */
 export function redact(text: string, secrets: readonly (string | undefined)[]): string {
   let out = text
   for (const secret of secrets) {
-    if (secret && secret.length >= 4) out = out.split(secret).join('[redacted]')
+    if (secret && secret.length >= SECRET_MIN_CHARS) out = out.split(secret).join('[redacted]')
   }
   return out
 }

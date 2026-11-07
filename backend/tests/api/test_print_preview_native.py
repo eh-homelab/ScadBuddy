@@ -189,17 +189,20 @@ def _slicing(client: TestClient) -> Slicing:
     return slicing
 
 
-def _post(client: TestClient, output_id: str) -> dict[str, Any]:
+def _post(client: TestClient, output_id: str, *, fresh: bool = False) -> dict[str, Any]:
     started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
+        f"/api/v1/print/outputs/{output_id}/preview-slice",
+        json=body(),
+        headers=press(),
+        params={"fresh": "true"} if fresh else None,
     )
     assert started.status_code == 202, started.text
     op: dict[str, Any] = follow_operation(client, started.json(), timeout=60, poll=0.1)
     return op
 
 
-def start(client: TestClient, output_id: str) -> dict[str, Any]:
-    op = _post(client, output_id)
+def start(client: TestClient, output_id: str, *, fresh: bool = False) -> dict[str, Any]:
+    op = _post(client, output_id, fresh=fresh)
     assert op["status"] == "succeeded", op
     result: dict[str, Any] = op["result"]
     return result
@@ -315,6 +318,58 @@ def test_the_same_choices_answer_the_same_job(
 
     assert again["job_id"] == first["job_id"]
     assert slicer.calls == 1
+
+
+def _old_is_readable(client: TestClient, output_id: str, job_id: int) -> None:
+    """The completed slice the dialog shows: its figures and its toolpath."""
+    answer = read(client, output_id, job_id, slicer="native").json()
+    assert (answer["status"], answer["print_time_seconds"]) == ("completed", 3600), answer
+    path = f"/api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath"
+    toolpath_read = client.get(path, params={"slicer": "native"})
+    assert toolpath_read.status_code == 200, toolpath_read.text
+
+
+def test_reslice_slices_the_same_choices_again(
+    native_client: TestClient, model: str, slicer: FakeSlicer
+) -> None:
+    """#4433: the dialog's Reslice slices a completed slice's choices again, in a row of
+    its own. The completed slice stays readable while the new one runs. A plain start
+    after it answers the new slice, so a run of these choices uses the newest."""
+    output_id = prepared(native_client, model)
+    first = start(native_client, output_id)
+    assert settled(native_client, output_id, first["job_id"])["status"] == "completed"
+
+    slicer.hold = _event(native_client)
+    again = start(native_client, output_id, fresh=True)
+    read_at_once = read(native_client, output_id, again["job_id"], slicer="native").json()
+
+    assert again["job_id"] != first["job_id"]
+    assert read_at_once["status"] == "running"
+    _old_is_readable(native_client, output_id, first["job_id"])
+    _release(native_client, slicer)
+    assert settled(native_client, output_id, again["job_id"])["status"] == "completed"
+    assert slicer.calls == 2
+
+    assert start(native_client, output_id)["job_id"] == again["job_id"]
+    assert slicer.calls == 2
+
+
+def test_a_failed_reslice_leaves_the_completed_slice(
+    native_client: TestClient, model: str, slicer: FakeSlicer
+) -> None:
+    """#4433 review: a Reslice that fails leaves the completed slice as it was, its
+    figures and toolpath readable, and a plain start answers it again."""
+    output_id = prepared(native_client, model)
+    first = start(native_client, output_id)
+    assert settled(native_client, output_id, first["job_id"])["status"] == "completed"
+
+    slicer.refuse_plate = True
+    again = start(native_client, output_id, fresh=True)
+    assert settled(native_client, output_id, again["job_id"])["status"] == "failed"
+
+    _old_is_readable(native_client, output_id, first["job_id"])
+    slicer.refuse_plate = False
+    assert start(native_client, output_id)["job_id"] == first["job_id"]
 
 
 def test_progress_while_running(native_client: TestClient, model: str, slicer: FakeSlicer) -> None:

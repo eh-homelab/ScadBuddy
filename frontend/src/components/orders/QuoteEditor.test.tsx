@@ -1,13 +1,17 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client'
-import type { SliceQuoteRequest } from '../../api/types'
+import type { Quote, SliceQuoteRequest } from '../../api/types'
+import { reset, seedUnitCost } from '../../mocks/features/orders/history'
 import { printersState } from '../../mocks/features/printers'
-import { resetMockState } from '../../mocks/handlers'
+import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
-import { QuoteEditor } from './QuoteEditor'
+import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
+
+/** Long enough for a debounced price check to be sent and its answer to land. */
+const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEBOUNCE_MS))
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
@@ -169,5 +173,134 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
       'Rounding Rounded up to a whole unit$0.18',
     ])
     expect(screen.getByText(/abcdef012345/)).toBeInTheDocument()
+  })
+})
+
+// #5328, job cost spec §6.3: the quote warning, advice only, and one click to its price.
+describe('QuoteEditor · the quote warning (#5328)', () => {
+  beforeEach(() => {
+    resetMockState()
+    // 9.00 a unit over 4 jobs, failed prints the main reason; no markup, thin below 15 %.
+    setMockSettings({ ...mockSettings(), pricing_markup_percent: '0', orders_thin_margin_percent: '15' })
+    seedUnitCost('name-keychain', { jobs: 4, units: 6, unit_cost_minor: 900, estimated: false, main_reason: 'failed_prints', main_reason_minor: 250 })
+  })
+
+  function editor(quotes: Quote[] = []) {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    return renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={quotes}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ start: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+  }
+
+  it('warns on a typed price below the real cost, and one click uses the suggested price', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    await user.type(field, '8')
+    const warning = await screen.findByTestId('quote-warning')
+    expect(warning).toHaveTextContent("$8.00 a unit is below this model's real cost: $9.00 a unit over its last 4 jobs.")
+    expect(warning).toHaveTextContent('Main reason: failed prints, $2.50 a unit.')
+    // 9.00 / 0.85 = 10.588…, up to 10.59: the lowest price that is not thin.
+    await user.click(within(warning).getByRole('button', { name: 'Use $10.59' }))
+    expect(field).toHaveValue('10.59')
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    // Advice only: the quote can still be recorded.
+    expect(screen.getByRole('button', { name: 'Record only' })).toBeEnabled()
+  })
+
+  // A slice quote not yet accepted, at 6.00 a unit: below the 9.00 real cost.
+  const lowSlice = (): Quote => ({
+    id: 'q-low',
+    order_item_id: ITEM_DRAFT,
+    created_at: '2026-11-05T10:00:00Z',
+    source: 'slice',
+    accepted: false,
+    sliced_sha256: null,
+    sliced_blob_key: null,
+    plates: [],
+    lines: [],
+    unit_cost_minor: 500,
+    unit_price_minor: 600,
+    quantity: 1,
+    total_minor: 600,
+    created_by: { kind: 'browser', principal: null, session: null },
+  })
+
+  it('warns on a slice quote not yet accepted, and says nothing on a price that is not thin', async () => {
+    const { user } = editor([lowSlice()])
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '12')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+  })
+
+  it('warns about nothing while the typed price does not parse, and about the pending quote once the field is empty (#5533)', async () => {
+    const { user } = editor([lowSlice()])
+    const field = screen.getByLabelText('Price per unit (USD)')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+    await user.type(field, 'abc')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+    // The pending quote's answer does not come back while the field holds 'abc'.
+    await settled()
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    await user.clear(field)
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')
+  })
+
+  it('calls a price above the cost but under the thin threshold a thin margin, not a loss', async () => {
+    const { user } = editor()
+    // 10.00 over 9.00: a 10 % margin, under 15 %, and above the cost.
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '10')
+    const warning = await screen.findByTestId('quote-warning')
+    expect(warning).toHaveTextContent("$10.00 a unit leaves a thin margin, below 15 %, over this model's real cost: $9.00 a unit over its last 4 jobs.")
+    expect(warning).not.toHaveTextContent('is below')
+  })
+
+  it('follows the route on the thin boundary and sends it the price', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    // 9.00 / 0.85 = 10.588…: 10.58 is a 14.9 % margin, thin; 10.59 is 15.0 %, not thin.
+    await user.type(field, '10.58')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$10.58 a unit leaves a thin margin')
+    await user.clear(field)
+    await user.type(field, '10.59')
+    await waitFor(() => expect(screen.queryByTestId('quote-warning')).toBeNull())
+    // Nothing shows for 10.59 once its own answer has landed either.
+    await settled()
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+  })
+
+  it('reads the history again after a quote is recorded', async () => {
+    const { user } = editor()
+    const field = screen.getByLabelText('Price per unit (USD)')
+    await user.type(field, '8')
+    // The first read has landed: 8.00 is below its 9.00.
+    await screen.findByTestId('quote-warning')
+    await user.clear(field)
+    await user.type(field, '11')
+    // 11.00 over the 9.00 read at first is an 18 % margin: no warning.
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
+    // A job fulfilled while the editor is open: the real cost is now 12.00.
+    seedUnitCost('name-keychain', { jobs: 5, units: 7, unit_cost_minor: 1200, estimated: false, main_reason: null, main_reason_minor: null })
+    await user.click(screen.getByRole('button', { name: 'Record only' }))
+    await waitFor(() => expect(field).toHaveValue(''))
+    await user.type(field, '11')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$11.00 a unit is below this model')
+  })
+
+  it('shows nothing for a model with no history', async () => {
+    reset()
+    const { user } = editor()
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '1')
+    await settled()
+    expect(screen.queryByTestId('quote-warning')).toBeNull()
   })
 })

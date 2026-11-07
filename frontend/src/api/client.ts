@@ -37,6 +37,7 @@ import type {
   NotifyChannelInput,
   WorkspaceFile,
   WorkspaceFileList,
+  PickerSession,
   WorkspaceSettings,
   AttachmentView,
   AiSessionEdit,
@@ -55,6 +56,9 @@ import type {
   LibraryFileEntry,
   LibraryFileObjects,
   LibraryCopyResult,
+  LibraryCopyRequest,
+  LibraryCopyStarted,
+  LibraryCopyStatus,
   LibraryDeleteResult,
   LibraryFileName,
   LibraryFolder,
@@ -65,6 +69,7 @@ import type {
   LibrarySearch,
   LibraryMoveResult,
   LibraryRenameResult,
+  LibraryEntryUpdated,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -85,6 +90,7 @@ import type {
   BatchQueueProgress,
   ModelFacets,
   ModelSummary,
+  ReadmeImage,
   ModelVersion,
   Output,
   OutputPlate,
@@ -214,7 +220,13 @@ import type {
   OrderCreate,
   OrderDetail,
   OrderEstimate,
+  UnitCostHistory,
+  ProfitReport,
   OrderCosts,
+  TimeEntry,
+  TimeEntryCreate,
+  CostEntry,
+  CostEntryCreate,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -1059,7 +1071,7 @@ export const api = {
       body: JSON.stringify({ call_id: callId, answer }),
     }),
 
-  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string) =>
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string, boundHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1068,6 +1080,8 @@ export const api = {
         ...(reason ? { reason } : {}),
         // #2482: approve a parent's proposal, exactly the one shown (its hash).
         ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
+        // #4445: the printer the card named (its entry's `bound_hash`): another is refused.
+        ...(boundHash ? { bound_hash: boundHash } : {}),
       }),
     }),
 
@@ -1300,11 +1314,32 @@ export const api = {
     return command<ModelSummary>('/models', { method: 'POST', body })
   },
 
+  /**
+   * #4703 — an uploaded 3MF or STL opened as an editable mesh model
+   * (`POST /models/from-mesh/upload`); its type is its name's extension.
+   */
+  createMeshModelFromUpload: (file: File, name?: string) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (name) body.append('name', name)
+    return command<ModelSummary>('/models/from-mesh/upload', { method: 'POST', body })
+  },
+
   /** Multipart with a `file` part, like the output thumbnail PUT. */
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
     return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+  },
+
+  /**
+   * #5475 — an image into the template's `images/` folder, for its README, as one
+   * revision. The answer's `path` is what the README links: `images/<name>`.
+   */
+  addReadmeImage: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return command<ReadmeImage>(`/models/${seg(slug)}/images`, { method: 'POST', body })
   },
 
   /**
@@ -1408,9 +1443,19 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
-  deleteModel: (slug: string, force = false) =>
-    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
+  /**
+   * 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway.
+   * #5371 — `deleteInboxCopies` also trashes its outputs' copies in ScadBuddy's own library
+   * (each copy still filed under the template's folder, and the per-print copies with their
+   * slices), refused with 409 while one of their print runs is open. Never Bambuddy's inbox.
+   */
+  deleteModel: (slug: string, force = false, deleteInboxCopies = false) => {
+    const query = new URLSearchParams()
+    if (force) query.set('force', 'true')
+    if (deleteInboxCopies) query.set('delete_inbox_copies', 'true')
+    const search = query.size ? `?${query.toString()}` : ''
+    return command<unknown>(`/models/${seg(slug)}${search}`, { method: 'DELETE' }).then(() => undefined)
+  },
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
@@ -2006,10 +2051,11 @@ export const api = {
 
   /**
    * #2169 — slice the dialog's choices in the background, through the run's own path,
-   * without queueing; follow it with `getPreviewSlice`.
+   * without queueing; follow it with `getPreviewSlice`. `fresh` (#4433, the dialog's
+   * Reslice) slices again even when a finished slice of the same choices exists.
    */
-  previewSlice: (outputId: string, body: PrintRunRequest) =>
-    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+  previewSlice: (outputId: string, body: PrintRunRequest, fresh = false) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice${fresh ? '?fresh=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2276,7 +2322,7 @@ export const api = {
   unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
   orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number; statuses?: Order['status'][] } = {}) => {
-    const search = new URLSearchParams(ordersApiParams(query))
+    const search = ordersApiParams(query)
     // #5276: `status` repeated is orders of any of them, filtered by the server.
     for (const status of page.statuses ?? []) search.append('status', status)
     if (page.limit !== undefined) search.set('limit', String(page.limit))
@@ -2284,10 +2330,30 @@ export const api = {
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<OrderPage>(`/orders${suffix}`)
   },
+  /** #5329 §6.4 — the profit report by model: the orders accepted in `[from, to)`, by
+   * default the last 90 days. */
+  profitReport: (period: { from?: string; to?: string } = {}) => {
+    const search = new URLSearchParams()
+    if (period.from) search.set('from', period.from)
+    if (period.to) search.set('to', period.to)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ProfitReport>(`/orders/reports/profit${suffix}`)
+  },
   order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
   /** #4251 §6.4 — the accepted quotes beside the attempts. */
   orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
+  /** #5326 — time on the order or (with `order_item_id`) one of its items, at today's
+   * labour rate, which the entry keeps. Allowed in every order status. */
+  addTimeEntry: (orderId: string, body: TimeEntryCreate) =>
+    request<TimeEntry>(`/orders/${seg(orderId)}/time-entries`, { method: 'POST', body: JSON.stringify(body) }),
+  removeTimeEntry: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/time-entries/${seg(id)}`, { method: 'DELETE' }),
+  /** #5326 — money the job cost, in the order's currency. */
+  addCostEntry: (orderId: string, body: CostEntryCreate) =>
+    request<CostEntry>(`/orders/${seg(orderId)}/cost-entries`, { method: 'POST', body: JSON.stringify(body) }),
+  removeCostEntry: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/cost-entries/${seg(id)}`, { method: 'DELETE' }),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -2444,6 +2510,12 @@ export const api = {
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
+  /** #5328, job cost spec §6.3: the model's real cost per unit in its last fulfilled jobs,
+   * in `currency`, and whether `unitPrice` warns (`warning`, `below_cost`). Advice only. */
+  unitCostHistory: (slug: string, currency: string, unitPrice: number) =>
+    request<UnitCostHistory>(
+      `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice) })}`,
+    ),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>
@@ -2537,6 +2609,25 @@ export const api = {
       body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
     }),
 
+  /** #5355 — a copy between Bambuddy's library and ScadBuddy's own, started as a job; the same request joins a running one. */
+  startLibraryCopy: (body: LibraryCopyRequest) =>
+    request<LibraryCopyStarted>('/print/library-copies', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #5355 — a library copy's counts, whether it runs, and its files' outcomes. */
+  getLibraryCopy: (copyId: string) => request<LibraryCopyStatus>(`/print/library-copies/${seg(copyId)}`),
+
+  /** #5355 — Bambuddy's library (every file type) as a copy's source, whichever library the page serves. */
+  getBambuddyLibrary: (folderId: number | null) =>
+    request<LibraryListing>(`/print/bambuddy-library${folderId === null ? '' : `?folder_id=${folderId}`}`),
+
+  /** #4703 — uploads a file into a library folder (`null` is the top level); its name is the library name. */
+  uploadLibraryFile: (file: File, folderId: number | null) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (folderId !== null) body.append('folder_id', String(folderId))
+    return command<LibraryEntryUpdated>('/print/library/files', { method: 'POST', body })
+  },
+
   /** #2670 — a new name for a file, its extension kept. */
   renameLibraryFile: (fileId: number, filename: string) =>
     command<LibraryRenameResult>('/print/library/rename', {
@@ -2617,9 +2708,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #2169 — slice the dialog's choices for a library file in the background. */
-  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
-    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
+  /** #2169 — slice the dialog's choices for a library file in the background; `fresh` as `previewSlice`'s. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest, fresh = false) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice${fresh ? '?fresh=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2950,6 +3041,33 @@ export const api = {
    */
   getAiSessionFile: async (id: string, path: string): Promise<Blob> => {
     const response = await send(`${API_BASE}${sessionFilePath(id, path)}`)
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    return await response.blob()
+  },
+
+  /**
+   * #4703 — the workspace file picker's list: the sessions that touched `resource`, or
+   * (without one, "Advanced") every session the user may see, each with the files
+   * `accept` takes, searched by `q` (title or file name).
+   */
+  listWorkspacePicks: (query: { resource?: ResourceRef | null; accept: string; q?: string }) => {
+    const params = new URLSearchParams()
+    if (query.resource) {
+      params.set('resource_type', query.resource.type)
+      params.set('resource_id', query.resource.id)
+    }
+    params.set('accept', query.accept)
+    if (query.q) params.set('q', query.q)
+    return request<{ sessions: PickerSession[] }>(`/ai/workspace-files?${params}`)
+  },
+
+  /**
+   * #4703 — a picked workspace file's bytes, as they were at `sha256`. The agent answers
+   * 409 when the file has changed since the list was read, and 422 when it holds a saved
+   * Claude credential or a plugin secret (a header value or an OAuth token); both throw `ApiError`.
+   */
+  pickAiSessionFile: async (id: string, path: string, sha256: string): Promise<Blob> => {
+    const response = await send(`${API_BASE}${sessionFilePath(id, path)}?expected_sha256=${encodeURIComponent(sha256)}`)
     if (!response.ok) throw new ApiError(await readProblem(response))
     return await response.blob()
   },

@@ -238,6 +238,32 @@ class Order(BaseModel):
         return minor_exponent(self.currency)
 
 
+#: A profit report row's products: an item with a model ``slug``; else one with a ``sku``;
+#: else ``custom`` (a custom item with no SKU, or a request with no design yet).
+ProductKind = Literal["model", "sku", "custom"]
+
+
+class Product(BaseModel):
+    """A profit report row's key (job cost spec §6.4), and the orders list's ``product``
+    filter: ``model:<slug>``, ``sku:<sku>`` or ``custom``."""
+
+    kind: ProductKind
+    key: str | None = None
+
+    @classmethod
+    def parse(cls, value: str) -> Product:
+        """``ValueError`` for anything but the three forms."""
+        if value == "custom":
+            return cls(kind="custom")
+        kind, sep, key = value.partition(":")
+        if not sep or not key or kind not in ("model", "sku"):
+            raise ValueError("product is model:<slug>, sku:<sku> or custom")
+        return cls(kind="model" if kind == "model" else "sku", key=key)
+
+    def __str__(self) -> str:
+        return "custom" if self.kind == "custom" else f"{self.kind}:{self.key}"
+
+
 class OrderFilter(BaseModel):
     """What ``GET /orders`` narrows by (§4)."""
 
@@ -248,6 +274,13 @@ class OrderFilter(BaseModel):
     q: str | None = None
     since: datetime | None = None
     until: datetime | None = None
+    #: The profit report's row (job cost spec §6.4, #5329): orders accepted at or after
+    #: ``accepted_since`` and before ``accepted_until``, in ``currency``, with an item of
+    #: ``product``.
+    accepted_since: datetime | None = None
+    accepted_until: datetime | None = None
+    currency: str | None = None
+    product: Product | None = None
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -439,6 +472,68 @@ class Shipment(BaseModel):
     notes: str
     created_at: datetime
     items: list[ShipmentItem]
+
+
+# -- time and cost entries (job cost spec 2026-11-05 §4.3, §4.4, #5326) ----------------
+
+#: What a time entry was spent on.
+TimeKind = Literal["design", "setup", "post_processing", "packing", "other"]
+#: What a cost entry paid for. Shipping is a shipment's `cost_minor`, never an entry.
+CostKind = Literal["assistant", "payment_fee", "material", "other"]
+#: The longest time entry, in minutes (about two years): a typo, never a real entry.
+MAX_ENTRY_MINUTES = 1_000_000
+#: The largest cost entry: `order_cost_entries.amount_minor` is a `bigint`.
+MAX_ENTRY_MINOR = 2**63 - 1
+#: An entry's ``source``: ``<writer>:<id>``.
+ENTRY_SOURCE = r"^[a-z_]+:\S{1,200}$"
+
+
+class TimeEntryInput(BaseModel):
+    """Time spent on the order (``order_item_id`` None) or one of its items."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_item_id: str | None = None
+    kind: TimeKind
+    minutes: int = Field(ge=1, le=MAX_ENTRY_MINUTES)
+    note: str = Field(default="", max_length=1000)
+    #: When the timer started, when a timer wrote it.
+    started_at: datetime | None = None
+    #: What wrote it (``timer:<item or order>:<started_at>``, ``manual:<uuid>``): one entry
+    #: per order and source, whatever its kind, so a retry whose first reply was lost
+    #: writes once.
+    source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
+
+
+class TimeEntry(TimeEntryInput):
+    id: str
+    order_id: str
+    #: The labour rate in force when it was written, in the order's minor units per hour;
+    #: None when the order's currency is not the shop's, so no rate could be copied.
+    rate_minor_per_hour: Money | None
+    created_by: Actor
+    created_at: datetime
+
+
+class CostEntryInput(BaseModel):
+    """Money spent on the order or one of its items, in the order's currency."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_item_id: str | None = None
+    kind: CostKind
+    amount_minor: Money = Field(ge=1, le=MAX_ENTRY_MINOR)
+    note: str = Field(default="", max_length=1000)
+    #: What wrote it (``ai_session:<id>``, ``payment:<id>``, a form's ``manual:<uuid>``):
+    #: one entry per order, kind and source, so a writer that runs twice writes once.
+    source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
+
+
+class CostEntry(CostEntryInput):
+    id: str
+    order_id: str
+    created_by: Actor
+    created_at: datetime
 
 
 # -- attachments (§6.2, #4251) ----------------------------------------------------------

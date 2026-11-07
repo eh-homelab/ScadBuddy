@@ -386,7 +386,8 @@ sequenceDiagram
   the row still names that replica, so a reconnect to another replica that overtakes the
   old socket keeps the newer owner. A replica drops its own rows at start (a container
   restart keeps its identity). A replica claims tabs only while its host worker serves
-  `bridge.tab`. Every 30 s (`OWNER_REFRESH_MS`) it refreshes the rows of the tabs it holds
+  `bridge.tab`, and only with the KEK (#4949): without it, it could not open the sealed
+  calls that other replicas send it, so its tabs are reached only by calls made on it. Every 30 s (`OWNER_REFRESH_MS`) it refreshes the rows of the tabs it holds
   and makes a missing one again: a claim lost while the database was down, or a row that
   a missed call dropped. It never takes back a row that names another replica.
 - **One replica runs a call:** the activity is scheduled on the owner's queue only, with
@@ -420,7 +421,14 @@ sequenceDiagram
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
-  tab's route and live tools.
+  tab's route and live tools, but waits at most 6 s for the answer (`STATUS_PROBE_MS`,
+  #4950), as does the check behind a chat attach: past it the tab reads "not connected".
+  Those 6 s are the ack (3 s) plus the status activity's start-to-close (3 s), with none of
+  the workflow's slack: a probe made while a rollout fails the first workflow task reads
+  "not connected" at once, and does not wait for the task to run again (#5421).
+  A workflow that ends on its own execution timeout is logged as one ("timed out as a
+  workflow (rollout?)"), apart from an owner's failure: its 15 s of slack covers about one
+  failed workflow task during a rolling deploy.
 - **The Postgres relay is gone (#4868):** the relay of #1916 (rows in
   `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`) ran beside this path for one release
   of #4780. No replica of this build sends or answers it. While a replica of the build before

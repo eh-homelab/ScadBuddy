@@ -48,12 +48,18 @@ COPY = 41
 CREATED = "2026-10-10T23:40:00.123456"
 
 
-def start_slice(client: TestClient, output_id: str, json: dict[str, Any]) -> dict[str, Any]:
+def start_slice(
+    client: TestClient, output_id: str, json: dict[str, Any], *, fresh: bool = False
+) -> dict[str, Any]:
     """Start the background slice and follow it: the route answers 202 with the running
     operation as soon as it is recorded, never after the slice (#2462), which used to
-    hold every start for the whole 10 s command deadline."""
+    hold every start for the whole 10 s command deadline. ``fresh`` is the dialog's
+    Reslice (#4433)."""
     started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=json, headers=press()
+        f"/api/v1/print/outputs/{output_id}/preview-slice",
+        json=json,
+        headers=press(),
+        params={"fresh": "true"} if fresh else None,
     )
     assert started.status_code == 202, started.text
     op: dict[str, Any] = started.json()
@@ -142,6 +148,40 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
     assert response.status_code == 200, response.text
     # The run queued the background slice: nothing was sliced again.
     assert sliced.call_count == 1
+    assert json.loads(queued.calls.last.request.content)["library_file_id"] == SLICED
+
+
+@respx.mock
+def test_reslice_slices_again_where_a_finished_slice_would_answer(
+    client: TestClient, model: str
+) -> None:
+    """#4433: the dialog's Reslice asks for a fresh slice. A second start of the same
+    choices reuses the finished slice; a fresh one slices again, and a run of the same
+    choices then queues a finished slice without slicing a third time."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = Job().routes()
+    sliced_routes()
+    queued = queue_route()
+
+    start_slice(client, output_id, body())
+    start_slice(client, output_id, body())
+    assert sliced.call_count == 1
+
+    started = start_slice(client, output_id, body(), fresh=True)
+
+    assert started["job_id"] == 9
+    assert sliced.call_count == 2
+    assert not queued.called
+    read = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
+    assert read.status_code == 200, read.text
+    assert read.json()["status"] == "completed"
+
+    response = run_print(client, output_id, json=body())
+
+    assert response.status_code == 200, response.text
+    assert sliced.call_count == 2
     assert json.loads(queued.calls.last.request.content)["library_file_id"] == SLICED
 
 

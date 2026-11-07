@@ -1,4 +1,4 @@
-import { expect, test, type FrameLocator, type Page } from '@playwright/test'
+import { expect, test, type Download, type FrameLocator, type Page } from '@playwright/test'
 import { bambuddyFrame } from './bambuddyFrame'
 
 /**
@@ -27,10 +27,14 @@ test.describe('downloads', () => {
     const frame = await framed(page, baseURL)
     await generate(frame)
 
-    const popup = page.context().waitForEvent('page')
+    // The popup's download listener is attached in the `page` handler itself. Awaiting
+    // the popup first and then calling `waitForEvent` loses a race: with a fast fetch
+    // the download starts about 40 ms after the popup opens, before the test's next
+    // call reaches the browser, and then the popup closes with no listener (#5329, CI
+    // trace of 58f6c54).
+    const download = new Promise<Download>((resolve) => page.context().once('page', (popup) => popup.once('download', resolve)))
     await frame.getByRole('button', { name: 'Download 3MF' }).click()
-    const download = await (await popup).waitForEvent('download')
-    expect(download.suggestedFilename()).toMatch(/^name-keychain-[0-9a-f]+\.3mf$/)
+    expect((await download).suggestedFilename()).toMatch(/^name-keychain-[0-9a-f]+\.3mf$/)
   })
 
   test('says to allow pop-ups when the frame’s popup is blocked', async ({ page, baseURL }) => {

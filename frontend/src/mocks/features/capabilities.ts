@@ -110,6 +110,7 @@ const HTTP_NOTE = 'read for GET and HEAD, outward (asks first) for anything else
 
 /** The tools that take a loading (#838), and which of the mock's tools are base by default (the agent's `UPFRONT_TOOLS`). */
 const LOADING_SOURCES = new Set(['builtin:scadbuddy', 'builtin:browser'])
+// The mock's tools named in agent/src/harness/toolSearch.ts `UPFRONT_TOOLS` (copied: change both).
 const UPFRONT = new Set(['list_models', 'get_model', 'render_model'])
 
 const state = {

@@ -50,6 +50,18 @@ def test_the_order_read_lists_each_items_revisions(client: TestClient) -> None:
     assert [r["number"] for r in detail["items"][0]["revisions"]] == [1, 2]
 
 
+def test_a_sent_revisions_file_keeps_its_role(client: TestClient) -> None:
+    order, item = a_request(client)
+    base = f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions"
+    rev = client.post(base, json={"reference": a_reference(client)}).json()
+    a_render(client, base, rev["id"])
+    [render] = client.get(f"/api/v1/orders/{order['id']}").json()["attachments"]
+    patch = f"/api/v1/orders/{order['id']}/attachments/{render['id']}"
+    assert client.patch(patch, json={"role": "test_print"}).status_code == 422
+    assert client.post(f"{base}/{rev['id']}/send").status_code == 200
+    problem(client.patch(patch, json={"caption": "late"}), "revision_sent")
+
+
 def test_send_and_answer_are_refused_in_order(client: TestClient) -> None:
     order, item = a_request(client)
     base = f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions"

@@ -15,6 +15,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
 
 /**
  * How often a delete refused for a render in progress is sent again, and for how long
@@ -27,10 +29,20 @@ export const DELETE_WAIT_LIMIT_MS = 5 * 60_000
 interface Props {
   slug: string
   name: string
+  /**
+   * #5422 — whether Settings' `library_backend` is ScadBuddy's own library, the only one
+   * `delete_inbox_copies` acts on. False (or not yet known) leaves the choice out.
+   */
+  nativeLibrary: boolean
+  /**
+   * #5431 — the settings read failed, so `nativeLibrary` is not known. The dialog says why
+   * the inbox-copies choice is missing.
+   */
+  settingsFailed: boolean
 }
 
 /** Deletes the model after a confirm, then goes back to the catalogue, which refetches on mount. */
-export function DeleteModelButton({ slug, name }: Props) {
+export function DeleteModelButton({ slug, name, nativeLibrary, settingsFailed }: Props) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -38,6 +50,10 @@ export function DeleteModelButton({ slug, name }: Props) {
   // Set when the server refused because these duplicates track the model; the confirm
   // then deletes anyway, leaving them with an upstream that is gone.
   const [duplicates, setDuplicates] = useState<string[] | null>(null)
+  // #5371 — the output delete's choice: also trash the outputs' copies in ScadBuddy's own
+  // library. Offered on that library only (#5422); Bambuddy's inbox is never touched by a
+  // model delete.
+  const [alsoInbox, setAlsoInbox] = useState(false)
   // Set while a delete refused for a render in progress waits to be sent again; Cancel
   // (or leaving the page) stops it.
   const [waiting, setWaiting] = useState(false)
@@ -63,6 +79,7 @@ export function DeleteModelButton({ slug, name }: Props) {
     setSending(false)
     setError(null)
     setDuplicates(null)
+    setAlsoInbox(false)
   }
 
   async function confirm() {
@@ -74,7 +91,7 @@ export function DeleteModelButton({ slug, name }: Props) {
     for (;;) {
       setSending(true)
       try {
-        await api.deleteModel(slug, force)
+        await api.deleteModel(slug, force, nativeLibrary && alsoInbox)
         if (mine === attempt.current) navigate('/', { replace: true })
         return
       } catch (caught) {
@@ -97,6 +114,7 @@ export function DeleteModelButton({ slug, name }: Props) {
     }
   }
 
+  const alsoId = `also-inbox-${slug}`
   return (
     <>
       <Button
@@ -117,6 +135,32 @@ export function DeleteModelButton({ slug, name }: Props) {
               stay in the history.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {nativeLibrary && (
+            <div className="flex flex-col gap-2 text-sm">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id={alsoId}
+                  checked={alsoInbox}
+                  disabled={deleting}
+                  onCheckedChange={(next) => setAlsoInbox(next === true)}
+                />
+                <Label htmlFor={alsoId} className="font-normal">
+                  Also delete the inbox copies in ScadBuddy&apos;s library
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Each output&apos;s copy still in this template&apos;s folder goes to the trash, with its per-print
+                copies and their sliced files. Copies in Bambuddy&apos;s inbox are never deleted from here; delete an
+                output on its own for those.
+              </p>
+            </div>
+          )}
+          {!nativeLibrary && settingsFailed && (
+            <p className="text-xs text-muted-foreground">
+              The settings did not load, so the choice to also delete the inbox copies in ScadBuddy&apos;s library is
+              not offered.
+            </p>
+          )}
           {duplicates && (
             <div role="alert" className="text-sm text-destructive">
               <p>

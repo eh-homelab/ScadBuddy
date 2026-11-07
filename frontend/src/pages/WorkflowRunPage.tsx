@@ -265,6 +265,8 @@ function PendingCard({ entry, runId, step, respond }: CardProps) {
       <CardContent>
         <p className="mb-2 text-[13px] font-medium">{waitingText(entry)}</p>
         {step && <StepLine step={step} />}
+        {/* #4445: what the call does, read from ScadBuddy's own records (a print's printer). */}
+        {entry.summary && <p className="mb-2 text-[12.5px]">{entry.summary}</p>}
         {entry.kind === 'answer' ? (
           <form
             onSubmit={(event) => {
@@ -298,7 +300,9 @@ function PendingCard({ entry, runId, step, respond }: CardProps) {
               <Button
                 size="sm"
                 disabled={busy}
-                onClick={() => void act(() => api.decideFlowRun(runId, entry.call_id, true, text || undefined))}
+                onClick={() =>
+                  void act(() => api.decideFlowRun(runId, entry.call_id, true, text || undefined, undefined, entry.bound_hash ?? undefined))
+                }
               >
                 Approve
               </Button>

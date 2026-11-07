@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import type { PrintRunRequest } from '../../api/types'
 import { resetMockState } from '../handlers'
+import { startedFresh } from './printPreview'
 import { server } from '../server'
 
 beforeEach(() => resetMockState())
@@ -28,6 +29,16 @@ describe('preview-slice mock (#2824)', () => {
       // Only this test's: another listener on the shared server stays (#3457).
       server.events.removeListener('response:mocked', listener)
     }
+  })
+
+  it('records a Reslice start as fresh (#4433)', async () => {
+    const plain = await api.previewSlice('out-1', {} as PrintRunRequest)
+    const fresh = await api.previewSlice('out-1', {} as PrintRunRequest, true)
+    const library = await api.previewLibrarySlice(7, {} as PrintRunRequest, true)
+
+    expect(startedFresh(plain.job_id)).toBe(false)
+    expect(startedFresh(fresh.job_id)).toBe(true)
+    expect(startedFresh(library.job_id)).toBe(true)
   })
 
   it('answers 404 for an operation it never recorded', async () => {

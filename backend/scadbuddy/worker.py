@@ -34,7 +34,12 @@ from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
-from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
+from scadbuddy.auth.service_credentials import (
+    ExchangeReader,
+    ServiceAuth,
+    ServiceCredentialConfigError,
+    token_source,
+)
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -62,9 +67,12 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.crud.client import CrudClient, wait_for_areas
+from scadbuddy.crud.operations import RemoteOperationStore
+from scadbuddy.crud.projects import RemoteFlowStore
+from scadbuddy.crud.render import RemoteRenderSettingsSource
 from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.operations import flow_kinds
-from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
@@ -79,8 +87,8 @@ from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import (
+    RenderStoreSettings,
     SettingsStore,
-    load_render_store_settings,
     settings_kek,
 )
 from scadbuddy.operations.store import OperationStore
@@ -107,7 +115,7 @@ from scadbuddy.spools.providers import SettingsOnly, discover_providers
 from scadbuddy.spools.spool_providers import native_use_hook
 from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.store.geometry import GeometryIndex
@@ -179,10 +187,11 @@ ROUTED_WAIT = 60.0
 ROUTED_POLL = 0.5
 
 
-def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Awaitable[int]]:
-    """The Settings page's per-job colour slots, through the `render_settings` view on
+def stored_solid_concurrency(source: StoreSettingsSource) -> Callable[[], Awaitable[int]]:
+    """The Settings page's per-job colour slots, through the store settings on
     ``source``'s TTL: a worker holds no settings store, so this is how the live setting
-    reaches it (#601). ``deps.config`` is the one read at start."""
+    reaches it (#601; the API's CRUD route on a render worker, #5298). ``deps.config`` is
+    the one read at start."""
 
     async def current() -> int:
         return (await source.current()).solid_concurrency
@@ -198,10 +207,15 @@ def worker_metrics(settings: Settings, role: MetricsRole) -> Metrics:
 
 
 def build_worker_deps(
-    settings: Settings, *, stopping: Callable[[], bool] = lambda: False
+    settings: Settings,
+    source: StoreSettingsSource,
+    current: RenderStoreSettings,
+    *,
+    metrics: Metrics | None = None,
+    stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
-    """``stopping`` ends the wait for the API's schema and grants
-    (`WorkerStoppedError`)."""
+    """``current`` is ``source``'s first read, which the store is built from.
+    ``stopping`` ends the wait for the API's schema and grants (`WorkerStoppedError`)."""
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
     paths = DataPaths(root=settings.data_dir)
@@ -215,7 +229,7 @@ def build_worker_deps(
         except OSError:
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
-    metrics = worker_metrics(settings, "render")
+    metrics = metrics or worker_metrics(settings, "render")
     # The projection's job events go out on the API's bus: `publish_in` writes and
     # NOTIFYs in the row's transaction, so the listener is never started here.
     events = PgNotifyEventBus(
@@ -244,9 +258,6 @@ def build_worker_deps(
     )
     try:
         wait_until_ready(projection.pool, stopping=stopping)
-        source = RenderSettingsSource(projection.pool, settings)
-        current = load_render_store_settings(projection.pool, settings)
-        source.seed(current)
         backend = current.store_backend
         store = build_store(
             backend=backend,
@@ -1029,6 +1040,34 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
     return asyncio.create_task(_housekeep_periodically(deps, interval))
 
 
+#: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
+RENDER_CRUD_AREAS = frozenset({"settings"})
+
+
+def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
+    """The render worker's client of the API's CRUD routes, with its service credential,
+    which it exchanges for its proof (#5494). The exchange is its only source: it has no
+    view to fall back to, and holds no KEK."""
+    if settings.api_internal_url is None:
+        raise ApiUrlMissingError(
+            "SCADBUDDY_API_INTERNAL_URL is required for the render worker: it reads the"
+            " store settings through the API's CRUD routes (#5298), e.g."
+            " http://scadbuddy:8082"
+        )
+    proof: Literal["k8s", "bootstrap"]
+    if settings.service_token_file is not None:
+        proof_file, proof = settings.service_token_file, "k8s"
+    elif settings.service_bootstrap_file is not None:
+        proof_file, proof = settings.service_bootstrap_file, "bootstrap"
+    else:
+        raise ServiceCredentialConfigError(
+            "SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE is required for"
+            " the render worker: it exchanges that proof for its service credential (#5494)"
+        )
+    credential = ServiceAuth(ExchangeReader("render", settings.api_internal_url, proof_file, proof))
+    return CrudClient(settings.api_internal_url, "render", credential, metrics=metrics)
+
+
 async def run_worker(
     settings: Settings,
     *,
@@ -1036,16 +1075,60 @@ async def run_worker(
     stop_now: asyncio.Event | None = None,
     health_port: HealthListen | None = HEALTH_PORT,
     client: Client | None = None,
+    crud: CrudClient | None = None,
 ) -> None:
+    """``crud``, the client of the API's CRUD routes, defaults to `render_crud`'s; the
+    worker closes it when it ends."""
     stop = stop or asyncio.Event()
-    # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
-    # the rest opens the projection's pool, waits for the API's schema and grants
-    # (#601), and reads the store settings. A stop meanwhile ends the wait.
+    metrics = worker_metrics(settings, "render")
+    crud = crud or render_crud(settings, metrics)
     try:
-        deps, store = await asyncio.to_thread(build_worker_deps, settings, stopping=stop.is_set)
-    except WorkerStoppedError:
-        logger.info("stopped before the database was ready for this worker")
-        return
+        # During a roll the API pod may be older than this worker: read the store
+        # settings only once it serves every area the worker calls.
+        if not await wait_for_areas(crud, "render", RENDER_CRUD_AREAS, stop):
+            logger.info("stopped before the API served this worker's CRUD areas")
+            return
+        source = RemoteRenderSettingsSource(crud)
+        reading = asyncio.create_task(source.current())
+        stopping = asyncio.create_task(stop.wait())
+        await asyncio.wait({reading, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        if not reading.done():
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+            logger.info("stopped before the API answered this worker's store settings")
+            return
+        current = reading.result()
+        # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
+        # the rest opens the projection's pool and waits for the API's schema and grants
+        # (#601). A stop meanwhile ends the wait.
+        try:
+            deps, store = await asyncio.to_thread(
+                build_worker_deps,
+                settings,
+                source,
+                current,
+                metrics=metrics,
+                stopping=stop.is_set,
+            )
+        except WorkerStoppedError:
+            logger.info("stopped before the database was ready for this worker")
+            return
+        await _serve_render(settings, deps, store, stop, stop_now, health_port, client)
+    finally:
+        await crud.aclose()
+
+
+async def _serve_render(
+    settings: Settings,
+    deps: WorkerDeps,
+    store: StoreBundle,
+    stop: asyncio.Event,
+    stop_now: asyncio.Event | None,
+    health_port: HealthListen | None,
+    client: Client | None,
+) -> None:
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
@@ -1153,10 +1236,11 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     pool = settings_store.pool
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
-    # #4975 phase 4: the print worker's service credential on the internal routes, read
-    # from its own view and unsealed with the KEK (none without one).
+    # #4975 phase 4: the print worker's service credential on the internal routes:
+    # exchanged for its proof when one is configured (#5494), else read from its own view
+    # and unsealed with the KEK (none without one).
     credential = ServiceAuth(
-        TokenReader("print", settings.database_url, settings_kek(settings.secret_key_file))
+        token_source("print", settings, settings_kek(settings.secret_key_file))
     )
     outputs = RemoteOutputs(
         settings.api_internal_url,
@@ -1382,6 +1466,10 @@ class ProjectsKeyMissingError(ValueError):
     pass
 
 
+#: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
+PROJECTS_CRUD_AREAS = frozenset({"flows", "operations"})
+
+
 async def run_projects_worker(
     settings: Settings,
     *,
@@ -1409,23 +1497,26 @@ async def run_projects_worker(
             " http://scadbuddy:8080"
         )
     metrics = worker_metrics(settings, "projects")
-    events = PgNotifyEventBus(
-        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
-    )
-    settings_store = SettingsStore(settings, events=events)
+    # #5298: no event bus. The API makes every write that announces, and the event
+    # commits there.
+    settings_store = SettingsStore(settings)
     # #5210: on a role of its own, wait for the API's migrations and grants.
     await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
+    crud: CrudClient | None = None
+    routes: FlowRoutes | None = None
     try:
-        await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
-        # #4975 phase 4: the projects worker's service credential on the API's routes.
+        # #4975 phase 4: the projects worker's service credential on the API's routes,
+        # exchanged for its proof when one is configured (#5494).
         credential = ServiceAuth(
-            TokenReader("projects", settings.database_url, settings_kek(settings.secret_key_file))
+            token_source("projects", settings, settings_kek(settings.secret_key_file))
         )
         client = await connect_flows(
             settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
         )
-        store = FlowStore(settings_store.pool, events=events)
+        # #5298: flow runs, decisions, grants and operations through the API's CRUD routes.
+        crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
+        store = RemoteFlowStore(crud)
         queue = settings.temporal_task_queue_projects
         kinds = {
             kind.name: kind
@@ -1436,13 +1527,11 @@ async def run_projects_worker(
                 api=lambda: api_client(settings.api_internal_url, credential),
             )
         }
-        # This worker ends its kinds' records, so it counts them (#2295).
+        # The API ends its kinds' records and counts them (#2295, #5298). Its series are
+        # still made here at zero: the dashboard's library panels leave out the kinds
+        # that a print or projects job has (`deploy/grafana/scadbuddy-renders.json`).
         metrics.operation_kinds(kinds)
-        decisions = operation_activities(
-            OperationStore(settings_store.pool, events=events, metrics=metrics),
-            settings_store,
-            kinds,
-        )
+        decisions = operation_activities(RemoteOperationStore(crud, "projects"), None, kinds)
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)
         grants = FlowGrants(store, api, approval_key(settings))
@@ -1461,24 +1550,29 @@ async def run_projects_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            async with LoopWatch(metrics):
-                await _serve_versioned(
-                    client,
-                    [worker],
-                    stop,
-                    build_id=build_id,
-                    deployment_name=PROJECTS_DEPLOYMENT_NAME,
-                    task_queue=queue,
-                    drain_timeout=None,
-                    ready=(queue, routed),
-                )
+            # During a roll the API pod may be older than this worker: poll Temporal only
+            # once it serves every area the worker calls.
+            if await wait_for_areas(crud, "projects", PROJECTS_CRUD_AREAS, stop):
+                async with LoopWatch(metrics):
+                    await _serve_versioned(
+                        client,
+                        [worker],
+                        stop,
+                        build_id=build_id,
+                        deployment_name=PROJECTS_DEPLOYMENT_NAME,
+                        task_queue=queue,
+                        drain_timeout=None,
+                        ready=(queue, routed),
+                    )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
                 await serving
-            await routes.aclose()
     finally:
-        await events.aclose()
+        if routes is not None:
+            await routes.aclose()
+        if crud is not None:
+            await crud.aclose()
         await asyncio.to_thread(settings_store.close)
 
 

@@ -5,9 +5,12 @@ import hashlib
 import itertools
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 from google.protobuf.message import Message
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio import activity
@@ -15,6 +18,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.models import TERMINAL, Run, StoredDefinition
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_tools import FLOW_TOOL_TIER
@@ -86,10 +90,19 @@ async def define(store: FlowStore, name: str) -> StoredDefinition:
 
 
 class Flows:
-    def __init__(self, client: Client, queue: str, store: FlowStore) -> None:
+    def __init__(
+        self,
+        client: Client,
+        queue: str,
+        store: FlowStore,
+        remote: RemoteFlowStore | None = None,
+    ) -> None:
         self.client = client
         self.queue = queue
         self.store = store
+        #: The projects worker's store: the CRUD routes over `store`'s schema (#5298),
+        #: when the fixture serves them; `store` otherwise.
+        self.remote: FlowStore | RemoteFlowStore = store if remote is None else remote
         #: Workers a test started beside the fixture's, shut down after it.
         self.cleanup: list[tuple[Any, Any]] = []
 
@@ -158,6 +171,27 @@ class Flows:
                 return run
             await asyncio.sleep(0.1)
         raise AssertionError("the execution did not complete (Ruling 8)")
+
+
+async def backdate(
+    pool: ConnectionPool[Connection[DictRow]],
+    column: Literal["workflow_runs.updated_at", "flow_grants.created_at"],
+    *ids: str,
+) -> None:
+    """Move the rows' time an hour back (#5502): a sweep with a zero margin then picks
+    them even when Postgres's wall clock jumps back after the write (WSL2 does). `pool`
+    is the one the store uses (`JobProjection.pool`, the `jobs` fixture's, #5507)."""
+    table, field = column.split(".")
+    key = "id" if table == "workflow_runs" else "run_id"
+
+    def update() -> None:
+        with pool.connection() as conn:
+            conn.execute(
+                f"UPDATE {table} SET {field} = now() - interval '1 hour' WHERE {key} = ANY(%s)",
+                (list(ids),),
+            )
+
+    await asyncio.to_thread(update)
 
 
 def script(*body: str) -> str:

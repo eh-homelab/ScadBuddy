@@ -13,7 +13,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 from temporalio import activity
@@ -21,6 +21,7 @@ from temporalio import activity
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import (
     CHECK_ON_BAMBUDDY,
@@ -42,6 +43,9 @@ from scadbuddy.workflows.operation_models import (
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 
+if TYPE_CHECKING:
+    from scadbuddy.crud.operations import RemoteOperationStore
+
 #: Below the check activity's 8 s start-to-close (`workflows/operation.py` CHECK_TIMEOUT).
 #: It stops the wait, not the work: a check's ``asyncio.to_thread`` (the settings, the
 #: output, ``output_stem``'s reads) runs on after the 504, and each re-send may start
@@ -51,13 +55,21 @@ CHECK_BUDGET_SECONDS = 6.0
 
 
 def operation_activities(
-    store: OperationStore, settings_store: SettingsStore, kinds: Mapping[str, OperationKind]
+    store: OperationStore | RemoteOperationStore,
+    settings_store: SettingsStore | None,
+    kinds: Mapping[str, OperationKind],
 ) -> list[Callable[..., Any]]:
+    """``settings_store`` is None with a `RemoteOperationStore`: the API prunes past its
+    own retention setting (#5298)."""
+
     @activity.defn(name=INSERT_ACTIVITY)
     async def insert(input: InsertOp) -> Operation:
         info = activity.info()
         assert info.workflow_id is not None and info.workflow_run_id is not None
-        retention = (await asyncio.to_thread(settings_store.load)).operation_retention_seconds
+        retention = None
+        if settings_store is not None:
+            seconds = (await asyncio.to_thread(settings_store.load)).operation_retention_seconds
+            retention = timedelta(seconds=seconds) if seconds is not None else None
         op = input.input
         return await store.insert(
             uuid.uuid4().hex,
@@ -67,7 +79,7 @@ def operation_activities(
             request=op.request,
             workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id,
-            retention=timedelta(seconds=retention) if retention is not None else None,
+            retention=retention,
             idempotency_key=op.idempotency_key,
             author=op.author,
             person=op.person,
@@ -186,6 +198,10 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
         except ApiError as error:
             again = kind.run_attempts > 1 and is_transient(error)
             raise raised_as(error, FAILED, non_retryable=not again) from None
+        except CrudRefusedError as refused:
+            # The API's 4xx through a CRUD route (#5298): the same answer every time.
+            final = ApiError(refused.status, str(refused.problem.get("detail", refused)))
+            raise raised_as(final, FAILED, non_retryable=True) from None
         finally:
             OPERATION_RUN.reset(operation)
 

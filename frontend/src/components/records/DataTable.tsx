@@ -19,6 +19,8 @@ export interface Column<Row> {
   /** Classes on the cell, beside `CELL`; per row when a function. */
   className?: string | ((row: Row) => string)
   headerClassName?: string
+  /** The header's `aria-sort`, when the page sorts the rows by this column. */
+  sort?: 'ascending' | 'descending' | 'none'
 }
 
 export interface DataTableProps<Row> {
@@ -37,9 +39,11 @@ export interface DataTableProps<Row> {
   empty?: ReactNode
   /** Rows under the body, such as an entry row (#4954): `<tr>`s, in a `<tfoot>`. */
   footer?: ReactNode
+  /** Classes on a row, such as a tint for its state (#5327). */
+  rowClassName?: (row: Row) => string
 }
 
-export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer }: DataTableProps<Row>) {
+export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer, rowClassName }: DataTableProps<Row>) {
   if (rows.length === 0 && empty !== undefined && !footer) {
     return (
       <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">{empty}</p>
@@ -52,7 +56,7 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
           <thead className="bg-muted/50 text-xs text-muted-foreground">
             <tr>
               {columns.map((column) => (
-                <th key={column.key} className={`${HEAD} ${column.headerClassName ?? ''}`.trim()}>
+                <th key={column.key} aria-sort={column.sort} className={`${HEAD} ${column.headerClassName ?? ''}`.trim()}>
                   {column.header}
                 </th>
               ))}
@@ -69,7 +73,7 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
                   id={rowId?.(row)}
                   data-testid={rowTestId?.(row)}
                   aria-current={current ? 'true' : undefined}
-                  className={current ? `${ROW} bg-muted/60` : ROW}
+                  className={`${current ? `${ROW} bg-muted/60` : ROW} ${rowClassName?.(row) ?? ''}`.trim()}
                 >
                   {columns.map((column) => {
                     const extra = typeof column.className === 'function' ? column.className(row) : column.className

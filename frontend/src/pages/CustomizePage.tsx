@@ -1384,7 +1384,12 @@ export function CustomizePage() {
                 // the record reloads.
                 onSaved={modelState.setData}
               />
-              <DeleteModelButton slug={slug} name={displayName} />
+              <DeleteModelButton
+                slug={slug}
+                name={displayName}
+                nativeLibrary={settings?.library_backend === 'native'}
+                settingsFailed={settingsRead.error !== undefined}
+              />
             </>
           )}
         </div>

@@ -8,7 +8,7 @@ from typing import Protocol, runtime_checkable
 
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
-from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
+from scadbuddy.store.bambuddy import BambuddyContentBackend, StoreSettingsSource
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.index import Pool
 from scadbuddy.store.s3 import S3ContentBackend
@@ -32,7 +32,7 @@ class UnrecordedSweeper(Protocol):
 
 
 def build_backend(
-    backend: StoreBackend, current: RenderStoreSettings, source: RenderSettingsSource, pool: Pool
+    backend: StoreBackend, current: RenderStoreSettings, source: StoreSettingsSource, pool: Pool
 ) -> RemoteBackend:
     """``backend`` by name, not ``current.store_backend``: a migration builds its target
     while the stored backend still names the old one."""

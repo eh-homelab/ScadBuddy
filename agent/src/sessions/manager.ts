@@ -560,6 +560,25 @@ export type ListFilter = {
    * leaves them out), the only ones listed (`only`, the archive view), or both (`include`).
    */
   archived?: 'exclude' | 'only' | 'include'
+  /**
+   * #4703 — only sessions whose title, or the path of a file in whose workspace, holds this
+   * text, ignoring case (the workspace file picker's search). Matched before `limit`, so an
+   * older match is found.
+   */
+  search?: string
+  /**
+   * #4703 — the file kinds a target takes, as a file input's `accept` checked by
+   * routes/workspacePicker.ts (`.ext`, `type/subtype`, `type/*`, lowercase). It narrows
+   * `search`'s path match and `withFile` to those files. Empty or left out: any file.
+   */
+  accept?: readonly string[]
+  /** #4703 — only sessions whose workspace holds a file `accept` takes. Matched before `limit`. */
+  withFile?: boolean
+}
+
+/** `text` as a literal part of an ILIKE pattern: its `%`, `_` and backslash match themselves. */
+export function likeLiteral(text: string): string {
+  return text.replace(/[\\%_]/g, (c) => `\\${c}`)
 }
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
@@ -890,6 +909,31 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
     }
     where.push(`EXISTS (SELECT 1 FROM ai_session_resources r WHERE r.session_id = ai_sessions.id AND ${match})`)
   }
+  // A file of the session that `accept` takes: by its primary key's prefix (`workspace`,
+  // ai_session_files), then its extension or media type, as workspacePicker.ts `accepts`.
+  // Its parameters only when a filter below uses them: an unused one has no type to infer.
+  const accepted: string[] = []
+  for (const entry of filter.search || filter.withFile ? (filter.accept ?? []) : []) {
+    if (entry.startsWith('.')) {
+      params.push(`%${likeLiteral(entry)}`)
+      accepted.push(`lower(f.path) LIKE $${params.length}`)
+    } else if (entry.endsWith('/*')) {
+      params.push(`${likeLiteral(entry.slice(0, -1))}%`)
+      accepted.push(`lower(f.media_type) LIKE $${params.length}`)
+    } else {
+      params.push(entry)
+      accepted.push(`lower(f.media_type) = $${params.length}`)
+    }
+  }
+  const fileWhere = (extra: string) =>
+    `EXISTS (SELECT 1 FROM ai_session_files f WHERE f.workspace = 'session:' || ai_sessions.id::text` +
+    `${accepted.length ? ` AND (${accepted.join(' OR ')})` : ''}${extra})`
+  if (filter.search) {
+    params.push(`%${likeLiteral(filter.search)}%`)
+    const n = params.length
+    where.push(`(title ILIKE $${n} OR ${fileWhere(` AND f.path ILIKE $${n}`)})`)
+  }
+  if (filter.withFile) where.push(fileWhere(''))
   params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
   const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY updated_at DESC LIMIT $${params.length}`

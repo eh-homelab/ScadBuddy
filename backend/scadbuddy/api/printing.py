@@ -156,7 +156,12 @@ from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.slicing.component import SlicingDep
-from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
+from scadbuddy.slicing.preview import (
+    FreshQuery,
+    SlicerQuery,
+    read_native_preview,
+    read_native_toolpath,
+)
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.spools.models import Overlay
@@ -1391,17 +1396,23 @@ async def post_preview_slice(
     outputs: OutputsDep,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
+    fresh: FreshQuery = False,
 ) -> PreviewStarted | JSONResponse:
     """#2169: what the dialog's choices would print, sliced through the run's own path
     and never queued. Follow ``GET /print/preview-slices/{job_id}``. A run of the same
-    choices queues this slice rather than slicing again."""
+    choices queues this slice rather than slicing again. ``fresh`` (the dialog's
+    Reslice, #4433) slices again even when a finished slice of the same choices exists."""
     require_output(outputs, output_id)
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["preview_slice"],
         subject=output_id,
-        request={"output_id": output_id, "request": body.model_dump(mode="json")},
+        request={
+            "output_id": output_id,
+            "request": body.model_dump(mode="json"),
+            **({"fresh": True} if fresh else {}),
+        },
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, PreviewStarted)

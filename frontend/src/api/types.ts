@@ -47,6 +47,8 @@ export type RevokedSessions = Schemas['RevokedSessions']
 export type RepositoryLag = Schemas['RepositoryLag']
 
 export type ModelSummary = Schemas['ModelRecord']
+/** #5475 — an image stored in a template's `images/` folder for its README. */
+export type ReadmeImage = Schemas['ReadmeImage']
 /** #2290 — the Models page's filter counts. */
 export type ModelFacets = Schemas['ModelFacets']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
@@ -297,7 +299,15 @@ export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
 export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 export type LibraryMoveResult = Schemas['LibraryMoveResult']
 export type LibraryCopyResult = Schemas['LibraryCopyResult']
+/** #5355 — a copy between Bambuddy's library and ScadBuddy's own: its request, start and status. */
+export type LibraryCopyRequest = Schemas['LibraryCopyRequest']
+export type LibraryCopyStarted = Schemas['LibraryCopyStarted']
+export type LibraryCopySummary = Schemas['LibraryCopySummary']
+export type LibraryCopyStatus = Schemas['LibraryCopyStatus']
+export type LibraryCopyFileResult = Schemas['LibraryCopyFileResult']
 export type LibraryRenameResult = Schemas['LibraryRenameResult']
+/** #4703 — the file a library upload filed. */
+export type LibraryEntryUpdated = Schemas['LibraryEntryUpdated']
 export type LibraryFolder = Schemas['LibraryFolder']
 export type LibraryFolderCreate = Schemas['LibraryFolderCreate']
 export type LibraryFolderDeleteResult = Schemas['LibraryFolderDeleteResult']
@@ -370,6 +380,9 @@ export type OrderItemStatus = OrderItem['status']
 export type OrderItemDetail = Schemas['ItemDetail']
 export type OrderTotals = Schemas['OrderTotals']
 export type OrderPage = Schemas['OrderPage']
+/** A row of `GET /orders`: the order and its margin (job cost spec §6.2, #5327). */
+export type OrderRow = Schemas['OrderRow']
+export type MarginState = NonNullable<OrderRow['margin_state']>
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
 /** Storefront phase 1 (#5280, spec 2026-11-02 §4): one design of an item, and how it is approved. */
@@ -394,6 +407,11 @@ export type OrderEvent = Schemas['OrderEvent']
 export type OrderCosts = Schemas['OrderCosts']
 export type ItemCost = Schemas['ItemCost']
 export type AttemptCost = Schemas['AttemptCost']
+// #5326 — job cost: the time and the other costs a job took.
+export type TimeEntry = Schemas['TimeEntry']
+export type CostEntry = Schemas['CostEntry']
+export type TimeEntryCreate = Defaulted<Schemas['TimeEntryInput'], 'note' | 'order_item_id' | 'started_at' | 'source'>
+export type CostEntryCreate = Defaulted<Schemas['CostEntryInput'], 'note' | 'order_item_id' | 'source'>
 export type AddressSnapshot = Schemas['AddressSnapshot']
 export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
 export type OrderPatch = Partial<Schemas['OrderPatch']>
@@ -432,6 +450,11 @@ export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
  * item's copies, plates and request id are the server's. */
 export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printer_id' | 'filament_plan' | 'choices'>
 export type OrderEstimate = Schemas['OrderEstimate']
+/** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
+export type UnitCostHistory = Schemas['UnitCostHistory']
+/** #5329, job cost spec §6.4 — `GET /orders/reports/profit`: the profit report by model. */
+export type ProfitReport = Schemas['ProfitReport']
+export type ProfitRow = Schemas['ProfitRow']
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
 export type Activity = Schemas['ActivityItem']
@@ -715,6 +738,26 @@ export interface BackgroundTask {
   expires_at: string | null
   detail: string | null
   created_at: string
+}
+
+/** #4703 — a file the workspace file picker lists (agent `routes/workspacePicker.ts`). */
+export interface PickerFile extends WorkspaceFile {
+  /** Why it cannot be read now (a sealed blob this agent cannot open); null when it can. */
+  unavailable: string | null
+}
+
+/** #4703 — one session in the workspace file picker, with the files the target takes. */
+export interface PickerSession {
+  id: string
+  title: string
+  status: SessionStatus
+  archived: boolean
+  updated_at: string
+  /** Why none of its files the target takes can be read now; null when they can, or it has none. */
+  unavailable: string | null
+  /** Its files the target does not take. */
+  other_files: number
+  files: PickerFile[]
 }
 
 export interface WorkspaceFileList {

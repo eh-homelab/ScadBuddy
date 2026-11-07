@@ -46,6 +46,7 @@ describe('order tools (#4249)', () => {
       'customer_get',
       'customer_upsert',
       'order_list',
+      'orders_profit_report',
       'order_get',
       'order_create',
       'order_update',
@@ -67,6 +68,7 @@ describe('order tools (#4249)', () => {
       customer_get: 'read',
       customer_upsert: 'write',
       order_list: 'read',
+      orders_profit_report: 'read',
       order_get: 'read',
       order_create: 'write',
       order_update: 'write',
@@ -132,6 +134,35 @@ describe('order tools (#4249)', () => {
     expect(firstText(result)).toEqual({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false })
   })
 
+  it('logs time and adds costs as writes, leaving their removal to the page (#5326)', async () => {
+    const sent: { path: string; body: unknown }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/time-entries`, async ({ request }) => {
+        sent.push({ path: 'time', body: await request.json() })
+        return HttpResponse.json({ id: 't1', minutes: 25 }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/cost-entries`, async ({ request }) => {
+        sent.push({ path: 'cost', body: await request.json() })
+        return HttpResponse.json({ id: 'c1', amount_minor: 120 }, { status: 201 })
+      }),
+    )
+    expect([tool('order_time_add').risk, tool('order_cost_add').risk]).toEqual(['write', 'write'])
+
+    const time = await tool('order_time_add').execute({ order_id: ORDER, order_item_id: ITEM, kind: 'post_processing', minutes: 25 }, ctx())
+    const cost = await tool('order_cost_add').execute({ order_id: ORDER, kind: 'assistant', amount_minor: 120, source: 'ai_session:s1' }, ctx())
+
+    expect(firstText(time)).toEqual({ id: 't1', minutes: 25 })
+    expect(firstText(cost)).toEqual({ id: 'c1', amount_minor: 120 })
+    expect(sent).toEqual([
+      { path: 'time', body: { order_item_id: ITEM, kind: 'post_processing', minutes: 25, note: '' } },
+      { path: 'cost', body: { kind: 'assistant', amount_minor: 120, note: '', source: 'ai_session:s1' } },
+    ])
+    expect(() => tool('order_cost_add').execute({ order_id: ORDER, kind: 'material', amount_minor: 0 }, ctx())).toThrow('amount_minor')
+    const removals = NOT_A_TOOL.map((n) => n.operation)
+    expect(removals).toContain('DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}')
+    expect(removals).toContain('DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}')
+  })
+
   it('passes the list filters and the cursor through to the backend', async () => {
     let url = ''
     server.use(
@@ -144,6 +175,32 @@ describe('order tools (#4249)', () => {
     expect(firstText(result)).toEqual({ items: [{ id: ORDER, number: 'ORD-2026-1' }], next_cursor: 'abc' })
     const query = new URL(url).searchParams
     expect(Object.fromEntries(query)).toEqual({ status: 'quoted', customer_id: CUSTOMER, cursor: 'xyz', limit: '5' })
+
+    // #5327: "Loss or thin" is `margin_state` repeated.
+    await tool('order_list').execute({ margin_state: ['loss', 'thin'] }, ctx())
+    expect(new URL(url).searchParams.getAll('margin_state')).toEqual(['loss', 'thin'])
+
+    // #5329: a profit report row's orders.
+    const row = { product: 'sku:DES-1', accepted_from: '2026-08-08T00:00:00Z', accepted_to: '2026-11-06T00:00:00Z', currency: 'USD' }
+    await tool('order_list').execute(row, ctx())
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual(row)
+    expect(() => tool('order_list').execute({ product: 'nope' }, ctx())).toThrow()
+  })
+
+  it('reads the profit report for a period (#5329)', async () => {
+    let url = ''
+    const report = { group: 'model', rows: [{ group: 'model', key: 'demo', product: 'model:demo', currency: 'USD' }], complete: true }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/reports/profit`, ({ request }) => {
+        url = request.url
+        return HttpResponse.json(report)
+      }),
+    )
+    const period = { from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z' }
+    expect(firstText(await tool('orders_profit_report').execute(period, ctx()))).toEqual(report)
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual(period)
+    await tool('orders_profit_report').execute({}, ctx())
+    expect(new URL(url).search).toBe('')
   })
 
   it('edits, holds and records a payment through their own routes', async () => {
@@ -514,6 +571,68 @@ describe('pricing tools (#4250)', () => {
         ctx(),
       ),
     ).rejects.toThrow('exactly one')
+  })
+
+  // #5328, job cost spec §6.3: the quote warning in the result, advice only.
+  it("adds a price warning when the quote is below the model's real cost, or above it with a thin margin", async () => {
+    const quote = { id: 'q3', order_item_id: ITEM, source: 'manual', unit_price_minor: 800 }
+    const asked: Record<string, string>[] = []
+    const history = (warning: boolean, price = 800) => ({
+      slug: 'tag',
+      currency: 'EUR',
+      jobs: 4,
+      units: 6,
+      unit_cost_minor: 900,
+      estimated: false,
+      main_reason: 'failed_prints',
+      main_reason_minor: 250,
+      markup_percent: '0',
+      thin_margin_percent: '15',
+      suggested_unit_price_minor: 1059,
+      unit_price_minor: price,
+      margin_percent: price === 800 ? -12.5 : 10,
+      warning,
+      below_cost: price < 900,
+      minor_exponent: 2,
+    })
+    let warn = true
+    let price = 800
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, () => HttpResponse.json(quote, { status: 201 })),
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({ order: { id: ORDER, currency: 'EUR' }, items: [{ id: ITEM, reference: { slug: 'tag' } }] }),
+      ),
+      http.get(`${BACKEND}/api/v1/orders/history/unit-cost`, ({ request }) => {
+        asked.push(Object.fromEntries(new URL(request.url).searchParams))
+        return HttpResponse.json(history(warn, price))
+      }),
+    )
+    const input = { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 800 } }
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual({
+      ...quote,
+      price_warning: {
+        jobs: 4,
+        unit_cost_minor: 900,
+        main_reason: 'failed_prints',
+        main_reason_minor: 250,
+        suggested_unit_price_minor: 1059,
+        margin_percent: -12.5,
+        below_cost: true,
+        estimated: false,
+      },
+    })
+    expect(asked).toEqual([{ slug: 'tag', currency: 'EUR', unit_price_minor: '800' }])
+    // 10.00 over a cost of 9.00 is a 10 % margin: above the cost, and still thin.
+    price = 1000
+    const thin = { ...quote, unit_price_minor: 1000 }
+    server.use(http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, () => HttpResponse.json(thin, { status: 201 })))
+    const answer = firstText(await tool('order_item_quote').execute(input, ctx())) as { price_warning: Record<string, unknown> }
+    expect(answer.price_warning).toMatchObject({ below_cost: false, margin_percent: 10, unit_cost_minor: 900 })
+    warn = false
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(thin)
+    // A lookup that fails leaves the recorded quote as it is.
+    server.use(http.get(`${BACKEND}/api/v1/orders/history/unit-cost`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    expect(firstText(await tool('order_item_quote').execute(input, ctx()))).toEqual(thin)
   })
 
   it('reads the book, and sets the policy over what it was', async () => {

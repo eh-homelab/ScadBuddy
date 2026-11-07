@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { api } from '../../api/client'
-import type { Customer, Order } from '../../api/types'
+import type { Customer, Order, OrderRow } from '../../api/types'
 import { DEFAULT_ORDERS_QUERY } from '../../lib/ordersQuery'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -35,7 +35,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   const [error, setError] = useState<string | null>(null)
   const chosen = picker.chosen
   const orders = useAsync(
-    () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })),
+    () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as OrderRow[], next_cursor: null })),
     [chosen],
   )
   // An order made here, offered (first, as the newest) until the reload lists it. Once

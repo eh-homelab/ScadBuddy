@@ -63,10 +63,23 @@ class Prints:
 
 
 class Observer:
-    def started(self, meta: object) -> None:
+    def started(
+        self,
+        meta: object,
+        *,
+        run_id: str | None = None,
+        queue_item_ids: frozenset[int] = frozenset(),
+    ) -> None:
         pass
 
-    def started_subject(self, key: str, slug: str) -> None:
+    def started_subject(
+        self,
+        key: str,
+        slug: str,
+        *,
+        run_id: str | None = None,
+        queue_item_ids: frozenset[int] = frozenset(),
+    ) -> None:
         pass
 
 

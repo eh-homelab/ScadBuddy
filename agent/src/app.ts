@@ -246,7 +246,8 @@ export function createApp(deps: AppDeps): AgentApp {
     if (database) {
       // /mcp serves only once the agent's migrations have applied (db.ts
       // `ready()`), so its database-backed stores never see a half-made schema.
-      app.use('/mcp', async (c, next) => {
+      // `/mcp/*` matches the bare path too (Hono), so it covers the uploads (mcp/uploads.ts).
+      app.use('/mcp/*', async (c, next) => {
         if (!(await database.ready())) {
           return c.json({ error: 'AI unavailable: database migrations have not applied' }, 503)
         }
@@ -256,7 +257,7 @@ export function createApp(deps: AppDeps): AgentApp {
     } else {
       // Spec §9, "No database": AI features are disabled. /mcp answers why
       // instead of 404, so an MCP client's error names the fix.
-      app.all('/mcp', (c) =>
+      app.all('/mcp/*', (c) =>
         c.json({ error: 'AI disabled: no database (SCADBUDDY_DATABASE_URL is not set)' }, 503),
       )
     }

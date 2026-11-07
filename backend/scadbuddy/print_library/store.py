@@ -270,6 +270,17 @@ class NativeLibraryStore:
             f"SELECT {_FILE_COLUMNS} FROM library_files WHERE {where} ORDER BY id", params
         )
 
+    def files_by_sha256(self, digests: list[str]) -> list[NativeFile]:
+        """The live files whose bytes are any of ``digests`` (#5355): what a copy into
+        this library skips."""
+        if not digests:
+            return []
+        return self._files(
+            f"SELECT {_FILE_COLUMNS} FROM library_files WHERE sha256 = ANY(%s)"
+            f" AND deleted_at IS NULL ORDER BY id",
+            (list(digests),),
+        )
+
     def files_by_ids(self, ids: list[int]) -> list[NativeFile]:
         return self._files(
             f"SELECT {_FILE_COLUMNS} FROM library_files WHERE id = ANY(%s) AND deleted_at IS NULL"
@@ -352,13 +363,27 @@ class NativeLibraryStore:
             ).fetchall()
         return sorted(int(r["id"]) for r in rows)
 
-    def per_print(self) -> list[NativeFile]:
-        """Every live file a run put here and nobody has made theirs (#4337): what
-        `sweep.sweep_print_copies` judges."""
+    def per_print(self, subjects: list[str]) -> list[NativeFile]:
+        """Every live file a run of one of ``subjects`` put here and nobody has made theirs
+        (#4337): what `sweep.sweep_print_copies` judges, a page of subjects at a time."""
         return self._files(
             f"SELECT {_FILE_COLUMNS} FROM library_files"
-            f" WHERE print_subject IS NOT NULL AND deleted_at IS NULL ORDER BY id"
+            f" WHERE print_subject = ANY(%s) AND deleted_at IS NULL ORDER BY id",
+            (list(subjects),),
         )
+
+    def print_subjects(self, after: str | None, limit: int) -> list[str]:
+        """Up to ``limit`` subjects that mark a live file, in order, past ``after``: the
+        pages `sweep.sweep_print_copies` reads (#5156)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT print_subject FROM library_files"
+                " WHERE print_subject IS NOT NULL AND deleted_at IS NULL"
+                " AND (%s::text IS NULL OR print_subject > %s)"
+                " ORDER BY print_subject LIMIT %s",
+                (after, after, limit),
+            ).fetchall()
+        return [str(r["print_subject"]) for r in rows]
 
     def existing(self, ids: list[int]) -> set[int]:
         """Those of ``ids`` whose row is still there, live or trashed."""

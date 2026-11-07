@@ -1,3 +1,7 @@
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { api } from '../api/client'
+import { seedSessionFile } from '../mocks/features/sessionFiles'
+import { seedPickerSession } from '../mocks/features/workspacePicker'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import type userEvent from '@testing-library/user-event'
 import { delay, HttpResponse, http } from 'msw'
@@ -1429,5 +1433,26 @@ describe('HistoryPage paging (#2290)', () => {
     await user.click(await menuItem(user, await row('Paged 1'), /^Delete/))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /^Delete/ }))
     await screen.findByText(`Showing ${HISTORY_PAGE_SIZE - 1} of ${seeded() + 29}`)
+  })
+
+  it("replaces an output's thumbnail with a file from an assistant session's workspace (#4703)", async () => {
+    const id = outputs.find((o) => o.name === 'Workshop')!.id
+    seedPickerSession({ id: 's-thumb', title: 'Workshop pictures', touched: [{ type: 'output', id }] })
+    seedSessionFile('s-thumb', 'workshop.png', new Uint8Array([137, 80, 78, 71]), 'image/png')
+    const put = vi.spyOn(api, 'putThumbnail').mockResolvedValue(undefined)
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <Routes>
+          <Route path="/m/:slug/history" element={<HistoryPage />} />
+        </Routes>
+      </AssistantOpenerContext.Provider>,
+      { route: '/m/name-keychain/history' },
+    )
+    await user.click(await menuItem(user, await row('Workshop'), 'Replace the thumbnail of Workshop'))
+    const dialog = await screen.findByRole('dialog', { name: 'Replace the thumbnail of Workshop' })
+    await user.click(within(dialog).getByRole('button', { name: 'From a session…' }))
+    await user.click(await screen.findByRole('button', { name: 'Use workshop.png' }))
+    await waitFor(() => expect(put).toHaveBeenCalledWith(id, expect.objectContaining({ name: 'workshop.png', type: 'image/png' })))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })

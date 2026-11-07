@@ -161,7 +161,12 @@ from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.slicing.component import SlicingDep
-from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
+from scadbuddy.slicing.preview import (
+    FreshQuery,
+    SlicerQuery,
+    read_native_preview,
+    read_native_toolpath,
+)
 from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
@@ -1543,14 +1548,20 @@ async def post_library_preview_slice(
     response: Response,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
+    fresh: FreshQuery = False,
 ) -> PreviewStarted | JSONResponse:
-    """As ``/print/outputs/{id}/preview-slice``, for a file in Bambuddy's library (#2169)."""
+    """As ``/print/outputs/{id}/preview-slice``, for a file in Bambuddy's library (#2169),
+    ``fresh`` included (#4433)."""
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds["preview_slice"],
         subject=library_slug(PrintSubject.library(file_id)),
-        request={"library_file_id": file_id, "request": body.model_dump(mode="json")},
+        request={
+            "library_file_id": file_id,
+            "request": body.model_dump(mode="json"),
+            **({"fresh": True} if fresh else {}),
+        },
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, PreviewStarted)

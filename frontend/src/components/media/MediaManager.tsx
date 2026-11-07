@@ -10,6 +10,7 @@ import {
   useUploadLimit,
 } from '../../lib/mediaFiles'
 import { ArrowDownIcon, ArrowUpIcon, ImagePlusIcon, StarIcon, Trash2Icon, UploadIcon } from 'lucide-react'
+import { WorkspacePickButton } from '../workspace/WorkspaceFilePicker'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -460,9 +461,19 @@ export function MediaManager({ model: initial, onChanged }: Props) {
         <p className="text-xs text-muted-foreground" data-testid="media-paste-hint">
           or paste an image or video
         </p>
-        <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
-          <UploadIcon /> Choose files
-        </Button>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
+            <UploadIcon /> Choose files
+          </Button>
+          <WorkspacePickButton
+            resource={{ type: 'model', id: slug }}
+            resourceLabel="this model"
+            accept={MEDIA_ACCEPT}
+            acceptLabel="image and video"
+            title="Add media from an assistant session"
+            onFile={(file) => add([file])}
+          />
+        </div>
         <p className="text-xs text-muted-foreground">PNG, JPEG or WebP images; MP4 or WebM videos</p>
         <input
           ref={inputRef}

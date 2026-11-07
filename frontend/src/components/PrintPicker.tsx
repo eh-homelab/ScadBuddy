@@ -2121,6 +2121,9 @@ export function PrintPicker({
                 slicing={previewSlice.slicing}
                 progress={previewSlice.progress}
                 sliceError={previewSlice.error}
+                onReslice={sliced ? null : previewSlice.reslice}
+                canReslice={previewSlice.canReslice}
+                reslicing={previewSlice.reslicing}
               />
             </div>
             </div>

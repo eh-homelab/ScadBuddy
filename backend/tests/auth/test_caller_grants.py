@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +27,6 @@ from scadbuddy.auth.caller_grants import (
 )
 from scadbuddy.auth.service_credentials import ServiceCaller
 from scadbuddy.core.settings import Settings
-from scadbuddy.flow_triggers.store import TriggerStore
-from scadbuddy.flows.grants import GrantRule, GrantSpec, GrantUse
-from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.pg_store import Migration, migrate
@@ -40,7 +37,6 @@ from scadbuddy.render.worker_role import (
     owns_schema,
 )
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
-from tests.test_flow_trigger_store import approved, arrange_pick, make, seed
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -141,13 +137,12 @@ def test_the_role_holds_its_list_and_cannot_migrate(
         pool.close()
 
 
-@pytest.mark.parametrize("caller", ["print", "projects"])
 def test_a_worker_on_its_own_role_opens_reads_settings_and_runs_an_operation(
-    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path, caller: ServiceCaller
+    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
 ) -> None:
-    _grant(owner, role, caller)
+    _grant(owner, role, "print")
     store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
-    open_for_caller(store, caller)
+    open_for_caller(store, "print")
     try:
         store.snapshot()
         operations = OperationStore(store.pool)
@@ -212,32 +207,56 @@ def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path
         store.close()
 
 
+def test_a_projects_worker_on_its_own_role_opens(
+    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
+) -> None:
+    """#5298: it only waits for the API's migrations and grants; it reads no settings."""
+    _grant(owner, role, "projects")
+    store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
+    try:
+        open_for_caller(store, "projects")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            store.snapshot()
+    finally:
+        store.close()
+
+
 def test_print_and_projects_lists_differ_where_their_work_does() -> None:
-    # The print worker rewrites settings in a printer merge; flow runs only read them.
-    assert "UPDATE" in PRINT_GRANTS["settings"] and PROJECTS_GRANTS["settings"] == ("SELECT",)
+    # The print worker rewrites settings in a printer merge; flow runs read none (#5298).
+    assert "UPDATE" in PRINT_GRANTS["settings"] and "settings" not in PROJECTS_GRANTS
 
 
-async def test_the_projects_role_spends_a_trigger_seeded_run_grant(
+#: The relations the projects worker reaches only through the CRUD routes (#5298): the
+#: flow relations, and its operations, its events and the settings snapshot.
+CRUD_RELATIONS = (
+    "workflow_runs",
+    "workflow_definitions",
+    "workflow_run_decisions",
+    "workflow_run_proposals",
+    "flow_grants",
+    "flow_grant_uses",
+    "flow_trigger_grants",
+    "operations",
+    "events",
+    "settings",
+    "model_print_choices",
+    "printer_bed_types",
+    "printers",
+)
+
+
+def test_the_projects_role_reaches_no_relation_of_the_crud_routes(
     owner: Pool, role: str, pg_conninfo: str
 ) -> None:
-    """#5215 review: `FLOW_GRANT_CHECK` records the use and spends the standing grant."""
-    triggers = TriggerStore(owner)
-    trigger = await make(triggers, overlap="allow_all")
-    spec = GrantSpec(
-        expires_at=datetime.now(UTC) + timedelta(days=1),
-        rules=[GrantRule(fn="arrange", max_calls=1)],
-    )
-    await approved(triggers, trigger, spec)
-    run_id = str(uuid.uuid4())
-    assert await seed(triggers, trigger, run_id)
+    """#5298: flow runs, decisions, grants and operations go through the API, and the
+    worker has no event bus; its list names none of their relations."""
+    assert not set(CRUD_RELATIONS) & set(PROJECTS_GRANTS)
     _grant(owner, role, "projects")
     pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
     try:
-        flows = FlowStore(pool, events=None)
-        used = await flows.consume_grant(run_id, "req-1", arrange_pick(run_id, "req-1"))
-        assert isinstance(used, GrantUse)
-        # Spent: the next call finds the limit reached.
-        again = await flows.consume_grant(run_id, "req-2", arrange_pick(run_id, "req-2"))
-        assert not isinstance(again, GrantUse)
+        with pool.connection() as conn:
+            for name in CRUD_RELATIONS:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(name)))
     finally:
         pool.close()

@@ -214,6 +214,43 @@ export const dollhouseSchema: CustomizerSchema = {
   ],
 }
 
+/** #5376 — the bookmark's eight parameter groups (models/bookmark/model.scad), with a
+ *  few of its parameters each: enough groups that the tab list wraps in the real panel.
+ *  The groups are a copy of that file's sections, kept by hand: nothing checks them, so
+ *  they may drift when the template changes. The e2e tab wrap test needs only enough
+ *  of them to wrap, not an exact copy. */
+export const bookmarkSchema: CustomizerSchema = {
+  title: 'Bookmark',
+  source_sha256: 'b'.repeat(64),
+  groups: ['Shape', 'Corner clip', 'Mask', 'Overlay', 'Text', 'Layers', 'Beads', 'Colours'],
+  parameters: [
+    param('Shape', {
+      name: 'shape',
+      type: 'select',
+      initial: 'tassel',
+      caption: 'Outline',
+      options: [
+        { name: 'Classic - rounded rectangle', value: 'classic' },
+        { name: 'Tassel - with a cord hole', value: 'tassel' },
+        { name: 'Pointed end', value: 'pointed' },
+      ],
+    }),
+    param('Shape', { name: 'length', type: 'slider', initial: 150, caption: 'Length', min: 60, max: 250, step: 5 }),
+    param('Shape', { name: 'width', type: 'slider', initial: 40, caption: 'Width', min: 20, max: 80, step: 1 }),
+    param('Corner clip', { name: 'corner_size', type: 'slider', initial: 55, caption: 'Clip size', min: 30, max: 100, step: 1 }),
+    param('Mask', { name: 'mask_scale', type: 'slider', initial: 100, caption: 'Mask scale, %', min: 10, max: 300, step: 5 }),
+    param('Mask', { name: 'mask_invert', type: 'boolean', initial: false, caption: 'Invert the mask' }),
+    param('Overlay', { name: 'overlay_scale', type: 'slider', initial: 55, caption: 'Overlay scale, %', min: 10, max: 300, step: 5 }),
+    param('Text', { name: 'label', type: 'string', initial: 'Keep reading', caption: 'Text', max_length: 40 }),
+    param('Text', { name: 'text_size', type: 'slider', initial: 11, caption: 'Text size', min: 4, max: 30, step: 0.5 }),
+    param('Layers', { name: 'two_tone', type: 'boolean', initial: false, caption: 'Two-tone top layers' }),
+    param('Layers', { name: 'border', type: 'boolean', initial: true, caption: 'Coloured rim' }),
+    param('Beads', { name: 'bead_count', type: 'slider', initial: 2, caption: 'Beads', min: 0, max: 6, step: 1 }),
+    param('Colours', { name: 'base_color', type: 'color', initial: '#2E86DE', caption: 'Base' }),
+    param('Colours', { name: 'text_color', type: 'color', initial: '#FFFFFF', caption: 'Text' }),
+  ],
+}
+
 export const gridfinitySchema: CustomizerSchema = {
   title: 'Gridfinity Bin',
   source_sha256: 'a'.repeat(64),
@@ -313,6 +350,9 @@ export const UI_DEMO_UI_VERSION = commit('e1d2c3b4a5f0')
 export const MAZE_SLUG = 'builtin:maze-puzzle'
 /** #1737 — the bundled dollhouse-kit, whose designer takes the whole page (slot `page`). */
 export const DOLLHOUSE_SLUG = 'builtin:dollhouse-kit'
+
+/** #5376 — a template with the bookmark's eight parameter groups. */
+export const BOOKMARK_SLUG = 'bookmark'
 
 /**
  * #274 — each template's media, in order (the first is the cover). The keychain has
@@ -472,6 +512,20 @@ const modelsSeed: ModelSummary[] = [
     version: commit('7d6c5b4a3f2e'),
     ui_version: commit('6c5b4a3f2e7d'),
     ui: { module: 'ui/index.js', slot: 'page', api: 1 },
+  },
+  {
+    slug: BOOKMARK_SLUG,
+    name: 'Bookmark',
+    description: 'A flat, multi-colour bookmark.',
+    tags: ['bookmark'],
+    updated_at: '2026-08-10T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'mine',
+    media: [],
   },
   {
     slug: UNMIGRATED_SLUG,
@@ -694,6 +748,7 @@ export const schemas: Record<string, CustomizerSchema> = {
   [UNMIGRATED_SLUG]: keychainSchema,
   [MAZE_SLUG]: mazeSchema,
   [DOLLHOUSE_SLUG]: dollhouseSchema,
+  [BOOKMARK_SLUG]: bookmarkSchema,
 }
 
 export const fonts: FontFamily[] = [
@@ -978,6 +1033,11 @@ export const settingsDefaults = {
   rough_estimate_factor: '1.15',
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
+  // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,
+  // and the thin-margin threshold percent.
+  pricing_labour_rate_per_hour: '0',
+  pricing_usd_rate: '1',
+  orders_thin_margin_percent: '15',
   // #4939 — whether a native run waits for a cleared plate between its prints.
   lan_require_plate_clear: false,
   fonts_catalogue_ttl: 86400,

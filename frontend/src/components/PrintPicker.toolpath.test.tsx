@@ -20,6 +20,9 @@ const slice = vi.hoisted(() => ({
     progress: null,
     toolpathUrl: null,
     error: null,
+    reslice: () => undefined,
+    canReslice: false,
+    reslicing: false,
   } satisfies PreviewSliceState as PreviewSliceState,
 }))
 vi.mock('../lib/usePreviewSlice', async (actual) => ({

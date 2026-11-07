@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -16,6 +18,7 @@ from scadbuddy.auth.gate import AuthGate, caller_of
 from scadbuddy.auth.models import ANONYMOUS, Service
 from scadbuddy.auth.service_credentials import (
     LIFETIME,
+    REREAD_MIN_SECONDS,
     ROTATE_BEFORE,
     SCOPES,
     ServiceCredentialStore,
@@ -53,6 +56,37 @@ def test_rotation_issues_one_per_caller_and_again_only_when_due(
     assert len(store.rotate_due(Kek("k2", os.urandom(32)), now=now)) == 3
 
 
+def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
+    store: ServiceCredentialStore, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5298: a release that changes a caller's scopes mints it a credential with them at
+    the API's start, not when the old one is due; the old one stays live for the old pods
+    of the roll, and a reader refused with the old one reads the new one."""
+    now = datetime.now(UTC)
+    with monkeypatch.context() as patched:
+        patched.setitem(SCOPES, "projects", frozenset({"api"}))
+        store.rotate_due(KEK, now=now)
+    clock = [0.0]
+    reader = TokenReader("projects", pg_conninfo, KEK, clock=lambda: clock[0])
+    old = reader.token()
+    assert old is not None
+    assert store.resolve(old) == Service("projects", frozenset({"api"}))
+
+    # Minted at the same instant, so it expires with the old one: the later-created wins.
+    (minted,) = store.rotate_due(KEK, now=now)
+    assert [c.caller for c in store.list() if c.id == minted] == ["projects"]
+    assert store.rotate_due(KEK, now=now) == []
+    assert store.resolve(old) == Service("projects", frozenset({"api"}))
+
+    reader.invalidate(old)
+    clock[0] = REREAD_MIN_SECONDS - 0.1
+    assert reader.token() == old
+    clock[0] = REREAD_MIN_SECONDS
+    new = reader.token()
+    assert new is not None and new != old
+    assert store.resolve(new) == Service("projects", SCOPES["projects"])
+
+
 def test_a_caller_reads_its_token_and_the_api_verifies_it(
     store: ServiceCredentialStore, pg_conninfo: str, pg_pool: PgPool
 ) -> None:
@@ -77,7 +111,45 @@ def test_revoked_or_expired_is_refused(store: ServiceCredentialStore, pg_conninf
     assert store.revoke(agent.id) == "agent"
     assert store.resolve(token) is None
     assert store.revoke(agent.id) is None
-    assert not store.has_live("agent")
+    assert not [c for c in store.list() if c.caller == "agent" and c.revoked_at is None]
+
+
+def _after(
+    start: threading.Barrier, run: Callable[[], object], errors: list[BaseException]
+) -> None:
+    """Runs ``run`` once both threads are ready; records what it raised, which a thread
+    would otherwise only print."""
+    try:
+        start.wait()
+        run()
+    except BaseException as error:
+        errors.append(error)
+
+
+def test_a_revoke_and_the_rotation_replace_once(store: ServiceCredentialStore) -> None:
+    """#5393: the prune Schedule's rotation and a revoke's replacement, at once, leave
+    one live credential, not one each."""
+    store.rotate_due(KEK)
+    for _ in range(20):
+        for credential in store.list():
+            if credential.caller == "agent":
+                store.revoke(credential.id)
+        start = threading.Barrier(2)
+        errors: list[BaseException] = []
+        threads = [
+            threading.Thread(target=_after, args=(start, lambda: store.rotate_due(KEK), errors)),
+            threading.Thread(
+                target=_after,
+                args=(start, lambda: store.replace_if_none(KEK, "agent"), errors),
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        live = [c for c in store.list() if c.caller == "agent" and c.revoked_at is None]
+        assert len(live) == 1
 
 
 def test_last_used_is_recorded(store: ServiceCredentialStore, pg_conninfo: str) -> None:

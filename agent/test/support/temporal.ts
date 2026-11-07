@@ -22,9 +22,19 @@ function onPath(): string | undefined {
 export const TEMPORAL_CLI = process.env[TEMPORAL_CLI_ENV]?.trim() || onPath()
 export const TEMPORAL_SKIP = TEMPORAL_CLI ? '' : ` (skipped: ${TEMPORAL_CLI_ENV} is not set and no temporal on PATH)`
 
-export function localTemporal(): Promise<TestWorkflowEnvironment> {
+/**
+ * `deleteAtOnce`: `deleteWorkflowExecution` removes a closed run in milliseconds, not 19-33 s.
+ * By default the server holds the delete task until the visibility queue's checkpoint has
+ * passed the run's close task (`history.transferProcessorEnsureCloseBeforeDelete`), and that
+ * checkpoint moves about every 30 s, so a test that waits for the run to go raced it (#5243;
+ * measured on CLI 1.9.1, Server 1.32.0: 19-33 s with the check, 9-18 ms without).
+ */
+export function localTemporal(opts: { deleteAtOnce?: boolean } = {}): Promise<TestWorkflowEnvironment> {
   return TestWorkflowEnvironment.createLocal({
-    server: { executable: { type: 'existing-path', path: TEMPORAL_CLI! } },
+    server: {
+      executable: { type: 'existing-path', path: TEMPORAL_CLI! },
+      extraArgs: opts.deleteAtOnce ? ['--dynamic-config-value', 'history.transferProcessorEnsureCloseBeforeDelete=false'] : [],
+    },
   })
 }
 

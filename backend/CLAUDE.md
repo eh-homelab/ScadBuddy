@@ -24,6 +24,15 @@ the API moves to `enforce` (#5297). Template Python and openscad move to a pod w
 database secret (#5296). Never add a worker table grant, a cross-service table read or a
 new database client; add a CRUD route that requires a service credential instead.
 
+A caller gets its service credential from `auth/service_credentials.py` `token_source`: with
+`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` it exchanges that proof
+at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token.py`, class
+`exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
+credential, falling back to its view on a 404; otherwise it reads its sealed one from its
+view (`TokenReader`), as before (#5494). The API's own in-process callers use
+`InProcessProvider` (`proof = inprocess`). A new caller-side client takes a `token_source`,
+never a `TokenReader` of its own.
+
 ## Commands
 
 Backend (`backend/`, Python 3.12, uv). CI runs these inside the Dockerfile's `test`
@@ -135,7 +144,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   render worker's own role `scadbuddy_render` may touch, granted by the API at start;
   a change to what the worker reads or writes changes it, and
   `tests/test_render_worker_role.py` renders as that role; the worker never migrates
-  and reads settings only through the `render_settings` view; that role is today's state,
+  and reads the store settings only through the API's CRUD route, `crud/render.py`; that role is today's state,
   superseded by #5295, which moves the worker's SQL behind CRUD routes, #5298). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
@@ -286,8 +295,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `transfer.py` and `transfer_token.py` (the worker's transfer URLs: presigned S3 GET or
   the internal blob routes, a token MACed under a KEK-derived key; never log one),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
-  `start.py` (`start_native_slice`: one execution per copy, subject, copy sha256 and
-  presets, which the dialog and the run share; the lost-row repair), `preview.py` (the
+  `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
+  and presets, which the dialog and the run share; the dialog's Reslice gives a
+  completed slice a new row of its own, `reslice_of`, #4433; the lost-row repair), `preview.py` (the
   dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
   `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
@@ -337,6 +347,28 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+  Copies between the two libraries (#5355): `print_library/copy.py` (the plan's walk,
+  the batch, the ``library`` queue activities), `copy_models.py`, `copy_store.py`
+  (`library_copies`, `library_copy_files`), `workflows/library_copy.py` (`LibraryCopy`,
+  AUTO_UPGRADE, one execution per distinct request: `copy_id`; its histories replay from
+  `tests/fixtures/library_copy_histories/`, so a change goes behind `workflow.patched`), routes
+  `api/library_copy.py` (`POST`/`GET /print/library-copies`, and `/print/bambuddy-library`,
+  Bambuddy's library browsed as a source on `native`). A file whose SHA-256 the target
+  holds is skipped (Bambuddy's `file_hash` and the native rows' `sha256` compare
+  directly), each selected folder's path is kept, nothing at the target is deleted or
+  overwritten. The bytes go into Bambuddy through `send.upload_raw`, the one raw upload
+  path (`ensure_raw_copy` uses it too), and into the native library through
+  `NativeLibrary.upload` (`StoreFullError` is a failed row naming the 507). Each file
+  counts its own tries (`attempts`, limit `MAX_FILE_TRIES`: every try, whether the
+  library answered, did not answer, answered 429 or the try never ended) and, apart, its
+  5xx answers (`server_errors`, 507 aside, limit `FILE_ATTEMPTS`); any other answer fails
+  the file at once, except a 401 or 403, which fails the whole copy (`CopyRefusedError`).
+  A session advisory lock per target library and SHA-256 (`TargetLocks`) keeps two
+  copies from putting the same bytes twice, and the status route matches the execution by the
+  row's `run_id`; a row with no run id falls back to `close_time >= started_at +
+  NO_RUN_ID_MARGIN` (5 min) (#5424). Agent
+  `copy_library_files` and `get_library_copy` (`agent/src/tools/libraryCopy.ts`);
+  `list_library`'s `source: bambuddy`; frontend `components/library/LibraryCopyDialog.tsx`.
   A native run of several prints starts the later ones in `PrintLanSequence`
   (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`); its controls
   (#4942, #4939) are `POST /print/runs/{id}/stop` (cancels the sequence, which records
@@ -539,6 +571,56 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
+  `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
+  only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
+  in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
+  audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
+  currency), and an entry's `source` (a timer's `timer:<item or order>:<started_at>`, a form's
+  `manual:<uuid>`, a writer's id) makes a retry write once (200 with the first entry; a time
+  entry's is unique per order whatever its kind, a cost entry's per order and kind). An item with entries is never deleted, only
+  cancelled (`delete_item`, `item_has_entries`), and a cancelled order is charged nothing, its
+  charges included (§5). `orders/costs.py`
+  `order_costs(..., CostRates)` computes on read each attempt's filament and machine cost
+  (`estimated`/`unknown` when a figure is not measured), each item's labour (entries, else
+  a default), other costs, `revenue_minor`, margin and `margin_state`, and the order's sums
+  with its shipments' cost and every charge but tax. Settings `pricing_labour_rate_per_hour`,
+  `pricing_usd_rate`, `orders_thin_margin_percent` (live). Routes `POST`/`DELETE
+  /orders/{id}/time-entries` and `…/cost-entries`; agent `order_time_add`, `order_cost_add`
+  (write); the order page's `components/orders/OrderCosts.tsx` and `CostEntryForms.tsx`.
+  Every attempt counts, test prints (#5280) too (`OrderStore.cost_rows`, every purpose).
+  Job cost phase 2 (#5327): `GET /orders` rows (`OrderRow`) carry `margin_minor`,
+  `margin_percent`, `margin_state` and `margin_estimated`, and the list takes `margin_state`
+  repeated. `costs.py` `order_margins` and the per-order read are one computation
+  (`_order_costs`) over `OrderStore.cost_rows`, which reads every table once for all the
+  orders given (one order for the page, a page for the list); never a second formula. A
+  margin is not stored, so the filter computes each store page's margins until the page is
+  full or `MAX_SCAN_PAGES` pages were read (`api/orders.py` `_order_page`, #5515): a page
+  can be short or empty while a cursor remains. Frontend: the list's Margin column, its sort (the
+  rows loaded, `components/orders/marginSort.ts`) and the "Loss or thin" chip
+  (`lib/ordersQuery.ts` `margin=loss_thin`); agent `order_list`'s `margin_state`.
+  Job cost phase 3 (#5328, §6.3): `GET /orders/history/unit-cost?slug=` (`orders/history.py`
+  `unit_cost_history`, `OrderStore.fulfilled_items`): the slug's last 10 items `fulfilled`
+  within 365 days of their last accepted attempt, on orders not cancelled, in one currency;
+  each item's cost is `_order_costs`'s, never a second formula. It gives the unit cost, the
+  main reason, the suggested price and, with `unit_price_minor`, `warning`. Advice only.
+  Frontend `components/orders/QuoteWarning.tsx` in `QuoteEditor` (mock
+  `mocks/features/orders/history.ts`); agent `order_item_quote` adds `price_warning`.
+  Job cost phase 4 (#5329, §6.4): `GET /orders/reports/profit?from=&to=&group=model`
+  (`orders/report.py` `profit_report`): the orders accepted in `[from, to)` (default the
+  last 90 days), cancelled ones too, per currency (never summed across currencies) and per
+  product (`product_of`: a model `slug`, else a `sku`, else `custom`, an empty SKU too;
+  the list's `custom` filter matches `sku` null or `''`). Each row sums its
+  items' figures from `_order_costs`, never a second formula. Waste is the cost of test and
+  failed attempts. The `order` row is each order's read less its items' (entries, shipping
+  cost, charges), over the orders with figures of their own; it has no list link. `total`
+  is the orders' reads summed. It reads batches of `REPORT_BATCH`
+  (`OrderStore.accepted_orders`, index `orders_accepted_at`) and stops at
+  `MAX_REPORT_ORDERS` (`complete`, `read_from`). `GET /orders` takes `product`, `accepted_from`, `accepted_to` and
+  `currency` (`OrderFilter`, `models.py` `Product`), which list a row's orders. Frontend
+  `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
+  `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
+  `orders_profit_report` (read) and `order_list`'s new filters.
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)

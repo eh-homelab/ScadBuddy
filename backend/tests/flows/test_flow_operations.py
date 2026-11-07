@@ -42,7 +42,7 @@ pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 
 def kinds(flows: Flows) -> dict[str, OperationKind]:
-    return {kind.name: kind for kind in flow_kinds(flows.store, Keys(), HASH_KEY)}
+    return {kind.name: kind for kind in flow_kinds(flows.remote, Keys(), HASH_KEY)}
 
 
 async def operate(flows: Flows, kind: OperationKind, request: dict[str, Any]) -> dict[str, Any]:

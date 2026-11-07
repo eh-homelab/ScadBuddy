@@ -117,7 +117,7 @@ async def test_a_person_cannot_decide_a_call_the_grant_approved(
     )
     run = await outward.row(run_id, lambda r: any(w.kind == "answer" for w in r.waiting_on))
     call_id = run.steps[0].call_id
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     env = ActivityEnvironment(client=outward.client)
     with pytest.raises(ApiError) as err:
         await env.run(decide.check, {"run_id": run_id, "call_id": call_id, "approved": False})
@@ -256,7 +256,7 @@ async def parked_send(
     env.info = dataclasses.replace(
         env.info, workflow_id=run.workflow_id, workflow_run_id=run.workflow_run_id
     )
-    grants = FlowGrants(outward.store, api_client_of(api), HASH_KEY)
+    grants = FlowGrants(outward.remote, api_client_of(api), HASH_KEY)
     return [
         Parked(run_id, w.call_id, request_id(run, w.call_id), env, grants) for w in run.waiting_on
     ]
@@ -407,7 +407,7 @@ async def test_approving_a_requested_grant_releases_the_calls_waiting_inside_it(
         await asyncio.sleep(0.1)
     assert served.calls == []
     await outward.store.approve_grant(run_id, None, approved_by="browser")
-    grants = FlowGrants(outward.store, api_client_of(api), HASH_KEY)
+    grants = FlowGrants(outward.remote, api_client_of(api), HASH_KEY)
     released = await grants.release(outward.client, parked)
     [tool_call] = [w.call_id for w in parked.waiting_on if w.fn == "tool:send_to_bambuddy"]
     assert released == [tool_call]
@@ -438,7 +438,7 @@ def harness_down(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def person_can_decide(outward: Outward, p: Parked) -> None:
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.check, {"run_id": p.run_id, "call_id": p.call_id, "approved": True})
 
@@ -511,13 +511,14 @@ async def test_a_call_whose_approval_failed_after_its_row_is_decided_by_a_person
     """Review of #2645: the approval wrote its row and then failed for good (here at
     once; in production when its retries run out). The workflow withdraws the row
     before it lists the call, so the person it is listed for can decide it."""
-    record = outward.store.record_grant_decision
+    # The worker's own store: the failure is the worker's, after the API recorded it.
+    record = outward.remote.record_grant_decision
 
     async def recorded_then_lost(decision: Any) -> bool:
         assert await record(decision)
         raise ApplicationError("the worker was lost", non_retryable=True)
 
-    monkeypatch.setattr(outward.store, "record_grant_decision", recorded_then_lost)
+    monkeypatch.setattr(outward.remote, "record_grant_decision", recorded_then_lost)
     run_id = await outward.run(
         script("a = await arrange({'objects': [{'output_id': 'o1'}]})", "return a['status']"),
         grant=grant({"fn": "arrange"}),
@@ -525,7 +526,7 @@ async def test_a_call_whose_approval_failed_after_its_row_is_decided_by_a_person
     run = await outward.row(run_id, lambda r: [w.fn for w in r.waiting_on] == ["arrange"])
     call_id = run.steps[0].call_id
     assert await outward.store.get_decision(request_id(run, call_id)) is None
-    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.check, {"run_id": run_id, "call_id": call_id, "approved": True})
     await outward.decide(run_id, approved=True)

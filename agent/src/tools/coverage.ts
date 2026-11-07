@@ -7,6 +7,10 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/print/library-copies',
+    reason: "The Library page's list of recent copies between the libraries (#5355); an agent follows the copy it started with get_library_copy.",
+  },
+  {
     operation: "POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
     reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
   },
@@ -90,12 +94,38 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: "DELETE /api/v1/auth/service-credentials/{credential_id}",
     reason: "The services' credentials (#4975, spec 2026-11-01 §7.2): an agent must never mint, rotate or revoke the credentials it and the workers present.",
   },
+  ...([
+    'DELETE /api/v1/auth/service-credentials/pods/{pod_uid}',
+    'GET /api/v1/auth/service-callers',
+    'PUT /api/v1/auth/service-callers/{caller}/suspension',
+    'DELETE /api/v1/auth/service-callers/{caller}/suspension',
+  ] as const).map((operation) => ({
+    operation,
+    reason:
+      "Revoking a pod's credentials and suspending a caller (#5494, spec 2026-11-05 §6.5): a person's answer to " +
+      'a compromised service; an agent must never revoke or suspend the credentials it and the workers present.',
+  })),
+  {
+    operation: 'POST /api/v1/auth/service-token',
+    reason:
+      "The service-token exchange (#5494, spec 2026-11-05 §6.2): the agent's own credential source " +
+      '(`api/serviceCredential.ts` `ExchangeCredential`) calls it with its proof; never a tool.',
+  },
   {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +
       'Activity.',
   },
+  ...(['DELETE /api/v1/orders/{order_id}/time-entries/{entry_id}', 'DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "Removing a time or cost entry (#5326) is the order page's: a person corrects the job's cost record, " +
+        'on the audit line. The agent records entries with order_time_add and order_cost_add, and reads them in ' +
+        'order_costs.',
+    }),
+  ),
   {
     operation: 'GET /api/v1/activity/facets',
     reason: "The UI's filter bar; activity_list's own filters say the same.",
@@ -503,6 +533,9 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'PUT /api/v1/ai/capabilities/{source}',
     'PUT /api/v1/ai/capabilities/{source}/items/{item}',
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}',
+    // A ScadBuddy tool's loading (#838).
+    'PUT /api/v1/ai/capabilities/{source}/items/{item}/loading',
+    'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',

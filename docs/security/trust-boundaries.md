@@ -46,11 +46,11 @@ of them (`pg_tables`). Connected roles on 2026-11-05: `scadbuddy` (68 connection
 
 | Process | Code | Database secret (clusters manifest) | Tables it may touch | SQL into the other service's tables |
 |---|---|---|---|---|
-| API, 3 replicas | `backend/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:376-379`) | all | reads and writes 8 `ai_*` tables (`agent/src/db/grants.ts:26-33` `API_AI_GRANTS`) |
-| render worker, 2 replicas | `backend/` | `scadbuddy-render-db` as `PGPASSWORD` (`scadbuddy-render.yaml:163-168`) | 13 (`backend/scadbuddy/render/worker_role.py:34` `RENDER_GRANTS`) | none |
+| API, 3 replicas | `backend/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:376-379`) | all | reads and writes 8 `ai_*` tables (`agent/src/db/grants.ts:25-35` `API_AI_GRANTS`) |
+| render worker, 2 replicas | `backend/` | `scadbuddy-render-db` as `PGPASSWORD` (`scadbuddy-render.yaml:163-168`) | 12 in its list (`backend/scadbuddy/render/worker_role.py:34` `RENDER_GRANTS`; the store settings go through a CRUD route, #5298), but an existing role still holds the `render_settings` view it held before, until the revoke in #5298 Task 22: 13 | none |
 | print worker, 1 replica | `backend/` | `scadbuddy-print-db` (`scadbuddy-print.yaml:140-145`) | 34 (`backend/scadbuddy/auth/caller_grants.py:43` `PRINT_GRANTS`) | none |
-| projects worker, 1 replica | `backend/` | `scadbuddy-projects-db` (`scadbuddy-projects.yaml:132-137`) | 14 (`caller_grants.py:100` `PROJECTS_GRANTS`) | reads or writes 5 `ai_*` tables (`agent/src/db/grants.ts:15-21` `PROJECTS_AI_GRANTS`) |
-| agent sidecar (in the API pod) | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:549-552`) | all | 6 backend tables (`caller_grants.py:126-133` `AGENT_GRANTS`): it reads `events` and `workflow_runs`, updates `flow_grants`, and a trigger writes `blob_refs` |
+| projects worker, 1 replica | `backend/` | `scadbuddy-projects-db` (`scadbuddy-projects.yaml:132-137`) | 1 in its list (`caller_grants.py:103` `PROJECTS_GRANTS`; flow runs, decisions, grants and operations go through CRUD routes, and it has no event bus, #5298), but an existing role still holds the 7 flow relations and `settings`, `model_print_choices`, `printer_bed_types`, `printers`, `events` and `operations`, which it held before, until the revoke in #5298 Task 11: 14 | 2 `ai_*` tables in its list (`agent/src/db/grants.ts:16-19` `PROJECTS_AI_GRANTS`), but an existing role still holds `ai_sessions`, `ai_mcp_tokens` and `ai_settings` until that revoke: 5 |
+| agent sidecar (in the API pod) | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:549-552`) | all | 6 backend tables (`caller_grants.py:110-117` `AGENT_GRANTS`): it reads `events`, `workflow_runs`, `workflow_run_decisions` and `flow_grant_uses`, reads and updates `flow_grants`, and a trigger reads, inserts and deletes `blob_refs` |
 | agent worker, 3 replicas | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy-agent-worker.yaml:102-105`) | all | as the sidecar |
 | agent-durable, 0 replicas | `agent-durable/` | `scadbuddy-db-app`, the owner (`scadbuddy-agent-durable.yaml:87-90`) | all | none it runs today: it runs no worker |
 | slicer worker, 1 replica | `workers/rust/` | none (`scadbuddy-slicer.yaml`) | 0 | none: transfer URLs only |
@@ -160,20 +160,19 @@ What changes:
 
 | Process | Today | Target |
 |---|---|---|
-| render worker | 13 tables over SQL; template Python and openscad in the same pod | render jobs, blob refs and assets through CRUD routes; template Python and openscad in a sandbox pod with no secret |
+| render worker | 12 tables over SQL in its list; the store settings through a CRUD route (#5298). An existing role keeps the `render_settings` view until the revoke in #5298 Task 22; template Python and openscad in the same pod | render jobs, blob refs and assets through CRUD routes; template Python and openscad in a sandbox pod with no secret |
 | print worker | 34 tables over SQL | print runs, outcomes, slices and printer state through CRUD routes (it already reads outputs through `/api/v1/internal/outputs`) |
-| projects worker | 14 tables and 5 `ai_*` tables over SQL | flow runs, decisions, grants and payload keys through CRUD routes |
+| projects worker | 1 table and 2 `ai_*` tables over SQL in its lists; flow runs, decisions, grants and operations through CRUD routes, and no event bus (#5298). An existing role keeps the 7 flow relations, `settings`, `model_print_choices`, `printer_bed_types`, `printers`, `events`, `operations` and `ai_sessions`, `ai_mcp_tokens`, `ai_settings` until the revoke in #5298 Task 11 | flow runs, decisions, grants and payload keys through CRUD routes |
 | agent services | the owner role; 46 `ai_*` tables and 6 backend tables | sessions, transcripts, approvals and credentials through CRUD routes; Claude Code and plugins in a sandbox pod; no database secret |
 | agent-durable | the owner role, 0 replicas | no database secret |
 | API | reads and writes 8 `ai_*` tables; runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |
 | Postgres | no ingress policy | an ingress policy that admits the CRUD service only |
 
-Open question for #5298 and #5299: each caller reads its service credential from a database
-view of its own today (`backend/scadbuddy/auth/service_credentials.py`). With no database
-secret, a caller needs another way to get it: a Kubernetes Secret that the CRUD service
-writes and the pod mounts, a projected service-account token that the CRUD service
-exchanges for a short-lived credential, or the sealed credential delivered at start. One
-choice applies to every caller.
+Each caller reads its service credential from a database view of its own today
+(`backend/scadbuddy/auth/service_credentials.py`). With no database secret, it gets one as
+[the service-credentials spec](../superpowers/specs/2026-11-05-service-credentials-without-db-design.md)
+(#5325) decides: a projected ServiceAccount token, checked by TokenReview and exchanged at
+the CRUD service for a 15-minute credential, scoped per caller and denied by default.
 
 Do the steps in this order. Split the APIs out first. Lock down the network last, so its
 policies admit only the CRUD service.

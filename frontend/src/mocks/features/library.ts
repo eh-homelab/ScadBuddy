@@ -199,7 +199,22 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
   }
 }
 
+/** #4703 — the files uploaded through `POST /print/library/files`, newest last; they join the listings. */
+const uploads: LibraryEntry[] = []
+
 export const handlers = [
+  http.post(`${base}/print/library/files`, async ({ request }) => {
+    const form = await request.formData()
+    const file = form.get('file')
+    if (!(file instanceof File) || file.size === 0) return HttpResponse.json({ detail: 'send the file as the `file` part' }, { status: 422 })
+    const rawFolder = form.get('folder_id')
+    const folderId = typeof rawFolder === 'string' && rawFolder !== '' ? Number(rawFolder) : null
+    const type = file.name.toLowerCase().endsWith('.gcode.3mf') ? 'gcode.3mf' : (file.name.split('.').pop() ?? '')
+    const added = entry(9000 + uploads.length, file.name, type, folderId, { file_size: file.size, created_at: new Date().toISOString() })
+    uploads.push(added)
+    libraryFiles.push(added)
+    return HttpResponse.json({ id: added.id, filename: added.filename, folder_id: folderId })
+  }),
   // #2349 — names by id; a file the mock library does not have is `name: null`.
   http.get(`${base}/print/library/names`, ({ request }) => {
     const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
@@ -762,6 +777,15 @@ function descendants(id: number): Set<number> {
   return found
 }
 
+/**
+ * #5371 — a model delete's `delete_inbox_copies`: its outputs' copies still filed under the
+ * template's folder go to the mocked trash. A move clears `filed` (`trash_filed`, #5422), so
+ * a copy moved out stays where it is.
+ */
+export function trashFiledMockLibraryFiles(ids: Iterable<number>): void {
+  for (const id of ids) if (!moved.has(id)) trashed.add(id)
+}
+
 function listedFiles(): LibraryEntry[] {
   return [...libraryFiles, ...copies]
     .filter((file) => !trashed.has(file.id) && !removed.has(file.id))
@@ -778,6 +802,7 @@ export function mockLibraryFileFolder(fileId: number): number | null {
 }
 
 export function reset(): void {
+  for (const added of uploads.splice(0)) libraryFiles.splice(libraryFiles.indexOf(added), 1)
   lastQueued.clear()
   batches.clear()
   refusedRequests.clear()

@@ -6,6 +6,7 @@ import { EgressError, type Resolver, systemResolver } from '../../http/egress.js
 import { assertEndpointAllowed, PluginError } from '../registry.js'
 import { type Checkout, extractSubdir, FetchError, type RepoFetcher } from './git.js'
 import { hashTree, PackageContentError } from './hash.js'
+import { declaredHeaderSecrets } from './mcp.js'
 import {
   DEFAULT_REF,
   normaliseGitUrl,
@@ -134,6 +135,14 @@ export function marketplaceTarget(marketplace: unknown, entryName: string, marke
   }
 }
 
+/**
+ * How long a pin whose files could not be had for its header secrets (`headerSecrets`) is
+ * refused again without a new fetch (#5488): while its git host is down, `workspace_read` and
+ * the uploads fail at once instead of each waiting for the fetch to time out. The same window
+ * as plugins/secrets.ts `PLUGIN_SECRETS_CACHE_MS`.
+ */
+export const PACKAGE_SECRETS_FAILURE_MS = 30_000
+
 export class PackageInstaller {
   readonly cacheRoot: string
   private readonly fetcher: RepoFetcher
@@ -146,6 +155,8 @@ export class PackageInstaller {
   private readonly current = new Map<string, string>()
   /** Per cached directory, the built-ins its last vetting found (vet.ts `builtin_tools`). */
   private readonly builtins = new Map<string, string[]>()
+  /** Per pin (its cache directory), the last `headerSecrets` failure and when it happened. */
+  private readonly headerFailures = new Map<string, { at: number; error: unknown }>()
 
   constructor(options: InstallerOptions) {
     this.fetcher = options.fetcher
@@ -201,6 +212,20 @@ export class PackageInstaller {
    * allow is in the review's `refused`.
    */
   private async extractAndVet(checkout: Checkout, subpath: string, dest: string, fallbackName: string) {
+    const tree = await this.extract(checkout, subpath, dest)
+    const vetting = vetPackage(dest, fallbackName)
+    const builtIn = vetting.review && builtInNamed(vetting.review.name)
+    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
+    const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
+    // A fatal problem refuses the package outright, but the refusal names
+    // every problem: the allowable ones are reasons too. Fatal first, so the
+    // cap never hides one.
+    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.problems]))
+    return { tree, review: vetting.review }
+  }
+
+  /** Extracts `subpath` of `checkout` into `dest` (regular files only) and hashes it, with no vetting. */
+  private async extract(checkout: Checkout, subpath: string, dest: string) {
     const special = await this.fetcher.specialPaths(checkout, subpath)
     if (special.length) {
       throw new PackageRefusedError(special.map((s) => `${s}: a package holds regular files only`))
@@ -211,22 +236,12 @@ export class PackageInstaller {
       if (err instanceof FetchError) throw new PluginError(err.message, 422)
       throw err
     }
-    let tree
     try {
-      tree = await hashTree(dest)
+      return await hashTree(dest)
     } catch (err) {
       if (err instanceof PackageContentError) throw new PackageRefusedError([err.message])
       throw err
     }
-    const vetting = vetPackage(dest, fallbackName)
-    const builtIn = vetting.review && builtInNamed(vetting.review.name)
-    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
-    const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
-    // A fatal problem refuses the package outright, but the refusal names
-    // every problem: the allowable ones are reasons too. Fatal first, so the
-    // cap never hides one.
-    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.problems]))
-    return { tree, review: vetting.review }
   }
 
   /**
@@ -301,6 +316,8 @@ export class PackageInstaller {
       const code = (err as NodeJS.ErrnoException).code
       if (code !== 'ENOTEMPTY' && code !== 'EEXIST') throw err
     }
+    // A verified copy is here now, so a cached `headerSecrets` failure for it is over (#5490).
+    this.headerFailures.delete(dir)
     return dir
   }
 
@@ -391,8 +408,43 @@ export class PackageInstaller {
     })
   }
 
-  /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
-  private async verifiedCopy(pin: PackagePin): Promise<string> {
+  /**
+   * The header values `pin`'s http MCP servers declare (#5485, mcp.ts `declaredHeaderSecrets`),
+   * read from the copy that hashes to the pin, fetched again when there is none. Never vetted and
+   * never checked for address or listing size, so a package that fails to load still gives them:
+   * they stay secrets that every tool redacts and every upload refuses. Throws when no copy can
+   * be had (the fetch fails, or the files do not hash to the pin), so the secrets read fails
+   * closed; for `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without a
+   * fetch (a refusal, never an empty list), unless a copy that hashes to the pin is cached by
+   * then, which ends the refusal at once. Runs in the package's queue.
+   */
+  headerSecrets(pin: PackagePin): Promise<string[]> {
+    const key = this.cacheDir(pin)
+    return this.serial(pin.name, async () => {
+      // A good copy first: one cached since a failure (a load placed it, or another replica's
+      // fetch filled a shared cache) ends the refusal at once (#5490).
+      if (await this.cacheMatches(key, pin)) {
+        this.headerFailures.delete(key)
+        return declaredHeaderSecrets(key)
+      }
+      const failed = this.headerFailures.get(key)
+      if (failed && Date.now() - failed.at <= PACKAGE_SECRETS_FAILURE_MS) throw failed.error
+      try {
+        const values = declaredHeaderSecrets(await this.verifiedCopy(pin, { vet: false }))
+        this.headerFailures.delete(key)
+        return values
+      } catch (error) {
+        this.headerFailures.set(key, { at: Date.now(), error })
+        throw error
+      }
+    })
+  }
+
+  /**
+   * The cached directory of `pin` when every file hashes to it, else fetched again at the pinned
+   * commit, vetted unless `vet` is false (a load re-vets the copy anyway, `materialiseNow`).
+   */
+  private async verifiedCopy(pin: PackagePin, options: { vet?: boolean } = {}): Promise<string> {
     const dir = this.cacheDir(pin)
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
@@ -404,7 +456,10 @@ export class PackageInstaller {
           throw new PluginError(`fetched commit ${checkout.commit}, the pin is ${pin.commit}`, 502)
         }
         const pkg = path.join(tmp, 'pkg')
-        const { tree } = await this.extractAndVet(checkout, pin.fetchPath, pkg, pin.name)
+        const tree =
+          options.vet === false
+            ? await this.extract(checkout, pin.fetchPath, pkg)
+            : (await this.extractAndVet(checkout, pin.fetchPath, pkg, pin.name)).tree
         if (tree.hash !== pin.contentHash) {
           throw new PluginError(
             `the files at commit ${pin.commit} hash to ${tree.hash}, not the pinned ${pin.contentHash}`,

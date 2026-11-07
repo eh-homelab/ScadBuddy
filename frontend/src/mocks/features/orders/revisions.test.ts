@@ -150,6 +150,17 @@ describe('revisions mock (#5280)', () => {
     expect(refused?.problem.type).toBe(type('print_in_flight'))
   })
 
+  it('counts a claim whose run is not attached yet as in flight, as print_in_flight does', async () => {
+    const [first] = await revisionsOf(ORDER_ACCEPTED, ITEM_APPROVED)
+    const claim = await api.testPrintRevision(ORDER_ACCEPTED, ITEM_APPROVED, first!.id, NO_CHOICES)
+    // `OrderStore.print_in_flight` counts the claim by its `print_request_id`, run or not.
+    const row = state.fulfilments.find((f) => f.id === claim.id)!
+    expect(row.print_request_id).toEqual(expect.any(String))
+    row.print_run_id = null
+    const refused = await failure(api.printItem(ORDER_ACCEPTED, ITEM_APPROVED, NO_CHOICES as never))
+    expect(refused?.problem.type).toBe(type('print_in_flight'))
+  })
+
   it('fills the colours of an item that has none by amending its revision in place', async () => {
     const made = await api.addOrderItem(ORDER_DRAFT, { output_id: OUTPUT_REAGAN, quantity: 1 })
     const quote = await api.quoteOrderItem(ORDER_DRAFT, made.id, { unit_price_minor: 700 })
@@ -173,15 +184,21 @@ describe('revisions mock (#5280)', () => {
     const render = (await api.order(ORDER_DRAFT)).attachments.find((a) => a.revision_id === revision.id)!
     const refusedPicture = await failure(api.setItemDelivered(ORDER_DRAFT, ITEM_DRAFT, render.id))
     expect(refusedPicture?.status).toBe(422)
+    const notPrinted = await failure(api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'test_print' }))
+    expect(notPrinted?.status).toBe(422)
+    await api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'other' })
+    const laundered = await failure(api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'test_print' }))
+    expect(laundered?.status).toBe(422)
+    await api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'render' })
     await api.sendOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id)
     const refused = await failure(api.deleteOrderAttachment(ORDER_DRAFT, render.id))
     expect(refused?.status).toBe(409)
     expect(refused?.problem.type).toBe(type('revision_sent'))
     expect((await api.order(ORDER_DRAFT)).attachments.some((a) => a.id === render.id)).toBe(true)
-    const reroled = await failure(api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'test_print' }))
+    const reroled = await failure(api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'reference', caption: 'late' }))
     expect(reroled?.status).toBe(409)
     expect(reroled?.problem.type).toBe(type('revision_sent'))
-    expect((await api.order(ORDER_DRAFT)).attachments.find((a) => a.id === render.id)?.role).toBe('render')
+    expect((await api.order(ORDER_DRAFT)).attachments.find((a) => a.id === render.id)).toMatchObject({ role: 'render', caption: '' })
   })
 
   it('keeps a render and a test print on a revision', async () => {

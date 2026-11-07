@@ -27,6 +27,7 @@ from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitError
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.render.job_models import Job, JobTableKind
+from scadbuddy.render.jobs import _make_staging
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -387,7 +388,11 @@ def test_the_orphan_sweep_never_touches_a_live_model(
         output = paths.output_dir(slug, "deadbeef")
         output.mkdir(parents=True)
         export = paths.model_revision_dir(slug, "0" * 40)
-        export.mkdir(parents=True)
+        # The boot's prune run (`prune_revision_exports`) runs beside this test. It
+        # removes a slug directory that it finds empty, so a plain `mkdir(parents=True)`
+        # can lose the parent before it makes the leaf (#5458). Make the directory as
+        # an export does: again, when the prune took the parent (#4400).
+        _make_staging(export)
         paths.schema_cache.mkdir(parents=True, exist_ok=True)
         paths.model_schema_cache(slug).write_text("{}\n", encoding="utf-8")
         derived += [output, export, paths.model_schema_cache(slug)]

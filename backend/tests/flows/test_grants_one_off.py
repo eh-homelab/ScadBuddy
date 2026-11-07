@@ -62,8 +62,8 @@ async def test_match_grant_parks_it_without_reading_or_spending_the_grant() -> N
         async def get_grant(self, run_id: str) -> Grant:
             return grant
 
-        async def consume_grant(self, run_id: str, request_id: str, pick: Any) -> str:
-            spent.append(request_id)
+        async def consume(self, run_id: str, request: Any) -> str:
+            spent.append(request.request_id)
             return "spent"
 
     async def facts_of(fn: str, tool: str | None, args: dict[str, Any]) -> CallFacts:

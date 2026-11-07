@@ -54,6 +54,11 @@ describe.skipIf(skip !== '')(`the backend roles' ai_* grants${skip}`, () => {
     }
     expect(await can(roles.projects, 'ai_payload_keys', 'DELETE')).toBe(false)
     expect(await can(roles.projects, 'ai_operations', 'SELECT')).toBe(false)
+    // ScadBuddy#5298: a session's tiers and the approval timeout come through the API.
+    for (const table of ['ai_sessions', 'ai_mcp_tokens', 'ai_settings']) {
+      expect(await can(roles.api, table, 'SELECT'), `${roles.api} SELECT ${table}`).toBe(true)
+      expect(await can(roles.projects, table, 'SELECT'), `${roles.projects} SELECT ${table}`).toBe(false)
+    }
   })
 
   it('grants nobody on one shared role', async () => {

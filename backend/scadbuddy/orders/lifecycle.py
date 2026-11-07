@@ -27,6 +27,7 @@ import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -44,6 +45,8 @@ from scadbuddy.orders.models import (
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    CostEntry,
+    CostEntryInput,
     Fulfilment,
     FulfilmentPurpose,
     ItemStatus,
@@ -59,8 +62,10 @@ from scadbuddy.orders.models import (
     Revision,
     Shipment,
     ShipmentItem,
+    TimeEntry,
+    TimeEntryInput,
 )
-from scadbuddy.orders.pricing import Plate, Priced
+from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
@@ -72,6 +77,7 @@ from scadbuddy.orders.store import (
     fulfilment_subject,
     item_subject,
     order_subject,
+    quote_file_keys,
     revision_subject,
 )
 from scadbuddy.store.refs import BlobRefs
@@ -246,6 +252,14 @@ class OrderEdit(BaseModel):
     shipping_address_id: str | UnsetType | None = UNSET
     billing_address_id: str | UnsetType | None = UNSET
     charges: list[ChargeInput] | None = None
+
+
+@dataclass(frozen=True)
+class LabourRate:
+    """``pricing_labour_rate_per_hour`` and the shop's ``orders_currency`` it is in."""
+
+    per_hour: Decimal
+    currency: str
 
 
 @dataclass
@@ -534,6 +548,116 @@ class Lifecycle:
             self._event(conn, order, by, "payment.added", payment_id=payment.id)
         self._told(_Change(order))
         return payment
+
+    # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
+    # A record of what the job took, allowed in every status, ended and on hold included:
+    # a fee or a label often arrives after the order moved on. Nothing here moves a status.
+
+    def _entry_item(self, conn: Conn, order: Order, item_id: str | None) -> list[OrderItem]:
+        return [] if item_id is None else [self._item_of(conn, order, item_id)]
+
+    def add_time_entry(
+        self, order_id: str, body: TimeEntryInput, by: Actor, *, labour_rate: LabourRate
+    ) -> tuple[TimeEntry, bool]:
+        """Time spent, at the labour rate now (copied, in the order's minor units, under
+        the order's lock, so a currency change cannot slip in between), and whether this
+        call wrote it: a second write of one ``source`` returns the first entry and writes
+        nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            rate = (
+                to_minor(labour_rate.per_hour, order.currency)
+                if order.currency == labour_rate.currency
+                else None
+            )
+            entry, written = self.store.insert_time_entry(
+                conn, order.id, body, rate_minor_per_hour=rate, created_by=by
+            )
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "time.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def remove_time_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_time_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "time_entry_not_found",
+                    f"no time entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "time.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
+
+    def add_cost_entry(
+        self, order_id: str, body: CostEntryInput, by: Actor
+    ) -> tuple[CostEntry, bool]:
+        """Money spent, and whether this call wrote it: a second write of one ``source``
+        returns the first entry and writes nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_cost_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "cost_entry_not_found",
+                    f"no cost entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)
@@ -1328,6 +1452,15 @@ class Lifecycle:
                     f" (POST /orders/{order_id}/items/{item_id}/cancel)",
                     items=[item.id],
                 )
+            if self.store.item_has_entries(conn, item.id):
+                # Logged time and costs are the job's record (#5326): never dropped with
+                # the item, and its delete has no audit row for them.
+                raise LifecycleError(
+                    "item_has_entries",
+                    f"item {item_id} has time or cost entries: remove them or cancel it"
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    items=[item.id],
+                )
             # Its files go with it, each on the audit line, and with them their holds
             # on the blobs: nothing could show or remove an item's file once the item
             # is gone. A refusal below rolls this back.
@@ -1460,10 +1593,25 @@ class Lifecycle:
         it, with the plates it read and the sliced file it read them from, under the id
         its ref was taken with (``quote_id``, Ruling 3). As a manual quote: the order
         open for items, the item not settled, allowed on hold (it advances nothing). It names
-        the revision the run sliced; one since superseded is `revision_not_newest`."""
+        the revision the run sliced; one since superseded is `revision_not_newest`.
+        A ``quote_id`` already recorded (by an earlier attempt of the same operation,
+        #5353) is answered with, under the order's lock, and nothing is written but the
+        drop of this holder's holds on keys the recorded quote does not name (#5415: a
+        re-slice that gave other bytes). The holder is shared by every attempt, so those
+        holds may be a sibling attempt's that still runs; that attempt's own record is
+        answered with this quote too, so it never needs them (#5448). The quote's holds
+        are taken again in its own transaction, so a row never commits without them,
+        whatever another attempt dropped before it."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            if quote_id is not None:
+                recorded = self.store.quote(quote_id, conn=conn)
+                if recorded is not None and recorded.order_item_id == item_id:
+                    self.store.drop_holds(
+                        conn, QUOTE_HOLDER, quote_id, keep=quote_file_keys(recorded)
+                    )
+                    return recorded
             self._not_ended(order)
             self._open_for_items(order, "an item's price")
             item = self._item_of(conn, order, item_id)
@@ -1490,9 +1638,25 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
             )
+            self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
         return quote
+
+    def drop_unrecorded_quote_holds(self, order_id: str, quote_id: str) -> bool:
+        """A failed quote run's holds (Ruling 3), unless its quote was recorded (#5353:
+        another attempt of the same operation may have recorded it): then only those on
+        keys the quote does not name (#5415). Under the order's lock, which
+        :meth:`record_slice_quote` takes too, so a drop never lands between that
+        record's check and its commit. Whether it dropped them all."""
+        with self.store.transaction() as conn:
+            self._lock(conn, order_id)
+            recorded = self.store.quote(quote_id, conn=conn)
+            if recorded is not None:
+                self.store.drop_holds(conn, QUOTE_HOLDER, quote_id, keep=quote_file_keys(recorded))
+                return False
+            self.store.drop_holds(conn, QUOTE_HOLDER, quote_id)
+        return True
 
     def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every
@@ -2649,12 +2813,22 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             before = self._attachment_of(conn, order, attachment_id)
-            if before.revision_id is None and patch.role is not None:
-                _refuse_revision_role(patch.role)
             if (patch.role not in (None, before.role)) or (
                 patch.caption not in (None, before.caption)
             ):
                 self._refuse_sent_revision(conn, before)
+            if patch.role not in (None, before.role):
+                if before.revision_id is None:
+                    _refuse_revision_role(patch.role)
+                elif patch.role == "test_print":
+                    # A test print's photo may join the model's photos (`attachment_to_model`),
+                    # so it only ever arrives by upload: no re-role, from a render or through
+                    # another role, makes one.
+                    raise LifecycleError(
+                        "role",
+                        "only an upload is the photo of a test print: upload that photo",
+                        unprocessable=True,
+                    )
             attachment = self.store.update_attachment(
                 conn,
                 before.id,

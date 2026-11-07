@@ -78,7 +78,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
         const effective = await effectiveTool(tool, services)
         if (effective.disabled || !hasTier(principal, effective.risk)) return undefined
         try {
-          return await tool.prepareApproval(input, {
+          const { input: prepared, summary } = await tool.prepareApproval(input, {
             ...services,
             principal,
             ...(session.id !== undefined ? { session: session.id } : {}),
@@ -87,6 +87,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
             lookup,
             gate: 'harness',
           })
+          return { input: prepared, summary }
         } catch (err) {
           // An interrupted turn is not the backend away: the abort goes on as it is (#4442 review).
           if (signal.aborted) throw err
@@ -112,8 +113,10 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
       const allowed = tools.filter((t) =>
         builtIn ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, turnTierOf(t)) : hasTier(principal, t.risk),
       )
-      // The turn's own secrets (its credentials and plugin tokens) beside every
-      // saved credential's, for workspace_read to redact (#2329).
+      // The turn's own secrets (its loaded plugins' current headers and forwarder URLs,
+      // one not saved yet too) beside `services.secrets`, the one list every mode checks
+      // (main.ts: saved credentials and every plugin secret, #5480). workspace_read
+      // redacts the union (#2329) and every upload refuses it (tools/workspaceUploads.ts).
       const turnSecrets = extras?.secrets
       const withSecrets: ToolServices = turnSecrets
         ? { ...services, secrets: async () => [...((await services.secrets?.()) ?? []), ...turnSecrets()] }

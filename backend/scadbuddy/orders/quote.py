@@ -41,6 +41,7 @@ from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
+from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
     OPEN_FOR_EDITS,
     QUOTE_HOLDER,
@@ -308,22 +309,30 @@ def output_matches(
     With ``schema`` (the commit's), both inputs are compared at its defaults where they
     omit one (#4774): an output saved before renders filled them records only the params
     it was sent, and is still the render of a reference that names its defaults."""
-    if output_id is None:
-        return False
+    return output_id is not None and _matching(outputs, output_id, item, schema) is not None
+
+
+def _matching(
+    outputs: OutputsRead, output_id: str, item: OrderItem, schema: CustomizerSchema | None
+) -> OutputMeta | None:
+    """The output's ``meta.json`` when it matches (:func:`output_matches`), from one
+    read of it."""
     try:
         meta = outputs.get(output_id)
         inputs = outputs.inputs(output_id)
         arranged = not is_commit_id(meta.model_version) and bool(outputs.arranged_from(output_id))
     except (OutputNotFoundError, OSError, ValueError):
-        return False
+        return None
     reference = item.reference
     if reference is None:
-        return False
-    return (
+        return None
+    if (
         meta.slug == reference.slug
         and (meta.model_version == reference.commit or arranged)
         and _at_defaults(inputs, schema) == _at_defaults(reference.inputs, schema)
-    )
+    ):
+        return meta
+    return None
 
 
 def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> dict[str, Any]:
@@ -349,6 +358,7 @@ async def ensure_output(
     follow_every: float = FOLLOW_EVERY,
     schema: CustomizerSchema | None = None,
     revision_id: str | None = None,
+    saved_as: str | None = None,
 ) -> str:
     """The output the item slices (Ruling 7): its own while it matches the reference,
     else the reference rendered at its commit, waited on through the projection, saved
@@ -356,10 +366,22 @@ async def ensure_output(
     as the item's ``output_id``. An item with no colour slots takes the render's, with
     ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`.
     With ``revision_id`` (the quote's run) the render is of that revision: once the
-    item has another, nothing is written and the run is refused `revision_not_newest`."""
+    item has another, nothing is written and the run is refused `revision_not_newest`.
+    ``saved_as`` is the id a new output is saved under (:func:`operation_output_id`,
+    #5390): an output of that id that matches is one an earlier attempt of the same
+    operation saved before it stopped, and is set on the item without a second render
+    or save. The save claims the id first (``OutputStore.claim``): a directory already
+    there (another attempt's save still writing, or an output that does not match) is
+    left alone, and the new output gets an id of its own."""
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
+    if saved_as is not None:
+        earlier = await asyncio.to_thread(_matching, outputs, saved_as, item, schema)
+        if earlier is not None:
+            return await _set_output(
+                lifecycle, order, item, saved_as, list(earlier.colors), filaments, by, revision_id
+            )
     reference = reference_of(item)
     params = reference.inputs.get("params", {})
     pipeline = reference.render_key == inputs_key(
@@ -389,10 +411,33 @@ async def ensure_output(
             "index": 0,
             "inputs": reference.inputs,
             "name": f"{order.number} {item.title}",
+            **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )
-    output_id = str(saved["id"])
-    colours = saved.get("colors") or []
+    return await _set_output(
+        lifecycle,
+        order,
+        item,
+        str(saved["id"]),
+        saved.get("colors") or [],
+        filaments,
+        by,
+        revision_id,
+    )
+
+
+async def _set_output(
+    lifecycle: Lifecycle,
+    order: Order,
+    item: OrderItem,
+    output_id: str,
+    colours: Sequence[str],
+    filaments: Mapping[int, str],
+    by: Actor,
+    revision_id: str | None,
+) -> str:
+    """The item's ``output_id`` set to the saved output, with its colour slots when the
+    item has none."""
     try:
         await asyncio.to_thread(
             lambda: lifecycle.update_item(
@@ -541,7 +586,7 @@ async def keep_sliced(
     key = sliced_key(sha256)
     await asyncio.to_thread(_write_sliced, blobs, key, payload)
     await blobs.publish(key, scope=scope)
-    await asyncio.to_thread(refs.add, key, QUOTE_HOLDER, quote_id)
+    await asyncio.to_thread(refs.hold, key, QUOTE_HOLDER, quote_id)
     return key, sha256
 
 
@@ -586,6 +631,24 @@ class QuoteRun:
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None
 
 
+def operation_quote_id(operation: str | None) -> str:
+    """The id a quote's run records its quote under (#5353): the operation's (its
+    workflow id, the same on every attempt), so an attempt that runs again after its
+    worker stopped (a rollout) finds the quote an earlier attempt recorded. A run
+    outside an operation gets one of its own."""
+    if operation is None:
+        return uuid.uuid4().hex
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote:{operation}").hex
+
+
+def operation_output_id(quote_id: str) -> str:
+    """The id a quote's run saves a new output under (#5390): one per quote id, so per
+    operation (:func:`operation_quote_id`). An attempt that runs again after its worker
+    stopped between the save and the item's ``output_id`` write finds the output the
+    earlier attempt saved (:func:`ensure_output`) instead of saving a second."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:order_item_quote_output:{quote_id}").hex
+
+
 def subject_of(item_id: str) -> str:
     """The quote's subject (§5.4's, Ruling 1): an item's quote and its print are the
     same subject's work."""
@@ -593,11 +656,23 @@ def subject_of(item_id: str) -> str:
 
 
 async def quote_run(
-    run: QuoteRun, order_id: str, item_id: str, request: SliceQuoteRequest, by: Actor
+    run: QuoteRun,
+    order_id: str,
+    item_id: str,
+    request: SliceQuoteRequest,
+    by: Actor,
+    *,
+    quote_id: str | None = None,
 ) -> Quote:
-    """The whole run, in the order the module docstring gives."""
+    """The whole run, in the order the module docstring gives. ``quote_id`` is the id
+    every attempt of one operation records under (:func:`operation_quote_id`): an
+    attempt that finds it recorded answers with it and does nothing (#5353)."""
     lifecycle = run.lifecycle
     store = lifecycle.store
+    quote_id = quote_id or uuid.uuid4().hex
+    recorded = await asyncio.to_thread(store.quote, quote_id)
+    if recorded is not None and recorded.order_item_id == item_id:
+        return recorded
     try:
         await asyncio.to_thread(set_filaments, lifecycle, order_id, item_id, request.filaments, by)
     except LifecycleError as error:
@@ -629,13 +704,13 @@ async def quote_run(
         follow_every=run.follow_every,
         schema=schema,
         revision_id=revision_id,
+        saved_as=operation_output_id(quote_id),
     )
     subject = subject_of(item_id)
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
-    quote_id = uuid.uuid4().hex
     held = False
     try:
         plates: list[Plate] = []
@@ -656,7 +731,9 @@ async def quote_run(
         first = plates[0]
         assert first.sha256 is not None and first.blob_key is not None
         try:
-            return await asyncio.to_thread(
+            # To its end: a cancel (the worker stopping) waits for the commit, so the
+            # drop below sees the quote it recorded (#5353).
+            return await to_thread_to_end(
                 lambda: lifecycle.record_slice_quote(
                     order_id,
                     item_id,
@@ -667,12 +744,12 @@ async def quote_run(
                     by=by,
                     revision_id=revision_id,
                     quote_id=quote_id,
-                )
+                ),
             )
         except LifecycleError as error:
             raise refused(error) from None
     except QuoteError as error:
-        await _drop(run.refs, quote_id, held)
+        await _drop(lifecycle, order_id, quote_id, held)
         extensions: dict[str, Any] = {}
         if error.plate is not None:
             extensions["plate"] = error.plate
@@ -685,17 +762,20 @@ async def quote_run(
             **extensions,
         ) from None
     except BaseException:
-        await _drop(run.refs, quote_id, held)
+        await _drop(lifecycle, order_id, quote_id, held)
         raise
 
 
-async def _drop(refs: BlobRefs, quote_id: str, held: bool) -> None:
+async def _drop(lifecycle: Lifecycle, order_id: str, quote_id: str, held: bool) -> None:
     """A run that fails after its first add drops its own holder before it raises
-    (Ruling 3); one the drop misses is the reaper's. Off the loop, as every other store
-    call of the run: a slow database must not stall the worker."""
+    (Ruling 3), unless its quote was recorded: every attempt of one operation holds
+    under one id, and another may have recorded it (#5353). Then it drops only the
+    holds on keys that quote does not name (#5415). One the drop misses is the
+    reaper's. Off the loop, as every other store call of the run: a slow database must
+    not stall the worker."""
     if not held:
         return
     try:
-        await asyncio.to_thread(refs.drop_holder, QUOTE_HOLDER, quote_id)
+        await asyncio.to_thread(lifecycle.drop_unrecorded_quote_holds, order_id, quote_id)
     except Exception:
         logger.exception("could not drop a failed quote's hold", extra={"id": quote_id})

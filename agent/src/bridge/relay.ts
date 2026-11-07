@@ -1,4 +1,4 @@
-import type { Client } from '@temporalio/client'
+import { type Client, TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
 import { TASK_QUEUE } from '../temporal/names.js'
 import {
@@ -162,6 +162,8 @@ export class TemporalTabRelay implements TabRelay {
   #owner: RelayOwner | undefined
   /** Whether this replica's host worker polls its queue with `bridge.tab` (`startHosting`): only then is a tab claimed here. */
   #hosting = false
+  /** `startHosting` refused for want of a sealing client, and said so once. */
+  #refused = false
   /** One owner-row write at a time, in order: a tab's release never lands before its claim. */
   #writes: Promise<void> = Promise.resolve()
   readonly #refreshMs: number
@@ -190,10 +192,19 @@ export class TemporalTabRelay implements TabRelay {
    * The host worker polls `hostQueue` with `hostActivities()` (main.ts, once the worker runs):
    * from now on this replica claims its tabs in ai_tab_owners, and claims the ones it already
    * holds. Never before: a claim with nothing polling the queue would send every call there to
-   * wait out the ack timeout.
+   * wait out the ack timeout. Never without a sealing client (`useClient`) either: a replica
+   * with no KEK cannot decode the sealed calls other replicas send it, so each would answer
+   * no_answer (#4949). Its tabs then reach only the calls made on this replica.
    */
   startHosting(): void {
     if (this.#hosting) return
+    if (!this.#client) {
+      if (!this.#refused) {
+        this.#refused = true
+        this.#log('bridge relay: no sealing client (no secret key), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
+      }
+      return
+    }
     this.#hosting = true
     // The tabs are read when the write runs, after any release queued before it.
     const refresh = () => void this.#write(() => this.#owners.refresh(this.#owner?.tabs() ?? [], this.hostQueue))
@@ -310,7 +321,15 @@ export class TemporalTabRelay implements TabRelay {
           signal.removeEventListener('abort', onAbort)
           // The workflow failed or timed out (a rollout's old replica failing its tasks): the
           // owner may have run the call, so it is never sent again.
-          this.#failed(err)
+          if (executionTimedOut(err)) {
+            // Named apart from an owner's failure (#4950): WORKFLOW_SLACK_MS covers about one
+            // failed workflow task, so a run of them during a rollout ends here.
+            this.#log(
+              `bridge relay: the call to tab ${tabId} on ${queue} timed out as a workflow (rollout? its workflow tasks may have failed): ${errorMessage(err)}`,
+            )
+          } else {
+            this.#failed(err)
+          }
           resolve('failed')
         },
       )
@@ -328,8 +347,47 @@ export class TemporalTabRelay implements TabRelay {
   }
 
   #failed(err: unknown): void {
-    this.#log(`bridge relay: ${err instanceof Error ? err.message : String(err)}`)
+    this.#log(`bridge relay: ${errorMessage(err)}`)
   }
+}
+
+/** How often `hostTabs` asks whether the host worker polls yet. */
+export const HOSTING_POLL_MS = 200
+
+/**
+ * How main.ts starts this replica's tab hosting (#5421): the sealing client first, when there is
+ * one, then `startHosting` once `worker` (the host worker on `relay.hostQueue`) polls, asked now
+ * and every `pollMs`. In that order, or `startHosting` would refuse as for a replica with no KEK.
+ * Without `worker` the client is set and no tab is claimed. Returns a stop for the wait.
+ */
+export function hostTabs(
+  relay: TemporalTabRelay,
+  options: { sealing: SealingClient | undefined; worker: { state(): string } | undefined; pollMs?: number },
+): () => void {
+  const { sealing, worker } = options
+  if (sealing) relay.useClient(sealing)
+  if (!worker) return () => {}
+  const polled = () => {
+    if (worker.state() !== 'ok') return false
+    relay.startHosting()
+    return true
+  }
+  if (polled()) return () => {}
+  // Unref'd, so a worker that never connects does not hold the process open at shutdown.
+  const polling = setInterval(() => {
+    if (polled()) clearInterval(polling)
+  }, options.pollMs ?? HOSTING_POLL_MS)
+  polling.unref()
+  return () => clearInterval(polling)
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Whether a workflow's result failed on its execution timeout (the client's WorkflowFailedError of a TimeoutFailure). */
+function executionTimedOut(err: unknown): boolean {
+  return err instanceof WorkflowFailedError && err.cause instanceof TimeoutFailure
 }
 
 function jsonBytes(value: unknown): number {

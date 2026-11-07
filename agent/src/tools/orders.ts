@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
 import { nozzles, presetRef, slotChoice, tier } from './print.js'
-import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
@@ -154,6 +154,34 @@ const sliceQuote = z
   })
   .strict()
 
+/**
+ * The quote warning (job cost spec 2026-11-05 §6.3, #5328): the model's real cost per unit
+ * in its past jobs against the quote's unit price, when that price is thin. Undefined with
+ * no warning, for an answer that is not a quote (a slice quote still running), and when the
+ * lookup fails: the quote is recorded by then, and a failed tool call would invite a second.
+ */
+async function priceWarning(ctx: ToolContext, orderId: string, answer: unknown): Promise<unknown> {
+  const quote = answer as { order_item_id?: unknown; unit_price_minor?: unknown } | null
+  if (typeof quote?.order_item_id !== 'string' || typeof quote.unit_price_minor !== 'number') return undefined
+  try {
+    // The whole order: no route reads one item, and the order holds the currency.
+    const order = await ok(ctx.backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id: orderId } } }), `get order ${orderId}`)
+    const slug = order.items.find((item) => item.id === quote.order_item_id)?.reference?.slug
+    if (!slug) return undefined
+    const history = await ok(
+      ctx.backend.GET('/api/v1/orders/history/unit-cost', {
+        params: { query: { slug, currency: order.order.currency, unit_price_minor: quote.unit_price_minor } },
+      }),
+      `read the unit cost history of ${slug}`,
+    )
+    if (!history.warning) return undefined
+    const { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, estimated, below_cost } = history
+    return { jobs, unit_cost_minor, main_reason, main_reason_minor, suggested_unit_price_minor, margin_percent, below_cost, estimated }
+  } catch {
+    return undefined
+  }
+}
+
 /** The quiet-path answer for a `delete`: openapi-fetch gives no body for a 204. */
 const deleted = (what: string) => json({ deleted: what })
 
@@ -267,13 +295,31 @@ export const orderTools: Tool[] = [
     label: 'List orders',
     description:
       'Orders, newest first, a page at a time (`limit` up to 100): pass `next_cursor` back as `cursor`. Filter by ' +
-      '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made.',
+      '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made. ' +
+      "Each order carries its margin, the figures order_costs gives: `margin_minor`, `margin_percent`, `margin_state` " +
+      '(`loss`, `thin`, `unknown`, `ok`; null with no charged figure) and `margin_estimated`. `margin_state` filters by ' +
+      'any of the states given (`["loss", "thin"]` is the orders list\'s "Loss or thin"). With `margin_state`, each ' +
+      'call reads a limited number of orders, so a page can be short or empty while `next_cursor` remains: follow ' +
+      'the cursor until it is null before you say no order matches. `product`, `accepted_from` (inclusive), ' +
+      '`accepted_to` (exclusive) and `currency` list the orders behind an orders_profit_report row: pass its ' +
+      '`product`, its `period_from` and `period_to`, and its `currency`.',
     input: z.object({
       status: z.enum(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']).optional(),
       customer_id: customerId.optional(),
       q: z.string().max(200).optional(),
       from: datetime.optional(),
       to: datetime.optional(),
+      accepted_from: datetime.optional(),
+      accepted_to: datetime.optional(),
+      currency: z.string().regex(/^[A-Z]{3}$/).optional().describe('An ISO 4217 code, such as USD'),
+      product: z
+        .string()
+        .min(1)
+        .max(210)
+        .regex(/^(custom|(model|sku):.+)$/)
+        .optional()
+        .describe('`model:<slug>`, `sku:<sku>` or `custom`, as a profit report row names it'),
+      margin_state: z.array(z.enum(['loss', 'thin', 'unknown', 'ok'])).min(1).max(4).optional(),
       cursor: z.string().max(400).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     }),
@@ -282,6 +328,26 @@ export const orderTools: Tool[] = [
     // The route takes `status` repeated (#5276); the tool names one.
     handler: async ({ status, ...query }, { backend }) =>
       json(await ok(backend.GET('/api/v1/orders', { params: { query: { ...query, ...(status ? { status: [status] } : {}) } } }), 'list orders')),
+  }),
+  defineTool({
+    name: 'orders_profit_report',
+    label: 'Read the profit report',
+    description:
+      'The profit report by model (job cost spec §6.4): the orders accepted at or after `from` and before `to` ' +
+      '(by default the last 90 days), cancelled ones too. Rows are per currency, never summed across currencies. ' +
+      'Each product row is one model `slug` (`group` `model`), one custom item `sku` (`sku`), or the custom items ' +
+      'with no SKU (`custom`), with its `orders`, `units`, what was charged (`revenue_minor`), the real cost ' +
+      '(`cost_minor`), `margin_minor`, `margin_percent`, `margin_state` and the waste (`waste_minor`, ' +
+      '`waste_percent`: the cost of test and failed prints). Each item counts as order_costs gives it. The `order` ' +
+      "row is the orders' own entries, shipments' cost and charges (its `orders` counts only the orders that have " +
+      "any; no order_list filter matches them), and the `total` row each currency's sum. Pass a product " +
+      "row's `product`, `period_from`, `period_to` and `currency` to order_list for its orders. With `complete` " +
+      'false the report stopped at `max_orders` and covers the orders accepted from `read_from` only.',
+    input: z.object({ from: datetime.optional(), to: datetime.optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/reports/profit'],
+    handler: async (query, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders/reports/profit', { params: { query } }), 'read the profit report')),
   }),
   defineTool({
     name: 'order_get',
@@ -300,10 +366,13 @@ export const orderTools: Tool[] = [
     name: 'order_costs',
     label: "Read an order's real cost",
     description:
-      "An order's real cost (#4251): per item, its accepted quote's seconds, grams and filament cost for the " +
-      "item's quantity beside every attempt's actual seconds and grams, failed attempts included, the grams " +
-      "priced at the quote's own price per gram (a manual quote prices none). `bambuddy_cost` is Bambuddy's own " +
-      'cost of an attempt, shown and never in any sum.',
+      "An order's real cost and margin (#4251, #5326): per item, its accepted quote beside every attempt, failed " +
+      'ones included, each costed in filament and machine time (`estimated` names a figure taken from the quote ' +
+      "or today's settings; `unknown` an attempt with no source), its labour (`time_entries`, else a default, " +
+      '`labour_default`), its `cost_entries`, what it was charged (`revenue_minor`) and its `margin_minor`, ' +
+      '`margin_percent` and `margin_state` (`ok`, `thin`, `loss`, `unknown`); the order adds its own entries, its ' +
+      "shipments' cost and every charge but tax. `bambuddy_cost` is Bambuddy's own cost of an attempt, shown and " +
+      'never in any sum.',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}/costs'],
@@ -312,6 +381,73 @@ export const orderTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/orders/{order_id}/costs', { params: { path: { order_id } } }),
           `get the costs of order ${order_id}`,
+        ),
+      ),
+  }),
+  // Job cost (#5326, spec 2026-11-05 §4.3, §4.4): a record of what the job took, in any
+  // order status. Removing one is the order page's (coverage.ts).
+  defineTool({
+    name: 'order_time_add',
+    label: 'Log time on an order',
+    description:
+      'Record time spent on an order, or on one of its items with `order_item_id`: `design`, `setup`, ' +
+      "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
+      "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
+      'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
+    input: z.object({
+      order_id: orderId,
+      order_item_id: itemId.optional(),
+      kind: z.enum(['design', 'setup', 'post_processing', 'packing', 'other']),
+      minutes: z.number().int().min(1).max(1_000_000),
+      note: z.string().max(1000).default(''),
+      started_at: datetime.optional(),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/time-entries'],
+    title: ({ order_id, minutes }) => `Log ${minutes} minutes on order ${order_id}`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/time-entries', { params: { path: { order_id } }, body }),
+          `log time on order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_cost_add',
+    label: 'Add a cost to an order',
+    description:
+      "Record money a job cost, in the order's currency's minor units, on the order or one of its items: " +
+      "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
+      "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
+      'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
+      'this call names, and writes nothing. Allowed in every order status.',
+    input: z.object({
+      order_id: orderId,
+      order_item_id: itemId.optional(),
+      kind: z.enum(['assistant', 'payment_fee', 'material', 'other']),
+      amount_minor: money.min(1),
+      note: z.string().max(1000).default(''),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/cost-entries'],
+    title: ({ order_id, kind }) => `Add a ${kind} cost to order ${order_id}`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/cost-entries', { params: { path: { order_id } }, body }),
+          `add a cost to order ${order_id}`,
         ),
       ),
   }),
@@ -501,7 +637,8 @@ export const orderTools: Tool[] = [
       '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
       'order_item_accept_quote). A `reference` or ' +
       '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
-      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead). ' +
+      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead), and one ' +
+      'with time or cost entries with `item_has_entries` (remove them, or cancel it). ' +
       '`approval` sets how the customer approves the item: the design first, or design and price together.',
     input: z.object({
       order_id: orderId,
@@ -552,7 +689,12 @@ export const orderTools: Tool[] = [
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
-      'item is quoted; order_item_accept_quote pins it.',
+      'item is quoted; order_item_accept_quote pins it. When the unit price leaves a margin below the thin ' +
+      "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
+      '`price_warning`: `unit_cost_minor` and `jobs`, `below_cost` (true: the price is below the real cost; ' +
+      'false: it is above it, but the margin is thin), the `main_reason` (the cost part that most exceeded what ' +
+      'their quotes priced) and a `suggested_unit_price_minor`. It is advice: tell the user, never re-quote ' +
+      'without asking.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -563,26 +705,28 @@ export const orderTools: Tool[] = [
       slice: sliceQuote.optional(),
     }),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes', 'POST /api/v1/orders/{order_id}/items/{item_id}/quote'],
+    routes: [
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quotes',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quote',
+      'GET /api/v1/orders/history/unit-cost',
+    ],
     title: ({ order_id, item_id, slice }) => `${slice ? 'Quote from a slice' : 'Price'} item ${item_id} of order ${order_id}`,
     handler: async ({ order_id, item_id, manual, slice }, ctx) => {
       if ((manual === undefined) === (slice === undefined)) {
         throw new ToolError('give exactly one of `manual` (a typed price) or `slice` (the print dialog\'s choices)')
       }
       const path = { order_id, item_id }
-      if (manual !== undefined) {
-        return json(
-          await ok(
-            ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
-            `quote item ${item_id}`,
-          ),
-        )
-      }
-      return json(
-        await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
-          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
-        ),
-      )
+      const quote =
+        manual !== undefined
+          ? await ok(
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
+              `quote item ${item_id}`,
+            )
+          : await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
+            )
+      const warning = await priceWarning(ctx, order_id, quote)
+      return json(warning === undefined ? quote : { ...(quote as object), price_warning: warning })
     },
   }),
   defineTool({
@@ -992,6 +1136,8 @@ export const orderTools: Tool[] = [
     label: "Edit an order's attachment",
     description:
       "Caption or re-role an attachment (order_get lists them under `attachments`), in any state of the order. " +
+      "A file of a design revision sent to the customer, or answered, keeps its role and caption (refused, " +
+      "`revision_sent`); no file is re-roled to `test_print` (upload the photo of a test print). " +
       "`delivered` with the attachment's `item_id`: true marks this image as what the item delivered (its picture " +
       "from then on; refused unless it is one of that item's images), false clears the item's delivered mark.",
     input: z.object({

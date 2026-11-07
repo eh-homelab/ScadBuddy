@@ -314,6 +314,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attempt_copy: () => [],
   order_item_fulfil: () => [],
   order_item_unfulfil: () => [],
+  order_time_add: () => [],
+  order_cost_add: () => [],
   order_ship: () => [],
   order_close: () => [],
   order_cancel: () => [],
@@ -368,6 +370,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   set_model_thumbnail: revision,
   delete_model_thumbnail: revision,
   add_model_media: revision,
+  // Its answer wraps the ModelRecord with the stored `path` (#5475).
+  add_readme_image: (input, result) => revision(input, field(result, 'model')),
   // Presets.
   save_preset: (input, result) => {
     const id = str(field(result, 'id'))
@@ -472,6 +476,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const source = str(input.source)
     const target = str(input.target)
     return source && target ? setting(`store_migration:${source}:${target}`) : []
+  },
+  // #5355: a copy between the libraries is one job row; what it copies lands later, server-side.
+  copy_library_files: (_input, result) => {
+    const id = str(field(result, 'copy_id'))
+    return id ? setting(`library_copy:${id}`) : []
   },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),

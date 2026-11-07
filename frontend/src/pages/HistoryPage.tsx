@@ -8,6 +8,7 @@ import { ArrangedNext } from '../components/ArrangedNext'
 import { LazyArrangedPlates } from '../components/ArrangedPlates'
 import { BlobDownload } from '../components/BlobDownload'
 import { BomTable } from '../components/BomTable'
+import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
 import { ColorStrip } from '../components/ColorStrip'
 import { statusLabel } from '../components/prints/status'
 import { PrintPicker } from '../components/PrintPicker'
@@ -761,6 +762,8 @@ function OutputRow({
     setThumbnailOf(output)
     setThumbnailBroken(false)
   }
+  /** #4703 — the thumbnail is being replaced: from disk, or from an assistant session's workspace. */
+  const [replacingThumbnail, setReplacingThumbnail] = useState(false)
   /** #2288 — the name being typed, while Rename is open. */
   const [naming, setNaming] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
@@ -995,6 +998,12 @@ function OutputRow({
               >
                 Rename
               </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => setTimeout(() => setReplacingThumbnail(true), 0)}
+                aria-label={`Replace the thumbnail of ${label}`}
+              >
+                Replace thumbnail…
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 variant="destructive"
@@ -1008,6 +1017,20 @@ function OutputRow({
           </DropdownMenu>
         </div>
       </div>
+
+      <FileUploadDialog
+        open={replacingThumbnail}
+        title={`Replace the thumbnail of ${label}`}
+        description="A PNG image. It replaces the picture History and the print dialog show for this output."
+        onClose={() => setReplacingThumbnail(false)}
+        accept=".png,image/png"
+        hint="PNG only"
+        onFile={async (file) => {
+          await api.putThumbnail(output.id, file)
+          onRenamed(await api.getOutput(output.id))
+        }}
+        workspace={{ resource: { type: 'output', id: output.id }, label: 'this output' }}
+      />
 
       <div className="border-t pt-2.5">
         {diff.length === 0 ? (

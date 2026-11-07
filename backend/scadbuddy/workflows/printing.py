@@ -765,6 +765,10 @@ class PrintRunWorkflow(_PlateStarts):
         (re-attaching is idempotent), then its file uploaded beside the copy."""
         native = await self._slice_run(planned, plate, subject)
         # An upload's budget, beating (review I1): a sliced 3MF carries its G-code.
+        # ``subject`` (#4337) needs no `workflow.patched`: a replay matches a scheduled
+        # activity by its type and order, never by its input, so a run recorded before
+        # the field replays unchanged; its default (``None``) covers an attempt such a
+        # history scheduled (#5157).
         uploaded = await workflow.execute_activity(
             SLICED_UPLOAD_ACTIVITY,
             SlicedUploadInput(

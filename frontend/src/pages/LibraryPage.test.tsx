@@ -1,3 +1,6 @@
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { seedSessionFile } from '../mocks/features/sessionFiles'
+import { seedPickerSession } from '../mocks/features/workspacePicker'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useLocation, useNavigate } from 'react-router'
@@ -1516,6 +1519,26 @@ describe('LibraryPage file details (#1031)', () => {
     await waitFor(() => expect(screen.queryByTestId('library-file-121')).toBeNull())
     expect(within(after).queryByText(/is not listed here/)).toBeNull()
     expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('Spec / MakerWorld / Work')
+  })
+
+  it("uploads a file from an assistant session's workspace into the open folder (#4703)", async () => {
+    seedPickerSession({ id: 's-slice', title: 'Sliced wand' })
+    seedSessionFile('s-slice', 'out/wand.gcode.3mf', new Uint8Array([80, 75, 3, 4]), 'model/3mf')
+    const upload = vi.spyOn(api, 'uploadLibraryFile').mockResolvedValue({ id: 900, filename: 'wand.gcode.3mf', folder_id: 1 })
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
+        <LibraryPage />
+      </AssistantOpenerContext.Provider>,
+      { route: '/library/MakerWorld' },
+    )
+    await screen.findByTestId('library-file-67')
+    await user.click(screen.getByTestId('library-upload'))
+    const dialog = await screen.findByRole('dialog', { name: 'Upload into MakerWorld' })
+    await user.click(within(dialog).getByRole('button', { name: 'From a session…' }))
+    // No resource scopes a library upload: the picker opens on every session.
+    await user.click(await screen.findByRole('button', { name: 'Use out/wand.gcode.3mf' }))
+    await waitFor(() => expect(upload).toHaveBeenCalledWith(expect.objectContaining({ name: 'wand.gcode.3mf' }), 1))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })
 

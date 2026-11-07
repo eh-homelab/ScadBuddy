@@ -74,9 +74,9 @@ export function EndAttempt({
   }
 
   async function save() {
-    // `Number('')` is 0: an empty count is an error, not "none made".
-    const quantity = made ? (count.trim() === '' ? NaN : Number(count)) : attempt.quantity
-    if (!Number.isInteger(quantity) || quantity < 0) {
+    // Digits only: `Number` reads '' as 0 and takes '1e1' and '0x2' as 10 and 2.
+    const quantity = made ? (/^\d+$/.test(count.trim()) ? Number(count.trim()) : NaN) : attempt.quantity
+    if (!Number.isSafeInteger(quantity)) {
       setError('Enter how many were made, 0 or more.')
       return
     }

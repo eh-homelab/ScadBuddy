@@ -512,6 +512,32 @@ export class PluginOAuth {
     })
   }
 
+  /**
+   * Every secret a stored sign-in holds (its access and refresh tokens and its client
+   * secret), opened under `kek`, for a search that must not let one leave the agent
+   * (plugins/secrets.ts `readPluginSecrets`). Read from the rows alone: nothing is
+   * refreshed and no endpoint is contacted. A row that does not open under `kek` gives
+   * nothing; none without a KEK.
+   */
+  async storedSecrets(kek: Kek | undefined): Promise<string[]> {
+    if (!kek) return []
+    const rows = await this.sql<GrantRow[]>`SELECT * FROM ai_plugin_oauth`
+    const out: string[] = []
+    for (const row of rows) {
+      let secret: GrantSecret
+      try {
+        secret = JSON.parse(openSecret(kek, envelope(row), grantAad(row))) as GrantSecret
+      } catch (err) {
+        if (err instanceof SealError) continue
+        throw err
+      }
+      out.push(secret.access_token, bearer(secret.access_token).value)
+      if (secret.refresh_token) out.push(secret.refresh_token)
+      if (secret.client_secret) out.push(secret.client_secret)
+    }
+    return out
+  }
+
   /** Marks the grant failed with `reason`, shown in Settings until the person signs in again. */
   async mark(plugin: string, reason: string, grant?: string): Promise<void> {
     this.cache.delete(plugin)

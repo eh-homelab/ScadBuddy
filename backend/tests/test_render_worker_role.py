@@ -29,14 +29,12 @@ from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.config import available_cpus, default_solid_concurrency
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.render import RemoteRenderSettingsSource
 from scadbuddy.library.assets import AssetMeta, AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutLeases, InstallPermits
 from scadbuddy.library.settings_store import (
     RENDER_FIELDS,
-    S3_FIELDS,
-    SettingsPatch,
-    SettingsStore,
     load_render_store_settings,
 )
 from scadbuddy.render import worker_role
@@ -57,10 +55,11 @@ from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
 from scadbuddy.store.content import BlobScope, ContentStore
 from scadbuddy.store.index import BlobIndex
 from scadbuddy.worker import build_worker_deps, run_worker
-from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PrepareResult, piece_key
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
+from tests.crud.crud_support import served_render_crud, static_render_crud
 from tests.support.renders import render_to_end
 from tests.support.temporal import temporal_client
 
@@ -150,36 +149,14 @@ def _defaults(tmp_path: Path) -> Settings:
 # ── the role's reach ──────────────────────────────────────────────────────────
 
 
-def test_the_role_holds_every_grant_and_cannot_read_the_settings_table(
-    granted: Pool, pg_conninfo: str, tmp_path: Path
-) -> None:
-    store = SettingsStore(
-        Settings(
-            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
-        )
-    )
-    store.open()
-    try:
-        store.save(
-            SettingsPatch(
-                store_s3_endpoint="http://garage:3900",
-                store_s3_region="garage",
-                store_s3_bucket="sb",
-                store_s3_prefix="prod",
-                store_s3_access_key_id="GK1",
-                store_s3_secret_access_key="s3cr3t",
-                store_s3_path_style=False,
-            )
-        )
-    finally:
-        store.close()
+def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) -> None:
     with granted.connection() as conn:
-        readable = {row["name"] for row in conn.execute("SELECT name FROM render_settings")}
-        assert set(S3_FIELDS) <= readable
         assert missing_privileges(conn) == []
         assert pending_migrations(conn) == []
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            conn.execute("SELECT name FROM settings")
+        # The store settings come from the API's CRUD route (#5298), not the view.
+        for relation in ("settings", "render_settings"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
         for table in ("operations", "print_runs", "saved_presets", "model_print_choices"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
@@ -305,27 +282,27 @@ def test_every_grant_names_a_relation_the_schema_has(owner: Pool) -> None:
 # ── the settings it may read ──────────────────────────────────────────────────
 
 
-def test_the_full_key_is_hidden_once_a_render_key_is_stored(
-    owner: Pool, granted: Pool, tmp_path: Path
-) -> None:
+def test_the_full_key_is_hidden_once_a_render_key_is_stored(owner: Pool, tmp_path: Path) -> None:
+    """What the API's CRUD route releases to a render worker (#5298), read through the
+    `render_settings` view."""
     _put(owner, "store_backend", "bambuddy")
     _put(owner, "bambuddy_url", BASE_URL)
     _put(owner, "library_folder_id", 1)
     _put(owner, "bambuddy_api_key", "full")
     _put(owner, "google_fonts_api_key", "fonts")
     # No render key: the fallback the app alerts on (ScadBuddyRenderKeyFallback).
-    current = load_render_store_settings(granted, _defaults(tmp_path))
+    current = load_render_store_settings(owner, _defaults(tmp_path))
     assert (current.store_backend, current.api_key, current.key_is_fallback) == (
         "bambuddy",
         "full",
         True,
     )
     _put(owner, "bambuddy_render_api_key", "narrow")
-    current = load_render_store_settings(granted, _defaults(tmp_path))
+    current = load_render_store_settings(owner, _defaults(tmp_path))
     assert (current.api_key, current.key_is_fallback) == ("narrow", False)
     _put(owner, "solid_concurrency", 3)
-    assert load_render_store_settings(granted, _defaults(tmp_path)).solid_concurrency == 3
-    with granted.connection() as conn:
+    assert load_render_store_settings(owner, _defaults(tmp_path)).solid_concurrency == 3
+    with owner.connection() as conn:
         names = {row["name"] for row in conn.execute("SELECT name FROM render_settings")}
     assert names == {
         "store_backend",
@@ -336,7 +313,7 @@ def test_the_full_key_is_hidden_once_a_render_key_is_stored(
     }
     # A render key cleared in Settings (a JSON null) is no render key.
     _put(owner, "bambuddy_render_api_key", None)
-    assert load_render_store_settings(granted, _defaults(tmp_path)).api_key == "full"
+    assert load_render_store_settings(owner, _defaults(tmp_path)).api_key == "full"
 
 
 def test_the_view_passes_every_render_field(owner: Pool) -> None:
@@ -356,36 +333,43 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
     owner: Pool, granted: Pool, worker_conninfo: str, tmp_path: Path
 ) -> None:
     """The per-colour slots a person saves reach a worker that reads settings only
-    through `render_settings` (#601), and a change reaches it without a restart."""
+    through the API's CRUD route (#601, #5298), and a change reaches it without a
+    restart."""
     settings = _defaults(tmp_path).model_copy(update={"database_url": worker_conninfo})
-    deps, store = await asyncio.to_thread(build_worker_deps, settings)
-    try:
+    async with served_render_crud(owner, _defaults(tmp_path)) as crud:
         # Re-read on every call, not on the 30 s TTL.
-        store.source.ttl = 0
-        acts = RenderActivities(deps)
-        prepared = PrepareResult(version="v", scad="model.scad", schema_cache="")
-        # The worker serves no editor checks, so its default keeps no CPU for them.
-        derived = default_solid_concurrency(available_cpus(), deps.config.render_concurrency, 0)
+        source = RemoteRenderSettingsSource(crud, ttl=0)
+        current = await source.current()
+        deps, store = await asyncio.to_thread(build_worker_deps, settings, source, current)
+        try:
+            await _the_slots_follow_the_settings(owner, deps)
+        finally:
+            await store.aclose()
+            deps.projection.close()
 
-        async def slots() -> tuple[int, int]:
-            config = await acts._solids_config(prepared)
-            return config.solid_concurrency, config.solid_slots()
 
-        assert await slots() == (0, derived)
-        _put(owner, "solid_concurrency", 3)
-        assert await slots() == (3, 3)
-        _put(owner, "solid_concurrency", 5)
-        assert await slots() == (5, 5)
-        # 0 is "work it out": the derived default again.
-        _put(owner, "solid_concurrency", 0)
-        assert await slots() == (0, derived)
-        # Cleared in Settings: the environment's, as the API resolves it.
-        _put(owner, "solid_concurrency", 4)
-        _put(owner, "solid_concurrency", None)
-        assert await slots() == (0, derived)
-    finally:
-        await store.aclose()
-        deps.projection.close()
+async def _the_slots_follow_the_settings(owner: Pool, deps: WorkerDeps) -> None:
+    acts = RenderActivities(deps)
+    prepared = PrepareResult(version="v", scad="model.scad", schema_cache="")
+    # The worker serves no editor checks, so its default keeps no CPU for them.
+    derived = default_solid_concurrency(available_cpus(), deps.config.render_concurrency, 0)
+
+    async def slots() -> tuple[int, int]:
+        config = await acts._solids_config(prepared)
+        return config.solid_concurrency, config.solid_slots()
+
+    assert await slots() == (0, derived)
+    _put(owner, "solid_concurrency", 3)
+    assert await slots() == (3, 3)
+    _put(owner, "solid_concurrency", 5)
+    assert await slots() == (5, 5)
+    # 0 is "work it out": the derived default again.
+    _put(owner, "solid_concurrency", 0)
+    assert await slots() == (0, derived)
+    # Cleared in Settings: the environment's, as the API resolves it.
+    _put(owner, "solid_concurrency", 4)
+    _put(owner, "solid_concurrency", None)
+    assert await slots() == (0, derived)
 
 
 def test_the_api_grants_the_role_at_start(
@@ -571,7 +555,13 @@ async def test_the_worker_renders_as_its_own_role(
     async with temporal_client() as client:
         stop = asyncio.Event()
         worker = asyncio.create_task(
-            run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+            run_worker(
+                cfg,
+                stop=stop,
+                health_port=health_socket,
+                client=client,
+                crud=static_render_crud(),
+            )
         )
         try:
             job = await render_to_end(client, queue, job)

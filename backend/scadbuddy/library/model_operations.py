@@ -7,8 +7,8 @@ body. The merge's conflict is the route's own refusal, so ``merged`` stays out o
 operation's history.
 
 A create's source, thumbnail and README, a patch's presets, an import's URL, a saved
-source, a patch's body, a thumbnail, a README and a sibling file arrive as claims
-(``operations/claims.py``), never as workflow payloads.
+source, a patch's body, a thumbnail, a README, a README's image and a sibling file arrive
+as claims (``operations/claims.py``), never as workflow payloads.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from fastapi import status
 
 from scadbuddy.api import library_pins, model_files
 from scadbuddy.api import models as models_api
+from scadbuddy.api import readme_images as readme_images_api
 from scadbuddy.api import upstream as upstream_api
 from scadbuddy.api import versions as versions_api
 from scadbuddy.core.problems import ApiError
@@ -128,10 +129,27 @@ def model_kinds(state: AppState) -> list[OperationKind]:
             request["force"],
             renders=False,
         )
+        # As an output delete's check: refused before anything is deleted (#5117).
+        if request.get("delete_inbox_copies", False):
+            running = await models_api.model_open_runs(request["slug"], state)
+            if running:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    f"print run {running[0]} of an output of this model is still running,"
+                    " or has prints still to start, and its sliced files are in"
+                    " ScadBuddy's library: delete the model once the run has ended",
+                    run_id=running[0],
+                )
         return {}
 
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        await models_api.delete_template(request["slug"], request["force"], state)
+        await models_api.delete_template(
+            request["slug"],
+            request["force"],
+            state,
+            # Absent from a delete started before #5117.
+            delete_inbox_copies=request.get("delete_inbox_copies", False),
+        )
         return {}
 
     async def source_put_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -233,6 +251,17 @@ def model_kinds(state: AppState) -> list[OperationKind]:
             )
         )
 
+    async def image_add_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.to_thread(readme_images_api.image_add_check, request["slug"], state)
+        return {}
+
+    async def image_add_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        data = await _claimed(request["image"])
+        assert data is not None  # every add claims its image
+        added = await readme_images_api.image_add_run(request["slug"], request["name"], data, state)
+        dumped: dict[str, Any] = added.model_dump(mode="json")
+        return dumped
+
     async def readme_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         return _record(await models_api.readme_delete_run(request["slug"], state))
 
@@ -295,6 +324,7 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         kind("model_thumbnail_delete", thumbnail_delete_check, thumbnail_delete_run),
         kind("model_readme_put", exists_check, readme_put_run),
         kind("model_readme_delete", readme_delete_check, readme_delete_run),
+        kind("model_image_add", image_add_check, image_add_run),
         kind("model_file_put", file_put_check, file_put_run),
         kind("model_file_delete", file_delete_check, file_delete_run),
         kind("model_restore", restore_check, restore_run),

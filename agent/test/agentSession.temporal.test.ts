@@ -88,7 +88,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let writes: { open: (args: OpenInput) => Promise<boolean>; resolve: (args: ResolveInput) => Promise<boolean> } | undefined
 
   beforeAll(async () => {
-    env = await localTemporal()
+    // A deleted run is gone at once, as retention leaves it (#5243).
+    env = await localTemporal({ deleteAtOnce: true })
     bundle = await bundleWorkflowCode({ workflowsPath: WORKFLOWS })
     const make = (taskQueue: string, activities: Record<string, (...args: never[]) => unknown>, workflows: Pick<Parameters<typeof Worker.create>[0], 'workflowBundle' | 'workflowsPath'>) =>
       Worker.create({
@@ -793,7 +794,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         namespace: env.client.options.namespace,
         workflowExecution: { workflowId: sessionWorkflowId(session.id) },
       })
-      await expect.poll(async () => handleOf(session.id).describe().then(() => 'found', (err: unknown) => (err instanceof WorkflowNotFoundError ? 'gone' : 'found')), { timeout: 30_000 }).toBe('gone')
+      await expect.poll(async () => handleOf(session.id).describe().then(() => 'found', (err: unknown) => (err instanceof WorkflowNotFoundError ? 'gone' : 'found')), { timeout: 10_000 }).toBe('gone')
 
       const again = await m.send(session.id, browser, 'and a lid')
       expect(await again.done).toMatchObject({ kind: 'result' })

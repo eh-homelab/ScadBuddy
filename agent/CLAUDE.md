@@ -20,6 +20,13 @@ become routes, and Claude Code and plugin code run where no database secret exis
 `ai_*` grant or a trigger on another service's table; add a CRUD route that requires a
 service credential instead.
 
+The agent's service credential (`src/api/serviceCredential.ts`, wired in `main.ts`): with
+`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` (both is a `ConfigError`)
+`ExchangeCredential` exchanges that proof at the backend's `POST /api/v1/auth/service-token`
+for a 15-minute credential, renews it at half-life and after a 401, and falls back to the view
+on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed one from
+`service_credentials_agent`, as before (#5494).
+
 ## Commands
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):
@@ -256,7 +263,10 @@ opens every one and seals it again byte for byte).
     guards, writes owner-only, each write a `workspace.file` event) and the caps' route
     `routes/workspaceSettings.ts`; the frontend is `components/assistant/SessionFiles.tsx`
     with msw `src/mocks/features/sessionFiles.ts` (component tests stub the upload:
-    jsdom's `File` cannot pass undici's multipart parser).
+    jsdom's `File` cannot pass undici's multipart parser). An `/mcp` client puts a file
+    into its principal workspace with `PUT /mcp/workspace/<path>` (#4550,
+    `src/mcp/uploads.ts`, mounted by `mountMcp` behind `/mcp`'s gates and auth; `write`
+    tier, `disabled` mode refused), raw bytes answered with `{name, mediaType, size, sha256}`.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude

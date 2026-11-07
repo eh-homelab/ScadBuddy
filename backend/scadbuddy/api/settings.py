@@ -126,6 +126,10 @@ class SettingsView(BaseModel):
     pricing_markup_percent: str
     pricing_rounding: Literal["to_minor_unit", "to_major"]
     rough_estimate_factor: str
+    #: Job cost (#5326).
+    pricing_labour_rate_per_hour: str = "0"
+    pricing_usd_rate: str = "1"
+    orders_thin_margin_percent: str = "15"
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).

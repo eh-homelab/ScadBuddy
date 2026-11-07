@@ -66,7 +66,7 @@ class Escalations:
     def __init__(self, outward: Outward, api: FakeApi) -> None:
         with outward.store._pool.connection() as conn:
             parent_session(conn, PARENT_SESSION, STARTER["principal"])
-        kinds = flow_kinds(outward.store, Keys(), HASH_KEY, api=lambda: api_client_of(api))
+        kinds = flow_kinds(outward.remote, Keys(), HASH_KEY, api=lambda: api_client_of(api))
         self.kind = next(k for k in kinds if k.name == FLOW_ESCALATE)
         self.env = ActivityEnvironment(client=outward.client)
 
@@ -303,7 +303,7 @@ async def test_a_narrowed_decision_whose_input_does_not_match_its_hash_runs_noth
     env.info = dataclasses.replace(
         env.info, workflow_id=parked.workflow_id, workflow_run_id=parked.workflow_run_id
     )
-    grants = FlowGrants(outward.store, None, HASH_KEY)
+    grants = FlowGrants(outward.remote, None, HASH_KEY)
     ask = DecisionAsk(call_id=call_id, fn="queue_print")
     read: DecisionRead = await env.run(grants.decision, ask)
     assert (read.narrowed, read.args) == (True, None)

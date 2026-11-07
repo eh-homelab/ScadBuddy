@@ -150,8 +150,9 @@ describe('registry projections', () => {
     // outputs.py `send`, settings.py `test`/`targets`); `remember_*` only write
     // ScadBuddy's own settings.json, `/print/runs/` only reads its database, and
     // a revision's `/send` goes to the customer, not Bambuddy (#5280),
-    // `/print/filament-profiles` lists ScadBuddy's built-in profiles (#717).
-    const bambuddyRoutes = /\/print\/(?!runs\/|filament-profiles$)|(?<!\{revision_id\})\/send$|\/settings\/(test|targets)$/
+    // `/print/filament-profiles` lists ScadBuddy's built-in profiles (#717), and a
+    // library copy's status (`/print/library-copies/{copy_id}`) only reads its rows (#5355).
+    const bambuddyRoutes = /\/print\/(?!runs\/|filament-profiles$|library-copies\/\{)|(?<!\{revision_id\})\/send$|\/settings\/(test|targets)$/
     for (const tool of ALL_TOOLS) {
       if (tool.routes.some((r) => bambuddyRoutes.test(r.split(' ')[1]!)) && !tool.name.startsWith('remember_')) {
         expect(tool.bambuddyScope.length, tool.name).toBeGreaterThan(0)
