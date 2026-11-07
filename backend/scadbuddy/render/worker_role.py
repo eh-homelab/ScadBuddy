@@ -180,8 +180,8 @@ def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> No
 
 
 def grant_at_start(pool: ConnectionPool[Any]) -> None:
-    """The API's start, after its migrations: `grant_render_role`. A failure is logged,
-    never fatal to the API; a worker on that role then waits for a start that grants."""
+    """The API's start, after its migrations: `grant_render_role`, which grants the unused
+    role nothing new until #5298 Task 22. A failure is logged, never fatal to the API."""
     try:
         with pool.connection() as conn:
             granted = grant_render_role(conn)
@@ -223,11 +223,8 @@ def pending_migrations(
     return sorted(m.id for m in migrations if m.id not in done)
 
 
-def missing_privileges(
-    conn: Connection[Any], grants: Mapping[str, tuple[str, ...]] = RENDER_GRANTS
-) -> list[str]:
-    """The ``grants`` (`RENDER_GRANTS`) this connection's role lacks, as
-    ``table: PRIVILEGE``."""
+def missing_privileges(conn: Connection[Any], grants: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """The ``grants`` this connection's role lacks, as ``table: PRIVILEGE``."""
     cur = conn.cursor(row_factory=tuple_row)
     missing: list[str] = []
     for table, privileges in grants.items():

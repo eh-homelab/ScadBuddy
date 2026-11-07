@@ -50,10 +50,8 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.render import worker_role
 from scadbuddy.render.pg_store import Migration, migrate
 from scadbuddy.render.worker_role import (
-    RENDER_GRANTS,
     grant_at_start,
     grant_render_role,
-    missing_privileges,
 )
 from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
@@ -153,9 +151,8 @@ def _defaults(tmp_path: Path) -> Settings:
 # ── the role's reach ──────────────────────────────────────────────────────────
 
 
-def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) -> None:
+def test_the_role_cannot_read_the_settings(granted: Pool) -> None:
     with granted.connection() as conn:
-        assert missing_privileges(conn) == []
         # The store settings come from the API's CRUD route (#5298), not the view.
         for relation in ("settings", "render_settings"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -308,13 +305,6 @@ def test_a_role_that_does_not_exist_is_granted_nothing(owner: Pool) -> None:
         assert grant_render_role(conn, f"absent_{uuid.uuid4().hex[:8]}") is False
 
 
-def test_every_grant_names_a_relation_the_schema_has(owner: Pool) -> None:
-    with owner.connection() as conn:
-        for table in RENDER_GRANTS:
-            row = conn.execute("SELECT to_regclass(%s) AS found", (table,)).fetchone()
-            assert row is not None and row["found"] is not None, table
-
-
 # ── the settings it may read ──────────────────────────────────────────────────
 
 
@@ -433,8 +423,9 @@ def test_the_api_grants_the_role_at_start(
     grant_at_start(owner)
     pool = _pool(worker_conninfo)
     try:
-        with pool.connection() as conn:
-            assert missing_privileges(conn) == []
+        # `RENDER_GRANTS` is empty (#5298): the start grants the role no table.
+        with pool.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT 1 FROM render_jobs LIMIT 1")
     finally:
         pool.close()
 
