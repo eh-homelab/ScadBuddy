@@ -30,7 +30,8 @@ export function LibraryFilePicker({
   const [query, setQuery] = useState('')
   const asked = useDebounced(query.trim(), SEARCH_DEBOUNCE_MS)
   const [found, setFound] = useState<{ query: string; result: LibrarySearch } | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  // Keyed to its query, as `found` is: a failed search's message shows only while that query is asked.
+  const [error, setError] = useState<{ query: string; message: string } | null>(null)
 
   useEffect(() => {
     if (!open) setQuery('')
@@ -47,7 +48,7 @@ export function LibraryFilePicker({
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return
-        setError(err instanceof Error ? err.message : String(err))
+        setError({ query: asked, message: err instanceof Error ? err.message : String(err) })
       })
     return () => controller.abort()
   }, [open, picked, asked])
@@ -70,6 +71,7 @@ export function LibraryFilePicker({
 
   const current = found !== null && found.query === asked ? found.result : null
   const files = current?.files ?? []
+  const failed = error !== null && error.query === asked ? error.message : null
   return (
     <div className="flex flex-col gap-1">
       <Label htmlFor="add-item-library-search">Library file</Label>
@@ -81,9 +83,9 @@ export function LibraryFilePicker({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
-      {error ? (
+      {failed !== null ? (
         <p role="alert" className="text-[13px] text-warn">
-          Could not search the library: {error}
+          Could not search the library: {failed}
         </p>
       ) : !asked ? (
         <p className="text-[13px] text-muted-foreground">Type part of a file or folder name.</p>

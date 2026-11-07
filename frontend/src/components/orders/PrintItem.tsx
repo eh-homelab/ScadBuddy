@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
 import type { Order, OrderItemDetail, PrintRunRequest, Revision } from '../../api/types'
-import type { PrintSource } from '../../lib/printSource'
+import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
 
@@ -9,19 +9,12 @@ import { Button } from '@/components/ui/button'
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const ENDED = new Set(['closed', 'cancelled'])
 
-/** What the item prints: its output, or a library file item's file (#5544). */
-function printed(item: OrderItemDetail): PrintSource | null {
-  if (item.library_file) return { kind: 'library', file: { id: item.library_file.id, filename: item.library_file.filename } }
-  if (item.kind !== 'custom' && item.reference && item.output_id) return { kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }
-  return null
-}
-
 /** Whether the item can be printed now: a model or library file item of an accepted order
  * not on hold, `approved` (or `failed`, for a reprint), with the output (or the library
  * file) its quote was made from. */
 function offersPrint(order: Order, item: OrderItemDetail): boolean {
   return (
-    printed(item) !== null &&
+    orderItemSource(item) !== null &&
     IN_PRODUCTION.has(order.status) &&
     !order.on_hold &&
     (item.status === 'approved' || item.status === 'failed') &&
@@ -45,7 +38,7 @@ function offersTestPrint(order: Order, item: OrderItemDetail): boolean {
  */
 export function PrintItem({ order, item, onChanged, testRevision }: { order: Order; item: OrderItemDetail; onChanged: () => void; testRevision?: Revision }) {
   const [open, setOpen] = useState(false)
-  const source = printed(item)
+  const source = orderItemSource(item)
   if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !source) return null
   return (
     <>

@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { Quote, SliceQuoteRequest } from '../../api/types'
 import { reset, seedUnitCost } from '../../mocks/features/orders/history'
 import { printersState } from '../../mocks/features/printers'
@@ -51,6 +51,37 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     const linked = printersState().find((row) => row.bambuddy_printer_id === body?.printer_id)
     expect(linked).toBeDefined()
     expect(body?.printer).toBe(linked?.id)
+  })
+
+  // #5544, the PR #5610 review: a library file item before its first quote has no output
+  // and no colours, so the dialog opens on the file with an empty filaments map.
+  it('slices a library file item with no colours yet, on its file (#5544)', async () => {
+    const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockResolvedValue(undefined)
+    const plates = vi.spyOn(api, 'getLibraryPlates')
+    const library = {
+      ...item(ITEM_DRAFT, ORDER_DRAFT, 'draft'),
+      kind: 'library_file' as const,
+      reference: null,
+      output_id: null,
+      colours: [],
+      library_file: { id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' as const },
+    }
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={library} slice={{ start, dismiss: vi.fn() }} />,
+    )
+    expect(screen.queryByText(/Render the item first/)).toBeNull()
+    await user.click(screen.getByTestId('quote-from-slice'))
+    const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    const slots = await within(dialog).findAllByRole('combobox', { name: /^Filament for slot/ })
+    expect(slots.length).toBeGreaterThan(0)
+    expect(plates).toHaveBeenCalledWith(120)
+    const quote = within(dialog).getByTestId('run-quote')
+    expect(quote).toBeDisabled()
+    for (const slot of slots) await selectOption(user, slot, /^Bambu PLA/)
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1))
+    expect(start.mock.calls[0]?.[0].filaments).toEqual(Object.fromEntries(slots.map((_, index) => [String(index), FILAMENT_PLA])))
   })
 
   it('keeps the dialog and its choices open when the check refuses the quote (#4693)', async () => {

@@ -3,7 +3,7 @@ import { api } from '../../api/client'
 import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
-import type { PrintSource } from '../../lib/printSource'
+import { orderItemSource } from '../../lib/printSource'
 import { useDebounced } from '../../lib/useDebounced'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
@@ -75,11 +75,7 @@ export function QuoteEditor({
 }) {
   const [slicing, setSlicing] = useState(false)
   // What a slice quote slices: the item's output, or a library file item's file (#5544).
-  const sliceSource: PrintSource | null = item?.library_file
-    ? { kind: 'library', file: { id: item.library_file.id, filename: item.library_file.filename } }
-    : item?.output_id && item.reference
-      ? { kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }
-      : null
+  const sliceSource = item ? orderItemSource(item) : null
   const [price, setPrice] = useState('')
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
