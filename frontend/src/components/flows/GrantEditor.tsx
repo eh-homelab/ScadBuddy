@@ -58,6 +58,8 @@ interface RowDraft {
   printers: number[] | null
   models: string[] | null
   libraryFiles: string | null
+  /** #4252: null for no bound, 'any' for any order, else the ids as typed. */
+  orders: string | null
   maxPrints: string
   maxFilament: string
   maxCalls: string
@@ -75,6 +77,7 @@ function rowOf(key: string, rule: FlowGrantRule, on: boolean): RowDraft {
     printers: rule.printers ?? null,
     models: rule.models ?? null,
     libraryFiles: rule.library_files == null ? null : rule.library_files.join(', '),
+    orders: rule.orders == null ? null : rule.orders === 'any' ? 'any' : rule.orders.join(', '),
     maxPrints: numberText(rule.max_prints),
     maxFilament: numberText(rule.max_filament_g),
     maxCalls: numberText(rule.max_calls),
@@ -106,6 +109,7 @@ function ruleOf(row: RowDraft): FlowGrantRule {
   if (applies('printers') && row.printers) rule.printers = row.printers
   if (applies('models') && row.models) rule.models = row.models
   if (applies('library_files') && row.libraryFiles !== null) rule.library_files = listOf(row.libraryFiles).map(Number)
+  if (applies('orders') && row.orders !== null) rule.orders = row.orders === 'any' ? 'any' : listOf(row.orders)
   if (applies('max_prints') && row.maxPrints.trim()) rule.max_prints = Number(row.maxPrints)
   if (applies('max_filament_g') && row.maxFilament.trim()) rule.max_filament_g = Number(row.maxFilament)
   if (applies('max_calls') && row.maxCalls.trim()) rule.max_calls = Number(row.maxCalls)
@@ -129,6 +133,9 @@ function typingProblems(rows: RowDraft[]): string[] {
     }
     if (row.libraryFiles !== null && listOf(row.libraryFiles).some((id) => !whole(id))) {
       problems.push(`${name}: library file ids are whole numbers.`)
+    }
+    if (row.orders !== null && row.orders !== 'any' && listOf(row.orders).length === 0) {
+      problems.push(`${name}: name at least one order id, or choose any order.`)
     }
   })
   return problems
@@ -354,6 +361,28 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
                   value={row.libraryFiles}
                   onChange={(e) => update({ libraryFiles: e.target.value })}
                 />
+              )}
+            </div>
+          )}
+          {applies('orders') && (
+            <div className="flex flex-col gap-1.5">
+              <Check checked={row.orders !== null} onChange={(on) => update({ orders: on ? 'any' : null })}>
+                Only calls that name an order
+              </Check>
+              {row.orders !== null && (
+                <>
+                  <Check checked={row.orders === 'any'} onChange={(any) => update({ orders: any ? 'any' : '' })}>
+                    Any order (a run a trigger starts for an order gets that order only)
+                  </Check>
+                  {row.orders !== 'any' && (
+                    <Input
+                      aria-label="Order ids"
+                      placeholder="Order ids, comma-separated"
+                      value={row.orders}
+                      onChange={(e) => update({ orders: e.target.value })}
+                    />
+                  )}
+                </>
               )}
             </div>
           )}

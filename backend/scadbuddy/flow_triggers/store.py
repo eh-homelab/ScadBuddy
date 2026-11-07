@@ -33,7 +33,7 @@ from scadbuddy.flow_triggers.models import (
     Trigger,
     state_hash,
 )
-from scadbuddy.flows.grants import MAX_EXPIRY, GrantSpec, GrantStatus
+from scadbuddy.flows.grants import MAX_EXPIRY, GrantSpec, GrantStatus, narrowed_to_order
 from scadbuddy.flows.models import TERMINAL
 from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT
 
@@ -180,13 +180,16 @@ class TriggerStore:
         requested_by: dict[str, Any],
         now: datetime,
         checked: str,
+        order_id: str | None = None,
     ) -> str | None:
         """The run's own grant from the trigger's standing grant in force (§12.4), under
         that grant's lock so a revocation lands wholly before or after it. Its id, or None
         with no standing grant in force; `TriggerChangedError` when the trigger is no longer
-        the `checked` one (`state_hash` without its grant): nothing may start on it."""
+        the `checked` one (`state_hash` without its grant): nothing may start on it. A run
+        fired by an order's event (`order_id`) gets the grant for that order only
+        (`narrowed_to_order`, orders spec §7.2)."""
         return await self._call(
-            self._seed_run_grant, run_id, trigger_id, requested_by, now, checked
+            self._seed_run_grant, run_id, trigger_id, requested_by, now, checked, order_id
         )
 
     # -- fires --------------------------------------------------------------------
@@ -503,6 +506,7 @@ class TriggerStore:
         requested_by: dict[str, Any],
         now: datetime,
         checked: str,
+        order_id: str | None = None,
     ) -> str | None:
         with self._pool.connection() as conn, conn.transaction():
             trigger = self._locked_trigger(conn, trigger_id)
@@ -527,6 +531,8 @@ class TriggerStore:
             spec = standing.spec.model_copy(
                 update={"expires_at": expires, "ask_starter_session": False}
             )
+            if order_id is not None:
+                spec = narrowed_to_order(spec, order_id)
             grant_id = str(uuid.uuid4())
             conn.execute(
                 "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by,"

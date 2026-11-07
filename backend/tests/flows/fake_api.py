@@ -64,6 +64,11 @@ class FakeApi:
                 Route("/api/v1/operations/{op}", self.operation),
                 Route("/api/v1/print/outputs/{output_id}/run", self.print, methods=["POST"]),
                 Route("/api/v1/print/runs/{run_id}", self.run),
+                Route(
+                    "/api/v1/orders/{order_id}/items/{item_id}/print",
+                    self.print_item,
+                    methods=["POST"],
+                ),
                 Route("/api/v1/outputs/arrange", self.arrange, methods=["POST"]),
                 Route("/api/v1/outputs/{output_id}", self.output),
                 Route("/api/v1/settings/print-options", self.print_options),
@@ -116,6 +121,20 @@ class FakeApi:
             return JSONResponse({**self.runs[run_id], "repeated": True})
         self.runs[run_id] = {"id": run_id, "status": "running", "may_have_queued": False}
         return JSONResponse(self.runs[run_id], status_code=202)
+
+    async def print_item(self, request: Request) -> JSONResponse:
+        """`order_item_print` (#4252): item `stale` needs a new quote; any other answers
+        its attempt with the run its key started."""
+        await self._record(request)
+        if request.path_params["item_id"] == "stale":
+            return problem(
+                409,
+                "item stale's quote no longer stands",
+                "https://scadbuddy.dev/problems/orders/requote_needed",
+            )
+        run_id = f"run-{request.headers['Idempotency-Key']}"
+        self.runs.setdefault(run_id, {"id": run_id, "status": "running", "may_have_queued": False})
+        return JSONResponse({"id": "f1", "status": "queued", "print_run_id": run_id})
 
     async def run(self, request: Request) -> JSONResponse:
         return JSONResponse({**self.runs[request.path_params["run_id"]], "status": "succeeded"})
