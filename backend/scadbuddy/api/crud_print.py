@@ -9,13 +9,14 @@ the Bambuddy key, which the Bambuddy spool provider also uses (`PRINT_SECRETS`).
 other sealed field is null (`print_projection`). The CRUD router answers
 ``Cache-Control: no-store``, and each answer is logged with the secrets it released and
 the credential it released them to, never their values: at INFO the first time per
-credential in this process, then at DEBUG, since the worker reads them on every use.
+credential in this process (of the last `RELEASED_KEPT`), then at DEBUG, since the worker
+reads them on every use.
 
 Every run write is natural (plan D5). An insert sent again finds the execution's row by
 its workflow ids and answers it. A start-enqueue sets its flag again. A succeed, fail,
 fail-lost or lan-stopped sent again finds the row ended (or stopped) and answers it as it
-is, so only the write that changed it announces it. A result rewrite sent again writes
-the same result and announces it again, which a reader only re-reads. Each write runs
+is, so only the write that changed it announces it. A result rewrite sent again finds
+the same result there and answers the row, unannounced. Each write runs
 the API's `PrintRunStore`, so its ``print.run`` event and activity row commit with it
 (D7). The insert prunes past the API's own ``print_run_retention_seconds``. An outcome's
 record is natural on its run (``ON CONFLICT (run_id) DO NOTHING``), and its
@@ -32,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import OrderedDict
 from datetime import timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -71,8 +73,23 @@ EVENT_KIND_REFUSED = "event-kind-refused"
 #: (``printer.changed``).
 EVENT_KINDS = frozenset({"print.progress", "print.settled", "printer.report", "printer.changed"})
 
-#: The credentials this process has released the settings to, logged at INFO.
-_released_to: set[str | None] = set()
+#: How many credentials `_released_to` keeps. A credential lives 15 minutes and one print
+#: worker holds one at a time, so this is many hours of them; one dropped from it is
+#: logged at INFO again, once.
+RELEASED_KEPT = 256
+#: The credentials this process has released the settings to lately, logged at INFO,
+#: newest last. Bounded: a long-lived API would otherwise keep every id it ever saw.
+_released_to: OrderedDict[str | None, None] = OrderedDict()
+
+
+def _first_release(credential_id: str | None) -> bool:
+    """Whether ``credential_id`` is not among the last `RELEASED_KEPT`; it is kept now."""
+    first = credential_id not in _released_to
+    _released_to[credential_id] = None
+    _released_to.move_to_end(credential_id)
+    while len(_released_to) > RELEASED_KEPT:
+        _released_to.popitem(last=False)
+    return first
 
 
 def released(current: PrintSettings) -> list[str]:
@@ -88,8 +105,7 @@ async def print_settings(request: Request, state: StateDep) -> PrintSettings:
     principal = caller_of(request.scope)
     assert isinstance(principal, Service)
     # The worker reads them on every use: INFO once per credential in this process.
-    first = principal.credential_id not in _released_to
-    _released_to.add(principal.credential_id)
+    first = _first_release(principal.credential_id)
     logger.log(
         logging.INFO if first else logging.DEBUG,
         "released the print settings to service credential %s, secrets: %s",
@@ -278,7 +294,8 @@ async def older_open(subject: str, runs: PrintRunsDep) -> list[PrintRun]:
 @router.post("/events", name="crud_print_publish_event")
 async def publish_event(body: EventPost, events: EventsDep) -> Logged:
     kind = body.event.get("kind")
-    if kind not in EVENT_KINDS:
+    # Not a string (a list, an object) is no kind: refused, never hashed.
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
             f"The print worker does not publish {kind!r} events.",

@@ -1371,7 +1371,6 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         printers=printers,
         reports=reports,
     )
-    metrics.operation_kinds(kind.name for kind in kinds)
     printing = PrintActivities(
         PrintDeps(
             settings_store=settings_store,
@@ -1581,10 +1580,8 @@ async def run_projects_worker(
                 api=lambda: api_client(settings.api_internal_url, credential),
             )
         }
-        # The API ends its kinds' records and counts them (#2295, #5298). Its series are
-        # still made here at zero: the dashboard's library panels leave out the kinds
-        # that a print or projects job has (`deploy/grafana/scadbuddy-renders.json`).
-        metrics.operation_kinds(kinds)
+        # The API ends its kinds' records and counts them (#2295, #5298); the dashboards
+        # pick these kinds by name (`backend/tests/test_dashboard_operation_kinds.py`).
         decisions = operation_activities(RemoteOperationStore(crud, "projects"), None, kinds)
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)

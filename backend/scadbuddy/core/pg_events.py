@@ -181,22 +181,23 @@ _NOTIFY_SQL = "SELECT pg_notify(%s, %s)"
 Outgoing = tuple[Event, str]
 
 
-class Outbox:
+class Outbox[Item]:
     """The publish path's queue: bounded, oldest dropped (and counted) first, fed
     from any thread and drained on ``loop``. #321's `Subscription`, holding each
     event with the payload `publish` encoded, so the writer need not encode it
-    again."""
+    again. ``Item`` is what it carries: `Outgoing` here, a posted body on the print
+    worker (`crud/print.py` `RemoteEvents`)."""
 
     def __init__(self, *, maxsize: int, loop: asyncio.AbstractEventLoop) -> None:
         self.maxsize = maxsize
         #: Events lost by the outbox running more than ``maxsize`` behind.
         self.dropped = 0
         self._loop = loop
-        self._queue: deque[Outgoing] = deque()
+        self._queue: deque[Item] = deque()
         self._ready = asyncio.Event()
         self._closed = False
 
-    def offer(self, item: Outgoing) -> None:
+    def offer(self, item: Item) -> None:
         """Hand ``item`` over from any thread. Never blocks, never raises."""
         if self._closed:
             return
@@ -212,7 +213,7 @@ class Outbox:
         except RuntimeError:
             self._closed = True  # the loop is gone: nobody is left to drain
 
-    def _put(self, item: Outgoing) -> None:
+    def _put(self, item: Item) -> None:
         if self._closed:
             return
         if len(self._queue) >= self.maxsize:
@@ -221,10 +222,10 @@ class Outbox:
         self._queue.append(item)
         self._ready.set()
 
-    def get_nowait(self) -> Outgoing | None:
+    def get_nowait(self) -> Item | None:
         return self._queue.popleft() if self._queue else None
 
-    async def get(self) -> Outgoing | None:
+    async def get(self) -> Item | None:
         """The next item, or ``None`` once closed and drained."""
         while not self._queue:
             if self._closed:
@@ -372,7 +373,7 @@ class PgNotifyEventBus:
         )
         self._lock = threading.Lock()
         self._early: deque[Outgoing] = deque()
-        self._outbox: Outbox | None = None
+        self._outbox: Outbox[Outgoing] | None = None
         self._outbox_dropped = 0
         self._closed = False
         self._tasks: list[asyncio.Task[None]] = []
@@ -419,7 +420,7 @@ class PgNotifyEventBus:
         # The first pass is ours, not the timer's: run in a task, it would land whenever
         # the caller next yields, after events the caller has since logged (#1787).
         await self._prune_logged()
-        outbox = Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
+        outbox: Outbox[Outgoing] = Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
         with self._lock:
             self._outbox = outbox
             early, self._early = list(self._early), deque()
@@ -603,7 +604,7 @@ class PgNotifyEventBus:
 
     # -- internals ------------------------------------------------------------------
 
-    async def _drain(self, outbox: Outbox) -> None:
+    async def _drain(self, outbox: Outbox[Outgoing]) -> None:
         while (item := await outbox.get()) is not None:
             batch = [item]
             while len(batch) < WRITE_BATCH and (more := outbox.get_nowait()) is not None:

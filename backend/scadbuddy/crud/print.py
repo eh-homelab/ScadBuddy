@@ -80,6 +80,9 @@ def _run(path: str) -> str:
 
 
 class RemotePrintRunStore:
+    #: The route prunes past the API's own setting (`PrintRuns.uses_retention`).
+    uses_retention = False
+
     def __init__(self, client: CrudClient) -> None:
         self._client = client
 
@@ -237,6 +240,10 @@ class RemoteOutcomes:
         return [PrintRun.model_validate(run) for run in response.json()]
 
 
+#: An event and the body that posts it, encoded once by `RemoteEvents.publish`.
+Posted = tuple[Event, dict[str, Any]]
+
+
 class WorkerHearsNoEventsError(RuntimeError):
     """The print worker does not LISTEN (#5298, plan D7)."""
 
@@ -256,14 +263,14 @@ class RemoteEvents:
         self.metrics = metrics if metrics is not None else Metrics()
         self.outbox_size = outbox_size
         self._lock = threading.Lock()
-        self._early: deque[tuple[Event, str]] = deque()
-        self._outbox: Outbox | None = None
+        self._early: deque[Posted] = deque()
+        self._outbox: Outbox[Posted] | None = None
         self._outbox_dropped = 0
         self._closed = False
         self._drainer: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        outbox = Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
+        outbox: Outbox[Posted] = Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
         with self._lock:
             self._outbox = outbox
             early, self._early = list(self._early), deque()
@@ -287,7 +294,8 @@ class RemoteEvents:
     def publish(self, event: Event) -> None:
         """Queue ``event`` for the API. Non-blocking and thread-safe; a failure to post
         it is logged and counted, never raised."""
-        item = (event, event.model_dump_json())
+        # Encoded once, here: the drain posts this body as it is.
+        item = (event, {"event": event.model_dump(mode="json")})
         with self._lock:
             if self._closed:
                 logger.warning(
@@ -311,18 +319,16 @@ class RemoteEvents:
     def add_listener(self, listener: Callable[[Event], None]) -> Callable[[], None]:
         raise WorkerHearsNoEventsError("the print worker does not LISTEN (#5298)")
 
-    async def _drain(self, outbox: Outbox) -> None:
+    async def _drain(self, outbox: Outbox[Posted]) -> None:
         while (item := await outbox.get()) is not None:
             if outbox.dropped != self._outbox_dropped:
                 lost, self._outbox_dropped = outbox.dropped - self._outbox_dropped, outbox.dropped
                 logger.error("the event outbox overflowed", extra={"dropped": lost})
                 self.metrics.events_dropped.labels("outbox_full").inc(lost)
-            event, _ = item
+            event, body = item
             try:
                 # The event's own id makes a resend one row (`publish_once`).
-                await self._client.request(
-                    "POST", f"{BASE}/events", json={"event": event.model_dump(mode="json")}
-                )
+                await self._client.request("POST", f"{BASE}/events", json=body)
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -214,6 +214,10 @@ class PrintRuns(LatestRuns, Protocol):
     worker), `crud/print.py` `RemotePrintRunStore` over the CRUD routes (the print
     worker, #5298)."""
 
+    #: Whether `insert_accepted` prunes past the ``retention`` it is given. False over the
+    #: CRUD routes, where the API prunes past its own setting, so no caller reads it.
+    uses_retention: bool
+
     async def insert_accepted(
         self,
         run_id: str,
@@ -246,6 +250,8 @@ class PrintRunStore:
     Only the ``PrintRun`` workflow's activities write here (spec 2026-10-01 §5.4), and
     every write that changes a row publishes ``print.run`` in the same transaction.
     """
+
+    uses_retention = True
 
     def __init__(
         self,
@@ -361,7 +367,9 @@ class PrintRunStore:
 
     async def update_result(self, run_id: str, slug: str, result: PrintRunResult) -> PrintRun:
         """Rewrite a succeeded run's result: a LAN run's later starts, each made once the
-        printer has finished the one before (#4541). Only a ``succeeded`` run changes."""
+        printer has finished the one before (#4541). Only a ``succeeded`` run changes, and
+        only when ``result`` differs from its own: the same result sent again is answered
+        unannounced."""
         return await asyncio.to_thread(
             self._update_result, run_id, slug, result.model_dump(mode="json")
         )
@@ -613,11 +621,13 @@ class PrintRunStore:
         return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
 
     def _update_result(self, run_id: str, slug: str, value: dict[str, Any]) -> PrintRun:
+        # A resend of the same result (a retried activity, its CRUD call sent again,
+        # #5298) changes nothing and announces nothing.
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE print_runs SET result = %s WHERE id = %s AND status = 'succeeded'"
-                f" RETURNING {_COLUMNS}",
-                (Jsonb(value), run_id),
+                f" AND result IS DISTINCT FROM %s::jsonb RETURNING {_COLUMNS}",
+                (Jsonb(value), run_id, Jsonb(value)),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)

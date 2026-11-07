@@ -7,14 +7,18 @@ then, of the kinds it publishes only. Every route is the print caller's alone.""
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.api.crud_print import EVENT_KIND_REFUSED
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
@@ -34,6 +38,8 @@ from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.worker import PRINT_CRUD_AREAS
+from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.print_models import InsertInput
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import served_print_crud, threaded_print_crud
 
@@ -344,3 +350,74 @@ async def test_an_api_out_of_reach_reads_as_no_run() -> None:
         raise CrudUnavailableError("CRUD route unavailable", "unreached")
 
     assert await read_latest(unreachable, "library:7") is None
+
+
+async def test_a_result_sent_again_announces_once(crud: CrudClient, store: SettingsStore) -> None:
+    """A LAN run's rewrite sent again (a retried `print_lan_update`) finds the same result
+    there: the same row, and no second ``print.run``."""
+    remote = RemotePrintRunStore(crud)
+    await _insert(remote, "r1")
+    await remote.succeed("r1", SLUG, RESULT)
+    later = RESULT.model_copy(update={"queue_item_ids": [51, 52]})
+    first = await remote.update_result("r1", SLUG, later)
+    again = await remote.update_result("r1", SLUG, later)
+    assert first == again and first.result == later
+    # The insert's, the succeed's and the first rewrite's.
+    assert len(_logged(store, "print.run")) == 3
+
+
+@pytest.mark.parametrize("kind", [["print.progress"], {"a": 1}, None, 7])
+async def test_a_kind_that_is_not_a_string_is_refused(crud: CrudClient, kind: Any) -> None:
+    with pytest.raises(CrudRefusedError) as refused:
+        await crud.request("POST", f"{BASE}/events", json={"event": {"kind": kind}})
+    assert refused.value.status == 403
+    assert refused.value.problem["reason"] == EVENT_KIND_REFUSED
+
+
+def test_the_released_credentials_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The settings route's INFO-once log keeps the last `RELEASED_KEPT` credentials, not
+    every one the process has seen."""
+    monkeypatch.setattr(crud_print, "_released_to", OrderedDict())
+    monkeypatch.setattr(crud_print, "RELEASED_KEPT", 3)
+    assert crud_print._first_release("a") and not crud_print._first_release("a")
+    for credential in ("b", "c", "d"):
+        assert crud_print._first_release(credential)
+    assert list(crud_print._released_to) == ["b", "c", "d"]
+    # "a" fell out: it is logged at INFO once more.
+    assert crud_print._first_release("a")
+    # A seen one moves to the newest place, so it is the last to fall out.
+    assert not crud_print._first_release("c")
+    assert list(crud_print._released_to) == ["d", "a", "c"]
+
+
+async def test_the_remote_insert_reads_no_settings() -> None:
+    """`print_insert` over the CRUD routes: the API prunes past its own setting, so the
+    activity spends no settings read on a retention it would not send."""
+
+    class Runs:
+        uses_retention = False
+
+        async def insert_accepted(self, run_id: str, **fields: Any) -> Any:
+            assert fields["retention"] is None
+            return "inserted"
+
+    class Unread:
+        def load(self, timeout: float | None = None) -> Any:
+            raise AssertionError("the settings were read")
+
+    activities = PrintActivities(
+        PrintDeps(
+            settings_store=cast(Any, Unread()),
+            outputs=cast(Any, None),
+            prints=None,
+            uploads=cast(Any, None),
+            store=cast(Any, Runs()),
+            observer=cast(Any, None),
+        )
+    )
+    input = InsertInput.model_construct(
+        input=SimpleNamespace(subject="library:7", key="k1", slug=SLUG),
+        checked=SimpleNamespace(prepared=SimpleNamespace(printer=None)),
+    )
+    inserted: Any = await ActivityEnvironment().run(activities.insert, input)
+    assert inserted == "inserted"
