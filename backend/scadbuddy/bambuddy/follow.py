@@ -296,8 +296,10 @@ class Follower:
     ) -> tuple[bool, bool]:
         """Read each of the subject's older runs still open by its own run (#5613), run
         the read hooks on each that moved, and record each settled one against its run.
-        On the pass its record succeeds, moved or not, run the settled hooks once for
-        that run (``hooked``, by run id, #5621).
+        On the pass its record succeeds, moved or not, run the settled hooks once per
+        follow for that run (``hooked``, by run id, #5621): ``hooked`` lives for one
+        activity attempt, so a retried attempt runs them again, which is safe because
+        each hook is idempotent.
         Whether one is still open (a read that failed counts as open: it is read again),
         and whether one moved. Nothing is published: the subject's topic shows its newest
         print, as before."""

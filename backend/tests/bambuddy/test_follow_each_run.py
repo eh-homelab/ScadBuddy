@@ -365,7 +365,8 @@ def flaky_follower(
 
 async def test_an_older_run_whose_read_raises_is_read_again(pg_pool: PgPool) -> None:
     """The older run's read fails twice. The follow keeps going, reads it again, and
-    records it once the read answers (#5621)."""
+    records it once the read answers (#5621). #5613's `_older` already did this (a read
+    that raises counts as open); this test guards it against a regression."""
     await two_runs(pg_pool)
     reads = 0
 
