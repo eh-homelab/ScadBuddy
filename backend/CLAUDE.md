@@ -315,9 +315,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   path"): `PrintRunRequest.path` `bambuddy` is Bambuddy's queue whatever the row says
   (`run_route`/`ensured_route` `asked`, no LAN report read; the printer must link
   Bambuddy), and `native` is refused when the run would not go over the LAN
-  (`LAN_PATH_REFUSAL`). A native run refuses a request whose own `options` set
-  `bed_levelling`, `flow_cali`, `nozzle_offset_cali` or `vibration_cali`
-  (`options.lan_calibration_refusal`, 422): the LAN start cannot send them. A
+  (`LAN_PATH_REFUSAL`). Every reader that takes the request passes it: the dialog's
+  checks (`dialog_route` `asked`), the background and quote slices (`slice_route`
+  `asked`, `SliceQuoteRequest.path`) and the analyzers (`AnalysisRequest.path`). A
+  native run refuses a request whose own `options` set `bed_levelling`, `flow_cali`,
+  `nozzle_offset_cali` or `vibration_cali` (`options.lan_calibration_refusal`, 422): the
+  LAN start cannot send them. A
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed

@@ -178,6 +178,8 @@ const sliceQuote = z
         "The price-book filament (price_book_get) of each of the item's colour slots, keyed by `colours[].slot` " +
           '(from 0; the dialog\'s slot_id - 1): the spool slices, the filament prices',
       ),
+    // #5352: the quote slices on the route its print will take, so that print queues the quote's slice.
+    path: printPath,
   })
   .strict()
 

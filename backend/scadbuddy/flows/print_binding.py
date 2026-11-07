@@ -98,6 +98,9 @@ async def bind_call(
         summary = f"Prints on printer {printer}, which the registry does not hold"
     elif row.bambuddy_printer_id is None:
         summary = f"Prints on {row.name} over the LAN"
+    elif args.get("path") == "bambuddy":
+        # #5352: the call asked for Bambuddy's queue, so the run goes through Bambuddy.
+        summary = f"Prints on {row.name} (Bambuddy printer {row.bambuddy_printer_id})"
     else:
         summary = f"Prints on {row.name}{await _path_of(row, native)}"
     if "printer_id" in args:

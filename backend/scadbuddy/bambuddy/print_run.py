@@ -2060,20 +2060,28 @@ async def slice_route(
     *,
     printer: str | None,
     printer_id: int | None,
+    asked: RunPath | None = None,
 ) -> RunRoute | None:
     """The route a slice that is not a run takes, as the run's check takes it: the dialog's
     background slice (`bambuddy/operations.py` `preview_run`) and a quote's
     (`orders/operations.py` `PreviewSlicer`, #4551). ``None`` off the hot path's backends;
     a printer with no row yet takes the row it makes (`ensured_route`), the one Bambuddy
-    read here. A printer the registry refuses is the run's refusal (`RunRefusalError`)."""
+    read here. A printer the registry refuses is the run's refusal (`RunRefusalError`).
+    ``asked`` is the request's own ``path`` (#5352), as the run takes it."""
     if printers is None or not native_backends(settings):
         return None
     route = await run_route(
-        settings, printers, reports, printer=printer, printer_id=printer_id, say_fallback=False
+        settings,
+        printers,
+        reports,
+        printer=printer,
+        printer_id=printer_id,
+        say_fallback=False,
+        asked=asked,
     )
     if route.row is None and route.printer_id is not None:
         async with client_for(settings) as client:
-            route = await ensured_route(client, settings, printers, reports, route)
+            route = await ensured_route(client, settings, printers, reports, route, asked=asked)
     return route
 
 
@@ -2084,13 +2092,16 @@ async def dialog_route(
     *,
     printer: str | None,
     printer_id: int | None,
+    asked: RunPath | None = None,
 ) -> RunRoute | None:
     """The dialog's reads' :class:`RunRoute` when a run on that printer would be native,
     else ``None``: the reads then go through Bambuddy as before. Nothing is read of the
     registry unless the stored backends are the hot path's (D2), and a printer the
     registry cannot place (none chosen, a stale report) reads as before too: the check
-    and the run say why, as they always have."""
-    if printers is None or not native_backends(settings):
+    and the run say why, as they always have. ``asked`` is the request's own ``path``
+    (#5352): ``bambuddy`` is always ``None``, so the reads go through Bambuddy as the
+    run does; ``native`` changes nothing, as the check refuses a run that is not."""
+    if printers is None or not native_backends(settings) or asked == "bambuddy":
         return None
     try:
         route = await run_route(

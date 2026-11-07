@@ -110,7 +110,16 @@ word. `timelapse` and `layer_inspect` are LAN fields and still pass. A remembere
 (global, printer or model scope) is not judged: it stays a Bambuddy queue option, as
 before. The refusal is in `prepare_run`, in the dialog's check (`check_print`,
 `asked_path_refusal`) and in the run's `print_check` activity, before anything is
-recorded. No workflow code changed, so the replays need no patch. The tier is
+recorded.
+
+Every reader that takes the request judges the route as the run does. The dialog's
+checks (`POST /print/outputs/{id}/check`, `POST /print/library/{id}/check`) pass `path` to
+`dialog_route`: with `bambuddy` it answers `None`, so the check builds a client and is
+Bambuddy's check. The background slice (`preview_slice`) and a quote's slice
+(`SliceQuoteRequest.path`, `orders/operations.py` `PreviewSlicer`) pass it to
+`slice_route`, so a `bambuddy` print finds the slice made on its own route. The analyzers
+(`AnalysisRequest.path`) pass it to `run_route`, and a flow's approval line
+(`flows/print_binding.py`) names Bambuddy for a call that asks for it. No workflow code changed, so the replays need no patch. The tier is
 unchanged: `print_output` and `order_item_print` stay `outward`. The agent's
 `print_output` and `order_item_print` take `path`, and `order_item_print` takes `options`.
 The print dialog has no control for it yet.

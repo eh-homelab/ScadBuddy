@@ -580,8 +580,10 @@ sliced again and no sliced file is uploaded (measured with Bambuddy's slicer:
 queues library file 301, the quote's slice). The one upload is the unsliced copy, filed
 in the item's project folder (#79). That is the same path as a print of the output from
 the dialog. Over the LAN a calibration in `options` is refused (422), and a `path`
-`native` the run cannot honour is refused. The agent's `order_item_print` takes `path` and
-`options` (outward, as before).
+`native` the run cannot honour is refused. A slice quote takes `path` too
+(`SliceQuoteRequest.path`), so the quote slices on the route its print will take. The
+agent's `order_item_print` takes `path` and `options` (outward, as before), and
+`order_item_quote`'s `slice` takes `path`.
 
 ## 6. Fulfilment and provenance
 

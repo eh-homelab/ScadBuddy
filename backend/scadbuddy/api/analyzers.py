@@ -424,6 +424,7 @@ async def analysis_context(
                 printers.reports,
                 printer=request.printer,
                 printer_id=request.printer_id,
+                asked=request.path,
             )
         except ApiError as error:
             refused = error.detail

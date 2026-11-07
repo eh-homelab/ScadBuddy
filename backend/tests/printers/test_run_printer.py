@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,6 +19,7 @@ import respx
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.options import lan_calibration_refusal
 from scadbuddy.bambuddy.print_run import (
@@ -27,14 +29,18 @@ from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     asked_path_refusal,
     check_print,
+    dialog_route,
     ensured_route,
     prepare_run,
     run_route,
+    slice_route,
 )
 from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.bambuddy.runs import run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.orders import operations as order_operations
+from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.printers.reports import PrinterReportStore
@@ -837,3 +843,81 @@ def test_the_path_keys_the_run_only_when_sent() -> None:
     assert run_key("o1", run_request(printer_id=1, path="bambuddy")) != before
     with pytest.raises(ValueError):
         run_request(path="cloud")
+
+
+@respx.mock
+async def test_the_dialog_and_slice_routes_take_the_asked_path(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """The dialog's reads and the background slices pick the route the run will take:
+    asked for Bambuddy, a row the LAN reaches is read and sliced through Bambuddy."""
+    bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports, preferred_path="native")
+    settings = StoredSettings(**HOT_PATH)
+    dialog = partial(dialog_route, settings, printers_with_kek, reports, printer=pid, printer_id=1)
+    native = await dialog()
+    assert native is not None and native.native
+    assert await dialog(asked="native") is not None
+    assert await dialog(asked="bambuddy") is None
+
+    sliced = partial(slice_route, settings, printers_with_kek, reports, printer=pid, printer_id=1)
+    plain = await sliced()
+    assert plain is not None and plain.native
+    asked = await sliced(asked="bambuddy")
+    assert asked is not None and (asked.native, asked.path) == (False, "bambuddy")
+
+
+class _StopError(Exception):
+    """Raised by a recorded `slice_route`, so nothing past the route is run."""
+
+
+def recorded_route(seen: dict[str, Any]) -> Any:
+    async def slice_route(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _StopError
+
+    return slice_route
+
+
+async def test_the_dialogs_background_slice_takes_the_asked_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`preview_slice` slices on the route the run will take, so a `path: "bambuddy"`
+    print finds its background slice and is not sliced again."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(bambuddy_operations, "slice_route", recorded_route(seen))
+    unused: Any = None
+    kinds = bambuddy_operations.bambuddy_kinds_over(
+        settings_store=cast(Any, SimpleNamespace(load=StoredSettings)),
+        outputs=unused,
+        uploads=unused,
+        links=unused,
+        archive_cache=unused,
+        printers=unused,
+        reports=unused,
+    )
+    (preview,) = [kind for kind in kinds if kind.name == "preview_slice"]
+    request = run_request(printer_id=1, path="bambuddy").model_dump(mode="json")
+    with pytest.raises(_StopError):
+        await preview.run({"request": request, "output_id": "o1"}, {})
+    assert seen["asked"] == "bambuddy"
+
+
+async def test_a_quotes_slice_takes_the_asked_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A quote slices on the route its print will take (`SliceQuoteRequest.path`)."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(order_operations, "slice_route", recorded_route(seen))
+    core = cast(Any, SimpleNamespace(settings_store=SimpleNamespace(load=StoredSettings)))
+    registry = SimpleNamespace(store=None, reports=None)
+    components = cast(Any, SimpleNamespace(get=lambda key: registry))
+    quote = SliceQuoteRequest.model_validate(
+        {
+            "printer_id": 1,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "choices": {"nozzles": [{"size": "0.2"}], "tier": "fine"},
+            "path": "bambuddy",
+        }
+    )
+    with pytest.raises(_StopError):
+        await order_operations.PreviewSlicer(core, components).start("o1", quote, "s")
+    assert seen["asked"] == "bambuddy"

@@ -104,6 +104,10 @@ class SliceQuoteRequest(BaseModel):
     filament_plan: FilamentPlan
     choices: PrintChoices
     filaments: dict[int, str] = Field(default_factory=dict)
+    #: The path the item's print will take (#5352, `PrintRunRequest.path`), so the quote
+    #: slices on the run's route and the print can queue that slice. Omitted is the
+    #: run's own choice.
+    path: Literal["bambuddy", "native"] | None = None
 
 
 class QuoteError(ValueError):

@@ -506,6 +506,9 @@ describe('pricing tools (#4250)', () => {
       filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
+    // #5352: the quote slices on the route its print will take.
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, path: 'bambuddy' } }, ctx())
+    expect(body).toMatchObject({ path: 'bambuddy' })
   })
 
   it('answers a slice quote still running past the follow window', async () => {
