@@ -135,6 +135,7 @@ from scadbuddy.orders.store import (
     decode_cursor,
     encode_cursor,
 )
+from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 
@@ -419,24 +420,6 @@ def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
         ],
         revisions=revisions,
     )
-
-
-class OrderTotals(BaseModel):
-    """§3.4: the items' prices, the charges on top, what was paid. Every item not
-    cancelled counts at its accepted quote's total or, before one is accepted (a draft
-    or quoted order), at its newest quote's unit price times its quantity now, so a
-    draft adds up as it is entered; ``pending_minor`` is the part of the subtotal no
-    accepted quote stands behind yet, and ``unpriced_items`` the items with no quote."""
-
-    subtotal_minor: Money
-    #: The part of ``subtotal_minor`` from quotes not yet accepted.
-    pending_minor: Money = 0
-    #: The items not cancelled with no quote at all, in no sum.
-    unpriced_items: list[str] = Field(default_factory=list)
-    charges_minor: Money
-    total_minor: Money
-    paid_minor: Money
-    balance_minor: Money
 
 
 class OrderDetail(BaseModel):
@@ -973,46 +956,6 @@ async def profit(
     return await asyncio.to_thread(profit_report, orders.store, rates, since=since, until=until)
 
 
-def item_price(item: ItemDetail) -> tuple[Money, bool] | None:
-    """The item's price and whether an accepted quote stands behind it: the accepted
-    quote's total, else the newest quote's unit price times the item's quantity now;
-    None with no quote."""
-    accepted = next((quote for quote in item.quotes if quote.accepted), None)
-    if accepted is not None:
-        return accepted.total_minor, True
-    newest = max(item.quotes, key=lambda quote: (quote.created_at, quote.id), default=None)
-    if newest is None:
-        return None
-    return newest.unit_price_minor * item.quantity, False
-
-
-def _totals(items: list[ItemDetail], charges: list[Charge], payments: list[Payment]) -> OrderTotals:
-    subtotal = pending = 0
-    unpriced: list[str] = []
-    for item in items:
-        if item.status == "cancelled":
-            continue
-        priced = item_price(item)
-        if priced is None:
-            unpriced.append(item.id)
-            continue
-        amount, accepted = priced
-        subtotal += amount
-        if not accepted:
-            pending += amount
-    charged = sum(charge.amount_minor for charge in charges)
-    paid = sum(payment.amount_minor for payment in payments)
-    return OrderTotals(
-        subtotal_minor=subtotal,
-        pending_minor=pending,
-        unpriced_items=unpriced,
-        charges_minor=charged,
-        total_minor=subtotal + charged,
-        paid_minor=paid,
-        balance_minor=subtotal + charged - paid,
-    )
-
-
 @router.get("/{order_id}", response_model=OrderDetail, summary="One order, whole")
 async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
     _path(order_id)
@@ -1031,7 +974,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             charges=charges,
             payments=payments,
             shipments=store.shipments(order.id),
-            totals=_totals(items, charges, payments),
+            totals=order_totals([(item, item.quotes) for item in items], charges, payments),
             attachments=store.attachments(order.id),
             projects=store.projects(order.id),
         )

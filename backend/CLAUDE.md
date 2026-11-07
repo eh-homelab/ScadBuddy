@@ -633,7 +633,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   The stored setting `orders_allow_unfulfil` (#4953, live, default on) turns it off:
   the route passes it as `allowed` and the lifecycle answers `unfulfil_disabled`.
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
-  times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
+  times its quantity (`orders/totals.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
