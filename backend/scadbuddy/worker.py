@@ -1696,7 +1696,22 @@ def main() -> None:
     # `kill -USR1 1` in the pod writes every thread's stack to stderr (#3788): the
     # loop watch logs a stall by itself, this is for a hang it does not see.
     faulthandler.register(signal.SIGUSR1, all_threads=True)
-    asyncio.run(_main(settings, queue))
+    try:
+        asyncio.run(_main(settings, queue))
+    except LocalStoreRefusedError as error:
+        _write_termination_message(str(error))
+        raise
+
+
+#: Kubernetes shows this file's text as the container's last termination message
+#: (`kubectl describe pod`), so a render Deployment left up on `local` says why it
+#: crash-loops (plan D11). Absent outside a pod.
+TERMINATION_LOG = Path("/dev/termination-log")
+
+
+def _write_termination_message(message: str) -> None:
+    with contextlib.suppress(OSError):
+        TERMINATION_LOG.write_text(message)
 
 
 if __name__ == "__main__":

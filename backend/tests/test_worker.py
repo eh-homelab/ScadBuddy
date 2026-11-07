@@ -2832,3 +2832,25 @@ async def test_wait_until_routed_gives_up_and_says_so(
         )
     assert not routed and asked
     assert "does not route to this build" in caplog.text
+
+
+def test_a_refused_local_store_is_the_pods_termination_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan D11: `kubectl describe pod` shows why a render worker on `local` crash-loops."""
+    log = tmp_path / "termination-log"
+    monkeypatch.setattr(worker_module, "TERMINATION_LOG", log)
+    monkeypatch.setattr(worker_module, "parse_queue", lambda: "render")
+    monkeypatch.setattr(worker_module, "configure_logging", lambda *_: None)
+    monkeypatch.setattr(worker_module, "configure_tracing", lambda *_, **__: None)
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", "temporal.invalid:7233")
+    monkeypatch.setenv("SCADBUDDY_DATA_DIR", str(tmp_path))
+
+    def refuse(coro: Any) -> NoReturn:
+        coro.close()
+        raise worker_module.LocalStoreRefusedError(worker_module.LOCAL_STORE_REFUSED)
+
+    monkeypatch.setattr(asyncio, "run", refuse)
+    with pytest.raises(worker_module.LocalStoreRefusedError):
+        worker_module.main()
+    assert log.read_text() == worker_module.LOCAL_STORE_REFUSED

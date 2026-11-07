@@ -315,8 +315,7 @@ on shutdown.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10): the most connections of the API's main pool
     (`scadbuddy-api`, which the settings, the jobs and the presets share; before #5226
     the settings and the jobs each had a pool of this size, so twice it), and of the
-    render worker's `scadbuddy-render` pool and the print worker's `scadbuddy-settings`
-    pool. Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
+    print worker's `scadbuddy-settings` pool. Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
     too small. The schema is created and migrated at startup.
     An API process's pools hold at most that plus 13 connections: the event bus's 2,
     the features' shared `scadbuddy-rows` 6, `scadbuddy-auth` 2, `scadbuddy-rack-usage`
