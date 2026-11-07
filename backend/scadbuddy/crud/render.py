@@ -42,7 +42,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
-from psycopg.errors import DeadlockDetected
+from psycopg.errors import DeadlockDetected, LockNotAvailable
 from temporalio import activity
 
 from scadbuddy.bambuddy.client import DEFAULT_TIMEOUT as BAMBUDDY_TIMEOUT
@@ -67,6 +67,11 @@ REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
+#: `api/crud_render.py` `TARGET_MOVED` and `FOLDER_LOCKED`.
+TARGET_MOVED = "target-moved"
+FOLDER_LOCKED = "folder-locked"
+#: A problem's RFC 9457 members; every other member is an extension of the `ApiError`.
+_PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
 #: How many activity attempts `WriteKeys` counts writes for at once; the oldest is
 #: forgotten first (an attempt long finished).
 WRITE_KEYS_KEPT = 1024
@@ -92,9 +97,10 @@ HOLD_BUDGET = 30.0
 #: `Work/`, each under a lock it may wait `FOLDER_LOCK_SECONDS` for, then a listing and a
 #: create at Bambuddy's own timeout. A slow but healthy find is answered inside it.
 FIND_TIMEOUT = 2 * (FOLDER_LOCK_SECONDS + 2 * BAMBUDDY_TIMEOUT)
-#: How long a find tries again after a failure that passes: a lock the API waited
-#: `FOLDER_LOCK_SECONDS` for in vain (a 503 ``database-unavailable``), an API pod away.
-FIND_BUDGET = FIND_TIMEOUT
+#: How long a find is sent again after a try that failed before the API answered it (no
+#: connection, a pod without the route, a 5xx). A lock waited for in vain and Bambuddy
+#: not answering are answers, never sent again (`RemoteStoreFolders.find`).
+FIND_BUDGET = 5.0
 
 
 class RemoteRenderSettingsSource(StoreSettingsSource):
@@ -450,12 +456,19 @@ class RemoteBlobIndex:
 class RemoteStoreFolders:
     """`KeepsFolders` over the routes, on the worker's event loop. ``budget`` and
     ``timeout`` bound a find (`FIND_BUDGET`, `FIND_TIMEOUT`); a forget and a listing
-    have the client's own."""
+    have the client's own. ``source`` is the worker's store settings, read again after
+    the API says they are older than its own."""
 
     def __init__(
-        self, client: CrudClient, *, budget: float = FIND_BUDGET, timeout: float = FIND_TIMEOUT
+        self,
+        client: CrudClient,
+        *,
+        source: StoreSettingsSource | None = None,
+        budget: float = FIND_BUDGET,
+        timeout: float = FIND_TIMEOUT,
     ) -> None:
         self._client = client
+        self._source = source
         self._budget = budget
         self._timeout = timeout
 
@@ -465,10 +478,17 @@ class RemoteStoreFolders:
         """``client``, the worker's Bambuddy client, is not used: the API calls Bambuddy
         with its own. A refusal (the API's Bambuddy is not the worker's, Bambuddy's own
         404) is the `ApiError` the SQL find raised, so an upload still forgets a folder
-        Bambuddy lost and makes it again. Bambuddy not answering comes as a 424
-        ``bambuddy-unavailable``, which the client does not retry: it is the 502 or 504
-        `ApiError` the SQL find raised, at once, and the activity's own retry takes
-        over. A lock the API waited for in vain passes, and is tried again."""
+        Bambuddy lost and makes it again; its title and upstream fields are kept.
+
+        One call lasts at most what the SQL find did: one request, answered within
+        `FIND_TIMEOUT`, sent again only while it failed before the API answered, within
+        `FIND_BUDGET`. Bambuddy not answering comes as a 424 ``bambuddy-unavailable``,
+        raised as the 502 or 504 `ApiError` the SQL find raised; a lock the API waited
+        30 s for in vain as a 423 ``folder-locked``, raised as the `LockNotAvailable` the
+        SQL find raised. Neither is sent again: the activity's own retry takes over. A
+        409 ``target-moved`` (the worker's settings are older than the API's) has
+        ``source`` read again first, so the activity's next attempt finds the folder on
+        the Bambuddy and inbox Settings now name."""
         body = {
             "slug": slug,
             "role": role,
@@ -485,20 +505,28 @@ class RemoteStoreFolders:
                 budget=self._budget,
             )
         except CrudRefusedError as error:
-            problem = error.problem
-            code = error.status
-            extensions: dict[str, Any] = {}
-            if code == 424 and problem.get("reason") == BAMBUDDY_UNAVAILABLE:
-                code = int(problem["upstream_status"])
-                if "bambuddy_status" in problem:
-                    extensions["bambuddy_status"] = problem["bambuddy_status"]
-            raise ApiError(
-                code,
-                str(problem.get("detail", "")),
-                type_=str(problem.get("type", "about:blank")),
-                **extensions,
-            ) from error
+            raise self._refused(error) from error
         return int(response.json()["folder_id"])
+
+    def _refused(self, error: CrudRefusedError) -> Exception:
+        problem = error.problem
+        reason = problem.get("reason")
+        if error.status == 423 and reason == FOLDER_LOCKED:
+            return LockNotAvailable(str(problem.get("detail", "")))
+        if error.status == 409 and reason == TARGET_MOVED and self._source is not None:
+            self._source.invalidate()
+        code = error.status
+        extensions = {k: v for k, v in problem.items() if k not in _PROBLEM_MEMBERS}
+        if code == 424 and reason == BAMBUDDY_UNAVAILABLE:
+            code = int(extensions.pop("upstream_status"))
+            del extensions["reason"]
+        return ApiError(
+            code,
+            str(problem.get("detail", "")),
+            title=problem.get("title"),
+            type_=str(problem.get("type", "about:blank")),
+            **extensions,
+        )
 
     async def forget(self, inbox: Inbox, slug: str) -> None:
         await self._client.request(

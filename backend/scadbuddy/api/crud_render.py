@@ -20,7 +20,7 @@ from typing import Annotated, Any
 
 from fastapi import Query, Request, status
 from psycopg import Connection
-from psycopg.errors import DeadlockDetected
+from psycopg.errors import DeadlockDetected, LockNotAvailable
 from psycopg.rows import DictRow
 from pydantic import BaseModel
 
@@ -69,6 +69,10 @@ TARGET_MOVED = "target-moved"
 #: the CRUD client does not retry, so the call fails at once as the SQL find did and
 #: the activity's own retry takes over. `crud/render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
+#: A folder find whose lock the API waited `FOLDER_LOCK_SECONDS` for in vain: a 423, which
+#: the client does not retry, so the call fails after one wait as the SQL find did.
+#: `crud/render.py` `FOLDER_LOCKED`.
+FOLDER_LOCKED = "folder-locked"
 
 
 def released(current: RenderStoreSettings) -> list[str]:
@@ -542,8 +546,10 @@ async def index_delete(
 # (the render key, as the worker's was), and no lock outlives the request. It takes the
 # lock an older worker still finding over SQL takes (`folder_lock_key`, the same 30 s
 # `lock_timeout`), so the two exclude each other during a roll. A lock waited for in vain
-# is a `psycopg` `LockNotAvailable`, which the guard answers as a 503 that passes. Every
-# route is natural; a forget of nothing is a success.
+# (`LockNotAvailable`) and Bambuddy not answering are 4xx answers the worker's client does
+# not send again (a 423 ``folder-locked``, a 424 ``bambuddy-unavailable``): the call fails
+# after the one wait, with the error the SQL find raised, and Temporal's retry takes
+# over. Every route is natural; a forget of nothing is a success.
 
 
 class FolderFind(BaseModel):
@@ -570,8 +576,9 @@ async def find_store_folder(body: FolderFind, state: StateDep) -> FolderFound:
     recorded. A worker whose Bambuddy or inbox is not the API's (its settings older than
     a change in Settings) is a 409 ``target-moved``: a folder id of one Bambuddy is
     another folder on the other. Bambuddy not answering is a 424
-    ``bambuddy-unavailable`` carrying the status its client raised
-    (``upstream_status``), never a 5xx the worker's client would retry."""
+    ``bambuddy-unavailable`` carrying the status and title its client raised
+    (``upstream_status``), and a lock waited for in vain a 423 ``folder-locked``: never a
+    5xx the worker's client would send again."""
     pool = state.settings_store.pool
     target = render_target(
         await asyncio.to_thread(load_render_store_settings, pool, state.settings)
@@ -586,12 +593,15 @@ async def find_store_folder(body: FolderFind, state: StateDep) -> FolderFound:
     try:
         async with BambuddyClient(target.config) as client:
             found = await _folders(state).find(client, inbox, body.slug, body.role, body.title)
+    except LockNotAvailable as error:
+        raise ApiError(status.HTTP_423_LOCKED, str(error).strip(), reason=FOLDER_LOCKED) from error
     except ApiError as error:
         if error.type != UNAVAILABLE_PROBLEM:
             raise
         raise ApiError(
             status.HTTP_424_FAILED_DEPENDENCY,
             error.detail,
+            title=error.title,
             type_=error.type,
             reason=BAMBUDDY_UNAVAILABLE,
             upstream_status=error.status,

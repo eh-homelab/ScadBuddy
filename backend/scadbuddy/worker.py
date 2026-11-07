@@ -1130,7 +1130,7 @@ async def run_worker(
                     geometry=RemoteGeometryIndex(remote),
                     index=RemoteBlobIndex(remote),
                     # On the loop, as the store calls it: the async client.
-                    folders=RemoteStoreFolders(crud),
+                    folders=RemoteStoreFolders(crud, source=source),
                     metrics=metrics,
                     stopping=stop.is_set,
                 )

@@ -26,8 +26,13 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
-from scadbuddy.crud.client import CrudClient, CrudUnavailableError
-from scadbuddy.crud.render import FIND_BUDGET, FIND_TIMEOUT, RemoteStoreFolders
+from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.render import (
+    FIND_BUDGET,
+    FIND_TIMEOUT,
+    RemoteRenderSettingsSource,
+    RemoteStoreFolders,
+)
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.store import bambuddy
 from scadbuddy.store.bambuddy import (
@@ -222,30 +227,45 @@ async def test_a_find_waits_for_the_lock_within_one_request(
     assert created.call_count == 2
 
 
-def test_the_find_budget_covers_the_lock_and_bambuddy() -> None:
-    """Two finds in one request (the template folder's, then Work's), each up to the
-    30 s lock and a listing and a create at Bambuddy's 30 s timeout."""
+def test_the_find_timeout_covers_the_lock_and_bambuddy() -> None:
+    """One request waits for two finds (the template folder's, then Work's), each up to
+    the 30 s lock and a listing and a create at Bambuddy's 30 s timeout. The budget for
+    trying again is small: only a request that never reached the API is sent again."""
     assert FOLDER_LOCK_TIMEOUT == "30s"  # unchanged: an old worker takes the same
     one_find = FOLDER_LOCK_SECONDS + 2 * BambuddyConfig("x").timeout
     assert 2 * one_find <= FIND_TIMEOUT
-    assert FIND_BUDGET >= FIND_TIMEOUT
+    assert FIND_BUDGET <= 10
 
 
 @respx.mock
-async def test_a_lock_timeout_passes(
+async def test_a_lock_timeout_fails_the_call_at_once(
     crud: CrudClient, store: SettingsStore, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The API's `lock_timeout` is a state that passes (a 503 `database-unavailable`),
-    never a refusal: the worker's call tries again, and its failure says it passes."""
+    """The API's `lock_timeout` costs what it cost over SQL: one wait, then the call fails
+    with the `LockNotAvailable` the SQL find raised, which Temporal's retry handles. The
+    worker's client does not send it again."""
     _, created = _bambuddy()
-    monkeypatch.setattr(bambuddy, "FOLDER_LOCK_TIMEOUT", "50ms")
+    monkeypatch.setattr(bambuddy, "FOLDER_LOCK_TIMEOUT", "300ms")
     key = folder_lock_key(HERE.instance, INBOX, SLUG, "template")
+    sent = 0
+    folders = RemoteStoreFolders(crud)
+    request = crud.request
+
+    async def counted(*args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal sent
+        sent += 1
+        return await request(*args, **kwargs)
+
+    monkeypatch.setattr(crud, "request", counted)
     with psycopg.connect(pg_conninfo, autocommit=True) as holder:
         holder.execute("SELECT pg_advisory_lock(%s)", (key,))
-        with pytest.raises(CrudUnavailableError) as raised:
-            await RemoteStoreFolders(crud, budget=0.5).find(None, HERE, SLUG, "work", TITLE)
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            await folders.find(None, HERE, SLUG, "work", TITLE)
+        elapsed = time.monotonic() - started
         holder.execute("SELECT pg_advisory_unlock(%s)", (key,))
-    assert raised.value.passes
+    assert sent == 1
+    assert elapsed < 3
     assert not created.called
     assert _rows(store) == []
 
@@ -370,3 +390,59 @@ async def test_a_find_while_bambuddy_is_down_fails_at_once(
     assert raised.value.type == UNAVAILABLE_PROBLEM
     assert is_transient(raised.value)
     assert _rows(store) == []
+
+
+@respx.mock
+async def test_a_moved_target_rereads_the_settings_for_the_next_attempt(
+    crud: CrudClient, store: SettingsStore
+) -> None:
+    """The worker's settings are older than a change in Settings: the 409 makes it read
+    them again, so the next attempt (`pipelines.RETRY`'s, 2 s later) finds the folder
+    on the Bambuddy and inbox Settings now name, rather than failing on the 30 s cache."""
+    _bambuddy()
+    upload = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FileUploadResponse", id=500, filename="f", file_size=1)
+        )
+    )
+    source = RemoteRenderSettingsSource(crud)  # the 30 s TTL
+    fresh = await source.current()
+    source.seed(fresh.model_copy(update={"library_folder_id": 2}))  # the inbox before
+    backend = BambuddyContentBackend(
+        source.target, store.pool, folders=RemoteStoreFolders(crud, source=source)
+    )
+    scope = BlobScope(slug=SLUG, title=TITLE)
+    try:
+        with pytest.raises(ApiError) as raised:
+            await backend.upload("piece", b"a", name="a.zip", scope=scope)
+        assert raised.value.status == 409
+        assert await backend.upload("piece", b"a", name="a.zip", scope=scope) == "500"
+    finally:
+        await backend.aclose()
+    assert upload.calls[0].request.url.params["folder_id"] == "11"
+    assert (await source.current()).library_folder_id == INBOX
+
+
+@respx.mock
+async def test_a_refusal_reads_as_it_did_over_sql(crud: CrudClient, store: SettingsStore) -> None:
+    """Bambuddy refusing the render key: the worker's `ApiError` has the status, title,
+    type and upstream fields the SQL find's had."""
+    respx.route(host="127.0.0.1").pass_through()
+    respx.get(f"{API}/library/folders").mock(return_value=httpx.Response(403))
+    target = BambuddyTarget(
+        config=BambuddyConfig(base_url=BASE_URL, api_key=RENDER_KEY), inbox_id=INBOX
+    )
+    async with BambuddyClient(target.config) as client:
+        with pytest.raises(ApiError) as over_sql:
+            await FolderFinder(store.pool).find(client, HERE, SLUG, "work", TITLE)
+    with pytest.raises(ApiError) as remote:
+        await RemoteStoreFolders(crud).find(None, HERE, SLUG, "work", TITLE)
+    expected, got = over_sql.value, remote.value
+    assert (got.status, got.title, got.type, got.detail) == (
+        expected.status,
+        expected.title,
+        expected.type,
+        expected.detail,
+    )
+    assert got.extensions == expected.extensions
+    assert "required_scope" in got.extensions
