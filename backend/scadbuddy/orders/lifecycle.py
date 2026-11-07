@@ -420,6 +420,9 @@ class Lifecycle:
         self.refs = refs
         #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
         self.parts = PartStore(store)
+        #: The payment providers offered (#4957, ``payments/registry.py``): a default
+        #: provider not among them is no provider. Set by ``OrdersComponent``.
+        self.offered_providers: frozenset[str] = frozenset()
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -756,7 +759,8 @@ class Lifecycle:
         provider: str | UnsetType | None = UNSET,
     ) -> PaymentRequestView:
         """A request for ``amount_minor`` (the balance now when None), through
-        ``provider`` (the default provider when unset; None collects by hand)."""
+        ``provider`` (the default provider when unset and still offered; None collects by
+        hand). A named provider that is not connected is refused as 422 ``provider``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -767,13 +771,19 @@ class Lifecycle:
             )
             if amount <= 0:
                 raise LifecycleError("nothing_due", f"order {order.number} has nothing due")
+            if isinstance(provider, UnsetType):
+                provider = payments.default_provider(conn, self.offered_providers)
+            elif provider is not None and not payments.hold_provider(conn, provider):
+                raise LifecycleError(
+                    "provider",
+                    f"no connected payment provider {provider!r}",
+                    unprocessable=True,
+                )
             opened = payments.insert_request(
                 conn,
                 order_id=order.id,
                 kind=kind,
-                provider=(
-                    payments.default_provider(conn) if isinstance(provider, UnsetType) else provider
-                ),
+                provider=provider,
                 amount_minor=amount,
                 currency=order.currency,
                 created_by=by,

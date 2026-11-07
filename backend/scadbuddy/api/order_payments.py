@@ -13,7 +13,7 @@ import asyncio
 
 from fastapi import APIRouter, status
 
-from scadbuddy.api.orders import _path
+from scadbuddy.api.orders import check_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
@@ -50,7 +50,7 @@ def _request_of(orders: OrdersComponent, order_id: str, request_id: str) -> None
     summary="An order's payment requests, oldest first",
 )
 async def list_payment_requests(order_id: str, orders: OrdersDep) -> list[PaymentRequestView]:
-    _path(order_id)
+    check_path(order_id)
     try:
         return await asyncio.to_thread(_order_requests, orders, order_id)
     except LifecycleError as error:
@@ -72,7 +72,7 @@ async def list_payment_requests(order_id: str, orders: OrdersDep) -> list[Paymen
 async def request_payment(
     order_id: str, body: PaymentRequestCreate, service: PaymentsDep
 ) -> PaymentRequestView:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     try:
         return await service.service.request_payment(order_id, by, body)
@@ -94,7 +94,7 @@ async def request_payment(
 async def cancel_payment_request(
     order_id: str, request_id: str, orders: OrdersDep
 ) -> PaymentRequestView:
-    _path(order_id, request_id)
+    check_path(order_id, request_id)
     by = current_actor()
     try:
         return await asyncio.to_thread(
@@ -116,7 +116,7 @@ async def cancel_payment_request(
 async def link_payment_request(
     order_id: str, request_id: str, orders: OrdersDep, service: PaymentsDep
 ) -> PaymentRequestView:
-    _path(order_id, request_id)
+    check_path(order_id, request_id)
     try:
         await asyncio.to_thread(_request_of, orders, order_id, request_id)
         return await service.service.link(request_id)

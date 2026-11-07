@@ -790,15 +790,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   offered providers; the fake one only with the bootstrap
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
-  sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; no KEK
-  is 409 `kek_missing`), `service.py` (`Payments`, what the routes call) and
+  sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
+  a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
+  `kek_missing`), `service.py` (`Payments`, what the routes call) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus
   `order_payments.provider` and `.payment_request_id` (migration `…_payments_seam.sql`),
   all on the orders pool. The lifecycle (`open_payment_request`, `cancel_payment_request`,
   `set_request_link`, `record_provider_event`, `add_payment(payment_request_id=…)`) writes
-  the rows and the audit line under the order's lock; a provider is called only after
+  the rows under the order's lock, with an audit line for each but `set_request_link` (the
+  link is the provider's, not a person's decision). A named provider's credential row is
+  held `FOR SHARE` while a request opens, so a disconnect waits and then refuses; a
+  default provider no longer offered (`Lifecycle.offered_providers`) is no provider. A
+  provider is called only after
   that commit (`Payments.link`), with the request id as its idempotency key, and a
   failure stays on the open request as `link_error` (`POST …/payment-requests/{id}/link`
   retries). A provider's `paid` event with a fee writes a `payment_fee` cost entry,

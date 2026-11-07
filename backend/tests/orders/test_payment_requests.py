@@ -3,12 +3,17 @@ provider's events and their fees (job cost spec §4.4), and a cancel that cancel
 
 from __future__ import annotations
 
+import threading
+from typing import Any
+
 import pytest
 
 from scadbuddy.core.events import OrderChanged
 from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import Actor, Order
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.store import Conn, OrderStore
+from scadbuddy.payments import store as payments_store
+from scadbuddy.payments.credentials import PaymentCredentials, ProviderBusyError
 from scadbuddy.payments.models import HostedRequest, PaymentRequestView, ProviderEvent
 from scadbuddy.payments.store import request
 from scadbuddy.store.refs import BlobRefs
@@ -48,9 +53,23 @@ class PayShop(Shop):
         return order, req
 
 
+def connect(rows: OrderStore, provider: str = "fake", *, default: bool = False) -> None:
+    """A credential row: the provider is connected (its secret is never opened here)."""
+    with rows.transaction() as conn:
+        conn.execute(
+            "INSERT INTO payment_credentials (provider, account_label, secret_sealed, dek_sealed,"
+            " kek_id, is_default) VALUES (%s, 'Fake', '\\x00', '\\x00', 'k', %s)",
+            (provider, default),
+        )
+
+
 @pytest.fixture
 def shop(rows: OrderStore, pool: PgPool) -> PayShop:
-    return PayShop(rows, BlobRefs(pool))
+    """The fake provider offered and connected, not the default."""
+    made = PayShop(rows, BlobRefs(pool))
+    made.lifecycle.offered_providers = frozenset({"fake"})
+    connect(rows)
+    return made
 
 
 def _slug(call: object) -> LifecycleError:
@@ -81,10 +100,7 @@ def test_a_request_for_the_balance_takes_total_minus_paid(shop: PayShop) -> None
 
 def test_a_request_uses_the_default_provider_unless_one_is_named(shop: PayShop) -> None:
     with shop.rows.transaction() as conn:
-        conn.execute(
-            "INSERT INTO payment_credentials (provider, account_label, secret_sealed, dek_sealed,"
-            " kek_id, is_default) VALUES ('fake', 'Fake', '\\x00', '\\x00', 'k', true)"
-        )
+        conn.execute("UPDATE payment_credentials SET is_default = true WHERE provider = 'fake'")
     order, _ = shop.accepted()
     assert shop.lifecycle.open_payment_request(order.id, BY).provider == "fake"
     assert shop.lifecycle.open_payment_request(order.id, BY, provider=None).provider is None
@@ -477,3 +493,58 @@ def test_a_paid_event_on_an_expired_request_records_the_payment(shop: PayShop) -
     found = shop.rows_request(req.id)
     assert (found.status, found.payment_id, pay.amount_minor) == ("paid", pay.id, 700)
     assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+def test_a_default_provider_no_longer_offered_is_no_provider(shop: PayShop) -> None:
+    """The fake flag went off while fake was the default (plan gap 8)."""
+    with shop.rows.transaction() as conn:
+        conn.execute("UPDATE payment_credentials SET is_default = true WHERE provider = 'fake'")
+    shop.lifecycle.offered_providers = frozenset()
+    order, _ = shop.accepted()
+    assert shop.lifecycle.open_payment_request(order.id, BY).provider is None
+
+
+def test_a_named_provider_not_connected_is_refused_and_writes_nothing(shop: PayShop) -> None:
+    """A disconnect that committed before the open (plan gap 11)."""
+    with shop.rows.transaction() as conn:
+        conn.execute("DELETE FROM payment_credentials")
+    order, _ = shop.accepted()
+    refused = _slug(lambda: shop.lifecycle.open_payment_request(order.id, BY, provider="fake"))
+    assert (refused.slug, refused.unprocessable) == ("provider", True)
+    with shop.rows.transaction() as conn:
+        assert payments_store.requests_for_order(conn, order.id) == []
+    assert "payment_request.opened" not in shop.kinds(order)
+
+
+def test_a_disconnect_waits_for_an_open_and_then_sees_its_request(
+    shop: PayShop, rows: OrderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open holds the credential row FOR SHARE until it commits, so the disconnect
+    (EXCLUSIVE on the table) waits, then finds the open request and refuses."""
+    order, _ = shop.accepted()
+    credentials = PaymentCredentials(rows, None)
+    real_insert = payments_store.insert_request
+    outcome: list[object] = []
+
+    threads: list[threading.Thread] = []
+
+    def disconnect_meanwhile(conn: Conn, **kwargs: Any) -> PaymentRequestView:
+        def run() -> None:
+            try:
+                outcome.append(credentials.disconnect("fake"))
+            except ProviderBusyError as busy:
+                outcome.append(busy)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        # The disconnect cannot finish while this transaction holds the row.
+        worker.join(timeout=1)
+        assert worker.is_alive()
+        threads.append(worker)
+        return real_insert(conn, **kwargs)
+
+    monkeypatch.setattr(payments_store, "insert_request", disconnect_meanwhile)
+    opened = shop.lifecycle.open_payment_request(order.id, BY, provider="fake")
+    threads[0].join(timeout=10)
+    assert isinstance(outcome[0], ProviderBusyError)
+    assert shop.rows_request(opened.id).provider == "fake"

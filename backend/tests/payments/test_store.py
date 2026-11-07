@@ -113,7 +113,7 @@ def test_request_by_ref_is_per_provider(rows: OrderStore, order: Order) -> None:
 
 def test_has_open_requests_and_the_default_provider(rows: OrderStore, order: Order) -> None:
     with rows.transaction() as conn:
-        assert default_provider(conn) is None and not has_open_requests(conn, "fake")
+        assert default_provider(conn, {"fake"}) is None and not has_open_requests(conn, "fake")
         req = insert_request(
             conn, order_id=order.id, kind="deposit", provider="fake", amount_minor=500,
             currency="USD", created_by=BY,
@@ -126,7 +126,9 @@ def test_has_open_requests_and_the_default_provider(rows: OrderStore, order: Ord
             " (provider, account_label, secret_sealed, dek_sealed, kek_id, is_default)"
             " VALUES ('fake', 'Fake', '\\x00', '\\x00', 'k', true)"
         )
-        assert default_provider(conn) == "fake"
+        assert default_provider(conn, {"fake"}) == "fake"
+        # A default no longer offered (the fake flag went off) is no default.
+        assert default_provider(conn, set()) is None
 
 
 @pytest.mark.parametrize("status", ["cancelled", "expired"])

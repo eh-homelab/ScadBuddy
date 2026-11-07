@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.core.settings import Settings
 from scadbuddy.payments.fake import FAKE
 from scadbuddy.payments.provider import ProviderError
+from scadbuddy.payments.service import Payments
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 
@@ -199,3 +200,24 @@ def test_a_cancelled_request_is_not_linked(
     assert (late.json()["status"], late.json()["hosted_url"]) == ("cancelled", None)
     # A request no longer open is not sent to the provider again.
     assert calls == [req["id"]]
+
+
+def test_a_disconnect_between_the_check_and_the_open_is_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan gap 11: the service's check passes, then the disconnect commits; the open
+    finds no credential row and writes nothing."""
+    connect_fake(client)
+    order = payable_order(client)
+
+    def checked_then_gone(self: Payments, provider: str) -> bool:
+        assert client.delete(f"/api/v1/payments/providers/{provider}").status_code == 204
+        return True
+
+    monkeypatch.setattr(Payments, "_is_connected", checked_then_gone)
+    refused = client.post(
+        f"/api/v1/orders/{order['id']}/payment-requests", json={"provider": "fake"}
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == ["body", "provider"]
+    assert client.get(f"/api/v1/orders/{order['id']}/payment-requests").json() == []

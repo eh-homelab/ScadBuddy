@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
 from scadbuddy.payments.fake import signed_event
 from tests.api.test_auth_enforce import ENABLED, HEADER, PUBLIC, _app, _sign_in
 from tests.api.test_order_payments import (
@@ -129,6 +130,33 @@ def test_an_unknown_provider_is_404_and_a_huge_body_413(client: TestClient) -> N
     huge = b"x" * (256 * 1024 + 1)
     too_big = client.post(HOOK, content=huge, headers={"content-type": "application/json"})
     assert too_big.status_code == 413
+
+
+def test_a_huge_body_with_no_length_is_413(client: TestClient) -> None:
+    """A streamed body states no Content-Length: it is counted as it arrives."""
+    connect_fake(client)
+
+    def chunks() -> Iterator[bytes]:
+        for _ in range(5):
+            yield b"x" * (64 * 1024)
+
+    too_big = client.post(HOOK, content=chunks(), headers={"content-type": "application/json"})
+    assert too_big.request.headers.get("content-length") is None
+    assert too_big.status_code == 413
+
+
+def test_a_missing_kek_is_503_and_says_nothing_of_the_setup(
+    client: TestClient, settings: Settings
+) -> None:
+    order_id, req = linked_request(client)
+    body, headers = signed_event("s3cret", paid(req))
+    with TestClient(create_app(settings.model_copy(update={"secret_key_file": None}))) as bare:
+        refused = bare.post(HOOK, content=body, headers=headers)
+    assert refused.status_code == 503
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/payments/credential_unreadable"
+    assert refused.json()["detail"] == "the provider's credential is unavailable"
+    assert "SCADBUDDY" not in refused.text
+    assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
 
 
 def test_an_unreadable_credential_is_503(client: TestClient, pg_conninfo: str) -> None:

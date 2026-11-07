@@ -3,6 +3,8 @@ a lifecycle step writes its payment, its request and its audit line together."""
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from psycopg.types.json import Jsonb
 
 from scadbuddy.orders.models import Actor, Money
@@ -142,9 +144,25 @@ def finish_event(
     )
 
 
-def default_provider(conn: Conn) -> str | None:
-    row = conn.execute("SELECT provider FROM payment_credentials WHERE is_default").fetchone()
+def default_provider(conn: Conn, offered: Collection[str]) -> str | None:
+    """The default provider when it is still ``offered``, its row held ``FOR SHARE`` until
+    the caller commits (see ``hold_provider``)."""
+    row = conn.execute(
+        "SELECT provider FROM payment_credentials WHERE is_default AND provider = ANY(%s)"
+        " FOR SHARE",
+        (list(offered),),
+    ).fetchone()
     return None if row is None else str(row["provider"])
+
+
+def hold_provider(conn: Conn, provider: str) -> bool:
+    """Whether ``provider`` is connected. Its row stays ``FOR SHARE`` until the caller
+    commits: a disconnect (``EXCLUSIVE`` on the table) waits, then sees the request the
+    caller wrote and refuses (plan gap 11)."""
+    row = conn.execute(
+        "SELECT 1 FROM payment_credentials WHERE provider = %s FOR SHARE", (provider,)
+    ).fetchone()
+    return row is not None
 
 
 def has_open_requests(conn: Conn, provider: str) -> bool:

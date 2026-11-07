@@ -9,6 +9,8 @@ No ``from __future__ import annotations``: FastAPI reads the dependency annotati
 runtime (``api/components.py``).
 """
 
+import logging
+
 from fastapi import APIRouter, Request, status
 
 from scadbuddy.api.payments import PROBLEMS, not_found
@@ -17,6 +19,8 @@ from scadbuddy.payments.component import PaymentsDep
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
 from scadbuddy.payments.provider import BadSignatureError, ProviderError
 from scadbuddy.payments.service import ProviderNotFoundError, WebhookAnswer
+
+logger = logging.getLogger(__name__)
 
 #: A provider's event is a few KiB; this is far above any of them.
 MAX_WEBHOOK_BYTES = 256 * 1024
@@ -73,9 +77,11 @@ async def receive_webhook(provider: str, request: Request, payments: PaymentsDep
             status.HTTP_400_BAD_REQUEST, str(error), type_=PROBLEMS + "malformed_event"
         ) from None
     except (CredentialUnreadableError, KekMissingError) as error:
+        # The caller is anyone: the real reason goes to the log, a fixed text to them.
+        logger.warning("a webhook from %s was not read: %s", provider, error)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            str(error),
+            "the provider's credential is unavailable",
             type_=PROBLEMS + "credential_unreadable",
         ) from None
     return WebhookAnswer(outcome=outcome)
