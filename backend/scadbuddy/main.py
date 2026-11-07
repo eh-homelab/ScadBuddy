@@ -1108,7 +1108,12 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
             tables = grant_callers(conn)
-            revoked = revoke_retired(conn)
+            revoked: list[str] = []
+            try:
+                revoked = revoke_retired(conn)
+            except Exception:
+                # A revoke that fails must not cost the start its credentials' rotation.
+                logger.exception("could not revoke the retired callers' roles")
         if granted:
             logger.info("granted the callers' credential views", extra={"roles": granted})
         if tables:
