@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
-import { connectDatabase, type Database } from '../src/db.js'
+import { APPLICATION_NAME, connectDatabase, type Database } from '../src/db.js'
 import postgres from 'postgres'
 import {
   LEGACY_VERSIONS,
@@ -61,6 +61,28 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
     afterEach(async () => {
       await drop()
+    })
+
+    describe('connections (#5226)', () => {
+      it('name themselves and close once left idle', async () => {
+        const idle = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema, idleTimeoutSeconds: 1 })
+        try {
+          // Two at once, so the pool opens two connections.
+          const pids = (
+            await Promise.all([
+              idle.sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid, pg_sleep(0.2)`,
+              idle.sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid, pg_sleep(0.2)`,
+            ])
+          ).map(([row]) => row!.pid)
+          expect(new Set(pids).size).toBe(2)
+          const held = async (): Promise<string[]> =>
+            (await db.sql<{ name: string }[]>`SELECT application_name AS name FROM pg_stat_activity WHERE pid = ANY(${pids})`).map((r) => r.name)
+          expect(await held()).toEqual([APPLICATION_NAME, APPLICATION_NAME])
+          await expect.poll(held, { timeout: 10_000, interval: 250 }).toEqual([])
+        } finally {
+          await idle.close()
+        }
+      })
     })
 
     describe('migrations', () => {

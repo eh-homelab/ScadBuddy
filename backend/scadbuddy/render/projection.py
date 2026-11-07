@@ -16,7 +16,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from temporalio.client import Client, WorkflowExecutionStatus
@@ -25,6 +25,7 @@ from temporalio.service import RPCError
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
@@ -153,7 +154,10 @@ class JobProjection:
         pool_size: int = 10,
         connect_timeout: float = 30.0,
         events: TransactionalEvents | None = None,
+        pool: ConnectionPool[Connection[DictRow]] | None = None,
     ) -> None:
+        """``pool``, when given, is another's on the same role (the API's settings pool,
+        #5226), which its owner closes; otherwise the projection has its own."""
         self.conninfo = conninfo
         self.connect_timeout = connect_timeout
         self.events = events
@@ -161,14 +165,11 @@ class JobProjection:
         self.activity: ActivityIndex | None = None
         #: This process's LISTEN connection, which the event bus shares.
         self.pg_listener = PgListener(conninfo, connect_timeout=connect_timeout)
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
-            conninfo,
-            min_size=1,
-            max_size=pool_size,
-            open=False,
-            connection_class=Connection[DictRow],
-            kwargs={"autocommit": True, "row_factory": dict_row},
-            name="scadbuddy-jobs",
+        self._owns_pool = pool is None
+        self._pool = (
+            pool
+            if pool is not None
+            else row_pool(conninfo, name="scadbuddy-jobs", min_size=1, max_size=pool_size)
         )
 
     def open(self, *, migrate_schema: bool = True) -> None:
@@ -183,7 +184,8 @@ class JobProjection:
             logger.info("applied database migrations", extra={"versions": applied})
 
     def close(self) -> None:
-        self._pool.close()
+        if self._owns_pool:
+            self._pool.close()
 
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:

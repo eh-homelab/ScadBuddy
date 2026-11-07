@@ -15,7 +15,6 @@ from psycopg_pool import ConnectionPool
 
 import scadbuddy.orders.projects as projects_module
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.component import ROW_POOL_SIZE
 from scadbuddy.orders.integrations import (
     NOT_LINKED,
     ArchiveFacts,
@@ -27,6 +26,7 @@ from scadbuddy.orders.integrations import (
 from scadbuddy.orders.printing import print_item
 from scadbuddy.orders.projects import ensure_projects, item_project, item_project_name
 from scadbuddy.orders.store import OrderStore, item_subject, order_subject
+from scadbuddy.rows.component import POOL_SIZE as ROW_POOL_SIZE
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop

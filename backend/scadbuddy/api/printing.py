@@ -1366,7 +1366,8 @@ async def post_check(
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
-    run's 422 for the plates, printer, choices or nozzles; ``warnings`` the nozzle
+    run's 422 for the plates, printer, choices or nozzles, after the run's 409 for a
+    model.json that refuses its print settings (#5649); ``warnings`` the nozzle
     advisories it would carry back.
 
     Nothing is uploaded, sliced or queued; the used slots are read from the local 3MF.
@@ -1374,11 +1375,16 @@ async def post_check(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
+    refusal: str | None = None
     try:
         # The template's defaults, by-object printing among them (#2976).
         print_settings = await asyncio.to_thread(library_catalogue.print_settings, meta.slug)
-    except InvalidModelMetaError:
-        print_settings = {}  # the run refuses it; the check judges the request alone
+        await asyncio.to_thread(library_catalogue.part_print_settings, meta.slug)
+    except InvalidModelMetaError as error:
+        # The run's 409 (`LocalOutputs.naming`), said before Print (#5649); the rest
+        # of the check judges the request alone.
+        print_settings = {}
+        refusal = str(error)
     # The path first (D2): a native run's check builds no client (D3), so it answers
     # with no Bambuddy configured at all (AC2).
     route = await dialog_route(
@@ -1391,7 +1397,7 @@ async def post_check(
     )
     bare = names_no_printer(settings, body.printer, body.printer_id)
     async with maybe_client(settings, native=route is not None or bare) as client:
-        return await check_for_output(
+        check = await check_for_output(
             client,
             outputs,
             uploads,
@@ -1414,6 +1420,9 @@ async def post_check(
             profiles=slicing.profiles,
             native=await library.serving_native(),
         )
+    if refusal is not None:
+        check.errors.insert(0, refusal)
+    return check
 
 
 @router.post(

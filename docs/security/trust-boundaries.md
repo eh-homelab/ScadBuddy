@@ -153,6 +153,7 @@ flowchart LR
   P[print worker] -- HTTP + credential --> CRUD
   J[projects worker] -- HTTP + credential --> CRUD
   A[agent services] -- HTTP + credential --> CRUD
+  S[storefront<br/>public host] -- HTTP + credential --> CRUD
   CRUD[CRUD service<br/>the one database role] --> DB[(Postgres<br/>ingress: CRUD only)]
 ```
 
@@ -165,6 +166,7 @@ What changes:
 | projects worker | no database client, so no table over SQL; flow runs, decisions, grants, operations and payload keys (sealed) through CRUD routes, and no event bus (#5298). An existing role keeps the 7 flow relations, `settings`, `model_print_choices`, `printer_bed_types`, `printers`, `events`, `operations` and `ai_payload_keys`, `ai_forgotten_subjects`, `ai_sessions`, `ai_mcp_tokens`, `ai_settings` until the revoke in #5298 Task 11. Its service credential holds `flow.host` and `crud.projects`, not `api`: in `enforce` it reaches only the 11 public routes its flow host functions, grant checks and `flow_decide`'s printer read call (`backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`) | flow runs, decisions, grants and payload keys through CRUD routes |
 | agent services | the owner role; 46 `ai_*` tables and 6 backend tables | sessions, transcripts, approvals and credentials through CRUD routes; Claude Code and plugins in a sandbox pod; no database secret |
 | agent-durable | the owner role, 0 replicas | no database secret |
+| storefront (#4962, not built yet) | none | no database, Temporal, store or KEK secret; listings, drafts, renders and estimates through `/api/v1/internal/crud/storefront/*`, which scope every draft to the visitor id they are sent (storefront spec §5.1, amended 2026-11-07) |
 | API | reads and writes 8 `ai_*` tables; runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |
 | Postgres | no ingress policy | an ingress policy that admits the CRUD service only |
 

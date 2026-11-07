@@ -120,7 +120,11 @@ export class PgEventListener implements EventSource {
         else this.#channels.get(channel)?.(payload)
       },
       onclose: () => this.#dropped(),
-      ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
+      // As the backend's LISTEN connection names itself (`scadbuddy-listener`), in `pg_stat_activity`.
+      connection: {
+        application_name: 'scadbuddy-agent-listener',
+        ...(options.searchPath === undefined ? {} : { search_path: options.searchPath }),
+      },
     }
     // `onnotify` is a postgres.js connection option (src/connection.js
     // NotificationResponse) that its types do not declare.

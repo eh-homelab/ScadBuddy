@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, TypeVar
 
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import (
@@ -44,6 +44,7 @@ from pydantic import (
 )
 
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH, SLUG_PATTERN, InvalidSlugError, slugify
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.pg_store import migrate
@@ -428,17 +429,17 @@ class PresetStore:
         *,
         pool_size: int = 4,
         connect_timeout: float = 30.0,
+        pool: ConnectionPool[Connection[DictRow]] | None = None,
     ) -> None:
+        """``pool``, when given, is another's on the same role (the API's settings pool,
+        #5226), which its owner closes; otherwise the store has its own."""
         self.paths = paths
         self.connect_timeout = connect_timeout
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
-            conninfo,
-            min_size=1,
-            max_size=pool_size,
-            open=False,
-            connection_class=Connection[DictRow],
-            kwargs={"autocommit": True, "row_factory": dict_row},
-            name="scadbuddy-presets",
+        self._owns_pool = pool is None
+        self._pool = (
+            pool
+            if pool is not None
+            else row_pool(conninfo, name="scadbuddy-presets", max_size=pool_size)
         )
 
     def open(self) -> None:
@@ -449,7 +450,8 @@ class PresetStore:
             migrate(conn)
 
     def close(self) -> None:
-        self._pool.close()
+        if self._owns_pool:
+            self._pool.close()
 
     def _defined(
         self, model_id: str, name: str, raw: Any, strict: bool = False

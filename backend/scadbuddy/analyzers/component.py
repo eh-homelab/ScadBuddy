@@ -10,13 +10,15 @@ from typing import Annotated
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.rows.component import ROWS
 
 #: In Postgres only.
 DECISIONS: Key[DecisionStore] = Key("decisions")
 
 
 def _build(core: Core, components: Components) -> DecisionStore:
-    return PostgresDecisionStore(core.settings.database_url)
+    # On the API's shared rows pool (#5226), which `ROWS` closes after this one's run.
+    return PostgresDecisionStore(core.settings.database_url, pool=components.get(ROWS).pool)
 
 
 @asynccontextmanager

@@ -9,49 +9,28 @@ settings pool (`api/deps.py` `build_state`), and `AppState.store` is set only af
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Annotated
 
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.config import LibraryBackend
-from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeLibraryStore
-
-#: The rows' own pool: a library write is one statement or one short transaction.
-ROW_POOL_SIZE = 4
-#: As `analyzers/decisions.py` and `rack/usage.py`: an unreachable database fails a
-#: request within about this, never hangs it.
-CONNECT_TIMEOUT = 5.0
+from scadbuddy.rows.component import ROWS
 
 
 class PrintLibrary:
-    def __init__(self, core: Core) -> None:
+    def __init__(self, core: Core, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self.core = core
         self._backend: LibraryBackend | None = None
         self._native: NativeLibrary | None = None
-        # Opened only when `native` is first built; `open=False` connects to nothing.
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
-            core.settings.database_url,
-            min_size=1,
-            max_size=ROW_POOL_SIZE,
-            open=False,
-            timeout=CONNECT_TIMEOUT,
-            connection_class=Connection[DictRow],
-            kwargs={
-                "autocommit": True,
-                "row_factory": dict_row,
-                "connect_timeout": max(1, int(CONNECT_TIMEOUT)),
-                **TCP_KEEPALIVE,
-            },
-            name="scadbuddy-print-library",
-        )
+        #: The rows' shared pool (`rows/component.py`, #5226), which `ROWS` closes;
+        #: opened here only when `native` is first built.
+        self._pool = pool
 
     @property
     def backend(self) -> LibraryBackend:
@@ -82,25 +61,14 @@ class PrintLibrary:
             backend = await asyncio.to_thread(lambda: self.backend)
         return self.native if backend == "native" else None
 
-    def close(self) -> None:
-        self._pool.close()
-
 
 PRINT_LIBRARY: Key[PrintLibrary] = Key("print_library")
 
 
 def _build(core: Core, components: Components) -> PrintLibrary:
-    return PrintLibrary(core)
+    return PrintLibrary(core, components.get(ROWS).pool)
 
 
-@asynccontextmanager
-async def _run(library: PrintLibrary) -> AsyncIterator[None]:
-    try:
-        yield
-    finally:
-        await asyncio.to_thread(library.close)
-
-
-COMPONENT = Component(PRINT_LIBRARY, build=_build, run=_run)
+COMPONENT = Component(PRINT_LIBRARY, build=_build)
 
 PrintLibraryDep = Annotated[PrintLibrary, component_dep(PRINT_LIBRARY)]

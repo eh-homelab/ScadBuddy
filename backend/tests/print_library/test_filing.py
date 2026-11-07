@@ -15,11 +15,12 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.print_library.component import CONNECT_TIMEOUT, ROW_POOL_SIZE
 from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeFile, NativeLibraryStore
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.rows.component import CONNECT_TIMEOUT
+from scadbuddy.rows.component import POOL_SIZE as ROW_POOL_SIZE
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 

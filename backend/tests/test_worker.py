@@ -24,6 +24,7 @@ import psycopg
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Summary
+from psycopg.rows import DictRow, dict_row
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.deployment.v1 import (
@@ -2429,6 +2430,19 @@ class _RecordingPool(PgPool):
         self.opened.append(self)
 
 
+def _recording_row_pool(conninfo: str, *, name: str, max_size: int, min_size: int = 0) -> PgPool:
+    """`core/pg_pool.py` `row_pool` as the worker calls it, making a `_RecordingPool`."""
+    return _RecordingPool(
+        conninfo,
+        min_size=min_size,
+        max_size=max_size,
+        open=False,
+        connection_class=psycopg.Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        name=name,
+    )
+
+
 def test_a_refused_store_closes_the_pool_the_worker_opened(
     settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2436,7 +2450,7 @@ def test_a_refused_store_closes_the_pool_the_worker_opened(
         raise StoreNotReadyError("refused")
 
     monkeypatch.setattr(_RecordingPool, "opened", [])
-    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
+    monkeypatch.setattr(worker_module, "row_pool", _recording_row_pool)
     monkeypatch.setattr(worker_module, "build_store", refuse)
     with pytest.raises(StoreNotReadyError):
         _built(settings)
@@ -2450,7 +2464,7 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
     migrating; a stop ends the wait, and what it opened is closed."""
     opened: list[PgPool] = []
     monkeypatch.setattr(_RecordingPool, "opened", opened)
-    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
+    monkeypatch.setattr(worker_module, "row_pool", _recording_row_pool)
     stop = asyncio.Event()
     worker = asyncio.create_task(
         worker_module.run_worker(settings, stop=stop, health_port=None, crud=static_render_crud())
