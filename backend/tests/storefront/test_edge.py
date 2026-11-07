@@ -113,8 +113,7 @@ def test_the_edge_imports_nothing_that_touches_the_database() -> None:
             "import scadbuddy.storefront.app, sys;"
             " forbidden = {'psycopg_pool', 'scadbuddy.orders', 'scadbuddy.render',"
             " 'scadbuddy.workflows', 'scadbuddy.store', 'scadbuddy.library', 'scadbuddy.main'};"
-            " print(sorted({'.'.join(m.split('.')[:2]) for m in sys.modules}"
-            " & forbidden | {m for m in sys.modules if m == 'psycopg_pool'}))",
+            " print(sorted({'.'.join(m.split('.')[:2]) for m in sys.modules} & forbidden))",
         ],
         capture_output=True,
         text=True,
