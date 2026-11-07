@@ -443,7 +443,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`outcomes.py`, #2665): the follow's settled read (`Follower.record_outcome`, every
   path) records it once against the run that queued or started it and publishes
   `print.outcome` in that transaction; `print.finished`/`print.failed` triggers fire on
-  it, never on the per-process `print.settled`.
+  it, never on the per-process `print.settled`. Each run is settled on its own (#5613,
+  orders spec §3.3): the subject's one follow also reads each older open run of the
+  subject by that run (`Follower.read_run`, `progress.py` `run_reader`: a library file's
+  run by its own sends, a LAN run by its printer's report; `PrintOutcomeStore.older_open`,
+  within `OPEN_RUN_WINDOW`) and records it with `record_run`, and ends only once none is
+  open. This lives in the activity: `FollowPrint`'s commands are unchanged, and its
+  histories replay from `tests/fixtures/follow_print_histories/`, so a change to them
+  goes behind `workflow.patched`.
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per

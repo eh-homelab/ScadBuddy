@@ -1,4 +1,6 @@
-"""``FollowPrint``: one print followed until it settles (#1053, spec 2026-10-01 §4.4).
+"""``FollowPrint``: one print followed until it settles (#1053, spec 2026-10-01 §4.4),
+with each older run of its subject still open (#5613, in the activity: the commands
+here are as they were, and `tests/test_follow_replay.py` replays their histories).
 
 It replaces the API process's watcher tasks (#268): Temporal keeps the follow across a
 restart, so nothing records prints to resume or locks one per replica. The reads are
