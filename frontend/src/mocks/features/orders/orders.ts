@@ -1167,6 +1167,12 @@ export const handlers = [
       if (attempt.accepted_at) throw new Refused('fulfilment_accepted', `attempt ${attempt.attempt} is already accepted`)
       if (attempt.outcome === 'failed') throw new Refused('fulfilment_failed', `attempt ${attempt.attempt} failed; nothing was made`)
       if (!FULFILLABLE.has(found.status) && found.status !== 'printed') throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      // #5582 — `_before_priced_design`: an attempt older than the accepted quote's revision printed an earlier design.
+      const pricedId = quotesOf(found.id).find((q) => q.accepted)?.revision_id
+      const priced = pricedId == null ? undefined : revisionsOf(found.id).find((r) => r.id === pricedId)
+      if (priced && Date.parse(attempt.created_at) < Date.parse(priced.created_at)) {
+        throw new Refused('fulfilment_stale', `attempt ${attempt.attempt} printed an earlier design than the accepted quote's`, [found.id])
+      }
       attempt.accepted_at = now()
       const made = attemptsOf(found.id).filter((f) => f.accepted_at).reduce((sum, f) => sum + f.quantity, 0)
       if (made >= found.quantity) {

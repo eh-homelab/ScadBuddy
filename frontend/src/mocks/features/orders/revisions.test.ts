@@ -255,6 +255,18 @@ describe('revisions after acceptance mock (#5350)', () => {
     expect((await api.order(ORDER_ACCEPTED)).totals.subtotal_minor).toBe(1300 * accepted.quantity)
   })
 
+  it('never accepts an attempt of the old design (#5582)', async () => {
+    const old = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    // Pinned before the revision, as the backend's test does.
+    state.fulfilments.find((f) => f.id === old.id)!.created_at = '2026-01-01T00:00:00Z'
+    await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' })
+    const quote = await api.quoteOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1300 })
+    expect(await api.acceptOrderQuote(ORDER_ACCEPTED, ITEM_APPROVED, quote.id)).toMatchObject({ status: 'approved' })
+    const stale = await failure(api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, old.id))
+    expect(stale?.problem.type).toBe(type('fulfilment_stale'))
+    expect(state.fulfilments.find((f) => f.id === old.id)!.accepted_at).toBeNull()
+  })
+
   it('refuses as the backend does', async () => {
     const draft = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_DRAFT, ITEM_DRAFT, {}))
     expect(draft?.problem.type).toBe(type('order_not_accepted'))

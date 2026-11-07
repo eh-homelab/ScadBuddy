@@ -608,7 +608,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `revision.added_after_acceptance` (with `accepted_quote_id`). While the mark stands the
   lock is `requote_open` (`_open_for_requote`, and `quote_check`): quotes, a quote's
   acceptance, a customer's answer and more revisions, never the quantity. `_accept_quote`
-  clears the mark; `_reopened_status` gives such an item `quoted` or `draft`. Agent
+  clears the mark; `_reopened_status` gives such an item `quoted` or `draft`.
+  `accept_fulfilment` refuses an attempt made before the accepted quote's revision
+  (`fulfilment_stale`, `_before_priced_design`, #5582). Agent
   `order_item_revision_add_after_acceptance` (outward; `order_item_revision_add` stays
   write); frontend `afterAcceptance.ts` `reviseMode`, `priceOpen`, `reviseWarning` in
   `RevisionsPanel` and `AddItemDialog` (`revise` with `mode`).
