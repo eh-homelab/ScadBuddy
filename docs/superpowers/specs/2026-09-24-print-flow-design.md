@@ -265,17 +265,34 @@ written `N%`), `sparse_infill_pattern` and `ironing_type` (Bambu Studio's
 5954, 1363, 4596, 3085, 3102 and 4069): the shell layers have a minimum of 0 and no
 maximum there, so they take `wall_loops`' maximum, 1000. An unknown key, a value out of
 range or slot 0 is a 422 from the request's validation. A slot that no printed part of
-the output is made in is a 422 from `prepare_run` (`part_settings_refusal`, which reads the
-output's `model_settings.config` with `printed_part_slots`), so the dialog's check lists
+the file is made in is a 422 from `prepare_run` (`part_settings_refusal`, which reads the
+file's `model_settings.config` with `printed_part_slots`), so the dialog's check lists
 it too. A slot only painted on another part's faces is among them: it has no part of its
-own to carry the settings. Only an output takes them: a library file keeps its author's
-parts, and a sliced file prints as it was sliced.
+own to carry the settings. An output and a library file take them (#5628), on either
+library; a sliced file prints as it was sliced, so it is refused (422,
+`print_run.PART_SETTINGS_SLICED`). `part_settings_refusal` reads the source's one fetch of
+the 3MF (`fetched_3mf`, which the run's other reads share) and opens its archive once
+for the layout and the parts (`render/bambu3mf.py` `part_settings_slots`, #5637).
+
+A library file's `model_settings.config` is untrusted, so it is read in chunks up to
+`MAX_MODEL_SETTINGS_BYTES` (4 MiB; the largest MakerWorld fixture's is 231,209 bytes,
+`2178-find-100-mini-frogs-spot-search-game.3mf`) and its slots are read with
+ElementTree. One past the cap, not well-formed, or with a DOCTYPE takes no settings per
+part (422, `send.PART_SETTINGS_AS_IS`). The writer rewrites the text in place with
+patterns that stay linear in the file: a tag is `[^<>]*`, and a body is a possessive run
+that stops at the next `<part`, `<object` or `</object>`. The patterns of #5571 scanned to
+the end of the file from each unclosed `<part`: 20,000 of them took 63 s, measured on the
+dev machine on 2026-11-07. After the write the result is read back with ElementTree. A
+printed part of a slot that lacks its settings (a file written in a way the patterns do
+not read) is the same 422, so the copy's key never names settings its bytes lack.
 
 They are written into the laid-out copy, not the process. `send._laid_out_for` adds
 each slot's settings to every printed `<part>` of that slot in
 `Metadata/model_settings.config` (`render/bambu3mf.py` `set_part_settings`), as
 `<metadata key="top_shell_layers" value="8"/>`, after the layout. A part's slot is its
-`extruder` metadata, else its object's. A negative part or a modifier gets none. A
+`extruder` metadata, else its object's: in a library file, the filament its author gave
+the part. A key the part states already (a Bambu Studio file can) is replaced by the
+request's; the part's other keys stay. A negative part or a modifier gets none. A
 self-closing `<part …/>` becomes an open and a close tag around them. A painted part
 takes the settings of the slot it is made in, not those of its painted faces. In an
 author's file they are written even when its layout falls back to the file as it is
@@ -283,10 +300,15 @@ author's file they are written even when its layout falls back to the file as it
 the size caps, sliced, or with no `project_settings.config`) prints as it is, so it
 cannot carry them: `part_settings_refusal` refuses it before anything is uploaded (422,
 `send.PART_SETTINGS_AS_IS`), and `_laid_out_for` refuses a target with settings for one
-too. So the copy's key never names settings its bytes lack. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
+too. A library file with no 3MF to lay out (past `MAX_DOWNLOAD_BYTES`, or an STL that
+holds no mesh) is refused the same way. So the copy's key never names settings its bytes
+lack. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
 colours, so a copy with settings is never reused for one without, nor the other way
 round; a copy without settings keeps the key it had. `plan_run` builds the copy for the
-run, the dialog's background slice and the quote alike. A slice quote records the
+run, the dialog's background slice and the quote alike. A library file with settings is
+always copied (`print_source.file_to_print`): in Bambuddy's library the file itself is
+printed only when nothing would change it and no settings are sent, and a native file
+is copied whenever it has a 3MF to lay out. A slice quote records the
 settings it sliced with (`order_item_quotes.part_settings`, `part_settings.dumped`). An
 item's print that sends none prints with its quote's (`orders/operations.py`
 `print_body`, from what `print_check` returns), so it slices the bytes the quote priced;
@@ -298,7 +320,11 @@ Bambu Studio honours them. Its 3MF loader reads every `<part>` metadata key that
 one of its own (name, subtype, source, matrix …) into the volume's config
 (`src/libslic3r/Format/bbs_3mf.cpp` lines 5464-5471 in `_generate_volumes_new`, tag
 v02.08.02.61, commit `5b34346`), and each volume's region is sliced with that config over
-the process (`src/libslic3r/PrintApply.cpp` `region_config_from_model_volume`). The CLI
+its object's, over the process (`src/libslic3r/PrintObject.cpp` lines 3105-3122,
+`region_config_from_model_volume`: the print's region config, then the object's config,
+then the volume's, then a height range's). So a part's setting wins over its object's
+value for the same key, and a height range modifier in the file
+(`layer_config_ranges`) wins over both on its layers. The CLI
 replaces an object's config only for `--orient` (`src/BambuStudio.cpp` line 5216), which
 ScadBuddy never passes.
 
@@ -319,6 +345,20 @@ prime tower). Without the setting the block's top shell was a `Bridge` layer at 
 solid layers (z 4 and below) were 6 in both slices. Bambuddy's slicer runs the same
 02.08.02.61 CLI on the uploaded copy, but it was not measured with part settings.
 
+A library file (#5628) was measured the same way on the same day and image. The input was
+the same two-colour file made an author's (`print_settings_id` `0.20mm Standard @BBL
+H2C`, so `layout_of` says `author`), its object stating `top_shell_layers` 6 and slot 2's
+part its own 9. `_laid_out_for` laid it out for the H2C (`state_nozzles`, not re-placed),
+once without settings and once with slot 2's `top_shell_layers` 7, which replaced the
+part's 9 in the copy. Without the setting the base's top shell was 6 layers (z 3.0 to
+4.0, `Bridge` then solid) and the block's 9 (z 8.4 to 10.0). With it the base kept 6 and
+the block had 7 (z 8.8 to 10.0). So Bambu Studio reads an author's object and part keys,
+and the request's value is the one that slices. A first try with the object at 2 and the
+part at 3 sliced 5 layers for the base and for the block; a request of 8 on slot 2 gave
+the block 8 and left the base at 5. The process's `top_shell_thickness` (1.0 mm, 5 layers
+at 0.2 mm) sets a minimum, so a `top_shell_layers` below it changes nothing, from the
+object, a part or a request.
+
 A template declares its own (#5626) in `model.json` as `part_print_settings`, beside
 `print_settings`, with the same keys and limits (`PartSettings`). An unknown key or a
 value out of range fails the load (`InvalidModelMetaError`), as `PRINT_SETTING_VALUES`
@@ -338,7 +378,9 @@ output's `params.json` (else the template's default from its cached schema, for 
 output from before #4774) is matched, by `colour_hex`, to the slot of that colour in the
 output's `colors`. A parameter with no value, or whose colour no slot is, sets nothing.
 Two parameters of one colour share its slot; for a key both set, the first declared
-wins. The run (`SourceSpec.part_settings`, from the check activity), the background
+wins. An arranged output (`OutputStore.arranged_from` not empty) takes none: its parts
+come from other outputs or library files, it has no params, and it may be filed under
+any template, so a default colour's slot could be another file's part. The run (`SourceSpec.part_settings`, from the check activity), the background
 slice and the quote (`OutputSource.part_settings`) all reach `plan_run`, where
 `run_part_settings` lays the request's `part_settings` over them, per key
 (`part_settings.laid_under`). The template's go only where a copy can carry them: not on
@@ -349,8 +391,7 @@ copy carries, so a change to them makes a new copy. A slice quote records only t
 request's settings (`order_item_quotes.part_settings`); a print reads the template's as
 they are at that time, as with `print_settings`.
 
-Not yet: the print dialog's controls for them (#5627) and settings per part for a
-library file (#5628).
+Not yet: the print dialog's controls for them (#5627).
 
 ### The two warnings
 

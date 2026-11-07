@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,14 @@ from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.print_source import LibrarySource
-from scadbuddy.bambuddy.send import Printable, Target, _laid_out_for, ensure_uploaded, target_for
+from scadbuddy.bambuddy.send import (
+    Printable,
+    Target,
+    _laid_out_for,
+    ensure_uploaded,
+    part_settings_digest,
+    target_for,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
@@ -28,11 +36,13 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.copies import ensure_native_copy, trash_copies
 from scadbuddy.print_library.ids import NATIVE_ID_BASE, is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
+from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, PartOverrides
 from scadbuddy.render.plate import plate_for
 from scadbuddy.store.index import Pool
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.slicing_activities import SliceActivities
 from scadbuddy.workflows.slicing_models import SliceWorkflowInput
+from tests.bambuddy.test_part_settings import author_two_colours
 from tests.print_library.conftest import upload
 from tests.support.no_bambuddy import forbid_bambuddy
 
@@ -316,6 +326,52 @@ async def test_a_native_run_lays_a_library_files_copy_out_natively(
     assert (copy.filename, copy.folder_id) == ("bracket (ScadBuddy).3mf", folder)
     [recorded] = await uploads.for_output(source.subject.run_subject, native=True)
     assert recorded.id == printed.id
+
+
+async def test_a_native_library_files_copy_carries_the_slots_settings(
+    native: NativeLibrary, uploads: BambuddyUploadStore, tmp_path: Path
+) -> None:
+    """#5628: a native library file printed with settings per part gets a copy of its
+    own that carries them, its key naming them, apart from the copy printed without."""
+    author = tmp_path / "maze.3mf"
+    author.write_bytes(author_two_colours(tmp_path))
+    original = await upload(native, author)
+
+    async def printed(part_settings: PartOverrides | None) -> int:
+        source = await LibrarySource.load(
+            None,
+            original.id,
+            uploads=uploads,
+            settings=StoredSettings(),
+            files=native,
+            read_own=True,
+            native=native,
+        )
+        file = await source.file_to_print(
+            None,
+            printer_id=3,
+            nozzle_size="0.4",
+            plan=FilamentPlan(),
+            project_id=None,
+            native_copy=True,
+            printer_model="Bambu Lab H2C",
+            part_settings=part_settings,
+        )
+        return file.id
+
+    subject = PrintSubject.library(original.id).run_subject
+    settings = ((2, (("top_shell_layers", "8"),)),)
+    with_settings = await printed(settings)
+    [recorded] = await uploads.for_output(subject, native=True)
+    without = await printed(None)
+
+    assert len({original.id, with_settings, without}) == 3
+    assert recorded.id == with_settings
+    assert f"&parts:{part_settings_digest(settings)}" in recorded.target_key
+    chunks = [chunk async for chunk in native.download_library_file(with_settings)]
+    with zipfile.ZipFile(io.BytesIO(b"".join(chunks))) as archive:
+        model_settings = archive.read(MODEL_SETTINGS_NAME).decode()
+    assert model_settings.count('<metadata key="top_shell_layers" value="8"/>') == 1
 
 
 async def test_a_native_run_needs_the_native_library(

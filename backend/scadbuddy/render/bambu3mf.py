@@ -1432,14 +1432,83 @@ def _pin_plates(model_settings: str, filament_map: FilamentMap) -> str:
 #: slot's ``(key, value)`` pairs as Bambu Studio's config stores them, sorted by key.
 PartOverrides = tuple[tuple[int, tuple[tuple[str, str], ...]], ...]
 
-_OBJECT_BLOCK = re.compile(r"(<object\b[^>]*>)(.*?)(</object>)", re.DOTALL)
-#: A ``<part>``: self-closing (``self`` only), or its open tag, body and close tag.
+#: The most ``model_settings.config`` a print reads or writes settings per part in (#5628
+#: review). It comes from a library file, so it is untrusted. The largest MakerWorld
+#: fixture's is 231,209 bytes (``2178-find-100-mini-frogs-spot-search-game.3mf``, 100
+#: objects); this is about 18 times that. A larger one takes no settings per part.
+MAX_MODEL_SETTINGS_BYTES = 4 * 1024 * 1024
+
+
+class PartSettingsUnwritableError(ValueError):
+    """A ``model_settings.config`` settings per part cannot be read or written in: past
+    :data:`MAX_MODEL_SETTINGS_BYTES`, not well-formed XML, with a DOCTYPE, or with a
+    printed part the writer did not give its settings."""
+
+
+# Each pattern is linear in its input, whatever an untrusted file holds (#5628 review):
+# a tag is ``[^<>]*`` (no ``<`` is allowed in an attribute value), and a body is a
+# possessive run that stops at the next opening of its kind or ``</object>``, so no
+# match scans past the next one and none backtracks.
+_OBJECT_BLOCK = re.compile(
+    r"(<object\b[^<>]*+>)((?:(?!<object\b|</object>).)*+)(</object>)", re.DOTALL
+)
+#: A ``<part>``: self-closing (``self`` only), or its open tag and its body up to its
+#: ``</part>`` (``body`` ends with the close tag's indent, which :func:`_each_part`
+#: gives back to the close tag).
 _PART_BLOCK = re.compile(
-    r"(?P<self><part\b[^>]*/>)"
-    r"|(?P<open><part\b[^>]*?(?<!/)>)(?P<inner>.*?)(?P<close>[ \t]*</part>)",
+    r"(?P<self><part\b[^<>]*+(?<=/)>)"
+    r"|(?P<open><part\b[^<>]*+>)(?P<body>(?:(?!<part\b|</part>|</object>).)*+)</part>",
     re.DOTALL,
 )
-_EXTRUDER_METADATA = re.compile(r'<metadata key="extruder" value="(\d+)"\s*/>')
+_SUBTYPE = re.compile(r'subtype="([^"<>]*+)"')
+_EXTRUDER_METADATA = re.compile(r'<metadata key="extruder" value="(\d++)"\s*+/>')
+
+
+@dataclass(frozen=True)
+class _Part:
+    """One ``<part>`` as written: ``inner`` is ``None`` for a self-closing one."""
+
+    text: str
+    open_tag: str
+    inner: str | None
+    close: str
+
+
+def _parsed_model_settings(model_settings: str) -> ET.Element:
+    """``model_settings`` parsed, refused (:class:`PartSettingsUnwritableError`) past
+    :data:`MAX_MODEL_SETTINGS_BYTES`, with a DOCTYPE (so no entity is expanded), or when
+    it is not well-formed."""
+    if len(model_settings) > MAX_MODEL_SETTINGS_BYTES:
+        raise PartSettingsUnwritableError("model_settings.config is past its cap")
+    if "<!DOCTYPE" in model_settings:
+        raise PartSettingsUnwritableError("model_settings.config declares a DOCTYPE")
+    try:
+        return ET.fromstring(model_settings)
+    except ET.ParseError as error:
+        raise PartSettingsUnwritableError("model_settings.config is not XML") from error
+
+
+def _extruder_of(element: ET.Element) -> int | None:
+    """``element``'s own first ``extruder`` metadata, as a slot."""
+    for metadata in element.findall("metadata"):
+        if metadata.get("key") == "extruder":
+            value = metadata.get("value", "")
+            return int(value) if value.isascii() and value.isdigit() else None
+    return None
+
+
+def _printed_parts(root: ET.Element) -> Iterator[tuple[ET.Element, int]]:
+    """Each printed ``<part>`` (no subtype, or ``normal_part``) and its slot: its
+    ``extruder`` metadata, else its object's. A part with neither is left out."""
+    for obj in root.iter("object"):
+        own = _extruder_of(obj)
+        for part in obj.iter("part"):
+            if part.get("subtype", "normal_part") != "normal_part":
+                continue
+            slot = _extruder_of(part)
+            slot = slot if slot is not None else own
+            if slot is not None:
+                yield part, slot
 
 
 def _part_extruder(text: str) -> int | None:
@@ -1447,10 +1516,11 @@ def _part_extruder(text: str) -> int | None:
     return int(found.group(1)) if found is not None else None
 
 
-def _each_part(model_settings: str, part: Callable[[re.Match[str], int | None, bool], str]) -> str:
-    """``model_settings`` with every ``<part>`` replaced by ``part(match, slot, printed)``:
+def _each_part(model_settings: str, part: Callable[[_Part, int | None, bool], str]) -> str:
+    """``model_settings`` with every ``<part>`` replaced by ``part(found, slot, printed)``:
     its slot is its ``extruder`` metadata, else its object's; ``printed`` is false for a
-    negative part or a modifier."""
+    negative part or a modifier. Only :func:`set_part_settings` writes with it; slots are
+    read with ElementTree (:func:`printed_part_slots`), and what it wrote is checked so."""
 
     def object_block(match: re.Match[str]) -> str:
         head, body, tail = match.groups()
@@ -1458,12 +1528,20 @@ def _each_part(model_settings: str, part: Callable[[re.Match[str], int | None, b
         own = _part_extruder(body.split("<part", 1)[0])
 
         def part_block(found: re.Match[str]) -> str:
-            tag = found.group("self") or found.group("open")
-            subtype = re.search(r'subtype="([^"]*)"', tag)
+            closed = found.group("self")
+            inner: str | None
+            if closed is not None:
+                tag, inner, close = closed, None, ""
+            else:
+                tag, full = found.group("open", "body")
+                # The close tag keeps its indent, as the writer's parts have it.
+                inner = full.rstrip(" \t")
+                close = full[len(inner) :] + "</part>"
+            subtype = _SUBTYPE.search(tag)
             printed = subtype is None or subtype.group(1) == "normal_part"
-            inner = found.group("inner") or ""
-            slot = _part_extruder(inner)
-            return part(found, slot if slot is not None else own, printed)
+            slot = _part_extruder(inner or "")
+            written = _Part(found.group(0), tag, inner, close)
+            return part(written, slot if slot is not None else own, printed)
 
         return head + _PART_BLOCK.sub(part_block, body) + tail
 
@@ -1472,16 +1550,10 @@ def _each_part(model_settings: str, part: Callable[[re.Match[str], int | None, b
 
 def printed_part_slots(model_settings: str) -> set[int]:
     """The slots (filaments, from 1) a printed ``<part>`` of ``model_settings`` is made
-    in (#5571). A slot only painted on another part's faces is not among them."""
-    slots: set[int] = set()
-
-    def note(found: re.Match[str], slot: int | None, printed: bool) -> str:
-        if printed and slot is not None:
-            slots.add(slot)
-        return found.group(0)
-
-    _each_part(model_settings, note)
-    return slots
+    in (#5571), read with ElementTree. A slot only painted on another part's faces is
+    not among them. Raises :class:`PartSettingsUnwritableError` for a file
+    :func:`_parsed_model_settings` refuses."""
+    return {slot for _, slot in _printed_parts(_parsed_model_settings(model_settings))}
 
 
 def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
@@ -1494,29 +1566,40 @@ def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
     negative part or a modifier prints nothing, so it gets none. A self-closing part
     becomes an open and a close tag around its settings.
 
+    The text is rewritten in place, so the rest of the file stays byte for byte, then
+    read back with ElementTree: a printed part of a slot in ``overrides`` that does not
+    carry each of its settings once (a file written in a way the patterns do not read)
+    raises :class:`PartSettingsUnwritableError`, so no copy's key names settings its
+    bytes lack. So does a file :func:`_parsed_model_settings` refuses.
+
     Bambu Studio v02.08.02.61 reads every key of a ``<part>`` that is not one of its own
     (name, subtype, source, matrix …) into the volume's config
     (``src/libslic3r/Format/bbs_3mf.cpp`` lines 5464-5471 in ``_generate_volumes_new``),
-    and slices each volume's region with that config over the process
-    (``src/libslic3r/PrintApply.cpp`` ``region_config_from_model_volume``). Measured with
-    the native slicer image: print-flow spec 2026-09-24 §4 "Settings per part (#5571)"."""
+    and slices each volume's region with that config over its object's, over the process
+    (``src/libslic3r/PrintObject.cpp`` lines 3105-3122,
+    ``region_config_from_model_volume``). Measured with the native slicer image, for an
+    output and for an author's library file (#5628): print-flow spec 2026-09-24 §4
+    "Settings per part (#5571)"."""
+    _parsed_model_settings(model_settings)
     wanted = dict(overrides)
 
-    def part(found: re.Match[str], slot: int | None, printed: bool) -> str:
+    def part(found: _Part, slot: int | None, printed: bool) -> str:
         settings = wanted.get(slot or 0) if printed else None
         if not settings:
-            return found.group(0)
-        closed = found.group("self")
-        if closed is not None:
+            return found.text
+        if found.inner is None:
             # `<part …/>` as `<part …>` and `</part>`, indented as the writer's parts are.
-            open_tag, inner, close = closed[:-2].rstrip() + ">", "\n", "  </part>"
+            open_tag, inner, close = found.open_tag[:-2].rstrip() + ">", "\n", "  </part>"
         else:
-            open_tag, inner, close = found.group("open", "inner", "close")
+            open_tag, inner, close = found.open_tag, found.inner, found.close
         keys = "|".join(re.escape(key) for key, _ in settings)
+        # It starts only where a run of blanks starts, so a long run is scanned once.
         inner = re.sub(
-            rf'[ \t]*<metadata key="(?:{keys})" value="[^"]*"\s*/>[ \t]*\r?\n?', "", inner
+            rf'(?<![ \t])[ \t]*+<metadata key="(?:{keys})" value="[^"]*+"\s*+/>[ \t]*+\r?\n?',
+            "",
+            inner,
         )
-        indent = re.search(r"\n([ \t]*)<metadata", inner)
+        indent = re.search(r"\n([ \t]*+)<metadata", inner)
         pad = indent.group(1) if indent is not None else "   "
         lines = "".join(
             f"{pad}<metadata key={quoteattr(key)} value={quoteattr(value)}/>\n"
@@ -1526,25 +1609,31 @@ def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
             inner += "\n"
         return f"{open_tag}{inner}{lines}{close}"
 
-    return _each_part(model_settings, part)
-
-
-def model_settings_text(payload: bytes) -> str | None:
-    """``payload``'s ``model_settings.config``, or None when it has none."""
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        if MODEL_SETTINGS_NAME not in archive.namelist():
-            return None
-        return archive.read(MODEL_SETTINGS_NAME).decode("utf-8")
+    written = _each_part(model_settings, part)
+    for element, slot in _printed_parts(_parsed_model_settings(written)):
+        for key, value in wanted.get(slot, ()):
+            values = [m.get("value") for m in element.findall("metadata") if m.get("key") == key]
+            if values != [value]:
+                raise PartSettingsUnwritableError(f"a part of slot {slot} did not take {key}")
+    return written
 
 
 def with_part_settings(payload: bytes, overrides: PartOverrides | None) -> bytes:
     """``payload`` with :func:`set_part_settings` applied to its
-    ``model_settings.config``; unchanged with no overrides or no such file."""
+    ``model_settings.config``; unchanged with no overrides or no such file. Raises
+    :class:`PartSettingsUnwritableError` for a ``model_settings.config`` past
+    :data:`MAX_MODEL_SETTINGS_BYTES` (read in chunks, never past it), not UTF-8, or one
+    :func:`set_part_settings` refuses."""
     if not overrides:
         return payload
-    text = model_settings_text(payload)
-    if text is None:
-        return payload
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if MODEL_SETTINGS_NAME not in archive.namelist():
+                return payload
+            raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_MODEL_SETTINGS_BYTES)
+        text = raw.decode("utf-8")
+    except (zipfile.BadZipFile, ValueError) as error:
+        raise PartSettingsUnwritableError(str(error)) from error
     changed = set_part_settings(text, overrides).encode("utf-8")
     return rezipped(payload, {MODEL_SETTINGS_NAME: changed})
 
@@ -1573,21 +1662,27 @@ def nozzles_statable(payload: bytes) -> bool:
     it is."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            infos = archive.infolist()
-            names = [info.filename for info in infos]
-            if PROJECT_SETTINGS_NAME not in names or any(map(_GCODE.fullmatch, names)):
-                return False
-            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-                return False
-            if archive.getinfo(PROJECT_SETTINGS_NAME).file_size > MAX_SETTINGS_BYTES:
-                return False
-            # Reads each entry in 1 MiB chunks and checks its CRC; None when all match.
-            if archive.testzip() is not None:
-                return False
-            settings = _read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
-            return isinstance(json.loads(settings), dict)
+            return _statable(archive)
     except (zipfile.BadZipFile, ValueError):
         return False
+
+
+def _statable(archive: zipfile.ZipFile) -> bool:
+    """:func:`nozzles_statable` of an archive already open. Raises what reading it
+    raises (:class:`zipfile.BadZipFile`, :class:`ValueError`)."""
+    infos = archive.infolist()
+    names = [info.filename for info in infos]
+    if PROJECT_SETTINGS_NAME not in names or any(map(_GCODE.fullmatch, names)):
+        return False
+    if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+        return False
+    if archive.getinfo(PROJECT_SETTINGS_NAME).file_size > MAX_SETTINGS_BYTES:
+        return False
+    # Reads each entry in 1 MiB chunks and checks its CRC; None when all match.
+    if archive.testzip() is not None:
+        return False
+    settings = _read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
+    return isinstance(json.loads(settings), dict)
 
 
 class ArchiveTooLargeError(ValueError):
@@ -2202,18 +2297,51 @@ def layout_of(payload: bytes) -> Layout:
     ``as_is``: anything else (sliced, another slicer's, past the caps), which nothing
     can be stated into. The caps are checked first, so the plates are read back only
     from a file already bounded."""
-    if not nozzles_statable(payload):
-        return "as_is"
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
-            if settings.get("print_settings_id") != PRESET_PLACEHOLDER:
-                return "author"
-            if not all(each.object_files for each in laid_out_plates(archive)):
-                return "author"
+            return _layout(archive)
+    except (zipfile.BadZipFile, ValueError):
+        return "as_is"
+
+
+def _layout(archive: zipfile.ZipFile) -> Layout:
+    """:func:`layout_of` of an archive already open."""
+    try:
+        if not _statable(archive):
+            return "as_is"
+    except (zipfile.BadZipFile, ValueError):
+        return "as_is"
+    try:
+        settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+        if settings.get("print_settings_id") != PRESET_PLACEHOLDER:
+            return "author"
+        if not all(each.object_files for each in laid_out_plates(archive)):
+            return "author"
     except (KeyError, ValueError, ET.ParseError, zipfile.BadZipFile):
         return "author"
     return "scadbuddy"
+
+
+def part_settings_slots(payload: bytes) -> set[int] | None:
+    """The slots a printed part of ``payload`` is made in (:func:`printed_part_slots`),
+    or ``None`` when nothing can be written into it (:func:`layout_of` ``as_is``), so it
+    takes no settings per part (#5571). One pass over the archive judges both (#5637).
+    A file with no ``model_settings.config`` has no part to carry them: an empty set.
+
+    ``model_settings.config`` is read in chunks against :data:`MAX_MODEL_SETTINGS_BYTES`
+    and parsed with ElementTree (:func:`printed_part_slots`). One past the cap, not
+    UTF-8, not well-formed or with a DOCTYPE is ``None``, as :func:`with_part_settings`
+    would refuse to write into it (#5628 review)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if _layout(archive) == "as_is":
+                return None
+            if MODEL_SETTINGS_NAME not in archive.namelist():
+                return set()
+            raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_MODEL_SETTINGS_BYTES)
+        return printed_part_slots(raw.decode("utf-8"))
+    except (zipfile.BadZipFile, ValueError):
+        return None
 
 
 #: The colour an STL is wrapped in: it carries none, and a print recolors it for its
