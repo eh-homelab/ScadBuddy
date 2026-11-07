@@ -53,7 +53,12 @@ describe('useLanCleared (#5602)', () => {
     const { result, rerender } = renderHook(useDialog, {
       initialProps: { native: true, printer: 'lan', seed: { flow_cali: 'on', vibration_cali: true } },
     })
+    expect(result.current.notice).toBe(
+      'Flow calibration On and Vibration calibration On were cleared: the LAN cannot set them.',
+    )
     act(() => result.current.setOptions({ flow_cali: 'off' }))
+    // Set again on the LAN printer: it is the user's now, so the notice names it no more.
+    expect(result.current.notice).toBe('Vibration calibration On was cleared: the LAN cannot set it.')
     rerender({ native: false, printer: 'bambuddy', seed: {} })
     expect(result.current.options).toEqual({ flow_cali: 'off', vibration_cali: true })
 

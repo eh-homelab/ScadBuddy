@@ -2214,9 +2214,8 @@ async def prepare_run(
             raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
         refusal = lan_calibration_refusal(request.options)
         if refusal is not None:
-            raise lan_calibration_problem(
-                refusal, linked=route is not None and route.printer_id is not None
-            )
+            assert route is not None  # a native run is a registry row's (`RunRoute.printer`)
+            raise lan_calibration_problem(refusal, linked=route.printer_id is not None)
         if request.folder_id is not None:
             await require_native_folder(native, request.folder_id)
     elif request.folder_id is not None:

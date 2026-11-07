@@ -651,6 +651,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     budget=budget_of(core.settings),
                     downloads=core.store.downloads,
                     native=await components.get(PRINT_LIBRARY).serving_native(),
+                    # #5602: as the output's run below.
+                    api=True if request.get("api") else None,
                 )
                 assert isinstance(started, PrintRun)
                 return started
