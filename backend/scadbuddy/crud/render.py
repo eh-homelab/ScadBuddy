@@ -7,13 +7,15 @@ last good settings.
 
 `RemoteJobProjection` is the part of `render/projection.py` `JobProjection` the worker's
 activities call (accept, claims, `project`), with the same names, signatures and
-answers. Every write is natural (plan D5): sent again after a lost answer, the route
-answers as it did the first time.
+answers. Every write but the finish is natural (plan D5): sent again after a lost
+answer, the route answers as it did the first time. The finish sends an
+``Idempotency-Key`` of its own, so a resend replays whether this call settled the row.
 """
 
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -30,10 +32,15 @@ from scadbuddy.store.bambuddy import StoreSettingsSource
 BASE = f"/api/v1{PREFIX}/render"
 #: `api/crud_render.py` `QUEUE_FULL`.
 QUEUE_FULL = "queue-full"
-#: How long a `project` write tries again after a failed try. Each try waits at most
-#: `PROJECT_POOL_TIMEOUT` (5 s), as the SQL store's pool wait does, so the call ends
-#: within 9 s, inside the write's 10 s attempt (`pipelines.PROJECT_TIMEOUT`).
+#: How long a `project` write tries again after a failed try, inside its 10 s attempt
+#: (`pipelines.PROJECT_TIMEOUT`). Each wait of a try (connect, send, read) lasts at most
+#: `PROJECT_POOL_TIMEOUT` (5 s), as the SQL store's pool wait does, and so does an
+#: accept's; a credential exchange is outside these bounds.
 PROJECT_BUDGET = 4.0
+#: How long an accept tries again: a failing route fails each of `ACCEPT_RETRY`'s three
+#: attempts within about a second, so with their backoff (1 s, 2 s) the request is
+#: answered within the route's 10 s deadline, as a failing SQL accept was.
+ACCEPT_BUDGET = 1.0
 
 
 class RemoteRenderSettingsSource(StoreSettingsSource):
@@ -59,17 +66,25 @@ class RemoteJobProjection:
     def close(self) -> None:
         self._client.close()
 
-    def _send(self, method: str, path: str, *, json: Any = None, bounded: bool) -> httpx.Response:
-        """``bounded``: a `project` write's call, ended inside its attempt."""
-        if bounded:
-            return self._client.request(
-                method,
-                f"{BASE}{path}",
-                json=json,
-                timeout=PROJECT_POOL_TIMEOUT,
-                budget=PROJECT_BUDGET,
-            )
-        return self._client.request(method, f"{BASE}{path}", json=json)
+    def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        budget: float | None = None,
+        key: str | None = None,
+    ) -> httpx.Response:
+        """``budget``: an accept's or a `project` write's call, ended inside its attempt,
+        each of its waits bounded by `PROJECT_POOL_TIMEOUT`."""
+        return self._client.request(
+            method,
+            f"{BASE}{path}",
+            json=json,
+            idempotency_key=key,
+            timeout=None if budget is None else PROJECT_POOL_TIMEOUT,
+            budget=budget,
+        )
 
     def accept(
         self,
@@ -90,7 +105,7 @@ class RemoteJobProjection:
             "supersedes": supersedes,
         }
         try:
-            response = self._send("POST", "/jobs/accept", json=body, bounded=False)
+            response = self._send("POST", "/jobs/accept", json=body, budget=ACCEPT_BUDGET)
         except CrudRefusedError as error:
             if error.status == 409 and error.problem.get("reason") == QUEUE_FULL:
                 raise QueueFullError(int(error.problem["depth"])) from error
@@ -98,10 +113,12 @@ class RemoteJobProjection:
         return Job.model_validate(response.json())
 
     def set_claims(self, job_id: str, claims: int) -> None:
-        self._send("PUT", f"/jobs/{_part(job_id)}/claims", json={"claims": claims}, bounded=True)
+        self._send(
+            "PUT", f"/jobs/{_part(job_id)}/claims", json={"claims": claims}, budget=PROJECT_BUDGET
+        )
 
     def mark_started(self, job_id: str) -> Job | None:
-        response = self._send("POST", f"/jobs/{_part(job_id)}/started", bounded=True)
+        response = self._send("POST", f"/jobs/{_part(job_id)}/started", budget=PROJECT_BUDGET)
         body = response.json()
         return None if body is None else Job.model_validate(body)
 
@@ -110,19 +127,30 @@ class RemoteJobProjection:
             "PUT",
             f"/jobs/{_part(job_id)}/steps",
             json=[step.model_dump(mode="json") for step in steps],
-            bounded=True,
+            budget=PROJECT_BUDGET,
         )
 
     def finish(self, job: Job) -> bool:
+        """As `JobProjection.finish`: whether this call changed the row (the route's
+        ``moved``), so a retried activity's call, which finds it settled, answers False
+        and its settle is counted once."""
         response = self._send(
-            "POST", f"/jobs/{_part(job.id)}/finish", json=job.model_dump(mode="json"), bounded=True
+            "POST",
+            f"/jobs/{_part(job.id)}/finish",
+            json=job.model_dump(mode="json"),
+            budget=PROJECT_BUDGET,
+            key=uuid.uuid4().hex,
         )
-        return bool(response.json()["settled"])
+        return bool(response.json()["moved"])
 
     def read(self, job_id: str, *, pool_timeout: float | None = None) -> Job:
         """``pool_timeout``: a `project` activity's read, bounded as its writes are."""
         try:
-            response = self._send("GET", f"/jobs/{_part(job_id)}", bounded=pool_timeout is not None)
+            response = self._send(
+                "GET",
+                f"/jobs/{_part(job_id)}",
+                budget=None if pool_timeout is None else PROJECT_BUDGET,
+            )
         except CrudRefusedError as error:
             if error.status == 404:
                 raise JobNotFoundError(job_id) from error

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NoReturn
 from unittest import mock
 
+import httpx
 import psycopg
 import pytest
 from opentelemetry import trace
@@ -35,6 +36,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
+from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.config import load_config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
@@ -42,6 +44,8 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import use_traceparent
+from scadbuddy.crud.client import CrudSyncClient
+from scadbuddy.crud.render import RemoteJobProjection
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import submit as submit_module
 from scadbuddy.render.job_models import (
@@ -104,7 +108,7 @@ from scadbuddy.workflows.pipelines import (
     RenderPreview,
     TemplatePipeline,
 )
-from tests.crud.crud_support import served_render_jobs
+from tests.crud.crud_support import FixedToken, served_render_jobs
 from tests.support.pipelines import FakeWorld
 from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
@@ -1784,30 +1788,62 @@ async def test_an_older_builds_start_renders_its_row_on_this_worker(
     assert described.status == WorkflowExecutionStatus.COMPLETED
 
 
-async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
+async def test_an_api_out_of_reach_at_the_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory, deps: WorkerDeps
+) -> None:
+    """The API out of reach (its route missing, as on an old pod) past the accept's
+    retries is transient: the request is still accepting, not a 500 render-unstartable
+    that tells clients not to send it again (review #1066 (11))."""
+    missing = CrudSyncClient(
+        "http://api",
+        "render",
+        ServiceAuth(FixedToken()),
+        transport=httpx.MockTransport(lambda _: httpx.Response(404)),
+        backoff=0.01,
+    )
+    unreachable = replace(deps, projection=RemoteJobProjection(missing))
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(unreachable)
+        async with _worker(client, queue, acts):
+            with pytest.raises(CommandStillAcceptingError):
+                await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
+        await service.aclose()
+    missing.close()
+
+    assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
+
+
+async def test_a_500_from_the_accept_route_is_answered_unstartable(
     make_service: ServiceFactory,
     deps: WorkerDeps,
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Postgres out of reach past the accept's retries is transient: the request is
-    still accepting, not a 500 render-unstartable that tells clients not to send it
-    again (review #1066 (11))."""
+    """An error the API's accept does not expect is a failure no retry fixes, as it was
+    over SQL: past the accept's retries the request is answered render-unstartable."""
 
-    def unreachable(*_: object, **__: object) -> Job:
-        raise psycopg.OperationalError("connection refused")
+    def broken(*_: object, **__: object) -> Job:
+        raise psycopg.errors.UndefinedColumn("column x does not exist")
 
-    monkeypatch.setattr(projection, "accept", unreachable)
+    monkeypatch.setattr(projection, "accept", broken)
+    params: dict[str, ParamValue] = {"width": _w()}
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
         acts = ProjectingActivities(deps)
         async with _worker(client, queue, acts):
-            with pytest.raises(CommandStillAcceptingError):
-                await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
+            began = time.monotonic()
+            with pytest.raises(WorkflowUpdateFailedError) as refused:
+                await service.submit(SLUG, params)
+            took = time.monotonic() - began
         await service.aclose()
 
-    assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
+    assert took < submit_module.SUBMIT_DEADLINE
+    cause = refused.value.cause
+    assert isinstance(cause, ApplicationError) and cause.type == RENDER_UNSTARTABLE
+    assert acts.accepts == ACCEPT_RETRY.maximum_attempts
 
 
 async def test_rows_nothing_will_settle_are_failed_without_a_restart(

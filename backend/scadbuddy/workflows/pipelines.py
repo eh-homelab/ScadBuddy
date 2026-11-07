@@ -137,8 +137,11 @@ LOOKUP_RETRY = RetryPolicy(
 #: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
 #: them answers still-accepting) answers the request rather than holding its render key
 #: with no row (review #1066 (10) 1). A failing attempt is answered within the route's
-#: 10 s deadline; a slow one is not cut short (each has `SHORT`), so a loaded database
-#: delays a render, as `command-still-accepting`, rather than refusing it.
+#: 10 s deadline. On the API's in-process worker a slow one is not cut short (each has
+#: `SHORT`), so a loaded database delays a render, as `command-still-accepting`, rather
+#: than refusing it. On the render worker the accept is a CRUD call bounded inside that
+#: deadline (`crud/render.py`): an API out of reach, or one too slow to answer, is
+#: transient (`command-still-accepting`), and a 5xx of its route spends these attempts.
 ACCEPT_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )

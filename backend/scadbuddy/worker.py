@@ -23,6 +23,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -101,7 +104,6 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.usage import RackUsageStore, lan_settle_hook, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
-from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
@@ -119,6 +121,7 @@ from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.index import Pool
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
@@ -158,6 +161,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_PORT = 9090
+#: How long the render worker's pool waits for its first connection.
+POOL_CONNECT_TIMEOUT = 30.0
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
 #: How long a stopping worker whose build is still current, and polled by another
@@ -232,33 +237,39 @@ def build_worker_deps(
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = metrics or worker_metrics(settings, "render")
-    # Only its pool, for the stores still on SQL: the job rows, their events and activity
-    # rows go through the API's CRUD routes (``jobs``, #5298).
-    projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
+    # For the stores still on SQL, until #5298 Tasks 15-20 move them to CRUD routes: the
+    # job rows, their events and activity rows already go through them (``jobs``).
+    pool: Pool = ConnectionPool(
+        settings.database_url,
+        min_size=1,
+        max_size=settings.database_pool_size,
+        open=False,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        name="scadbuddy-render",
+    )
     # Never migrated here (#601): the worker's own role may not, and in a rollout the
     # API, which does, may not have started yet. Wait for it instead.
-    projection.open(migrate_schema=False)
+    pool.open(wait=True, timeout=POOL_CONNECT_TIMEOUT)
     # The leases in Postgres, where the API's removals see them (#872).
-    checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
+    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(
-        libraries, InstallPermits(INSTALL_CONCURRENCY, projection.pool), checkouts
-    )
+    fetcher = CheckoutFetcher(libraries, InstallPermits(INSTALL_CONCURRENCY, pool), checkouts)
     assets = AssetStore(
         paths.assets,
-        projection.pool,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
     try:
-        wait_until_ready(projection.pool, stopping=stopping)
+        wait_until_ready(pool, stopping=stopping)
         backend = current.store_backend
         store = build_store(
             backend=backend,
             current=current,
             config=config,
             paths=paths,
-            pool=projection.pool,
+            pool=pool,
             source=source,
             # On bambuddy a worker has no git: the API makes the snapshots it renders from.
             history=None,
@@ -269,16 +280,16 @@ def build_worker_deps(
         )
     except BaseException:
         # A refused start (an unready store) closes what it opened before propagating.
-        projection.close()
+        pool.close()
         raise
     deps = WorkerDeps(
         config=config,
         paths=paths,
         assets=assets,
         blobs=store.blobs,
-        refs=BlobRefs(projection.pool),
+        refs=BlobRefs(pool),
         projection=jobs,
-        geometry=GeometryIndex(projection.pool),
+        geometry=GeometryIndex(pool),
         history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,

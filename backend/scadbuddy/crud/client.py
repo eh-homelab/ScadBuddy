@@ -60,7 +60,18 @@ Outcome = Literal["ok", "refused", "route_missing", "unavailable", "transport", 
 
 
 class CrudUnavailableError(Exception):
-    """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable."""
+    """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
+    ``outcome`` is the last try's: ``transport`` or ``route_missing`` (the API is out of
+    reach, `unreachable`), ``unavailable`` (a 5xx of the route) or ``reexchange``."""
+
+    def __init__(self, message: str, outcome: Outcome) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+    @property
+    def unreachable(self) -> bool:
+        """No API pod with the route answered: a state that passes, unlike a route's 5xx."""
+        return self.outcome in ("transport", "route_missing")
 
 
 class CrudRefusedError(Exception):
@@ -105,6 +116,7 @@ class _Call:
         self.refresh = False
         self.fresh_connection = False
         self.last = "no attempt"
+        self.outcome: Outcome = "transport"
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -118,6 +130,7 @@ class _Call:
         status = response.status_code
         if CRUD_HEADER not in response.headers:
             self.last = f"{status} without {CRUD_HEADER}: the route is missing"
+            self.outcome = "route_missing"
             self.fresh_connection = True
             self.observe("route_missing", started)
             return "retry"
@@ -126,12 +139,14 @@ class _Call:
             return "done"
         if status >= 500:
             self.last = f"{status} from the API"
+            self.outcome = "unavailable"
             self.observe("unavailable", started)
             return "retry"
         problem = _problem(response)
         stale = status == 401 or (status == 403 and problem.get("reason") == OUT_OF_SCOPE)
         if stale:
             self.last = f"{status} for a stale credential"
+            self.outcome = "reexchange"
             self.refresh = status == 403 and "Authorization" in response.request.headers
             self.observe("reexchange", started)
             return "retry"
@@ -145,13 +160,14 @@ class _Call:
 
     def failed(self, error: Exception, started: float) -> None:
         self.last = f"{type(error).__name__}: {error}"
+        self.outcome = "transport"
         self.observe("transport", started)
 
     def delay(self) -> float:
         """The wait before the next try; raises once the budget is spent."""
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
-            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}")
+            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}", self.outcome)
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1
         return wait
@@ -220,8 +236,11 @@ class CrudClient(_Base):
 
     def blocking(self) -> CrudSyncClient:
         """A `CrudSyncClient` with this client's API, credential and options. A test's
-        transport is kept when it also serves blocking requests (`httpx.MockTransport`)."""
-        transport = self._transport if isinstance(self._transport, httpx.BaseTransport) else None
+        transport must also serve blocking requests (`httpx.MockTransport` does), or this
+        raises `TypeError` rather than reach the network."""
+        transport = self._transport
+        if transport is not None and not isinstance(transport, httpx.BaseTransport):
+            raise TypeError(f"{type(transport).__name__} serves no blocking requests")
         return CrudSyncClient(
             self._base_url,
             self._caller,

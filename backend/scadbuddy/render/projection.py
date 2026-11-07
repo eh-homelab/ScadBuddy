@@ -202,11 +202,11 @@ class JobProjection:
         if self.activity is not None:
             from scadbuddy.render.activity import row_of  # activity imports this module
 
-            self.activity.upsert_in(conn, lambda: row_of(self._read_in(conn, job_id)))
+            self.activity.upsert_in(conn, lambda: row_of(self.read_in(conn, job_id)))
         if self.events is not None:
             self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
 
-    def _read_in(self, conn: Connection[Any], job_id: str) -> Job:
+    def read_in(self, conn: Connection[Any], job_id: str) -> Job:
         columns = ", ".join(PROJECTION_COLUMNS)
         row = conn.execute(f"SELECT {columns} FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
         if row is None:
@@ -397,9 +397,15 @@ class JobProjection:
         or running (spec §3.4). A job the API already cancelled (`release_claim`)
         takes the cancellation handler's final projection -- log and steps, and its
         error only where the API stored none -- without a second event. A done or
-        failed job is left alone."""
-        assert job.state in ("done", "failed", "cancelled")
+        failed job is left alone. True when this call's write changed the row."""
         with self._pool.connection(timeout=PROJECT_POOL_TIMEOUT) as conn, conn.transaction():
+            return self.finish_in(conn, job)
+
+    def finish_in(self, conn: Connection[Any], job: Job) -> bool:
+        """`finish` in the caller's transaction (`api/crud_render.py`: with its
+        idempotency ledger row)."""
+        assert job.state in ("done", "failed", "cancelled")
+        with conn.transaction():
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, finished_at = %s, log_tail = %s,"
                 " error = %s, result = %s, diagnostics = %s, diagnostics_dropped = %s,"

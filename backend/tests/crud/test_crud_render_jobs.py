@@ -17,7 +17,7 @@ from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
-from scadbuddy.crud.render import RemoteJobProjection
+from scadbuddy.crud.render import BASE, RemoteJobProjection
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.pipelines import PROJECT_TIMEOUT
@@ -119,6 +119,18 @@ async def test_an_accept_naming_another_executions_ids_answers_as_a_missing_row(
     assert _count(projection, "SELECT count(*) AS n FROM render_jobs") == 1
 
 
+def _finish(remote: RemoteJobProjection, job: Job, key: str) -> dict[str, bool]:
+    """The route's own answer, as the worker's client sends it with ``key``."""
+    response = remote._client.request(
+        "POST",
+        f"{BASE}/jobs/{job.id}/finish",
+        json=job.model_dump(mode="json"),
+        idempotency_key=key,
+    )
+    answer: dict[str, bool] = response.json()
+    return answer
+
+
 async def test_a_finish_sent_twice_answers_true_twice_and_announces_once(
     jobs: RemoteJobProjection, projection: JobProjection
 ) -> None:
@@ -127,17 +139,64 @@ async def test_a_finish_sent_twice_answers_true_twice_and_announces_once(
     assert started is not None and started.state == "running"
     assert await asyncio.to_thread(jobs.mark_started, job.id) is None
     done = started.model_copy(update={"state": "done", "finished_at": datetime.now(UTC)})
-    assert await asyncio.to_thread(jobs.finish, done)
-    assert await asyncio.to_thread(jobs.finish, done)
+    # One call's resend (one key) replays that it moved the row; a later call's does not.
+    moved = {"settled": True, "moved": True}
+    assert await asyncio.to_thread(_finish, jobs, done, "call-1") == moved
+    assert await asyncio.to_thread(_finish, jobs, done, "call-1") == moved
+    assert await asyncio.to_thread(_finish, jobs, done, "call-2") == {
+        "settled": True,
+        "moved": False,
+    }
     assert _events(projection, job.id) == ["job.pending", "job.running", "job.done"]
     # Another settle of the done row is not this one's resend.
     failed = done.model_copy(update={"state": "failed", "error": "late"})
-    assert not await asyncio.to_thread(jobs.finish, failed)
+    assert await asyncio.to_thread(_finish, jobs, failed, "call-3") == {
+        "settled": False,
+        "moved": False,
+    }
     with projection.pool.connection() as conn:
         status = conn.execute(
             "SELECT status FROM activity WHERE id = %s", (f"render:{job.id}",)
         ).fetchone()
     assert status == {"status": "succeeded"}
+
+
+async def test_the_workers_finish_is_true_only_for_the_call_that_moved_the_row(
+    jobs: RemoteJobProjection, projection: JobProjection
+) -> None:
+    """A retried activity's finish answers False, so the worker counts a settle once."""
+    job = await _accept(jobs, _job())
+    done = job.model_copy(update={"state": "done", "finished_at": datetime.now(UTC)})
+    assert await asyncio.to_thread(jobs.finish, done)
+    assert not await asyncio.to_thread(jobs.finish, done)
+    assert _events(projection, job.id) == ["job.pending", "job.done"]
+
+
+async def test_a_finish_to_an_unfinished_state_is_a_422(
+    jobs: RemoteJobProjection, projection: JobProjection
+) -> None:
+    job = await _accept(jobs, _job())
+    with pytest.raises(CrudRefusedError) as refused:
+        await asyncio.to_thread(jobs.finish, job.model_copy(update={"state": "running"}))
+    assert refused.value.status == 422
+    assert projection.read(job.id).state == "pending"
+
+
+async def test_a_500_from_the_accept_route_is_not_unreachable(
+    jobs: RemoteJobProjection, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error the route does not expect fails the accept fast, as a 5xx, which the
+    worker does not take for an API out of reach (`render_accept`)."""
+
+    def broken(*_: object, **__: object) -> Job:
+        raise RuntimeError("relation render_jobs has no column x")
+
+    monkeypatch.setattr(projection, "accept", broken)
+    started = time.monotonic()
+    with pytest.raises(CrudUnavailableError) as failed:
+        await _accept(jobs, _job())
+    assert time.monotonic() - started < 3
+    assert failed.value.outcome == "unavailable" and not failed.value.unreachable
 
 
 async def test_claims_steps_and_reads_reach_the_row(

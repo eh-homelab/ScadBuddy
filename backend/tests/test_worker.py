@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast, get_args
+from typing import Any, ClassVar, NoReturn, cast, get_args
 
 import httpx
 import psycopg
@@ -2403,25 +2403,28 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     return worker_module.build_worker_deps(settings, source, current, jobs=jobs)
 
 
-def test_a_refused_store_closes_the_projection_the_worker_opened(
+class _RecordingPool(PgPool):
+    """Records each pool the worker opens."""
+
+    opened: ClassVar[list[PgPool]] = []
+
+    def open(self, *args: Any, **kwargs: Any) -> None:
+        super().open(*args, **kwargs)
+        self.opened.append(self)
+
+
+def test_a_refused_store_closes_the_pool_the_worker_opened(
     settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    opened: list[JobProjection] = []
-
-    class Recording(JobProjection):
-        def open(self, *, migrate_schema: bool = True) -> None:
-            assert not migrate_schema  # the worker never migrates (#601)
-            super().open(migrate_schema=migrate_schema)
-            opened.append(self)
-
     def refuse(**_: object) -> NoReturn:
         raise StoreNotReadyError("refused")
 
-    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    monkeypatch.setattr(_RecordingPool, "opened", [])
+    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
     monkeypatch.setattr(worker_module, "build_store", refuse)
     with pytest.raises(StoreNotReadyError):
         _built(settings)
-    assert len(opened) == 1 and opened[0].pool.closed
+    assert len(_RecordingPool.opened) == 1 and _RecordingPool.opened[0].closed
 
 
 async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
@@ -2429,14 +2432,9 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
 ) -> None:
     """#601: on an unmigrated schema the worker waits for the API rather than
     migrating; a stop ends the wait, and what it opened is closed."""
-    opened: list[JobProjection] = []
-
-    class Recording(JobProjection):
-        def open(self, *, migrate_schema: bool = True) -> None:
-            super().open(migrate_schema=migrate_schema)
-            opened.append(self)
-
-    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    opened: list[PgPool] = []
+    monkeypatch.setattr(_RecordingPool, "opened", opened)
+    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
     stop = asyncio.Event()
     worker = asyncio.create_task(
         worker_module.run_worker(settings, stop=stop, health_port=None, crud=static_render_crud())
@@ -2448,7 +2446,7 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
     assert not worker.done()
     stop.set()
     await asyncio.wait_for(worker, timeout=30)
-    assert len(opened) == 1 and opened[0].pool.closed
+    assert len(opened) == 1 and opened[0].closed
     with psycopg.connect(settings.database_url) as conn:
         ledger = conn.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
     assert ledger == (None,)

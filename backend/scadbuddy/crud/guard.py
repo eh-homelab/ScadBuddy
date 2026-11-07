@@ -6,12 +6,14 @@ credential of that caller whose scopes hold the class, in every ``SCADBUDDY_AUTH
 these routes are new, so no client needs ``off`` or ``observe`` to let it through. A
 missing or dead credential is 401 ``…/auth/signed-out``; any other is 403 ``…/auth/forbidden``.
 
-Every response of a CRUD router, a refusal included, carries ``X-ScadBuddy-Crud: 1`` and
-``Cache-Control: no-store``, so a client can tell an answer of these routes from a proxy's.
+Every response of a CRUD router, a refusal and an unexpected error's 500 included,
+carries ``X-ScadBuddy-Crud: 1`` and ``Cache-Control: no-store``, so a client can tell an
+answer of these routes from a proxy's.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal
 
@@ -24,6 +26,8 @@ from scadbuddy.auth.check import FORBIDDEN, SIGNED_OUT
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
+
+logger = logging.getLogger(__name__)
 
 #: The callers with CRUD routes; `auth/routes.py` `CRUD_CLASSES` has the same keys.
 CrudCaller = Literal["projects", "render", "print"]
@@ -90,6 +94,11 @@ class _CrudRoute(APIRoute):
             except StarletteHTTPException as error:
                 error.headers = {**(error.headers or {}), **CRUD_HEADERS}
                 raise
+            except Exception as error:
+                # Still this route's answer: without the headers a client would take the
+                # 500 for a missing route, an API out of reach (`crud/client.py`).
+                logger.exception("unhandled error", extra={"path": request.url.path})
+                raise ApiError(500, type(error).__name__, headers=CRUD_HEADERS) from error
             response.headers.update(CRUD_HEADERS)
             return response
 

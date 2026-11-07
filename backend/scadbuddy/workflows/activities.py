@@ -898,9 +898,15 @@ class RenderActivities:
             raise ApplicationError(
                 str(error), error.depth, type=QUEUE_FULL, non_retryable=True
             ) from None
-        except (psycopg.OperationalError, CrudUnavailableError) as error:
-            # Postgres or the API out of reach (a pool timeout is one too): a state that
-            # passes (review #1066 (11)).
+        except psycopg.OperationalError as error:
+            # Postgres out of reach (a pool timeout is one too): a state that passes
+            # (review #1066 (11)).
+            raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
+        except CrudUnavailableError as error:
+            # The API out of reach passes too. A 5xx of its route (an unexpected SQL error
+            # there) is a failure no retry fixes: it fails the attempt, as it did here.
+            if not error.unreachable:
+                raise
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)

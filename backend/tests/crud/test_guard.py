@@ -57,6 +57,10 @@ def _client(mode: str = "off") -> TestClient:
     def body(item: Body) -> dict[str, int]:
         return {"n": item.n}
 
+    @router.get("/broken")
+    def broken() -> None:
+        raise RuntimeError("relation runs has no column x")
+
     app.include_router(router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: None, credentials=lambda: Credentials())  # type: ignore[arg-type,return-value]
@@ -123,3 +127,14 @@ def test_a_service_class_refusal_asks_for_a_bearer(route_cls: str) -> None:
     error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
     assert error.status == 401
     assert error.headers == {"WWW-Authenticate": 'Bearer realm="scadbuddy"'}
+
+
+def test_an_unexpected_error_is_a_500_with_the_crud_headers() -> None:
+    """Without them the client would take it for a missing route (`crud/client.py`)."""
+    client = TestClient(_client("enforce").app, raise_server_exceptions=False)
+    answer = client.get(
+        "/api/v1/internal/crud/projects/broken", headers={"authorization": "Bearer sbsvc_projects"}
+    )
+    assert answer.status_code == 500
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"
+    assert answer.json()["detail"] == "RuntimeError"

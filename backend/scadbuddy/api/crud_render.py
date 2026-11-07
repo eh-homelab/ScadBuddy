@@ -14,6 +14,8 @@ import asyncio
 import logging
 
 from fastapi import Request, status
+from psycopg import Connection
+from psycopg.rows import DictRow
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import StateDep
@@ -21,15 +23,19 @@ from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.idempotency import IdempotencyKey, Replay, idempotent_write
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
+from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
 router = crud_router("render")
 #: A full queue's refusal of an accept: `crud/render.py` `QUEUE_FULL`.
 QUEUE_FULL = "queue-full"
+#: The finish's name in the idempotency ledger.
+FINISH_ROUTE = "POST /jobs/{job_id}/finish"
 
 
 def released(current: RenderStoreSettings) -> list[str]:
@@ -64,7 +70,8 @@ async def render_settings(request: Request, state: StateDep) -> RenderStoreSetti
 # commits its activity row and its ``job.*`` event in the same transaction, the event
 # log's lock taken first (`core/pg_events.py`, "Lock order"), as the worker's SQL did. So
 # an older worker still writing over SQL during a roll takes the locks in the same order.
-# Every write is natural (plan D5): sent again, it answers as it did the first time.
+# Every write but the finish is natural (plan D5): sent again, it answers as it did the
+# first time. The finish takes an Idempotency-Key, for its ``moved``.
 
 
 class JobAccept(BaseModel):
@@ -82,6 +89,7 @@ class Claims(BaseModel):
 
 class Settled(BaseModel):
     settled: bool
+    moved: bool
 
 
 def _no_such() -> ApiError:
@@ -135,19 +143,42 @@ async def set_steps(job_id: str, body: list[StepInfo], state: StateDep) -> None:
 
 
 @router.post("/jobs/{job_id}/finish", name="crud_render_finish_job")
-async def finish_job(job_id: str, body: Job, state: StateDep) -> Settled:
-    """R7: whether this write settled the row. A resend finds the row already holding
-    this terminal state and ``finished_at`` and answers true again; it announces
-    nothing, since only the write that moved the row does."""
+async def finish_job(job_id: str, body: Job, key: IdempotencyKey, state: StateDep) -> Settled:
+    """R7. ``settled``: whether the row holds this settle, true again for a resend that
+    finds the row already holding this terminal state and ``finished_at``. ``moved``:
+    whether this write changed the row, the only one that announces it and that the
+    worker counts. The write takes an ``Idempotency-Key``, one per call of the worker's
+    `finish`: a resend inside that call replays its ``moved``; a later call, a retried
+    activity's, gets false."""
     if body.id != job_id:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The job is not this route's.")
-    if await asyncio.to_thread(state.projection.finish, body):
-        return Settled(settled=True)
-    try:
-        held = await asyncio.to_thread(state.projection.read, job_id)
-    except JobNotFoundError:
-        return Settled(settled=False)
-    return Settled(settled=(held.state, held.finished_at) == (body.state, body.finished_at))
+    if body.state not in ("done", "failed", "cancelled"):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"A job does not finish as {body.state}."
+        )
+    projection = state.projection
+    wire = body.model_dump(mode="json")
+
+    def write(conn: Connection[DictRow]) -> Replay:
+        moved = projection.finish_in(conn, body)
+        settled = moved
+        if not moved:
+            try:
+                held = projection.read_in(conn, job_id)
+            except JobNotFoundError:
+                held = None
+            settled = held is not None and (held.state, held.finished_at) == (
+                body.state,
+                body.finished_at,
+            )
+        return Replay(200, {"settled": settled, "moved": moved})
+
+    def run() -> Replay:
+        with projection.pool.connection(timeout=PROJECT_POOL_TIMEOUT) as conn:
+            return idempotent_write(conn, "render", key, FINISH_ROUTE, wire, lambda: write(conn))
+
+    reply = await asyncio.to_thread(run)
+    return Settled.model_validate(reply.body)
 
 
 @router.get("/jobs/{job_id}", name="crud_render_get_job")

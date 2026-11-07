@@ -404,3 +404,79 @@ def test_activity_key_is_a_hash_of_the_activity_and_ordinal(
     key = activity_key(2)
     assert key == hashlib.sha256(b"wf\x007\x002").hexdigest()
     assert key != activity_key(3)
+
+
+def _clocked(script: Script, clock: FakeClock, budget: float) -> CrudSyncClient:
+    def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    return CrudSyncClient(
+        "http://api",
+        "render",
+        ServiceAuth(Source()),
+        transport=httpx.MockTransport(script),
+        unavailable_budget=budget,
+        backoff=0.5,
+        clock=clock,
+        sleep=sleep,
+    )
+
+
+def test_a_calls_budget_replaces_the_clients() -> None:
+    clock = FakeClock()
+    script = Script(problem(503))
+    client = _clocked(script, clock, budget=30.0)
+    with pytest.raises(CrudUnavailableError) as failed:
+        client.request("GET", PATH, budget=1.0)
+    assert clock.now == pytest.approx(1.0)
+    assert failed.value.outcome == "unavailable" and not failed.value.unreachable
+    clock.now = 0.0
+    with pytest.raises(CrudUnavailableError):
+        client.request("GET", PATH)
+    assert clock.now == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        (httpx.ConnectError("refused"), "transport"),
+        (httpx.Response(404), "route_missing"),
+    ],
+)
+def test_an_api_out_of_reach_is_unreachable(
+    answer: httpx.Response | Exception, outcome: str
+) -> None:
+    client = _clocked(Script(answer), FakeClock(), budget=1.0)
+    with pytest.raises(CrudUnavailableError) as failed:
+        client.request("GET", PATH)
+    assert failed.value.outcome == outcome and failed.value.unreachable
+
+
+async def test_blocking_shares_the_api_credential_and_options() -> None:
+    script = Script(problem(503), ok())
+    client, source = make(script, budget=1.0)
+    try:
+        blocking = client.blocking()
+        try:
+            assert blocking.request("PUT", PATH, json={}, idempotency_key="k").status_code == 200
+        finally:
+            blocking.close()
+    finally:
+        await client.aclose()
+    assert {str(r.url) for r in script.requests} == {f"http://api{PATH}"}
+    assert {r.headers["Authorization"] for r in script.requests} == {"Bearer t1"}
+    assert source.invalidated == []
+
+
+class _AsyncOnly(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return ok()
+
+
+async def test_blocking_refuses_a_transport_that_serves_no_blocking_request() -> None:
+    client = CrudClient("http://api", "render", ServiceAuth(Source()), transport=_AsyncOnly())
+    try:
+        with pytest.raises(TypeError, match="_AsyncOnly"):
+            client.blocking()
+    finally:
+        await client.aclose()
