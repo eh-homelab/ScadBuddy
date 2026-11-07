@@ -32,7 +32,12 @@ from scadbuddy.core.config import available_cpus, default_solid_concurrency
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
-from scadbuddy.crud.render import RemoteJobProjection, RemoteRenderSettingsSource
+from scadbuddy.crud.render import (
+    RemoteBlobRefs,
+    RemoteGeometryIndex,
+    RemoteJobProjection,
+    RemoteRenderSettingsSource,
+)
 from scadbuddy.library.assets import AssetMeta, AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutLeases, InstallPermits
@@ -160,11 +165,14 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
         for relation in ("settings", "render_settings"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
-        # The job rows, their events and activity rows go through the API too (#5298).
+        # The job rows, their events and activity rows, the blob refs and the piece
+        # geometry go through the API too (#5298).
         for table in (
             "render_jobs",
             "events",
             "activity",
+            "blob_refs",
+            "piece_geometry",
             "operations",
             "print_runs",
             "saved_presets",
@@ -364,16 +372,23 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
         # Re-read on every call, not on the 30 s TTL.
         source = RemoteRenderSettingsSource(crud, ttl=0)
         current = await source.current()
-        jobs = RemoteJobProjection(crud.blocking())
+        remote = crud.blocking()
         deps, store = await asyncio.to_thread(
-            build_worker_deps, settings, source, current, jobs=jobs
+            build_worker_deps,
+            settings,
+            source,
+            current,
+            jobs=RemoteJobProjection(remote),
+            refs=RemoteBlobRefs(remote),
+            geometry=RemoteGeometryIndex(remote),
         )
         try:
             await _the_slots_follow_the_settings(owner, deps)
         finally:
             await store.aclose()
-            deps.refs.pool.close()
-            jobs.close()
+            assert deps.pool is not None
+            deps.pool.close()
+            remote.close()
 
 
 async def _the_slots_follow_the_settings(owner: Pool, deps: WorkerDeps) -> None:
@@ -450,7 +465,7 @@ def test_the_worker_waits_for_migrations_then_grants(
             )
         with pool.connection() as conn:
             assert pending_migrations(conn) == []
-            assert "piece_geometry: INSERT" in missing_privileges(conn)
+            assert "store_blobs: INSERT" in missing_privileges(conn)
         with pytest.raises(WorkerStoppedError):
             wait_until_ready(pool, stopping=lambda: True, poll=0.01)
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:

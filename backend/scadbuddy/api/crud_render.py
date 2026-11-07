@@ -1,6 +1,7 @@
 """The render worker's CRUD routes (#5298): the store settings it renders with (inventory
-R2), for `crud/render.py` `RemoteRenderSettingsSource`, and its jobs' rows (R3-R10), for
-`RemoteJobProjection`.
+R2), for `crud/render.py` `RemoteRenderSettingsSource`, its jobs' rows (R3-R10), for
+`RemoteJobProjection`, and its jobs' blob refs and the piece geometry (R11, R12), for
+`RemoteBlobRefs` and `RemoteGeometryIndex`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.render`` (plan D8): the
 render key (or the full key while no render key is saved) and the S3 keys. The CRUD
@@ -12,13 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
-from fastapi import Request, status
+from fastapi import Query, Request, status
 from psycopg import Connection
 from psycopg.rows import DictRow
 from pydantic import BaseModel
 
-from scadbuddy.api.deps import StateDep
+from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
@@ -28,12 +30,15 @@ from scadbuddy.library.settings_store import RenderStoreSettings, load_render_st
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
+from scadbuddy.store.geometry import GeometryIndex
 
 logger = logging.getLogger(__name__)
 
 router = crud_router("render")
 #: A full queue's refusal of an accept: `crud/render.py` `QUEUE_FULL`.
 QUEUE_FULL = "queue-full"
+#: A ref for any holder but a render job: `RemoteBlobRefs`.
+HOLDER_KIND = "holder-kind"
 #: The finish's name in the idempotency ledger.
 FINISH_ROUTE = "POST /jobs/{job_id}/finish"
 
@@ -188,3 +193,66 @@ async def read_job(job_id: str, state: StateDep) -> Job:
         return await asyncio.to_thread(state.projection.read, job_id)
     except JobNotFoundError:
         raise _no_such() from None
+
+
+# -- blob refs and piece geometry (inventory R11, R12) ----------------------------
+#
+# Both natural: a ref sent again is the row already there (ON CONFLICT DO NOTHING), a
+# geometry put an upsert, and a forget of a row already gone a success.
+
+
+class BlobRef(BaseModel):
+    key: str
+    holder_kind: str
+    holder_id: str
+
+
+class Geometry(BaseModel):
+    piece_key: str
+    colours: list[str]
+    main: dict[str, Any]
+
+
+@router.post("/blob-refs", name="crud_render_add_blob_ref")
+async def add_blob_ref(body: BlobRef, state: StateDep) -> None:
+    """R11: hold ``key`` for a render job. The worker holds blobs for its jobs only, so
+    any other holder kind is a 403 and a holder that is no render job a 404: a render
+    credential cannot pin blobs under another holder."""
+    if body.holder_kind != "job":
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "The render worker holds blobs for render jobs only.",
+            reason=HOLDER_KIND,
+        )
+    try:
+        await asyncio.to_thread(state.projection.read, body.holder_id)
+    except JobNotFoundError:
+        raise _no_such() from None
+    await asyncio.to_thread(state.refs.add, body.key, "job", body.holder_id)
+
+
+def _geometry(state: AppState) -> GeometryIndex:
+    return GeometryIndex(state.refs.pool)
+
+
+@router.get("/geometry/{geometry_key}", name="crud_render_get_geometry")
+async def get_geometry(geometry_key: str, state: StateDep) -> Geometry | None:
+    """R12: the finished piece a geometry key's pieces can be recoloured from, or null."""
+    row = await asyncio.to_thread(_geometry(state).get, geometry_key)
+    if row is None:
+        return None
+    return Geometry(piece_key=row.piece_key, colours=row.colours, main=row.main)
+
+
+@router.put("/geometry/{geometry_key}", name="crud_render_put_geometry")
+async def put_geometry(geometry_key: str, body: Geometry, state: StateDep) -> None:
+    """R12: record the newest finished piece for ``geometry_key``."""
+    await asyncio.to_thread(
+        _geometry(state).put, geometry_key, body.piece_key, body.colours, body.main
+    )
+
+
+@router.delete("/geometry/{geometry_key}", name="crud_render_forget_geometry")
+async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Query()) -> None:
+    """R12: drop the row, unless another piece has replaced it since it was read."""
+    await asyncio.to_thread(_geometry(state).forget, geometry_key, piece_key)

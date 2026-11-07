@@ -153,7 +153,9 @@ def test_deleting_the_model_releases_the_other_outputs_when_one_release_fails(
 class _HoldFails(BlobRefs):
     """`blob_refs` with Postgres gone while the save holds its Parts."""
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
         raise psycopg.OperationalError("the server closed the connection")
 
 
@@ -198,7 +200,9 @@ def test_a_save_whose_write_fails_holds_nothing(
 class _HoldLandsThenFails(BlobRefs):
     """The hold's INSERT committed, then the connection dropped before it answered."""
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
         super().add(key, holder_kind, holder_id)
         raise psycopg.OperationalError("the server closed the connection")
 

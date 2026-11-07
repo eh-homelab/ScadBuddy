@@ -98,7 +98,9 @@ class _Refs:
     def __init__(self) -> None:
         self.added: list[tuple[str, str, str]] = []
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
         self.added.append((key, holder_kind, holder_id))
 
 
@@ -115,7 +117,7 @@ def _deps(tmp_path: Path) -> tuple[WorkerDeps, DataPaths]:
         paths=paths,
         assets=AssetStore(paths.assets),
         blobs=LocalBlobStore(paths.blobs),
-        refs=_Refs(),  # type: ignore[arg-type]
+        refs=_Refs(),
         projection=None,  # type: ignore[arg-type]
         revision="rev-1",
         openscad_version="OpenSCAD version 2026.09.28",

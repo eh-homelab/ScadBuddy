@@ -19,6 +19,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.crud.render import HOLD_BUDGET
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.store import BlobStore
 from scadbuddy.store.local import LocalBlobStore
@@ -94,9 +95,13 @@ def chatty():
 class RecordingRefs:
     def __init__(self) -> None:
         self.held: set[tuple[str, str, str]] = set()
+        self.budgets: list[float | None] = []
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
         self.held.add((key, holder_kind, holder_id))
+        self.budgets.append(budget)
 
     def referenced(self) -> set[str]:
         return {key for key, _, _ in self.held}
@@ -119,7 +124,7 @@ def _world(
         paths=paths,
         assets=AssetStore(paths.assets),
         blobs=blobs or LocalBlobStore(paths.blobs),
-        refs=refs or RecordingRefs(),  # type: ignore[arg-type]
+        refs=refs or RecordingRefs(),
         projection=None,  # type: ignore[arg-type]
         template_python=sys.executable,
     )
@@ -269,6 +274,17 @@ async def test_an_emitted_blob_is_held_for_the_job(tmp_path: Path) -> None:
     again = await env.run(acts.run_template_activity, _call("guide", 2, job_id="j2"))
     assert Blob.model_validate(again) == blob
     assert (blob.key, "job", "j2") in refs.held
+
+
+async def test_a_hold_after_the_template_ran_waits_as_long_as_the_sql_pool(
+    tmp_path: Path,
+) -> None:
+    """The hold comes after the call: one that gave up on a short budget would rerun the
+    template, so it has `HOLD_BUDGET`, not a `project` write's bound."""
+    refs = RecordingRefs()
+    acts, _ = _world(tmp_path, refs=refs)
+    await ActivityEnvironment().run(acts.run_template_activity, _call("guide", 3))
+    assert refs.budgets == [HOLD_BUDGET] == [30.0]
 
 
 async def test_identical_calls_at_once_on_one_worker_run_once(tmp_path: Path) -> None:

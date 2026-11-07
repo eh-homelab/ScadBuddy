@@ -61,11 +61,12 @@ from scadbuddy.render.projection import (
 )
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
-from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
+from scadbuddy.store import BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.refs import HoldsBlobs
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
@@ -83,7 +84,8 @@ from scadbuddy.workflows.models import (
 )
 
 if TYPE_CHECKING:
-    from scadbuddy.crud.render import RemoteJobProjection
+    from scadbuddy.crud.render import RemoteGeometryIndex, RemoteJobProjection
+    from scadbuddy.store.index import Pool
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +99,9 @@ class WorkerDeps:
     paths: DataPaths
     assets: AssetStore
     blobs: BlobStore
-    refs: BlobRefs
-    #: The render worker's is the API's CRUD routes (#5298); the in-process worker's, SQL.
+    #: The render worker's ``refs``, ``projection`` and ``geometry`` are the API's CRUD
+    #: routes (#5298); the in-process worker's, SQL.
+    refs: HoldsBlobs
     projection: JobProjection | RemoteJobProjection
     history: ModelHistory | None = None
     checkouts: CheckoutGate | None = None
@@ -110,7 +113,10 @@ class WorkerDeps:
     remote_assets: RemoteAssets | None = None
     #: Where a piece's geometry is found for a later piece in other colours; None turns
     #: that reuse off.
-    geometry: GeometryIndex | None = None
+    geometry: GeometryIndex | RemoteGeometryIndex | None = None
+    #: The render worker's own SQL pool (its stores still on SQL), closed when it
+    #: stops; None on the API's in-process worker, whose pool is the API's.
+    pool: Pool | None = None
     #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
     revision: str = ""
     openscad_version: str = ""
@@ -800,6 +806,9 @@ class RenderActivities:
                 )
             )
         )
+        # Here, not at the top: `crud.client` imports the API, which imports this module.
+        from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
+
         if d.geometry is not None and prepared.geometry_key is not None:
             # A cache's hint, after the piece is published: losing it costs a later
             # recolour its shortcut, never this render. A recoloured piece comes with
@@ -819,7 +828,15 @@ class RenderActivities:
                     prepared.colours,
                     main.model_dump(mode="json"),
                 )
-            except (psycopg.Error, OSError, ValueError, KeyError, TypeError) as error:
+            except (
+                psycopg.Error,
+                CrudUnavailableError,
+                CrudRefusedError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+            ) as error:
                 logger.warning(
                     "could not record the piece's geometry",
                     extra={"piece_key": req.piece_key, "error": type(error).__name__},
