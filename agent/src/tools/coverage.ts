@@ -136,6 +136,30 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       '(`api/serviceCredential.ts` `ExchangeCredential`) calls it with its proof; never a tool.',
   },
   {
+    operation: 'POST /api/v1/payments/webhooks/{provider}',
+    reason: "A payment provider's call, signed with its own secret (#4957); never an agent's.",
+  },
+  ...(
+    [
+      'GET /api/v1/payments/providers',
+      'PUT /api/v1/payments/providers/{provider}',
+      'DELETE /api/v1/payments/providers/{provider}',
+      'POST /api/v1/payments/providers/{provider}/default',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "Settings → Payments (#4957): a person connects, disconnects and chooses a provider; its credentials are never an agent's.",
+  })),
+  ...(
+    [
+      'POST /api/v1/orders/{order_id}/payment-requests/{request_id}/cancel',
+      'POST /api/v1/orders/{order_id}/payment-requests/{request_id}/link',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "The order page's (#4957): a person cancels a request or retries its link; the agent opens one with order_request_payment.",
+  })),
+  {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +

@@ -483,6 +483,20 @@ filter (`backend/scadbuddy/editor/nonet.py`), but that filter still allows `AF_U
 the process can connect to any filesystem socket the container can see, and a runtime
 socket would give it root on the node.
 
+### Payment webhooks (#4957)
+
+The front door (Pomerium and the LAN gateway) stays in front of every route but one. A
+payment provider must reach `POST /api/v1/payments/webhooks/<provider>` from the
+internet, so route only the path prefix `/api/v1/payments/webhooks/` from the public
+host to the API Service, and no other path. That route takes no session: the
+provider's signature is its credential, a bad signature is a `400` that records
+nothing, and a body above 256 KiB is a `413`. Enter the webhook URL
+`https://<public host>/api/v1/payments/webhooks/<provider>` in the provider's own
+dashboard, where its webhooks are set up. Connecting a provider
+(`PUT /api/v1/payments/providers/<provider>`, by a person signed in) needs
+`SCADBUDDY_SECRET_KEY_FILE` (see "Encrypted API keys" below): the account's secret is
+sealed with that key.
+
 ### Authentication on the deployment (#4975)
 
 What signing in is and what each `SCADBUDDY_AUTH_MODE` does is under "Signing in"

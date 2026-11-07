@@ -474,3 +474,65 @@ def test_the_revisions_migration_gives_every_model_item_revision_one(pg_conninfo
         assert conn.execute(
             "SELECT purpose, revision_id FROM order_item_fulfilments"
         ).fetchone() == ("production", None)
+
+
+@pytest.mark.requires_postgres
+def test_the_payments_seam_migration(pg_conninfo: str) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("payments_seam")])
+        customer_id = conn.execute(
+            "INSERT INTO customers (display_name) VALUES ('Ada') RETURNING id"
+        ).fetchone()[0]  # type: ignore[index]
+        order_id = conn.execute(
+            "INSERT INTO orders (number, customer_id, currency, created_by)"
+            " VALUES ('2026-9001', %s, 'USD', '{}') RETURNING id",
+            (customer_id,),
+        ).fetchone()[0]  # type: ignore[index]
+        conn.execute(
+            "INSERT INTO order_payments (order_id, amount_minor) VALUES (%s, 100)", (order_id,)
+        )
+        assert migrate(conn)[0] == MIGRATIONS[_index("payments_seam")].id
+        cols = {
+            r[0]
+            for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'order_payments'"
+            )
+        }
+        assert {"provider", "payment_request_id"} <= cols
+        # the old payment row survives with no provider
+        assert conn.execute("SELECT provider FROM order_payments").fetchall() == [(None,)]
+        insert = (
+            "INSERT INTO payment_requests"
+            " (order_id, kind, amount_minor, currency, created_by{extra})"
+            " VALUES (%s, %s, %s, 'USD', '{{}}'{more})"
+        )
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(insert.format(extra="", more=""), (order_id, "balance", 0))
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                insert.format(extra=", hosted_url", more=", 'https://x'"),
+                (order_id, "deposit", 5),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO payment_requests"
+                " (order_id, kind, amount_minor, currency, created_by, status)"
+                " VALUES (%s, 'deposit', 5, 'USD', '{}', 'paid')",
+                (order_id,),
+            )
+        conn.execute(
+            "INSERT INTO payment_events (provider, event_id, kind) VALUES ('f', 'e1', 'paid')"
+        )
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO payment_events (provider, event_id, kind) VALUES ('f', 'e1', 'paid')"
+            )
+        cred = (
+            "INSERT INTO payment_credentials"
+            " (provider, account_label, secret_sealed, dek_sealed, kek_id, is_default)"
+            " VALUES (%s, 'x', '\\x00', '\\x00', 'k', true)"
+        )
+        conn.execute(cred, ("one",))
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute(cred, ("two",))

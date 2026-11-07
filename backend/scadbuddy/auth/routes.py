@@ -54,7 +54,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: The header every cookie-authenticated request carries (§5.3 layer 3).
 REQUEST_HEADER = "x-scadbuddy-request"
 
-#: Anyone: probes, Prometheus, and the routes that sign a person in.
+#: Anyone: probes, Prometheus, the routes that sign a person in, and a payment webhook.
 PUBLIC_MODULES = frozenset({"scadbuddy.api.health", "scadbuddy.api.metrics"})
 PUBLIC_ENDPOINTS = frozenset(
     {
@@ -64,6 +64,8 @@ PUBLIC_ENDPOINTS = frozenset(
         "scadbuddy.api.auth.break_glass",
         # A delegation link's sign-in (#4975 phase 6): the one-time code is the credential.
         "scadbuddy.api.auth.delegated_sign_in",
+        # A payment provider's event (#4957): its signature is the credential.
+        "scadbuddy.api.payment_webhooks.receive_webhook",
     }
 )
 #: The service-token exchange (#5494, spec 2026-11-05 §6.2): the proof in its body is
@@ -101,6 +103,10 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.service_credentials.list_service_callers",
         "scadbuddy.api.service_credentials.suspend_service_caller",
         "scadbuddy.api.service_credentials.resume_service_caller",
+        # The shop's payment provider accounts (#4957): settings writes, never an agent's.
+        "scadbuddy.api.payments.connect_provider",
+        "scadbuddy.api.payments.disconnect_provider",
+        "scadbuddy.api.payments.default_provider",
     }
 )
 #: The public routes the projects worker's flow host functions and grant checks call

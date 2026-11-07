@@ -9,7 +9,7 @@ export const PRICED_WHILE: ReadonlySet<OrderStatus> = new Set<OrderStatus>(['dra
 type Priced = Pick<OrderItemDetail, 'quantity' | 'quotes'>
 
 /**
- * The quote that prices the item (`api/orders.py` `item_price`): the accepted one, or
+ * The quote that prices the item (`orders/totals.py` `item_price`): the accepted one, or
  * before one is accepted the newest by `byCreated`. Null with no quote at all.
  */
 export function pricingQuote(item: Priced): { quote: Quote; accepted: boolean } | null {
@@ -20,7 +20,7 @@ export function pricingQuote(item: Priced): { quote: Quote; accepted: boolean } 
 }
 
 /**
- * The item's price as the order's totals count it (`api/orders.py` `item_price`): the
+ * The item's price as the order's totals count it (`orders/totals.py` `item_price`): the
  * accepted quote's total, or before one is accepted the newest quote's unit price times
  * the quantity now, so a draft adds up as it is entered. Null with no quote at all.
  */

@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.library.output_index import OutputQuery
 from tests.api.conftest import wait_for_job
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
@@ -137,3 +138,18 @@ def test_renames_deletes_and_the_start_keep_the_index_in_step(
     assert listed(client) == [second]
     assert state.outputs.index.sync(state.outputs) == (1, 0)
     assert listed(client) == [second, first]
+
+
+def test_a_deleted_models_outputs_leave_the_index(
+    client: TestClient, three: tuple[str, str, str]
+) -> None:
+    """The count never names rows a page cannot show (#5667 review): deleting a model
+    drops its outputs' rows with its outputs' directories."""
+    first, second, third = three
+    plate = client.get(f"/api/v1/outputs/{third}").json()["slug"]
+    deleted = client.delete(f"/api/v1/models/{plate}", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    state = state_of(client)
+    assert state.outputs.index is not None
+    ids, total = state.outputs.index.query(OutputQuery())
+    assert (ids, total) == ([second, first], 2)

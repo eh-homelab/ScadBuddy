@@ -783,6 +783,16 @@ class OutputStore:
             self._covers.pop(slug, None)
             self._cover_epoch += 1
 
+    def forget_indexed(self, slug: str) -> None:
+        """Drop the index rows of ``slug``'s outputs (#4777), once their directory is gone
+        with the model: best effort, as a page drops a row whose files it cannot read."""
+        if self.index is None:
+            return
+        try:
+            self.index.forget_slug(slug)
+        except Exception:
+            logger.exception("could not drop a model's indexed outputs", extra={"slug": slug})
+
     def remembers_plate_cover(self, slug: str) -> bool:
         """Whether anything is held for ``slug`` -- for tests of the cache's lifetime."""
         with self._covers_lock:

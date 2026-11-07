@@ -140,6 +140,10 @@ from scadbuddy.orders.store import (
     decode_cursor,
     encode_cursor,
 )
+from scadbuddy.orders.totals import OrderTotals, order_totals
+from scadbuddy.payments.component import PaymentsDep
+from scadbuddy.payments.models import PaymentRequestView
+from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 
@@ -400,6 +404,8 @@ class PaymentCreate(BaseModel):
     reference: str | None = None
     received_at: datetime | None = None
     notes: str = ""
+    #: The open payment request this payment settles (#4957): it closes as `paid`.
+    payment_request_id: str | None = None
 
 
 class CancelBody(BaseModel):
@@ -439,24 +445,6 @@ def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
     )
 
 
-class OrderTotals(BaseModel):
-    """§3.4: the items' prices, the charges on top, what was paid. Every item not
-    cancelled counts at its accepted quote's total or, before one is accepted (a draft
-    or quoted order), at its newest quote's unit price times its quantity now, so a
-    draft adds up as it is entered; ``pending_minor`` is the part of the subtotal no
-    accepted quote stands behind yet, and ``unpriced_items`` the items with no quote."""
-
-    subtotal_minor: Money
-    #: The part of ``subtotal_minor`` from quotes not yet accepted.
-    pending_minor: Money = 0
-    #: The items not cancelled with no quote at all, in no sum.
-    unpriced_items: list[str] = Field(default_factory=list)
-    charges_minor: Money
-    total_minor: Money
-    paid_minor: Money
-    balance_minor: Money
-
-
 class OrderDetail(BaseModel):
     order: Order
     items: list[ItemDetail]
@@ -469,6 +457,8 @@ class OrderDetail(BaseModel):
     #: The Bambuddy projects mirroring the order and its items (§8.1), the order's first;
     #: empty without Bambuddy, or before the order is accepted.
     projects: list[OrderProject] = Field(default_factory=list)
+    #: The order's payment requests, oldest first (#4957).
+    payment_requests: list[PaymentRequestView] = Field(default_factory=list)
 
 
 class OrderRow(Order):
@@ -509,7 +499,7 @@ async def _run[T](call: Callable[[], T]) -> T:
         raise refused(error) from None
 
 
-def _path(*values: str) -> None:
+def check_path(*values: str) -> None:
     if any("\x00" in value for value in values):
         raise ApiError(status.HTTP_400_BAD_REQUEST, "a path value holds a NUL byte")
 
@@ -735,7 +725,7 @@ async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
 )
 async def patch_filament(filament_id: str, body: FilamentPatch, orders: OrdersDep) -> Filament:
     """Only what is sent changes. A quote already priced keeps the rate its lines carry."""
-    _path(filament_id)
+    check_path(filament_id)
     try:
         found = await asyncio.to_thread(orders.store.update_filament, filament_id, body)
     except FilamentExistsError as error:
@@ -753,7 +743,7 @@ async def patch_filament(filament_id: str, body: FilamentPatch, orders: OrdersDe
 async def archive_filament(filament_id: str, orders: OrdersDep) -> Filament:
     """Hidden from the book and refused by a new quote; never deleted, since an item may
     name it."""
-    _path(filament_id)
+    check_path(filament_id)
     found = await asyncio.to_thread(orders.store.archive_filament, filament_id)
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
@@ -769,7 +759,7 @@ async def unarchive_filament(filament_id: str, orders: OrdersDep) -> Filament:
     """Back in the book with its id, so its quotes and items still name it (#4977). 409
     ``filament_exists`` naming the record that holds its identity now, when the same
     filament was added again after the archive."""
-    _path(filament_id)
+    check_path(filament_id)
     try:
         found = await asyncio.to_thread(orders.store.unarchive_filament, filament_id)
     except FilamentExistsError as error:
@@ -842,7 +832,7 @@ async def estimate(
     density and the ``rough_estimate_factor`` for walls, infill and purge (§5.3). A
     read: nothing is recorded. 404 for an unknown output or filament, 422
     ``filament_density`` for a filament with no density."""
-    _path(output_id, filament_id)
+    check_path(output_id, filament_id)
     record = await asyncio.to_thread(orders.store.filament, filament_id)
     if record is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
@@ -929,7 +919,7 @@ async def unit_cost(
     unit_price_minor: Annotated[int | None, Query(ge=0)] = None,
     item_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
 ) -> UnitCostHistory:
-    _path(slug, *([item_id] if item_id is not None else []))
+    check_path(slug, *([item_id] if item_id is not None else []))
     runtime = settings.snapshot().runtime
     parts_unit: Decimal | None = None
     if item_id is not None:
@@ -991,49 +981,9 @@ async def profit(
     return await asyncio.to_thread(profit_report, orders.store, rates, since=since, until=until)
 
 
-def item_price(item: ItemDetail) -> tuple[Money, bool] | None:
-    """The item's price and whether an accepted quote stands behind it: the accepted
-    quote's total, else the newest quote's unit price times the item's quantity now;
-    None with no quote."""
-    accepted = next((quote for quote in item.quotes if quote.accepted), None)
-    if accepted is not None:
-        return accepted.total_minor, True
-    newest = max(item.quotes, key=lambda quote: (quote.created_at, quote.id), default=None)
-    if newest is None:
-        return None
-    return newest.unit_price_minor * item.quantity, False
-
-
-def _totals(items: list[ItemDetail], charges: list[Charge], payments: list[Payment]) -> OrderTotals:
-    subtotal = pending = 0
-    unpriced: list[str] = []
-    for item in items:
-        if item.status == "cancelled":
-            continue
-        priced = item_price(item)
-        if priced is None:
-            unpriced.append(item.id)
-            continue
-        amount, accepted = priced
-        subtotal += amount
-        if not accepted:
-            pending += amount
-    charged = sum(charge.amount_minor for charge in charges)
-    paid = sum(payment.amount_minor for payment in payments)
-    return OrderTotals(
-        subtotal_minor=subtotal,
-        pending_minor=pending,
-        unpriced_items=unpriced,
-        charges_minor=charged,
-        total_minor=subtotal + charged,
-        paid_minor=paid,
-        balance_minor=subtotal + charged - paid,
-    )
-
-
 @router.get("/{order_id}", response_model=OrderDetail, summary="One order, whole")
 async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
-    _path(order_id)
+    check_path(order_id)
     store = orders.store
 
     def read() -> OrderDetail | None:
@@ -1043,15 +993,18 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
         items = [item_detail(store, item) for item in store.items(order.id)]
         charges = store.charges(order.id)
         payments = store.payments(order.id)
+        with store.transaction() as conn:
+            requests = requests_for_order(conn, order.id)
         return OrderDetail(
             order=order,
             items=items,
             charges=charges,
             payments=payments,
             shipments=store.shipments(order.id),
-            totals=_totals(items, charges, payments),
+            totals=order_totals([(item, item.quotes) for item in items], charges, payments),
             attachments=store.attachments(order.id),
             projects=store.projects(order.id),
+            payment_requests=requests,
         )
 
     detail = await asyncio.to_thread(read)
@@ -1062,7 +1015,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
 
 @router.patch("/{order_id}", response_model=Order, summary="Edit an order")
 async def patch_order(order_id: str, body: OrderPatch, orders: OrdersDep) -> Order:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     try:
         return await _run(lambda: orders.lifecycle.edit_order(order_id, by, body.edit()))
@@ -1092,7 +1045,7 @@ async def put_charges_after_acceptance(
     holds the charges before and after. 409 ``order_not_accepted`` while the order is
     `draft` or `quoted` (use `PATCH /orders/{id}`), ``order_not_editable`` once it is
     `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     return await _run(
         lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges)
@@ -1101,7 +1054,7 @@ async def put_charges_after_acceptance(
 
 @router.get("/{order_id}/events", response_model=list[OrderEvent], summary="The audit line")
 async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
-    _path(order_id)
+    check_path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     return await asyncio.to_thread(orders.store.events, order_id)
@@ -1131,7 +1084,7 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
 async def get_order_costs(
     order_id: str, orders: OrdersDep, settings: SettingsStoreDep
 ) -> OrderCosts:
-    _path(order_id)
+    check_path(order_id)
     rates = _cost_rates(settings)
     costs = await order_costs(orders.store, orders.integrations, order_id, rates)
     if costs is None:
@@ -1163,7 +1116,7 @@ async def add_time_entry(
     settings: SettingsStoreDep,
     response: Response,
 ) -> TimeEntry:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
 
     runtime = settings.snapshot().runtime
@@ -1182,7 +1135,7 @@ async def add_time_entry(
     summary="Remove a time entry",
 )
 async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
-    _path(order_id, entry_id)
+    check_path(order_id, entry_id)
     by = current_actor()
     await _run(lambda: orders.lifecycle.remove_time_entry(order_id, entry_id, by))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1206,7 +1159,7 @@ async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> 
 async def add_cost_entry(
     order_id: str, body: CostEntryInput, orders: OrdersDep, response: Response
 ) -> CostEntry:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     entry, written = await _run(lambda: orders.lifecycle.add_cost_entry(order_id, body, by))
     if not written:
@@ -1220,7 +1173,7 @@ async def add_cost_entry(
     summary="Remove a cost entry",
 )
 async def remove_cost_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
-    _path(order_id, entry_id)
+    check_path(order_id, entry_id)
     by = current_actor()
     await _run(lambda: orders.lifecycle.remove_cost_entry(order_id, entry_id, by))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1242,7 +1195,7 @@ PROJECTS_WAIT_SECONDS = 20.0
     ),
 )
 async def accept_order(order_id: str, orders: OrdersDep) -> Order:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     accepted = await _run(lambda: orders.lifecycle.accept_order(order_id, by))
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would
@@ -1267,23 +1220,31 @@ def _ensured(task: asyncio.Task[Any], number: str) -> None:
 
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")
-async def cancel_order(order_id: str, orders: OrdersDep, body: CancelBody | None = None) -> Order:
-    _path(order_id)
+async def cancel_order(
+    order_id: str, orders: OrdersDep, service: PaymentsDep, body: CancelBody | None = None
+) -> Order:
+    """The open payment requests end with the order; their pages close after the commit."""
+    check_path(order_id)
     by = current_actor()
     reason = body.reason if body else None
-    return await _run(lambda: orders.lifecycle.cancel_order(order_id, by, reason))
+    try:
+        return await service.service.cancel_order(
+            order_id, lambda: orders.lifecycle.cancel_order(order_id, by, reason)
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
 
 
 @router.post("/{order_id}/hold", response_model=Order, summary="Put an order on hold")
 async def hold_order(order_id: str, orders: OrdersDep) -> Order:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.hold(order_id, by))
 
 
 @router.post("/{order_id}/release", response_model=Order, summary="Release an order from hold")
 async def release_order(order_id: str, orders: OrdersDep) -> Order:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.release(order_id, by))
 
@@ -1292,7 +1253,7 @@ async def release_order(order_id: str, orders: OrdersDep) -> Order:
 async def close_order(order_id: str, orders: OrdersDep) -> Order:
     """§3.5's close rule: refused with ``order_not_closable`` naming every item still
     open and every fulfilled item no shipment covers."""
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.close_order(order_id, by))
 
@@ -1311,7 +1272,7 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
     ),
 )
 async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.reopen_order(order_id, by))
 
@@ -1322,20 +1283,28 @@ async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
     status_code=status.HTTP_201_CREATED,
     summary="Record a payment",
 )
-async def add_payment(order_id: str, body: PaymentCreate, orders: OrdersDep) -> Payment:
-    _path(order_id)
+async def add_payment(
+    order_id: str, body: PaymentCreate, orders: OrdersDep, service: PaymentsDep
+) -> Payment:
+    """A payment that pays open requests closes their pages after the commit."""
+    check_path(order_id)
     by = current_actor()
-    return await _run(
-        lambda: orders.lifecycle.add_payment(
+    try:
+        return await service.service.add_payment(
             order_id,
-            by,
-            amount_minor=body.amount_minor,
-            method=body.method,
-            reference=body.reference,
-            received_at=body.received_at,
-            notes=body.notes,
+            lambda: orders.lifecycle.add_payment(
+                order_id,
+                by,
+                amount_minor=body.amount_minor,
+                method=body.method,
+                reference=body.reference,
+                received_at=body.received_at,
+                notes=body.notes,
+                payment_request_id=body.payment_request_id,
+            ),
         )
-    )
+    except LifecycleError as error:
+        raise refused(error) from None
 
 
 # -- items (§3.3) ------------------------------------------------------------------------------
@@ -1601,7 +1570,7 @@ async def _add_items(
 ) -> list[OrderItem]:
     """Each body read as `POST /orders/{id}/items` reads it, then all added in one
     transaction. In a batch a refused body's problem names its place, ``item_index``."""
-    _path(order_id)
+    check_path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     by = current_actor()
@@ -1631,12 +1600,27 @@ async def _add_items(
                 title=error.title,
                 type_=error.type,
                 headers=error.headers,
-                **error.extensions,
+                **{**error.extensions, **_in_item(error.extensions, index)},
                 item_index=index,
             ) from None
     return await _run(
         lambda: orders.lifecycle.add_items(order_id, by, entries, after_acceptance=after_acceptance)
     )
+
+
+def _in_item(extensions: dict[str, Any], index: int) -> dict[str, Any]:
+    """A field refusal's ``errors`` with each body ``loc`` inside ``items[index]``."""
+    errors = extensions.get("errors")
+    if not isinstance(errors, list):
+        return {}
+    return {
+        "errors": [
+            {**e, "loc": ["body", "items", index, *e["loc"][1:]]}
+            if isinstance(e, dict) and list(e.get("loc", []))[:1] == ["body"]
+            else e
+            for e in errors
+        ]
+    }
 
 
 async def _new_item(
@@ -1740,7 +1724,7 @@ async def patch_item(
     config: ConfigDep,
     fetcher: FetcherDep,
 ) -> OrderItem:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     given = body.model_fields_set
     resolved = None
     if body.reference is not None or ("output_id" in given and body.output_id is not None):
@@ -1785,7 +1769,7 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     """Only while the item is `draft` (Ruling 10): else 409 ``item_not_draft`` names the
     cancel route, and the caller decides. A draft item with time or cost entries is 409
     ``item_has_entries`` (#5326): remove them, or cancel it."""
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
     await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1803,7 +1787,7 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     ),
 )
 async def reopen_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.reopen_item(order_id, item_id, by))
 
@@ -1812,7 +1796,7 @@ async def reopen_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
     "/{order_id}/items/{item_id}/cancel", response_model=OrderItem, summary="Cancel a line item"
 )
 async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.cancel_item(order_id, item_id, by))
 
@@ -1925,7 +1909,7 @@ async def _add_revision(
     config: ConfigDep,
     fetcher: FetcherDep,
 ) -> Revision:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     given = body.model_fields_set
     resolved = None
     if body.reference is not None or ("output_id" in given and body.output_id is not None):
@@ -1970,7 +1954,7 @@ async def _add_revision(
 async def send_revision(
     order_id: str, item_id: str, revision_id: str, orders: OrdersDep
 ) -> Revision:
-    _path(order_id, item_id, revision_id)
+    check_path(order_id, item_id, revision_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.send_revision(order_id, item_id, revision_id, by))
 
@@ -1994,7 +1978,7 @@ async def answer_revision(
     body: RevisionAnswerInput,
     orders: OrdersDep,
 ) -> Revision:
-    _path(order_id, item_id, revision_id)
+    check_path(order_id, item_id, revision_id)
     by = current_actor()
     return await _run(
         lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by)
@@ -2013,7 +1997,7 @@ async def answer_revision(
 async def record_quote(
     order_id: str, item_id: str, body: ManualQuoteInput, orders: OrdersDep
 ) -> Quote:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.record_manual_quote(order_id, item_id, body, by))
 
@@ -2039,7 +2023,7 @@ async def quote_item(
     Refused before anything is written: 404 for an unknown order or item, 409
     ``order_not_open`` and ``item_not_open``, 422 ``filaments`` (a slot with no
     filament, or one archived) and ``price_book`` (a book that prices nothing)."""
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     result = await run_operation(
         ops,
         response,
@@ -2063,7 +2047,7 @@ async def quote_item(
     summary="Accept a quote",
 )
 async def accept_quote(order_id: str, item_id: str, quote_id: str, orders: OrdersDep) -> OrderItem:
-    _path(order_id, item_id, quote_id)
+    check_path(order_id, item_id, quote_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by))
 
@@ -2101,7 +2085,7 @@ async def print_item(
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced); and the
     print run's own refusals, as the print route answers them."""
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     result = await run_operation(
         ops,
         response,
@@ -2154,7 +2138,7 @@ async def test_print_item(
     print), and ``requote_needed`` (no slice quote of the revision,
     its sliced file gone or no longer the file it priced, or the output gone); and the
     print run's own refusals, as the print route answers them."""
-    _path(order_id, item_id, revision_id)
+    check_path(order_id, item_id, revision_id)
     result = await run_operation(
         ops,
         response,
@@ -2186,7 +2170,7 @@ async def test_print_item(
 async def record_fulfilment(
     order_id: str, item_id: str, body: FulfilmentInput, orders: OrdersDep
 ) -> Fulfilment:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.record_fulfilment(order_id, item_id, body, by))
 
@@ -2199,7 +2183,7 @@ async def record_fulfilment(
 async def update_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, orders: OrdersDep
 ) -> Fulfilment:
-    _path(order_id, item_id, fulfilment_id)
+    check_path(order_id, item_id, fulfilment_id)
     by = current_actor()
     return await _run(
         lambda: orders.lifecycle.update_fulfilment(order_id, item_id, fulfilment_id, body, by)
@@ -2240,7 +2224,7 @@ async def get_attempt_archives(
     ``linked`` is false, with no archives, without Bambuddy; an attempt by hand naming no
     archive, or one Bambuddy has linked no archive to yet, has none. 404 for an attempt
     not the item's."""
-    _path(order_id, item_id, fulfilment_id)
+    check_path(order_id, item_id, fulfilment_id)
     return await attempt_archives(
         orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
     )
@@ -2276,7 +2260,7 @@ async def copy_archive_media(
     ``no_timelapse`` (pull it off the printer first, ``POST
     /prints/{archive_id}/timelapse/pull``). Allowed in any state of the order, as an
     upload is."""
-    _path(order_id, item_id, fulfilment_id)
+    check_path(order_id, item_id, fulfilment_id)
     result = await run_operation(
         ops,
         response,
@@ -2312,7 +2296,7 @@ async def copy_archive_media(
 async def accept_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
 ) -> Fulfilment:
-    _path(order_id, item_id, fulfilment_id)
+    check_path(order_id, item_id, fulfilment_id)
     by = current_actor()
     return await _run(
         lambda: orders.lifecycle.accept_fulfilment(order_id, item_id, fulfilment_id, by)
@@ -2335,7 +2319,7 @@ async def accept_fulfilment(
 async def unfulfil_item(
     order_id: str, item_id: str, orders: OrdersDep, settings: SettingsStoreDep
 ) -> OrderItem:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
 
     def unfulfil() -> OrderItem:
@@ -2355,7 +2339,7 @@ async def unfulfil_item(
     summary="Record a shipment",
 )
 async def add_shipment(order_id: str, body: ShipmentInput, orders: OrdersDep) -> Shipment:
-    _path(order_id)
+    check_path(order_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.add_shipment(order_id, body, by))
 
@@ -2366,6 +2350,6 @@ async def add_shipment(order_id: str, body: ShipmentInput, orders: OrdersDep) ->
 async def update_shipment(
     order_id: str, shipment_id: str, body: ShipmentEdit, orders: OrdersDep
 ) -> Shipment:
-    _path(order_id, shipment_id)
+    check_path(order_id, shipment_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.update_shipment(order_id, shipment_id, body, by))
