@@ -104,6 +104,7 @@ from scadbuddy.bambuddy.options import (
 )
 from scadbuddy.bambuddy.part_settings import (
     PartSettingsMap,
+    laid_under,
     normalised,
     overrides_of,
     unknown_slots,
@@ -778,6 +779,27 @@ async def part_settings_refusal(source: PrintSource, request: PrintRunRequest) -
         f"part_settings names slot {', '.join(map(str, unknown))}, but no printed part of"
         f" this output is made in it (its parts' slots: {named})."
     )
+
+
+async def run_part_settings(
+    source: PrintSource, request: PrintRunRequest
+) -> PartSettingsMap | None:
+    """The settings per slot the run's copy carries: the template's (#5626,
+    ``OutputSource.part_settings``) with the request's ``part_settings`` over them, per
+    key. The template's go only where a copy can carry them: an output whose 3MF is laid
+    out (not ``as_is``), on the slots a printed part is made in. Elsewhere they set
+    nothing, so a template's settings never refuse a run; the request's were judged by
+    :func:`part_settings_refusal`."""
+    template = source.part_settings if isinstance(source, OutputSource) else None
+    if template is not None:
+        payload = await source.fetch_3mf(None)
+        if payload is None or await asyncio.to_thread(layout_of, payload) == "as_is":
+            template = None
+        else:
+            text = await asyncio.to_thread(model_settings_text, payload)
+            slots = printed_part_slots(text) if text is not None else set()
+            template = {slot: value for slot, value in template.items() if slot in slots}
+    return laid_under(template, request.part_settings)
 
 
 class PrintCheck(BaseModel):
@@ -2993,8 +3015,9 @@ async def plan_run(
             [slot.spool_id for slot in request.filament_plan.slots], printer_status
         ),
         filament_map=filament_map,
-        # #5571: the same copy for the quote, the background slice and the print.
-        part_settings=overrides_of(request.part_settings),
+        # #5571: the same copy for the quote, the background slice and the print; with
+        # the template's own under the request's (#5626).
+        part_settings=overrides_of(await run_part_settings(source, request)),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last

@@ -32,6 +32,7 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.bambuddy.part_settings import ColourParameter, PartSettings
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
@@ -469,6 +470,45 @@ class ModelMeta(BaseModel):
                 raise ValueError(problem)
         return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
 
+    #: The template's slicer settings per colour part (#5626): each key a ``// color``
+    #: parameter of its source, each value the settings for the parts of that colour,
+    #: with the keys and limits of a print's ``part_settings``
+    #: (``bambuddy/part_settings.py`` ``PartSettings``). Not in `ModelPatch` either.
+    #: Stored as plain dicts of the settings set, so a plain ``model_dump`` is the
+    #: model.json shape (an operation's stored result is sent as it is).
+    part_print_settings: dict[ColourParameter, dict[str, int | str]] = Field(
+        default_factory=dict,
+        description=(
+            "The template's own slicer settings per colour part, from its model.json: each"
+            " key a colour parameter, each value the settings for the parts in that colour."
+            " The server lays a print request's part_settings over them, per key, on every"
+            " slice of an output; for clients they are informational, and no request sets"
+            " them."
+        ),
+    )
+
+    @field_validator("part_print_settings", mode="before")
+    @classmethod
+    def _set_part_print_settings(cls, value: Any) -> Any:
+        """Each parameter's settings checked by ``PartSettings``: an unknown key or a
+        value out of range is refused, as an unknown print setting is. Only the settings
+        set are kept, and a parameter that sets nothing is dropped."""
+        if not isinstance(value, dict):
+            return value  # the field's own type check refuses it
+        kept: dict[Any, dict[str, Any]] = {}
+        for name, raw in value.items():
+            try:
+                settings = PartSettings.model_validate(raw)
+            except ValidationError as error:
+                problems = "; ".join(
+                    f"{name}.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                    for detail in error.errors()
+                )
+                raise ValueError(problems) from None
+            if settings.metadata():
+                kept[name] = settings.model_dump(exclude_none=True)
+        return kept
+
     @field_validator("media", mode="before")
     @classmethod
     def _readable_media(cls, value: Any) -> list[MediaItem]:
@@ -492,7 +532,7 @@ class ModelMeta(BaseModel):
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
 DEFAULTED_META_FIELDS = frozenset(
-    {"name", "description", "tags", "libraries", "media", "print_settings"}
+    {"name", "description", "tags", "libraries", "media", "print_settings", "part_print_settings"}
 )
 
 
@@ -964,6 +1004,12 @@ class Catalogue:
         :class:`InvalidModelMetaError`, naming the key."""
         return self._meta(slug, self.read_raw_meta(slug)).print_settings
 
+    def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
+        """The template's ``part_print_settings`` as its model.json has them now
+        (#5626), by colour parameter; read and refused as :meth:`print_settings`."""
+        declared = self._meta(slug, self.read_raw_meta(slug)).part_print_settings
+        return {name: PartSettings.model_validate(raw) for name, raw in declared.items()}
+
     def _record(
         self,
         slug: str,
@@ -1177,6 +1223,8 @@ class Catalogue:
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            if not meta.part_print_settings:
+                excluded.add("part_print_settings")  # #5626, as print_settings
             if meta.mesh_source is None:
                 excluded.add("mesh_source")
             raw = meta.model_dump(exclude=excluded)

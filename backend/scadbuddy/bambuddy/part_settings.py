@@ -18,12 +18,13 @@ takes the ``wall_loops`` bound, 1000, for them too.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.render.bambu3mf import PartOverrides
+from scadbuddy.render.colours import colour_hex
 
 #: The most layers or loops a part setting takes: ``wall_loops``' own maximum.
 MAX_LAYERS = 1000
@@ -116,3 +117,50 @@ def dumped(value: PartSettingsMap | None) -> dict[str, dict[str, Any]] | None:
     if kept is None:
         return None
     return {str(slot): settings.model_dump(exclude_none=True) for slot, settings in kept.items()}
+
+
+#: How a template's ``part_print_settings`` (#5626) names a part: by the OpenSCAD
+#: identifier of its ``// color`` parameter, never by slot, since the slots follow the
+#: colours a render uses and move when two colours become one or a colour comes or goes.
+COLOUR_PARAMETER_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+ColourParameter = Annotated[str, Field(pattern=COLOUR_PARAMETER_PATTERN, max_length=200)]
+
+
+def by_colour(
+    declared: Mapping[str, PartSettings],
+    params: Mapping[str, object],
+    colours: Sequence[str],
+) -> PartSettingsMap | None:
+    """A template's ``part_print_settings`` (#5626), named by colour parameter, as the
+    slots of one output: each parameter's value in ``params`` (the output's) is matched
+    to the slot of that colour in ``colours`` (the output's, in slot order). A parameter
+    the output has no value for, or whose colour no slot is, sets nothing. Two
+    parameters of one colour share its slot; for a key both set, the one declared first
+    wins. ``None`` when nothing is left."""
+    slots = {colour_hex(colour): index for index, colour in enumerate(colours, start=1)}
+    found: dict[int, dict[str, Any]] = {}
+    for name, settings in declared.items():
+        hex_value = colour_hex(params.get(name))
+        slot = slots.get(hex_value) if hex_value is not None else None
+        if slot is None:
+            continue
+        found[slot] = {**settings.model_dump(exclude_none=True), **found.get(slot, {})}
+    return normalised({slot: PartSettings(**values) for slot, values in found.items()})
+
+
+def laid_under(
+    template: PartSettingsMap | None, request: PartSettingsMap | None
+) -> PartSettingsMap | None:
+    """The template's settings per slot (#5626) with the request's over them: the
+    request wins per key, and a key only the template sets stays."""
+    merged: dict[int, PartSettings] = {}
+    for slot in sorted({*(template or {}), *(request or {})}):
+        under = (template or {}).get(slot)
+        over = (request or {}).get(slot)
+        merged[slot] = PartSettings(
+            **{
+                **(under.model_dump(exclude_none=True) if under is not None else {}),
+                **(over.model_dump(exclude_none=True) if over is not None else {}),
+            }
+        )
+    return normalised(merged)
