@@ -164,6 +164,28 @@ describe('OrderPage (#4249)', () => {
     expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeInTheDocument()
   })
 
+  it('offers the design and filament edits of an item revised after acceptance, never its quantity (#5582)', async () => {
+    const approved = state.items.find((i) => i.order_id === ORDER_ACCEPTED && i.status === 'approved')!
+    const first = render(ORDER_ACCEPTED, `?item=${approved.id}`)
+    let drawer = await screen.findByRole('dialog', { name: approved.title })
+    // Accepted: the price is pinned, and a new design goes through the confirm.
+    expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
+    expect(within(drawer).queryByRole('button', { name: 'Quote from a slice…' })).toBeNull()
+    expect(within(drawer).queryByRole('button', { name: 'Record and accept' })).toBeNull()
+    first.unmount()
+
+    await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, approved.id, { note: 'loop' })
+    render(ORDER_ACCEPTED, `?item=${approved.id}`)
+    drawer = await screen.findByRole('dialog', { name: approved.title })
+    await within(drawer).findByTestId('revised-after-acceptance')
+    // `priceOpen`: the new design takes a quote (its filaments with it) and more revisions, as the backend allows.
+    expect(within(drawer).getByRole('button', { name: 'Quote from a slice…' })).toBeEnabled()
+    expect(within(drawer).getByRole('button', { name: 'Record and accept' })).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeEnabled()
+    // The quantity stays pinned: it would reprice the old quote.
+    expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
+  })
+
   it('offers no Add item on an accepted order on hold', async () => {
     await api.holdOrder(ORDER_ACCEPTED)
     render(ORDER_ACCEPTED)

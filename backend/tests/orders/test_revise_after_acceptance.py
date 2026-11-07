@@ -6,6 +6,8 @@ the quantity stays pinned, the old quote is never accepted again."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from scadbuddy.orders.lifecycle import (
@@ -14,12 +16,13 @@ from scadbuddy.orders.lifecycle import (
     ManualQuoteInput,
     requote_open,
 )
-from scadbuddy.orders.models import Order, OrderItem, Quote
+from scadbuddy.orders.models import Fulfilment, Order, OrderItem, Quote
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_add_after_acceptance import START
 from tests.orders.test_lifecycle import BY, Shop, resolved
+from tests.orders.test_printing import run_row, set_run, settle, started
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -251,3 +254,59 @@ def test_a_print_in_flight_is_refused(shop: Shop) -> None:
     with pytest.raises(LifecycleError) as refused:
         revise(shop, order, item)
     assert refused.value.slug == "print_in_flight"
+
+
+def _backdate(pool: PgPool, attempt: Fulfilment, by: timedelta) -> None:
+    """Pins the attempt before the revision that follows it, so the order of the two rows
+    never rests on the clock between two transactions."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET created_at = created_at - %s WHERE id = %s",
+            (by, attempt.id),
+        )
+
+
+def _printed(shop: Shop, pool: PgPool, order: Order, item: OrderItem) -> Fulfilment:
+    """The item printed, its attempt not accepted yet: the item is `printed`."""
+    run_id = run_row(pool)
+    started(shop, order, item, run_id)
+    set_run(pool, run_id, "succeeded")
+    shop.lifecycle.follow_print(run_id)
+    shop.lifecycle.follow_print(run_id, progressed=True)
+    settle(pool, run_id, "finished")
+    attempt = shop.lifecycle.follow_print(run_id)
+    assert attempt is not None
+    return attempt
+
+
+@pytest.mark.parametrize("how", ["print", "hand"])
+def test_the_old_designs_attempt_is_never_accepted(shop: Shop, pool: PgPool, how: str) -> None:
+    order, item = shop.accepted()
+    if how == "print":
+        old = _printed(shop, pool, order, item)
+        assert shop.get_item(item).status == "printed"
+    else:
+        old = shop.lifecycle.record_fulfilment(
+            order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+        )
+    _backdate(pool, old, timedelta(hours=1))
+    revise(shop, order, item)
+    assert shop.get_item(item).status == "draft"
+    new = requote(shop, order, item, 1200)
+    item = shop.lifecycle.accept_quote(order.id, item.id, new.id, BY)
+    assert item.status == "approved"
+
+    # The old attempt printed the earlier design: it never counts as the new one made.
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.accept_fulfilment(order.id, item.id, old.id, BY)
+    assert refused.value.slug == "fulfilment_stale"
+    assert shop.get_item(item).status == "approved"
+    stale = next(f for f in shop.rows.fulfilments(item.id) if f.id == old.id)
+    assert stale.accepted_at is None
+
+    # An attempt of the new design is accepted.
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    assert shop.get_item(item).status == "fulfilled"

@@ -380,7 +380,9 @@ its old price (seen on ORD-2026-3).
   `in_production` or `ready` order (`TAKES_ITEMS`).
 - It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use the
   plain route), once it is `shipped` (`item_locked`; every item of a shipped order is
-  settled, so `item_not_open` answers first), once it has ended
+  settled, so `item_not_open` answers first), on a `ready` order (every item of it is
+  settled too, so `item_not_open` answers: the route never works on `ready`, though
+  `TAKES_ITEMS` lists it), once it has ended
   (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). It is refused for a
   fulfilled or cancelled item (`item_not_open`), a custom item (`item_custom`), an item
   with no accepted quote (`item_not_priced`: use the plain route, #5349), and while a
@@ -389,6 +391,11 @@ its old price (seen on ORD-2026-3).
   agreed. The item is marked `revised_after_acceptance` (a new column on `order_items`).
   An item in `quoted`, `approved`, `printed` or `failed` goes back to `draft`, so it is
   not printed or fulfilled at the old quote.
+- An attempt of the old design (a `printed` item's print, or one recorded by hand) stays
+  on the item, not accepted. Once a quote of the new design is accepted, the item is
+  `approved` again, and accepting that old attempt is refused (`fulfilment_stale`): an
+  attempt made before the revision the accepted quote prices printed an earlier design
+  (#5582, `Lifecycle.accept_fulfilment`).
 - While the mark stands, the lock is `requote_open` (`orders/lifecycle.py`), not
   `item_open`. The item takes a quote (manual or slice), a quote's acceptance, a
   customer's answer, and more revisions on either route. Its quantity stays pinned.
@@ -408,6 +415,10 @@ its old price (seen on ORD-2026-3).
   the confirm names the order's status (`afterAcceptance.ts` `reviseMode`,
   `reviseWarning`). A failed save clears the confirm. The quote editor follows
   `priceOpen`.
+- The drawer offers the design and filament edits that `update_item` lets through
+  `_open_for_requote` (#5582): a new design in the Revisions panel (`reviseMode`, which
+  is `open` while `priceOpen` holds) and the filaments of a slice quote in the quote
+  editor (`priceOpen`). The quantity field follows `itemOpen`, so it stays locked.
 
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed
