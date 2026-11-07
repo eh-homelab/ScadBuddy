@@ -17,7 +17,7 @@ from typing import Protocol
 
 from prometheus_client import Counter
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
@@ -28,7 +28,7 @@ from scadbuddy.bambuddy.models import ArchiveDetail, FilamentRequirement, Printe
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import Usage, rack_serials
 from scadbuddy.render.pg_store import migrate
@@ -187,23 +187,17 @@ class RackUsageStore:
     def __init__(
         self, conninfo: str, *, pool_size: int = 2, connect_timeout: float = CONNECT_TIMEOUT
     ) -> None:
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+        # Not the API's shared rows pool (`rows/component.py`, #5226): every connection
+        # here has its statement timeout lowered.
+        self._pool: ConnectionPool[Connection[DictRow]] = row_pool(
             conninfo,
-            min_size=1,
+            name="scadbuddy-rack-usage",
             max_size=pool_size,
-            open=False,
             timeout=connect_timeout,
-            connection_class=Connection[DictRow],
-            kwargs={
-                "autocommit": True,
-                "row_factory": dict_row,
-                "connect_timeout": max(1, int(connect_timeout)),
-                **TCP_KEEPALIVE,
-            },
+            connect_timeout=connect_timeout,
             # Set per connection rather than as ``options``, which would replace any the
             # conninfo already carries (a search_path, say). It only ever lowers one.
             configure=_bound_statements,
-            name="scadbuddy-rack-usage",
         )
         self._pool_open = False
         self._migrated = False

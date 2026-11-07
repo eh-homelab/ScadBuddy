@@ -23,11 +23,12 @@ from collections.abc import Collection, Sequence
 from typing import Any, Protocol
 
 from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
+from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.analyzers.model import Decision, ScopeKind, ScopeRef
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.pg_store import migrate
@@ -106,22 +107,27 @@ class PostgresDecisionStore:
     backend = "postgres"
 
     def __init__(
-        self, conninfo: str, *, pool_size: int = 4, connect_timeout: float = CONNECT_TIMEOUT
+        self,
+        conninfo: str,
+        *,
+        pool_size: int = 4,
+        connect_timeout: float = CONNECT_TIMEOUT,
+        pool: ConnectionPool[Connection[DictRow]] | None = None,
     ) -> None:
+        """``pool``, when given, is the API's shared rows pool (`rows/component.py`,
+        #5226), which its owner closes; otherwise the store has its own."""
         self.connect_timeout = connect_timeout
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
-            conninfo,
-            min_size=1,
-            max_size=pool_size,
-            open=False,
-            timeout=connect_timeout,
-            connection_class=Connection[DictRow],
-            kwargs={
-                "autocommit": True,
-                "row_factory": dict_row,
-                "connect_timeout": max(1, int(connect_timeout)),
-            },
-            name="scadbuddy-analyzer-decisions",
+        self._owns_pool = pool is None
+        self._pool = (
+            pool
+            if pool is not None
+            else row_pool(
+                conninfo,
+                name="scadbuddy-analyzer-decisions",
+                max_size=pool_size,
+                timeout=connect_timeout,
+                connect_timeout=connect_timeout,
+            )
         )
         self._pool_open = False
         self._migrated = False
@@ -233,7 +239,8 @@ class PostgresDecisionStore:
     def close(self) -> None:
         with self._open_lock:
             if self._pool_open:
-                self._pool.close()
+                if self._owns_pool:
+                    self._pool.close()
                 self._pool_open = False
 
 
