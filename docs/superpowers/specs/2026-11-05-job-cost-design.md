@@ -376,14 +376,17 @@ The builder's calls, each also a comment on #5543:
   nothing) a new pack's own cost replaces the average.
 - **A pack edit** (`PATCH /parts/{id}`) sets what the next "Add stock" records; the unit cost
   changes only when nothing is on hand to average. "Add stock" may name a new pack price,
-  which becomes the part's.
+  which becomes the part's. One "Add stock" moves at most 1,000,000 units (its packs times
+  the pack size) and leaves at most 1,000,000,000 on hand; past either it is a 422.
 - **Currency.** A part is priced in the shop's `orders_currency` when it is made. A part used
   on an order in another currency still leaves stock, but writes no cost entry (one currency
   is never added to another, §5).
 - **Rule shape.** A rule is lines of `{per_unit, part_id, when: [{colour, part_id}]}`: the
   first `when` whose colour the item has in any slot (in any case), else `part_id`, else
   nothing. A part two lines name is summed. The rule is applied once, when the item is
-  added; items already added keep their parts. It lives in Postgres keyed by slug, not in
+  added; items already added keep their parts. A `request` item gets its design later
+  through a revision (`add_revision`), which does not apply the rule: the item was added
+  with no model, and its parts are set on the item by hand, as for a model with no rule. It lives in Postgres keyed by slug, not in
   the template's `model.json`, so a rule change never moves a template's revision.
 - **Changing an item's parts** is refused (`item_parts_used`) while the item is fulfilled,
   so an unfulfil returns exactly what was taken; it is allowed in every other state of an

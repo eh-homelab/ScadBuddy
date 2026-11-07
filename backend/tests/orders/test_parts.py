@@ -19,6 +19,7 @@ from scadbuddy.orders.parts import (
     PartStore,
     StockAdd,
     StockAdjust,
+    StockTooLargeError,
     average,
     rule_parts,
     use_amount,
@@ -149,3 +150,29 @@ def test_a_rule_names_only_parts_that_exist(parts: PartStore) -> None:
     assert parts.rule("keychain") == saved
     assert parts.set_rule("keychain", PartRuleInput(lines=[]), BY).lines == []
     assert parts.rule("keychain").updated_at is None
+
+
+def test_a_stock_add_past_the_most_one_change_moves_is_refused(parts: PartStore) -> None:
+    """#5549 review: 10,000 packs of 1,000,000 would overflow `integer`; refused before SQL."""
+    part_id = _hook(parts, pack_size=1_000_000)
+
+    with pytest.raises(StockTooLargeError):
+        parts.add_stock(part_id, StockAdd(packs=2), BY)
+
+    assert parts.add_stock(part_id, StockAdd(packs=1), BY).on_hand == 1_000_000
+    assert [m.kind for m in parts.moves(part_id)] == ["add"]
+
+
+def test_a_name_taken_by_a_concurrent_create_is_part_exists(
+    parts: PartStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5549 review: two creates of one name both pass the check; the index answers."""
+    part_id = _hook(parts)
+    monkeypatch.setattr(PartStore, "_name_free", lambda *_: None)
+
+    with pytest.raises(PartExistsError) as exists:
+        _hook(parts, name="silver HOOK")
+    assert exists.value.existing_id == part_id
+    other = _hook(parts, name="Ring")
+    with pytest.raises(PartExistsError):
+        parts.update(other, PartPatch(name="Silver Hook"))

@@ -235,6 +235,20 @@ describe('QuoteEditor · the quote warning (#5328)', () => {
     created_by: { kind: 'browser', principal: null, session: null },
   })
 
+  it("reads the history again when the item's parts change (#5549 review)", async () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    const view = (parts: string) => (
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} parts={parts} slice={{ start: vi.fn(), dismiss: vi.fn() }} />
+    )
+    const { user, rerender } = renderPage(view(''))
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '8')
+    expect(await screen.findByTestId('quote-warning')).toHaveTextContent('real cost: $9.00 a unit')
+    // Two hooks saved in the Parts editor: the page passes the item's new parts.
+    seedUnitCost('name-keychain', { jobs: 4, units: 6, unit_cost_minor: 1100, estimated: false, main_reason: 'other', main_reason_minor: 200 })
+    rerender(view('hook:2'))
+    await waitFor(() => expect(screen.getByTestId('quote-warning')).toHaveTextContent('real cost: $11.00 a unit'))
+  })
+
   it('warns on a slice quote not yet accepted, and says nothing on a price that is not thin', async () => {
     const { user } = editor([lowSlice()])
     expect(await screen.findByTestId('quote-warning')).toHaveTextContent('$6.00 a unit is below')

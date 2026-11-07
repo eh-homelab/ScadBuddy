@@ -32,6 +32,8 @@ describe('item parts (#5543)', () => {
     await user.click(screen.getByRole('button', { name: 'Edit parts' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add part' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Add part' }))
+    // #5549 review: every part is in the list now, so there is none left to add.
+    expect(screen.getByRole('button', { name: 'Add part' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Save parts' }))
 
     await waitFor(() => expect(onChanged).toHaveBeenCalled())

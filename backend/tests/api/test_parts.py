@@ -52,6 +52,12 @@ def test_parts_and_their_stock(client: TestClient) -> None:
     assert client.get("/api/v1/parts?low=true").json() == []
     assert client.post("/api/v1/parts/nope/stock", json={}).status_code == 404
 
+    # #5549 review: packs times the pack size past one change's most is a 422, never a 500.
+    big = make_part(client, name="Magnet", pack_size=1_000_000)
+    too_many = client.post(f"/api/v1/parts/{big['id']}/stock", json={"packs": 10_000})
+    assert too_many.status_code == 422, too_many.text
+    assert too_many.json()["errors"][0]["loc"] == ["body", "packs"]
+
 
 def test_a_rule_fills_a_new_item_and_fulfil_uses_its_parts(client: TestClient) -> None:
     part = make_part(client, on_hand=1)

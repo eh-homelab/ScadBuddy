@@ -76,10 +76,19 @@ export function PartRules({ parts }: { parts: InventoryPart[] }) {
     }
   }
 
-  function edit(index: number, change: Partial<PartRuleLine>) {
+  /** Every change to the lines: none of it is saved yet. */
+  function change(next: (all: PartRuleLine[]) => PartRuleLine[]) {
     setSaved(false)
-    setLines((all) => all.map((line, i) => (i === index ? { ...line, ...change } : line)))
+    setLines(next)
   }
+
+  function edit(index: number, patch: Partial<PartRuleLine>) {
+    change((all) => all.map((line, i) => (i === index ? { ...line, ...patch } : line)))
+  }
+
+  // The lines are `loaded`'s: once the field names another slug, Save waits for its Open.
+  const typed = slug.trim()
+  const stale = loaded !== null && typed !== loaded
 
   return (
     <section aria-label="Model rules" className="flex flex-col gap-3 rounded-md border p-3">
@@ -112,7 +121,7 @@ export function PartRules({ parts }: { parts: InventoryPart[] }) {
                 <Button size="xs" variant="ghost" onClick={() => edit(index, { when: [...(line.when ?? []), { colour: '#000000', part_id: parts[0]?.id ?? '' }] })} disabled={parts.length === 0}>
                   Add colour
                 </Button>
-                <Button size="xs" variant="ghost" aria-label={`Remove line ${index + 1}`} onClick={() => setLines((all) => all.filter((_, i) => i !== index))}>
+                <Button size="xs" variant="ghost" aria-label={`Remove line ${index + 1}`} onClick={() => change((all) => all.filter((_, i) => i !== index))}>
                   Remove
                 </Button>
               </div>
@@ -135,13 +144,18 @@ export function PartRules({ parts }: { parts: InventoryPart[] }) {
             </div>
           ))}
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => setLines((all) => [...all, { per_unit: 1, part_id: parts[0]?.id ?? null, when: [] }])} disabled={parts.length === 0}>
+            <Button size="sm" variant="outline" onClick={() => change((all) => [...all, { per_unit: 1, part_id: parts[0]?.id ?? null, when: [] }])} disabled={parts.length === 0}>
               Add line
             </Button>
-            <Button size="sm" onClick={() => void save()} disabled={busy}>
+            <Button size="sm" onClick={() => void save()} disabled={busy || stale}>
               Save rule
             </Button>
             {saved && <span role="status" className="text-[13px] text-muted-foreground">Saved.</span>}
+            {stale && (
+              <span className="text-[13px] text-muted-foreground">
+                These lines are {loaded}'s rule. {typed ? `Open ${typed}'s rule first to edit it.` : 'Name a model to open its rule.'}
+              </span>
+            )}
           </div>
         </div>
       )}

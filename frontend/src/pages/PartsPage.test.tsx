@@ -83,5 +83,32 @@ describe('PartsPage (#5543)', () => {
 
     expect(await within(rules).findByText('Saved.')).toBeInTheDocument()
     expect((await api.partRule('keychain')).lines).toEqual([{ per_unit: 1, part_id: hook.id, when: [] }])
+
+    // #5549 review: a line added or removed after the save is not saved yet.
+    await user.click(within(rules).getByRole('button', { name: 'Add line' }))
+    expect(within(rules).queryByText('Saved.')).toBeNull()
+    await user.click(within(rules).getByRole('button', { name: 'Save rule' }))
+    expect(await within(rules).findByText('Saved.')).toBeInTheDocument()
+    await user.click(within(rules).getByRole('button', { name: 'Remove line 2' }))
+    expect(within(rules).queryByText('Saved.')).toBeNull()
+  })
+
+  it('never saves the opened rule under a slug typed since (#5549 review)', async () => {
+    const user = userEvent.setup()
+    const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599 })
+    renderPage(<PartsPage />)
+    await screen.findByTestId(`part-row-${hook.id}`)
+    const rules = screen.getByRole('region', { name: 'Model rules' })
+    const field = within(rules).getByLabelText('Model slug')
+
+    await user.type(field, 'keychain')
+    await user.click(within(rules).getByRole('button', { name: 'Open rule' }))
+    await within(rules).findByText(/keychain has no rule/)
+    await user.click(within(rules).getByRole('button', { name: 'Add line' }))
+    await user.clear(field)
+    await user.type(field, 'coaster')
+
+    expect(within(rules).getByRole('button', { name: 'Save rule' })).toBeDisabled()
+    expect(within(rules).getByText(/Open coaster's rule first/)).toBeInTheDocument()
   })
 })

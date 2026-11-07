@@ -19,6 +19,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
+from psycopg import errors
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator
 
@@ -28,9 +29,12 @@ from scadbuddy.orders.store import Conn, OrderStore
 
 #: The most of one part one unit of an item may use.
 MAX_PER_UNIT = 1000
-#: The most units one stock change may move, and the most packs one "Add stock" records.
+#: The most units one stock change may move (an "Add stock" is refused past it, its packs
+#: times the pack size; ``StockTooLargeError``), and the most packs one "Add stock" records.
 MAX_COUNT = 1_000_000
 MAX_PACKS = 10_000
+#: The most a part may hold on hand: well inside ``integer``, whatever adds come in turn.
+MAX_ON_HAND = 1_000_000_000
 #: A unit cost is kept to the millionth of a minor unit (``numeric(20, 6)``).
 UNIT_COST = Decimal("0.000001")
 
@@ -52,6 +56,11 @@ class PartNotFoundError(Exception):
     def __init__(self, part_id: str) -> None:
         super().__init__(f"no part {part_id!r}")
         self.part_id = part_id
+
+
+class StockTooLargeError(Exception):
+    """An "Add stock" that would move more than ``MAX_COUNT`` units at once, or leave more
+    than ``MAX_ON_HAND`` on hand."""
 
 
 class PartExistsError(Exception):
@@ -398,6 +407,31 @@ class PartStore:
     # part writes, each in its own transaction under the part's lock
 
     def create(self, body: PartInput, *, currency: str, by: Actor) -> InventoryPart:
+        """``PartExistsError`` when another part has the name, in any case: from the check,
+        or from ``parts_name`` when a create of the same name commits between the two."""
+        try:
+            return self._create(body, currency=currency, by=by)
+        except errors.UniqueViolation:
+            raise PartExistsError(self._named(body.name)) from None
+
+    def update(self, part_id: str, body: PartPatch) -> InventoryPart:
+        """Only what is sent changes. The pack is what the next "Add stock" records, so the
+        unit cost stays, unless nothing is on hand to average: then it is the new pack's.
+        A name another part has is ``PartExistsError``, as in ``create``."""
+        try:
+            return self._update(part_id, body)
+        except errors.UniqueViolation:
+            raise PartExistsError(self._named(body.name or "")) from None
+
+    def _named(self, name: str) -> str:
+        """The id of the part with ``name`` in any case, read after the refused write."""
+        with self.store._read(None) as c:
+            row = c.execute(
+                "SELECT id FROM parts WHERE lower(name) = lower(%s)", (name,)
+            ).fetchone()
+        return "" if row is None else str(row["id"])
+
+    def _create(self, body: PartInput, *, currency: str, by: Actor) -> InventoryPart:
         unit = (Decimal(body.pack_price_minor) / body.pack_size).quantize(
             UNIT_COST, rounding=ROUND_HALF_UP
         )
@@ -426,9 +460,7 @@ class PartStore:
                 )
         return part
 
-    def update(self, part_id: str, body: PartPatch) -> InventoryPart:
-        """Only what is sent changes. The pack is what the next "Add stock" records, so the
-        unit cost stays, unless nothing is on hand to average: then it is the new pack's."""
+    def _update(self, part_id: str, body: PartPatch) -> InventoryPart:
         with self.store.transaction() as conn:
             part = self._lock(conn, part_id)
             if body.name is not None:
@@ -472,6 +504,11 @@ class PartStore:
                 )
                 part = part.model_copy(update={"pack_price_minor": price})
             count = body.packs * part.pack_size
+            if count > MAX_COUNT or part.on_hand + count > MAX_ON_HAND:
+                raise StockTooLargeError(
+                    f"{body.packs} packs of {part.pack_size} is {count} units: one stock change"
+                    f" moves at most {MAX_COUNT}, and a part holds at most {MAX_ON_HAND}"
+                )
             return self.move(
                 conn, part, "add", count, by, amount_minor=body.packs * price, note=body.note
             )

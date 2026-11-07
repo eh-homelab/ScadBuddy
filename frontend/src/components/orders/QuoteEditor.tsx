@@ -53,6 +53,7 @@ export function QuoteEditor({
   onChanged,
   item,
   slice,
+  parts = '',
 }: {
   orderId: string
   itemId: string
@@ -68,6 +69,9 @@ export function QuoteEditor({
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
   slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
+  /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
+   * them, so a change reads it again. */
+  parts?: string
 }) {
   const [slicing, setSlicing] = useState(false)
   const [price, setPrice] = useState('')
@@ -86,7 +90,7 @@ export function QuoteEditor({
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
   const history = useAsync(
     () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked, itemId) : Promise.resolve(null)),
-    [slug, currency, checked, itemId],
+    [slug, currency, checked, itemId, parts],
   )
 
   async function record(accept: boolean) {

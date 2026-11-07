@@ -36,6 +36,7 @@ from scadbuddy.orders.parts import (
     StockAdd,
     StockAdjust,
     StockMove,
+    StockTooLargeError,
     order_parts,
 )
 from scadbuddy.orders.problems import PROBLEMS
@@ -126,7 +127,9 @@ async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> Invent
         "`packs` of the part's pack join the stock, at `pack_price_minor` each when sent "
         "(it becomes the part's pack price). The unit cost becomes the weighted average of "
         "the stock on hand and the new packs (their own cost when nothing is on hand). "
-        "Orders already fulfilled keep their cost. On the part's stock line as `add`."
+        "Orders already fulfilled keep their cost. On the part's stock line as `add`. 422 when "
+        "the packs come to more than 1,000,000 units, or would leave more than 1,000,000,000 "
+        "on hand."
     ),
 )
 async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> InventoryPart:
@@ -136,6 +139,12 @@ async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> Inventor
         return await asyncio.to_thread(orders.lifecycle.parts.add_stock, part_id, body, by)
     except PartNotFoundError as error:
         raise _not_found(error) from None
+    except StockTooLargeError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            errors=[{"loc": ["body", "packs"], "msg": str(error)}],
+        ) from None
 
 
 @router.post(

@@ -96,7 +96,7 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
             <Button
               size="xs"
               variant="outline"
-              disabled={parts.length === 0}
+              disabled={parts.every((p) => draft.some((r) => r.part_id === p.id))}
               onClick={() => {
                 const free = parts.find((p) => !draft.some((r) => r.part_id === p.id))
                 if (free) setDraft([...draft, { part_id: free.id, per_unit: 1 }])
