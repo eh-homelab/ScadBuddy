@@ -11,7 +11,8 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
       : 'text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground',
   )
 
-/** #5329 — the orders list and the profit report (`/orders/profit`), one tab each. */
+/** #5329 — the orders list, the profit report (`/orders/profit`) and the parts inventory
+ * (`/orders/parts`, #5543), one tab each. */
 export function OrdersTabs() {
   return (
     <nav aria-label="Orders views" className={cn(tabsListVariants(), 'h-9')}>
@@ -20,6 +21,9 @@ export function OrdersTabs() {
       </NavLink>
       <NavLink to="/orders/profit" className={tabClass}>
         Profit
+      </NavLink>
+      <NavLink to="/orders/parts" className={tabClass}>
+        Parts
       </NavLink>
     </nav>
   )

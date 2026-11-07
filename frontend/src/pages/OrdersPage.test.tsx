@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
+import { seedPart } from '../mocks/features/orders/parts'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import type { OrderRow } from '../api/types'
@@ -32,6 +33,22 @@ describe('OrdersPage (#4249)', () => {
     expect(rows.map((r) => within(r).getByRole('link').textContent)).toEqual(['ORD-2026-3', 'ORD-2026-2', 'ORD-2026-1'])
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Ada Lovelace')).toBeInTheDocument()
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Accepted')).toBeInTheDocument()
+  })
+
+  it('says which parts are low and links to the Parts page (#5543)', async () => {
+    seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599, on_hand: 2, low_stock: 5 })
+    seedPart({ name: 'Ring', pack_size: 10, pack_price_minor: 100, on_hand: 50, low_stock: 5 })
+    renderPage(<OrdersPage />, { route: '/orders' })
+
+    const banner = await screen.findByTestId('low-stock')
+    expect(banner).toHaveTextContent('Low stock: Silver hook (2).')
+    expect(within(banner).getByRole('link', { name: 'Parts' })).toHaveAttribute('href', '/orders/parts')
+  })
+
+  it('shows no low-stock line while no part is low (#5543)', async () => {
+    renderPage(<OrdersPage />, { route: '/orders' })
+    await screen.findByRole('table', { name: 'Orders' })
+    expect(screen.queryByTestId('low-stock')).not.toBeInTheDocument()
   })
 
   it('keeps the status chip and the customer in the URL', async () => {

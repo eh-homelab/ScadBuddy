@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, Loader2Icon } from 'lucide-react'
 import { api } from '../api/client'
-import type { Customer, OrderRow, OrderStatus } from '../api/types'
+import type { Customer, InventoryPart, OrderRow, OrderStatus } from '../api/types'
 import { CustomerPicker } from '../components/orders/CustomerPicker'
 import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustomerPicker'
 import { NEXT_SORT, sortByMargin, type MarginSort } from '../components/orders/marginSort'
@@ -65,6 +65,19 @@ function reportFilterText(query: OrdersQuery): string {
   return parts.join(', ')
 }
 
+/** #5543, job cost spec §11: the parts at or below their low-stock level, linked to the Parts page. */
+function LowStock({ parts }: { parts: InventoryPart[] }) {
+  if (parts.length === 0) return null
+  return (
+    <p role="status" data-testid="low-stock" className="rounded-md border border-warn/40 p-2 text-[13px] text-warn">
+      Low stock: {parts.map((p) => `${p.name} (${p.on_hand})`).join(', ')}.{' '}
+      <Link to="/orders/parts" className="underline underline-offset-4">
+        Parts
+      </Link>
+    </p>
+  )
+}
+
 /** `/orders` (spec 2026-10-18 §9): the list with its filters, newest first, paged by cursor. */
 export function OrdersPage() {
   const navigate = useNavigate()
@@ -73,6 +86,8 @@ export function OrdersPage() {
   const key = toOrdersParams(query).toString()
   const customers = useAsync(() => api.customers({ includeArchived: true, limit: 500 }), [])
   const list = useAsync(() => api.orders(query, { limit: PAGE }), [key], ['orders'])
+  // #5543: a fulfilment takes parts out of stock, so the low parts are read again on an order's change.
+  const lowParts = useAsync(() => api.parts(true), [], ['orders'])
   const [older, setOlder] = useState<{ key: string; items: OrderRow[]; cursor: string | null } | null>(null)
   const [sort, setSort] = useState<MarginSort>('none')
   const [loadingMore, setLoadingMore] = useState(false)
@@ -193,6 +208,7 @@ export function OrdersPage() {
             New order
           </Button>
         </div>
+        <LowStock parts={lowParts.data ?? []} />
         <FilterBar
           label="Order filters"
           search={{ value: query.q, onChange: (q) => onChange({ ...query, q }, { typing: true }), placeholder: 'Search orders' }}

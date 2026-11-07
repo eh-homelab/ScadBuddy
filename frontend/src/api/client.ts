@@ -222,6 +222,17 @@ import type {
   OrderEstimate,
   UnitCostHistory,
   ProfitReport,
+  InventoryPart,
+  PartCreate,
+  PartPatch,
+  StockAdd,
+  StockAdjust,
+  StockMove,
+  PartRule,
+  PartRuleLine,
+  ItemPart,
+  ItemPartRow,
+  OrderParts,
   OrderCosts,
   TimeEntry,
   TimeEntryCreate,
@@ -2514,11 +2525,24 @@ export const api = {
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
   /** #5328, job cost spec §6.3: the model's real cost per unit in its last fulfilled jobs,
-   * in `currency`, and whether `unitPrice` warns (`warning`, `below_cost`). Advice only. */
-  unitCostHistory: (slug: string, currency: string, unitPrice: number) =>
+   * in `currency`, and whether `unitPrice` warns (`warning`, `below_cost`). Advice only.
+   * With `itemId` (#5543), the item's parts at today's unit costs are in the unit cost. */
+  unitCostHistory: (slug: string, currency: string, unitPrice: number, itemId?: string) =>
     request<UnitCostHistory>(
-      `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice) })}`,
+      `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice), ...(itemId ? { item_id: itemId } : {}) })}`,
     ),
+  // -- the parts inventory (#5543, job cost spec §11) -------------------------------------------
+  parts: (low = false) => request<InventoryPart[]>(`/parts${low ? '?low=true' : ''}`),
+  createPart: (body: PartCreate) => request<InventoryPart>('/parts', { method: 'POST', body: JSON.stringify(body) }),
+  updatePart: (id: string, body: PartPatch) => request<InventoryPart>(`/parts/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  addPartStock: (id: string, body: StockAdd) => request<InventoryPart>(`/parts/${seg(id)}/stock`, { method: 'POST', body: JSON.stringify(body) }),
+  adjustPartStock: (id: string, body: StockAdjust) => request<InventoryPart>(`/parts/${seg(id)}/adjust`, { method: 'POST', body: JSON.stringify(body) }),
+  partMoves: (id: string) => request<StockMove[]>(`/parts/${seg(id)}/moves`),
+  partRule: (slug: string) => request<PartRule>(`/parts/rules/${seg(slug)}`),
+  setPartRule: (slug: string, lines: PartRuleLine[]) => request<PartRule>(`/parts/rules/${seg(slug)}`, { method: 'PUT', body: JSON.stringify({ lines }) }),
+  orderParts: (orderId: string) => request<OrderParts>(`/orders/${seg(orderId)}/parts`),
+  setItemParts: (orderId: string, itemId: string, parts: ItemPart[]) =>
+    request<ItemPartRow[]>(`/orders/${seg(orderId)}/items/${seg(itemId)}/parts`, { method: 'PUT', body: JSON.stringify({ parts }) }),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>

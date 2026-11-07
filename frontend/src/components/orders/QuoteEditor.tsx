@@ -85,8 +85,8 @@ export function QuoteEditor({
   const current = price.trim() ? parseUnitPrice(price, exponent) : (pending?.unit_price_minor ?? null)
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
   const history = useAsync(
-    () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked) : Promise.resolve(null)),
-    [slug, currency, checked],
+    () => (slug && checked !== null ? api.unitCostHistory(slug, currency, checked, itemId) : Promise.resolve(null)),
+    [slug, currency, checked, itemId],
   )
 
   async function record(accept: boolean) {
