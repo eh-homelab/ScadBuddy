@@ -32,7 +32,10 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
 (the projects worker, #5298) takes `exchange_source` instead: the exchange only, with no
-view, and no proof refuses its start. The API's own in-process callers use
+view, and no proof refuses its start. `ExchangeReader`, `exchange_source` and `ServiceAuth`
+live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
+re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
+no database secret and refuses to start with one) can use them. The API's own in-process callers use
 `InProcessProvider` (`proof = inprocess`). A new caller-side client takes a `token_source`,
 never a `TokenReader` of its own.
 

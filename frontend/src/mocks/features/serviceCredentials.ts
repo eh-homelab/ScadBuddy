@@ -11,6 +11,7 @@ const SCOPES: Record<ServiceCaller, string[]> = {
   print: ['crud.print', 'internal.library', 'internal.outputs'],
   projects: ['crud.projects', 'flow.host'],
   render: ['crud.render'],
+  storefront: ['crud.storefront'],
 }
 
 function credential(caller: ServiceCaller): ServiceCredentialView {

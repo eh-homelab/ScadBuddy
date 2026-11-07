@@ -3,6 +3,7 @@ raises, a stale credential is replaced once, and a retry keeps its idempotency k
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.server
 import threading
@@ -24,6 +25,7 @@ from scadbuddy.crud.client import (
     CrudSyncClient,
     CrudUnavailableError,
     activity_key,
+    wait_for_areas,
 )
 from tests.crud.crud_support import FakeClock
 
@@ -479,3 +481,41 @@ async def test_blocking_refuses_a_transport_that_serves_no_blocking_request() ->
             client.blocking()
     finally:
         await client.aclose()
+
+
+async def test_a_refusal_carries_its_retry_after() -> None:
+    """#5282: the storefront edge answers a CRUD 429 with its status, problem and header."""
+    limited = problem(429, type="https://scadbuddy.dev/problems/storefront/render_limited")
+    limited.headers["Retry-After"] = "7"
+    client, _ = make(Script(limited))
+    with pytest.raises(CrudRefusedError) as raised:
+        await client.request("POST", PATH)
+    assert (raised.value.status, raised.value.retry_after) == (429, "7")
+    with pytest.raises(CrudRefusedError) as plain:
+        await make(Script(problem(404)))[0].request("GET", PATH)
+    assert plain.value.retry_after is None
+
+
+async def test_the_storefront_counts_its_areas_and_waits_on_its_own_routes() -> None:
+    """#5282: the storefront's routes are under `/internal/crud/storefront/`."""
+    script = Script(httpx.Response(200, json={"areas": ["listings"]}, headers=HEADER), ok())
+    metrics = Metrics(CollectorRegistry())
+    client = CrudClient(
+        "http://api",
+        "storefront",
+        ServiceAuth(Source()),
+        transport=httpx.MockTransport(script),
+        metrics=metrics,
+        backoff=0.01,
+    )
+    assert await wait_for_areas(client, "storefront", {"listings"}, asyncio.Event()) is True
+    await client.request("GET", "/api/v1/internal/crud/storefront/listings")
+    assert [r.url.path for r in script.requests] == [
+        "/api/v1/internal/crud/storefront/areas",
+        "/api/v1/internal/crud/storefront/listings",
+    ]
+    sample = metrics.registry.get_sample_value(
+        "scadbuddy_crud_client_seconds_count",
+        {"caller": "storefront", "area": "listings", "outcome": "ok"},
+    )
+    assert sample == 1
