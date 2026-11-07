@@ -66,6 +66,9 @@ def test_a_bad_item_adds_none_and_names_its_index(client: TestClient) -> None:
     )
     assert refused.status_code == 422, refused.text
     assert refused.json()["item_index"] == 1
+    # The field's place names the item it is in.
+    assert [e["loc"][:3] for e in refused.json()["errors"]] == [["body", "items", 1]]
+    assert refused.json()["errors"][0]["loc"][3:] == ["output_id"]
     shape = batch(client, order["id"], [CUSTOM, {"kind": "custom", "quantity": 1}])
     assert shape.status_code == 422, shape.text
     assert detail(client, order["id"])["items"] == []
