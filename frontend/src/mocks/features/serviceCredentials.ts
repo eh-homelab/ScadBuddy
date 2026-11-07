@@ -34,7 +34,7 @@ let rows: ServiceCredentialView[] = []
 
 export function reset(): void {
   counter = 0
-  rows = (['agent', 'print', 'projects'] as const).map(credential)
+  rows = (['agent', 'print'] as const).map(credential)
 }
 reset()
 

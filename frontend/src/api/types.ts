@@ -37,6 +37,8 @@ export type LoginConfigView = Schemas['LoginConfigView']
 export type LoginConfigUpdate = Schemas['LoginConfigUpdate']
 export type ServiceCredentialView = Schemas['ServiceCredentialView']
 export type ServiceCaller = ServiceCredentialView['caller']
+/** The callers that read a sealed credential, the only ones "Rotate now" takes. */
+export type LegacyCaller = Schemas['RotateRequest']['caller']
 export type AccessTokenView = Schemas['AccessTokenView']
 export type AccessTokenCreate = Schemas['AccessTokenCreate']
 export type AccessTokenCreated = Schemas['AccessTokenCreated']

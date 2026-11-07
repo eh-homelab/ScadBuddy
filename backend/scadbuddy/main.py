@@ -1078,8 +1078,14 @@ async def _maintain_models_git_logged(state: AppState) -> None:
 def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
-    none can be sealed, so none are issued."""
+    none can be sealed, so none are issued. First, a sealed credential of a caller that
+    reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
+    retired = auth.credentials.revoke_retired_legacy()
+    if retired:
+        logger.info(
+            "revoked the retired callers' sealed credentials", extra={"credentials": retired}
+        )
     kek = auth.kek
     if kek is None:
         return
