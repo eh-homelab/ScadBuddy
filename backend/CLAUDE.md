@@ -241,6 +241,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   take an author or a grant status from a body. A trigger pins a version; any edit
   returns its standing grant to requested, and an approval names the state it saw
   (`seen`); a fire is admitted, and a standing grant spent, under row locks.
+  The `orders` bound (#4252, orders spec §7.2): `GrantRule.orders` (ids, or `"any"`)
+  bounds `queue_print` and `tool` by the order the call names (`CallFacts.order_id`: an
+  order tool's `order_id`, a line item print's source); a run grant seeded for an order's
+  event is `narrowed_to_order` (each rule keeps its index, which the standing grant's
+  counters are kept by). `queue_print`'s source `{"order_id", "order_item_id"}` posts to
+  `order_item_print` with the call's key and follows the attempt's run; a refusal before
+  it starts is the outcome `refused` with `problem` (`requote_needed`), and
+  `RouteRefusedError.problem` carries a route's problem `type`.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A

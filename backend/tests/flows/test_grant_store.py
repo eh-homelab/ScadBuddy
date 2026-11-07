@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 
 from scadbuddy.flows.grants import (
@@ -19,6 +20,7 @@ from scadbuddy.flows.grants import (
 )
 from scadbuddy.flows.store import FlowStore, GrantStateError
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, ProjectionWrite
 from tests.flows.flows_support import define
 
@@ -228,6 +230,37 @@ async def test_a_lookup_that_fails_is_outside(store: FlowStore) -> None:
     assert await store.grant_uses(run_id) == []
 
 
+async def test_a_line_item_not_on_its_order_goes_to_a_person(store: FlowStore) -> None:
+    """#4252 (review of #5645): an `order_item_id` the named order lacks fails the facts
+    lookup by name, which leaves the call outside every grant, for a person."""
+    run_id = await run_row(store)
+    await store.insert_grant(
+        run_id,
+        spec({"fn": "queue_print", "orders": "any"}),
+        status="approved",
+        requested_by={"kind": "browser"},
+    )
+
+    def api(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": [{"id": "i1", "quantity": 1}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api), base_url="http://a") as c:
+        grants = FlowGrants(store, c, None)
+        verdict = await match_grant(
+            store,
+            grants.facts_of,
+            hash_of,
+            run_id=run_id,
+            request_id="flow:r:w:gone",
+            fn="queue_print",
+            tool=None,
+            args={"source": {"order_id": "ord1", "order_item_id": "i9"}, "request": {}},
+            now=datetime.now(UTC),
+        )
+    assert isinstance(verdict, Outside) and "LookupError" in verdict.reason
+    assert await store.grant_uses(run_id) == []
+
+
 async def test_a_child_call_needs_sessions_and_a_flow_turn_of_the_run(store: FlowStore) -> None:
     session = "22222222-2222-4222-8222-222222222222"
     run_id = await run_row(store)
@@ -357,3 +390,34 @@ async def test_orphan_grants_are_swept(store: FlowStore) -> None:
     assert await store.orphan_grants(timedelta(hours=1)) == []
     await store.delete_grant(orphan)
     assert await store.get_grant(orphan) is None
+
+
+async def test_a_line_items_prints_count_the_accepted_quotes_plates(store: FlowStore) -> None:
+    """Review of #5645: the accepted slice quote's plates are what the print prints, not
+    the item's output's (a revision after acceptance may have made a new one)."""
+    seen: list[str] = []
+
+    def api(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.startswith("/api/v1/outputs/"):
+            return httpx.Response(200, json={"layout_plates": [{}] * 5})
+        item = {
+            "id": "i1",
+            "quantity": 2,
+            "reference": {"slug": "box"},
+            "output_id": "out-new",
+            "quotes": [
+                {"accepted": False, "plates": [{}] * 4},
+                {"accepted": True, "plates": [{}, {}, {}]},
+            ],
+        }
+        return httpx.Response(200, json={"items": [item]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api), base_url="http://a") as c:
+        facts = await FlowGrants(store, c, None).facts_of(
+            "queue_print",
+            None,
+            {"source": {"order_id": "ord1", "order_item_id": "i1"}, "request": {}},
+        )
+    assert facts.prints == 6
+    assert not [p for p in seen if p.startswith("/api/v1/outputs/")]

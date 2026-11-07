@@ -12,7 +12,7 @@ from temporal_agent_harness.harness.agent_client import AgentClient
 
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_routes import route_key
-from scadbuddy.workflows.flow_tools import outward_activity_id
+from scadbuddy.workflows.flow_tools import outward_activity_id, problem_name
 from tests.flows.fake_api import FakeApi, Outward, outward_worker
 from tests.flows.flows_support import script
 from tests.flows.test_project_replay import HISTORIES
@@ -92,6 +92,75 @@ async def test_print_waits_for_approval_then_runs_once_under_its_key(
     # The one thing a Reset preview can read of an outward send (Ruling 14).
     assert scheduled.count(outward_activity_id("queue_print", call_id)) == 1
     assert [(s.fn, s.outward, s.status) for s in run.steps] == [("queue_print", True, "succeeded")]
+
+
+async def test_a_line_items_print_follows_its_run_and_a_stale_quote_is_an_outcome(
+    outward: Outward, api: FakeApi
+) -> None:
+    """#4252 (orders spec §7.2): `queue_print` of a line item posts to its print route
+    with the call's key, and follows the run; `requote_needed` reaches the script as the
+    outcome's `problem`, never as a print."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'i1'}}, {PLAN!r})",
+            f"b = await queue_print({{'order_id': 'ord1', 'order_item_id': 'stale'}}, {PLAN!r})",
+            "return [a['status'], b['status'], b['problem'], b['run_id']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    await outward.row(run_id, lambda r: len(r.steps) == 2 and len(r.waiting_on) == 1)
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['succeeded', 'refused', 'requote_needed', '']", run.result
+    [(body, key)] = api.to("/api/v1/orders/ord1/items/i1/print")
+    assert body == PLAN and key is not None
+    assert list(api.runs) == [f"run-{key}"]
+
+
+async def test_an_unnamed_refusal_answered_in_time_may_have_queued(
+    outward: Outward, api: FakeApi
+) -> None:
+    """Review of #5645: a route that answers at once with no named problem (a 500, or a
+    404 `about:blank`) may have started the run, so it is `failed` with
+    `may_have_queued`, as on the 202 path."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'crashed'}}, {PLAN!r})",
+            f"b = await queue_print({{'order_id': 'ord1', 'order_item_id': 'unknown'}}, {PLAN!r})",
+            "return [a['status'], a['may_have_queued'], b['status'], b['may_have_queued']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    await outward.row(run_id, lambda r: len(r.steps) == 2 and len(r.waiting_on) == 1)
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['failed', True, 'failed', True]", run.result
+
+
+async def test_a_line_items_print_that_failed_unnamed_may_have_queued(
+    outward: Outward, api: FakeApi
+) -> None:
+    """Review of #5645: an operation that failed with no named refusal may have failed
+    after its run started, so the outcome is `failed` and `may_have_queued`, never
+    `refused`."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'broken'}}, {PLAN!r})",
+            "return [a['status'], a['may_have_queued'], a['problem'], a['error']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['failed', True, None, 'attaching the run failed']", run.result
+
+
+def test_a_refusals_problem_is_the_name_its_type_ends_in() -> None:
+    """Any route's named problem reaches a script by name, an order's and the print
+    route's alike; a plain one has none."""
+    assert problem_name("https://scadbuddy.dev/problems/orders/requote_needed") == "requote_needed"
+    assert problem_name("https://scadbuddy.dev/problems/lan-calibration") == "lan-calibration"
+    assert problem_name("about:blank") is None
+    assert problem_name(None) is None
 
 
 async def test_a_print_refusal_fails_its_step(outward: Outward) -> None:

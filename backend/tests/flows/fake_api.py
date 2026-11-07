@@ -64,6 +64,11 @@ class FakeApi:
                 Route("/api/v1/operations/{op}", self.operation),
                 Route("/api/v1/print/outputs/{output_id}/run", self.print, methods=["POST"]),
                 Route("/api/v1/print/runs/{run_id}", self.run),
+                Route(
+                    "/api/v1/orders/{order_id}/items/{item_id}/print",
+                    self.print_item,
+                    methods=["POST"],
+                ),
                 Route("/api/v1/outputs/arrange", self.arrange, methods=["POST"]),
                 Route("/api/v1/outputs/{output_id}", self.output),
                 Route("/api/v1/settings/print-options", self.print_options),
@@ -98,6 +103,16 @@ class FakeApi:
         return JSONResponse({"id": f"out-{body['job_id']}"}, status_code=201)
 
     async def operation(self, request: Request) -> JSONResponse:
+        if request.path_params["op"] == "op-broken":
+            # A failure no refusal names (#4252): it may have failed past the run's start.
+            return JSONResponse(
+                {
+                    "id": "op-broken",
+                    "kind": "order_item_print",
+                    "status": "failed",
+                    "error": {"type": "about:blank", "detail": "attaching the run failed"},
+                }
+            )
         return JSONResponse(
             {"id": "op-1", "kind": "output_create", "status": "succeeded", "result": {"id": "o-9"}}
         )
@@ -116,6 +131,30 @@ class FakeApi:
             return JSONResponse({**self.runs[run_id], "repeated": True})
         self.runs[run_id] = {"id": run_id, "status": "running", "may_have_queued": False}
         return JSONResponse(self.runs[run_id], status_code=202)
+
+    async def print_item(self, request: Request) -> JSONResponse:
+        """`order_item_print` (#4252): item `stale` needs a new quote; any other answers
+        its attempt with the run its key started."""
+        await self._record(request)
+        if request.path_params["item_id"] == "stale":
+            return problem(
+                409,
+                "item stale's quote no longer stands",
+                "https://scadbuddy.dev/problems/orders/requote_needed",
+            )
+        if request.path_params["item_id"] == "crashed":
+            # An unnamed server error answered in time (review of #5645).
+            return problem(500, "the run may have started")
+        if request.path_params["item_id"] == "unknown":
+            return problem(404, "no item unknown")
+        if request.path_params["item_id"] == "broken":
+            return JSONResponse(
+                {"id": "op-broken", "kind": "order_item_print", "status": "running"},
+                status_code=202,
+            )
+        run_id = f"run-{request.headers['Idempotency-Key']}"
+        self.runs.setdefault(run_id, {"id": run_id, "status": "running", "may_have_queued": False})
+        return JSONResponse({"id": "f1", "status": "queued", "print_run_id": run_id})
 
     async def run(self, request: Request) -> JSONResponse:
         return JSONResponse({**self.runs[request.path_params["run_id"]], "status": "succeeded"})

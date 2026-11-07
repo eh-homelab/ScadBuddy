@@ -21,6 +21,7 @@ export const BOUNDS: Record<Bound, readonly HostFn[]> = {
   max_filament_g: ['queue_print'],
   max_calls: ['queue_print', 'arrange', 'tool'],
   args: ['tool'],
+  orders: ['queue_print', 'tool'],
 }
 
 /** What an unbounded rule lets through, said in red (spec §3.1). */

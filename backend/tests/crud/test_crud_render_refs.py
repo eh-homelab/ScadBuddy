@@ -93,13 +93,16 @@ async def test_a_ref_for_any_holder_but_a_job_is_a_403(
     """A render credential pins blobs for its jobs only, and the refusal is final: no
     re-exchange, no retry inside the budget."""
     job = _job(projection)
+    # The credential's first exchange is made first (#5655: on a loaded runner it took
+    # longer than the budget), so the time below is the refusal's alone.
+    await asyncio.to_thread(refs.add, "piece-0", "job", job.id)
     started = time.monotonic()
     with pytest.raises(CrudRefusedError) as refused:
         await asyncio.to_thread(refs.add, "piece-1", holder_kind, job.id)
     assert time.monotonic() - started < 0.5
     assert refused.value.status == 403
     assert refused.value.problem.get("reason") == "holder-kind"
-    assert _refs(projection) == []
+    assert _refs(projection) == [("piece-0", "job", job.id)]
 
 
 async def test_a_ref_for_a_missing_job_is_a_404_and_writes_nothing(

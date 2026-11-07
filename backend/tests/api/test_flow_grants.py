@@ -61,6 +61,7 @@ def test_a_browser_start_approves_its_grant(client: TestClient) -> None:
             "max_filament_g": None,
             "max_calls": None,
             "args": None,
+            "orders": None,
         }
     ]
     assert shown["in_force"] is True and shown["uses"] == []

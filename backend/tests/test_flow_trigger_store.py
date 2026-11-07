@@ -230,6 +230,31 @@ async def test_a_standing_grants_limits_are_spent_across_its_runs(
     assert standing.used[standing.approval_id]["0"].calls == 2
 
 
+async def test_a_run_fired_for_an_order_is_granted_that_order_only(
+    triggers: TriggerStore, flows: FlowStore
+) -> None:
+    """#4252 (orders spec §7.2): "any order" in the standing grant, "this order only" in
+    the run grant it seeds for an order's event."""
+    trigger = await make(triggers, overlap="allow_all")
+    spec = GrantSpec(
+        expires_at=datetime.now(UTC) + timedelta(days=10),
+        rules=[
+            GrantRule(fn="tool", tool="order_item_fulfil", orders="any"),
+            GrantRule(fn="arrange"),
+        ],
+    )
+    await approved(triggers, trigger, spec)
+    run_id = str(uuid.uuid4())
+    now = await triggers.get(trigger.id)
+    assert now is not None
+    assert await triggers.seed_run_grant(
+        run_id, trigger.id, BROWSER, datetime.now(UTC), state_hash(now, None), "o1"
+    )
+    grant = await flows.get_grant(run_id)
+    assert grant is not None
+    assert [rule.orders for rule in grant.spec.rules] == [["o1"], None]
+
+
 async def test_a_revoked_standing_grant_stops_its_runs_and_the_next_fire(
     triggers: TriggerStore, flows: FlowStore
 ) -> None:
