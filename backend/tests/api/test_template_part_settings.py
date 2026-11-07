@@ -56,11 +56,25 @@ def declare(
     params_file.write_text(json.dumps(params), encoding="utf-8")
 
 
-def misdeclare(paths: DataPaths, model: str) -> None:
-    """Give ``model`` a ``part_print_settings`` key that is no colour parameter: a typo
-    the model.json load refuses."""
+#: Each model.json typo the load refuses (#5653): the field, its value, and the name
+#: the refusal says.
+MISDECLARED = [
+    pytest.param(
+        "part_print_settings",
+        {"lable_color": {"top_shell_layers": 8}},
+        "lable_color",
+        id="part_print_settings",
+    ),
+    pytest.param("print_settings", {"infill": "15%"}, "infill", id="print_settings"),
+]
+
+
+def misdeclare(paths: DataPaths, model: str, field: str, value: object) -> None:
+    """Give ``model`` a ``field`` of ``value`` that the model.json load refuses: a
+    ``part_print_settings`` key that is no colour parameter, or a ``print_settings``
+    key that is no print setting."""
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
-    meta["part_print_settings"] = {"lable_color": {"top_shell_layers": 8}}
+    meta[field] = value
     paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
 
 
@@ -169,13 +183,15 @@ def test_the_quotes_copy_takes_them(bambuddy: TestClient) -> None:
 
 
 @respx.mock
+@pytest.mark.parametrize(("field", "value", "named"), MISDECLARED)
 def test_a_refused_model_json_refuses_the_background_slice_and_the_check_says_why(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, field: str, value: object, named: str
 ) -> None:
     """#5649: a slice with none of the template's settings would show a print the run
-    then refuses (409), so the slice refuses it too, and the dialog's check names it."""
+    then refuses (409), so the slice refuses it too, and the dialog's check names it in
+    the run's own words (#5653)."""
     output_id = prepared(client, model)
-    misdeclare(paths, model)
+    misdeclare(paths, model, field, value)
     upload = upload_route()
     routes()
     preset_values({})
@@ -186,22 +202,25 @@ def test_a_refused_model_json_refuses_the_background_slice_and_the_check_says_wh
     )
 
     assert check.status_code == 200, check.text
-    assert "lable_color" in check.json()["errors"][0]
+    assert named in check.json()["errors"][0]
     # The route answers once the operation is recorded (`answers_running`); its run
     # refuses.
     assert started.status_code == 202, started.text
     op = follow_operation(client, started.json(), timeout=30, poll=0.1)
     assert op["status"] == "failed", op
     assert op["error"]["status"] == 409, op
-    assert "lable_color" in op["error"]["detail"], op
+    assert op["error"]["detail"] == check.json()["errors"][0], op
     assert not upload.called
 
 
 @pytest.mark.requires_git
-def test_a_refused_model_json_refuses_the_quote(bambuddy: TestClient) -> None:
+@pytest.mark.parametrize(("field", "value", "named"), MISDECLARED)
+def test_a_refused_model_json_refuses_the_quote(
+    bambuddy: TestClient, field: str, value: object, named: str
+) -> None:
     """#5649: never a price for a print the run refuses."""
     shop = Shop(bambuddy)
-    misdeclare(state(bambuddy).paths, SLUG)
+    misdeclare(state(bambuddy).paths, SLUG, field, value)
     upload = upload_route(QUOTE_COPY)
     slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
 
@@ -211,6 +230,6 @@ def test_a_refused_model_json_refuses_the_quote(bambuddy: TestClient) -> None:
     op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
     assert op["status"] == "failed", op
     assert op["error"]["status"] == 409, op
-    assert "lable_color" in op["error"]["detail"], op
+    assert named in op["error"]["detail"], op
     assert not upload.called
     assert not slices.posted.called
