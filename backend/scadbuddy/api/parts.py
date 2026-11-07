@@ -23,10 +23,10 @@ from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.parts import (
+    InventoryPart,
     ItemPartRow,
     ItemPartsInput,
     OrderParts,
-    Part,
     PartExistsError,
     PartInput,
     PartNotFoundError,
@@ -61,7 +61,7 @@ def _exists(error: PartExistsError) -> ApiError:
 
 @router.get(
     "/parts",
-    response_model=list[Part],
+    response_model=list[InventoryPart],
     summary="The parts inventory",
     description=(
         "Every part, by name: its pack, its unit cost (the weighted average of what is on "
@@ -70,14 +70,14 @@ def _exists(error: PartExistsError) -> ApiError:
         "(0 never warns). With `low`, only the low ones."
     ),
 )
-async def list_parts(orders: OrdersDep, low: bool = False) -> list[Part]:
+async def list_parts(orders: OrdersDep, low: bool = False) -> list[InventoryPart]:
     parts = await asyncio.to_thread(orders.lifecycle.parts.parts)
     return [p for p in parts if p.low] if low else parts
 
 
 @router.post(
     "/parts",
-    response_model=Part,
+    response_model=InventoryPart,
     status_code=status.HTTP_201_CREATED,
     summary="Add a part",
     description=(
@@ -86,7 +86,9 @@ async def list_parts(orders: OrdersDep, low: bool = False) -> list[Part]:
         "`part_exists` when another part has the name, in any case."
     ),
 )
-async def create_part(body: PartInput, orders: OrdersDep, settings: SettingsStoreDep) -> Part:
+async def create_part(
+    body: PartInput, orders: OrdersDep, settings: SettingsStoreDep
+) -> InventoryPart:
     by = current_actor()
     currency = settings.snapshot().runtime.orders_currency
     try:
@@ -99,14 +101,14 @@ async def create_part(body: PartInput, orders: OrdersDep, settings: SettingsStor
 
 @router.patch(
     "/parts/{part_id}",
-    response_model=Part,
+    response_model=InventoryPart,
     summary="Edit a part",
     description=(
         'Only what is sent changes. The pack is what the next "Add stock" records: the '
         "unit cost stays, unless nothing is on hand, when it becomes the new pack's."
     ),
 )
-async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> Part:
+async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> InventoryPart:
     _path(part_id)
     try:
         return await asyncio.to_thread(orders.lifecycle.parts.update, part_id, body)
@@ -118,7 +120,7 @@ async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> Part:
 
 @router.post(
     "/parts/{part_id}/stock",
-    response_model=Part,
+    response_model=InventoryPart,
     summary="Add stock: packs bought",
     description=(
         "`packs` of the part's pack join the stock, at `pack_price_minor` each when sent "
@@ -127,7 +129,7 @@ async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> Part:
         "Orders already fulfilled keep their cost. On the part's stock line as `add`."
     ),
 )
-async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> Part:
+async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> InventoryPart:
     _path(part_id)
     by = current_actor()
     try:
@@ -138,14 +140,14 @@ async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> Part:
 
 @router.post(
     "/parts/{part_id}/adjust",
-    response_model=Part,
+    response_model=InventoryPart,
     summary="Correct a part's count",
     description=(
         "The count on the shelf, with a note saying why it differs. The unit cost stays. "
         "On the part's stock line as `adjust`, with the difference."
     ),
 )
-async def adjust_stock(part_id: str, body: StockAdjust, orders: OrdersDep) -> Part:
+async def adjust_stock(part_id: str, body: StockAdjust, orders: OrdersDep) -> InventoryPart:
     _path(part_id)
     by = current_actor()
     try:

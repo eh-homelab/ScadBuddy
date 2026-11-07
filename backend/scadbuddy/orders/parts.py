@@ -91,7 +91,7 @@ class PartInput(BaseModel):
     on_hand: int = Field(default=0, ge=0, le=MAX_COUNT)
 
 
-class Part(BaseModel):
+class InventoryPart(BaseModel):
     id: str
     name: str
     supplier: str
@@ -324,15 +324,15 @@ class PartStore:
 
     # reads
 
-    def parts(self, *, conn: Conn | None = None) -> list[Part]:
+    def parts(self, *, conn: Conn | None = None) -> list[InventoryPart]:
         with self.store._read(conn) as c:
             rows = c.execute(f"SELECT {_PART} FROM parts ORDER BY lower(name), id").fetchall()
-        return [Part.model_validate(r) for r in rows]
+        return [InventoryPart.model_validate(r) for r in rows]
 
-    def part(self, part_id: str, *, conn: Conn | None = None) -> Part | None:
+    def part(self, part_id: str, *, conn: Conn | None = None) -> InventoryPart | None:
         with self.store._read(conn) as c:
             row = c.execute(f"SELECT {_PART} FROM parts WHERE id = %s", (part_id,)).fetchone()
-        return None if row is None else Part.model_validate(row)
+        return None if row is None else InventoryPart.model_validate(row)
 
     def moves(self, part_id: str, *, limit: int = 200) -> list[StockMove]:
         """The part's newest moves first."""
@@ -397,7 +397,7 @@ class PartStore:
 
     # part writes, each in its own transaction under the part's lock
 
-    def create(self, body: PartInput, *, currency: str, by: Actor) -> Part:
+    def create(self, body: PartInput, *, currency: str, by: Actor) -> InventoryPart:
         unit = (Decimal(body.pack_price_minor) / body.pack_size).quantize(
             UNIT_COST, rounding=ROUND_HALF_UP
         )
@@ -419,14 +419,14 @@ class PartStore:
                 ),
             ).fetchone()
             assert row is not None
-            part = Part.model_validate(row)
+            part = InventoryPart.model_validate(row)
             if body.on_hand > 0:
                 part = self.move(
                     conn, part, "adjust", body.on_hand, by, note="Count when the part was added"
                 )
         return part
 
-    def update(self, part_id: str, body: PartPatch) -> Part:
+    def update(self, part_id: str, body: PartPatch) -> InventoryPart:
         """Only what is sent changes. The pack is what the next "Add stock" records, so the
         unit cost stays, unless nothing is on hand to average: then it is the new pack's."""
         with self.store.transaction() as conn:
@@ -458,9 +458,9 @@ class PartStore:
                 ),
             ).fetchone()
             assert row is not None
-        return Part.model_validate(row)
+        return InventoryPart.model_validate(row)
 
-    def add_stock(self, part_id: str, body: StockAdd, by: Actor) -> Part:
+    def add_stock(self, part_id: str, body: StockAdd, by: Actor) -> InventoryPart:
         with self.store.transaction() as conn:
             part = self._lock(conn, part_id)
             price = (
@@ -476,7 +476,7 @@ class PartStore:
                 conn, part, "add", count, by, amount_minor=body.packs * price, note=body.note
             )
 
-    def adjust(self, part_id: str, body: StockAdjust, by: Actor) -> Part:
+    def adjust(self, part_id: str, body: StockAdjust, by: Actor) -> InventoryPart:
         with self.store.transaction() as conn:
             part = self._lock(conn, part_id)
             return self.move(conn, part, "adjust", body.on_hand - part.on_hand, by, note=body.note)
@@ -517,7 +517,7 @@ class PartStore:
         if missing:
             raise PartNotFoundError(missing[0])
 
-    def lock_parts(self, conn: Conn, part_ids: Iterable[str]) -> dict[str, Part]:
+    def lock_parts(self, conn: Conn, part_ids: Iterable[str]) -> dict[str, InventoryPart]:
         """The parts under their row locks, taken in id order."""
         wanted = sorted(set(part_ids))
         if not wanted:
@@ -525,7 +525,7 @@ class PartStore:
         rows = conn.execute(
             f"SELECT {_PART} FROM parts WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (wanted,)
         ).fetchall()
-        return {r["id"]: Part.model_validate(r) for r in rows}
+        return {r["id"]: InventoryPart.model_validate(r) for r in rows}
 
     def set_item_parts(self, conn: Conn, item_id: str, parts: Sequence[ItemPart]) -> None:
         """The item's parts replaced whole (``used`` 0: only an item not fulfilled may be
@@ -548,7 +548,7 @@ class PartStore:
     def move(
         self,
         conn: Conn,
-        part: Part,
+        part: InventoryPart,
         kind: MoveKind,
         delta: int,
         by: Actor,
@@ -558,7 +558,7 @@ class PartStore:
         note: str = "",
         order_id: str | None = None,
         order_item_id: str | None = None,
-    ) -> Part:
+    ) -> InventoryPart:
         """Move ``part``'s stock by ``delta`` (its row lock held) and write the line. An
         ``add`` averages its ``amount_minor`` in, a ``return`` its units at ``unit_cost``
         (the cost they were taken at, unrounded); a ``use`` or an ``adjust`` keeps the
@@ -574,7 +574,7 @@ class PartStore:
             (delta, unit, part.id),
         ).fetchone()
         assert row is not None
-        moved = Part.model_validate(row)
+        moved = InventoryPart.model_validate(row)
         conn.execute(
             "INSERT INTO part_stock_moves (part_id, kind, delta, on_hand_after,"
             " unit_cost_after_minor, amount_minor, note, order_id, order_item_id, created_by)"
@@ -596,13 +596,13 @@ class PartStore:
 
     # helpers
 
-    def _lock(self, conn: Conn, part_id: str) -> Part:
+    def _lock(self, conn: Conn, part_id: str) -> InventoryPart:
         row = conn.execute(
             f"SELECT {_PART} FROM parts WHERE id = %s FOR UPDATE", (part_id,)
         ).fetchone()
         if row is None:
             raise PartNotFoundError(part_id)
-        return Part.model_validate(row)
+        return InventoryPart.model_validate(row)
 
     def _name_free(self, conn: Conn, name: str, own_id: str | None) -> None:
         row = conn.execute(
