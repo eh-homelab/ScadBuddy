@@ -334,8 +334,13 @@ ORD-2026-3).
 - One `item.added_after_acceptance` audit row, in the add's transaction, names the item,
   its title, its quantity and the order's status. The bus hears the item and the order
   after the commit, as for every item write.
-- The order page offers "Add item" on such an order, and "Add to order…" lists it. Both
-  ask the person to confirm first that the add changes an accepted order.
+- The order page offers "Add item" and the "Add custom item" entry row on such an order
+  (#5541), and "Add to order…" lists it. Each asks the person to confirm first that the
+  add changes an accepted order (`afterAcceptanceWarning`). A new pick (a customer, an
+  order, a quantity, a field of the row) asks again.
+- A custom item's quoted price is accepted from the item drawer: Accept on its newest
+  quote while none is accepted (#5541). It is `accept_quote`, the route
+  `order_item_accept_quote` calls, with that route's checks.
 
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed

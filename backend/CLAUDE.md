@@ -586,7 +586,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `x-takes-items`), which `afterAcceptance.test.ts` checks the browser's copy against. Agent
   `order_item_add_after_acceptance` (outward; `order_item_add` stays write); frontend
   `components/orders/afterAcceptance.ts` (the rules, the confirm text) in `AddItemDialog`,
-  `AddToOrderDialog` and the order page.
+  `AddToOrderDialog`, the order page and its custom item row (#5541); the item drawer
+  accepts a custom item's quoted price (`QuoteEditor` `acceptPending`).
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
