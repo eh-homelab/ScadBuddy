@@ -282,6 +282,16 @@ describe('revisions after acceptance mock (#5350)', () => {
     expect(await itemOf()).toMatchObject({ status: 'approved', revised_after_acceptance: false })
   })
 
+  it('refuses item_partly_fulfilled before print_in_flight (#5598)', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.quantity = 3
+    const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
+    const [first] = await revisionsOf(ORDER_ACCEPTED, ITEM_APPROVED)
+    await api.testPrintRevision(ORDER_ACCEPTED, ITEM_APPROVED, first!.id, NO_CHOICES)
+    const refused = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' }))
+    expect(refused?.problem.type).toBe(type('item_partly_fulfilled'))
+  })
+
   it('refuses as the backend does', async () => {
     const draft = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_DRAFT, ITEM_DRAFT, {}))
     expect(draft?.problem.type).toBe(type('order_not_accepted'))

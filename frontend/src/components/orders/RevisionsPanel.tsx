@@ -5,7 +5,7 @@ import type { Approval, Fulfilment, Order, OrderAttachment, OrderAttachmentRole,
 import { timeAgo } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
 import { AddItemDialog } from './AddItemDialog'
-import { addRevision, PARTLY_FULFILLED_TEXT, partlyFulfilled, reviseMode, reviseWarning } from './afterAcceptance'
+import { addRevision, PARTLY_FULFILLED_TEXT, reviseMode, reviseWarning } from './afterAcceptance'
 import { EndAttempt } from './EndAttempt'
 import { AttachmentCard, FilePick } from './OrderAttachments'
 import { PrintItem } from './PrintItem'
@@ -74,6 +74,9 @@ export function RevisionsPanel({
   // #5592: not once an attempt is accepted (`item_partly_fulfilled`).
   const mode = settled ? null : reviseMode(order, item, item.quotes, item.fulfilments)
   const canRevise = mode !== null
+  // #5598: the hint only when the accepted attempt is the reason: with no attempts the
+  // item would take one after acceptance (not on hold, no print running).
+  const partly = !settled && !canRevise && reviseMode(order, item, item.quotes, []) === 'after_acceptance'
 
   /** The same design again, as a new revision: on an accepted item, after a confirm. */
   function sameDesign() {
@@ -158,7 +161,7 @@ export function RevisionsPanel({
           New design after acceptance: quote it, then accept the new quote. Until then the accepted price stays.
         </p>
       )}
-      {!settled && !ended && !canRevise && partlyFulfilled(item.fulfilments) && (
+      {partly && (
         <p className="text-[13px] text-muted-foreground" data-testid="partly-fulfilled">
           {PARTLY_FULFILLED_TEXT}
         </p>

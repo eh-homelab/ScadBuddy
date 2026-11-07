@@ -127,7 +127,8 @@ def test_a_cancelled_order_is_refused(client: TestClient) -> None:
 
 
 def test_an_item_with_an_accepted_attempt_is_refused(client: TestClient) -> None:
-    """#5592: one of two accepted is a real unit of the agreed design."""
+    """#5592: with 1 of 2 units accepted, the route answers `item_partly_fulfilled`, its
+    detail says "1 of 2", and the item stays `approved` and not revised after acceptance."""
     order_id, item_id = model_order(client)
     fulfil(client, order_id, item_id, 1)
     body = problem(revise(client, order_id, item_id), "item_partly_fulfilled")
