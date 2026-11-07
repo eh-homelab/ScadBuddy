@@ -3441,6 +3441,61 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
   })
 })
 
+describe('list_recent_outputs (#4777)', () => {
+  const outputs = Array.from({ length: 30 }, (_, i) => ({ id: i.toString(16).padStart(32, '0'), slug: i % 2 ? 'box' : 'lid' }))
+
+  it('lists every model\'s outputs with its filters, paged in the backend', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs`, ({ request }) => {
+        const query = new URL(request.url).searchParams
+        queries.push(query)
+        const after = query.get('after')
+        const start = after === null ? 0 : outputs.findIndex((o) => o.id === after) + 1
+        const window = outputs.slice(start, start + Number(query.get('limit')))
+        return HttpResponse.json(window, { headers: { 'X-Total-Count': String(outputs.length) } })
+      }),
+    )
+    const recent = tool('list_recent_outputs')
+    expect(recent.risk).toBe('read')
+    expect(recent.routes).toEqual(['GET /api/v1/outputs'])
+    const args = {
+      from: '2026-11-01T00:00:00Z',
+      to: '2026-11-07T00:00:00Z',
+      slug: ['box', 'lid'],
+      tag: 'kitchen',
+      q: 'width=12',
+      ordered: 'no',
+      limit: 20,
+    }
+    const first = firstText(await runTool(recent, args, ctx())) as {
+      items: { id: string }[]
+      next_cursor: string
+      total: number
+    }
+    expect(first.items).toHaveLength(20)
+    expect(first.total).toBe(30)
+    const query = queries[0]!
+    expect([
+      query.get('from'),
+      query.get('to'),
+      query.getAll('slug'),
+      query.get('tag'),
+      query.get('q'),
+      query.get('ordered'),
+    ]).toEqual(['2026-11-01T00:00:00Z', '2026-11-07T00:00:00Z', ['box', 'lid'], 'kitchen', 'width=12', 'no'])
+    const second = firstText(await runTool(recent, { ...args, cursor: first.next_cursor }, ctx())) as {
+      items: { id: string }[]
+      next_cursor: string | null
+    }
+    expect(second.items.map((o) => o.id)).toEqual(outputs.slice(20).map((o) => o.id))
+    expect(queries[1]?.get('after')).toBe(outputs[19]!.id)
+    // The cursor is the filters' own.
+    const other = await runTool(recent, { ...args, q: 'other', cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+  })
+})
+
 describe('a command the backend answers 202 accepting (#2795)', () => {
   const OUT = 'e'.repeat(32)
 

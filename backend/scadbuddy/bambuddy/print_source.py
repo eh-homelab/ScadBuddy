@@ -396,6 +396,7 @@ class PrintPipeline:
     #: :meth:`part_slots`, once read (#5626 review).
     _part_slots: set[int] | None = field(default=None, init=False, repr=False, compare=False)
     _part_slots_read: bool = field(default=False, init=False, repr=False, compare=False)
+    #: The refusal :meth:`part_slots` read, kept and raised again on each call (#5656).
     _part_slots_refused: PartSettingsUnwritableError | None = field(
         default=None, init=False, repr=False, compare=False
     )

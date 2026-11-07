@@ -122,6 +122,40 @@ const itemAddInput = z.object({
   requires_printing: z.boolean().optional().describe('A custom item\'s only'),
 })
 
+/** Most items `order_item_add` takes in one request (backend `MAX_BATCH_ITEMS`, #4777). */
+const MAX_BATCH_ITEMS = 50
+
+const itemBody = itemAddInput.omit({ order_id: true })
+type ItemBody = z.infer<typeof itemBody>
+
+/** The single-item fields a call with `items` must leave out. */
+const SINGLE_FIELDS = ['kind', 'output_id', 'library_file_id', 'slug', 'commit', 'inputs', 'title', 'sku', 'unit_price_minor', 'requires_printing'] as const
+
+const itemsAddInput = itemAddInput
+  .extend({
+    items: z
+      .array(itemBody)
+      .min(1)
+      .max(MAX_BATCH_ITEMS)
+      .optional()
+      .describe(
+        `Several items in one request (at most ${MAX_BATCH_ITEMS}), each what a single call takes, added in order, all or none: ` +
+          'a refused one adds none and names its place (`item_index`). With `items`, leave the single-item fields out',
+      ),
+  })
+  .refine((o) => o.items === undefined || SINGLE_FIELDS.every((f) => o[f] === undefined), {
+    message: 'with items, name each item inside items: leave the single-item fields out',
+    path: ['items'],
+  })
+
+/** The body a write tool sends: an accept is outward, so a custom item's price stays quoted. */
+const recorded = (body: ItemBody) => (body.kind === 'custom' ? { ...body, accept: false } : body)
+
+function itemsAddTitle(input: Parameters<typeof itemAddTitle>[0] & { items?: unknown[] }): string {
+  if (input.items === undefined) return itemAddTitle(input)
+  return `Add ${input.items.length} item${input.items.length === 1 ? '' : 's'} to order ${input.order_id}`
+}
+
 function itemAddTitle({
   order_id,
   slug,
@@ -700,21 +734,29 @@ export const orderTools: Tool[] = [
       'order_item_quote (a slice of the file, or `manual`), prints the file, and has no revisions. A file the ' +
       'library does not have or does not print is 422; one deleted later is 409 `library_file_gone` on quote ' +
       'and print. `sku` is the shop\'s stock code, on any kind. ' +
-      'An accepted, in-production or ready order answers 409 `item_locked`: use order_item_add_after_acceptance.',
-    input: itemAddInput,
+      'An accepted, in-production or ready order answers 409 `item_locked`: use order_item_add_after_acceptance. ' +
+      '`items` adds several in one request (#4777; e.g. outputs found with list_recent_outputs), all or none.',
+    input: itemsAddInput,
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/items'],
-    title: itemAddTitle,
-    handler: async ({ order_id, ...body }, { backend }) =>
+    routes: ['POST /api/v1/orders/{order_id}/items', 'POST /api/v1/orders/{order_id}/items/batch'],
+    title: itemsAddTitle,
+    handler: async ({ order_id, items, ...body }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/items', {
-            params: { path: { order_id } },
-            // An accept is outward: this write tool leaves a custom item's price quoted.
-            body: (body.kind === 'custom' ? { ...body, accept: false } : body) as never,
-          }),
-          `add an item to order ${order_id}`,
-        ),
+        items === undefined
+          ? await ok(
+              backend.POST('/api/v1/orders/{order_id}/items', {
+                params: { path: { order_id } },
+                body: recorded(body) as never,
+              }),
+              `add an item to order ${order_id}`,
+            )
+          : await ok(
+              backend.POST('/api/v1/orders/{order_id}/items/batch', {
+                params: { path: { order_id } },
+                body: { items: items.map(recorded) } as never,
+              }),
+              `add ${items.length} items to order ${order_id}`,
+            ),
       ),
   }),
   defineTool({
@@ -726,20 +768,28 @@ export const orderTools: Tool[] = [
       'accepted): it needs order_item_quote and order_item_accept_quote before it is printed or fulfilled. The ' +
       'accepted prices and charges do not change. A ready order goes back to in production. Refused: ' +
       '`order_not_accepted` on a draft or quoted order (use order_item_add), `item_locked` once shipped, ' +
-      '`order_closed`/`order_cancelled`, and `order_on_hold`.',
-    input: itemAddInput,
+      '`order_closed`/`order_cancelled`, and `order_on_hold`. `items` adds several in one request, all or none.',
+    input: itemsAddInput,
     risk: 'outward',
-    routes: ['POST /api/v1/orders/{order_id}/items/after-acceptance'],
-    summarize: (input) => `${itemAddTitle(input)}, after its acceptance`,
-    handler: async ({ order_id, ...body }, { backend }) =>
+    routes: ['POST /api/v1/orders/{order_id}/items/after-acceptance', 'POST /api/v1/orders/{order_id}/items/after-acceptance/batch'],
+    summarize: (input) => `${itemsAddTitle(input)}, after its acceptance`,
+    handler: async ({ order_id, items, ...body }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/items/after-acceptance', {
-            params: { path: { order_id } },
-            body: body as never,
-          }),
-          `add an item to accepted order ${order_id}`,
-        ),
+        items === undefined
+          ? await ok(
+              backend.POST('/api/v1/orders/{order_id}/items/after-acceptance', {
+                params: { path: { order_id } },
+                body: body as never,
+              }),
+              `add an item to accepted order ${order_id}`,
+            )
+          : await ok(
+              backend.POST('/api/v1/orders/{order_id}/items/after-acceptance/batch', {
+                params: { path: { order_id } },
+                body: { items } as never,
+              }),
+              `add ${items.length} items to accepted order ${order_id}`,
+            ),
       ),
   }),
   defineTool({

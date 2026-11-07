@@ -9,6 +9,8 @@ import { renderPage } from '../../test/utils'
 import { AddItemDialog } from './AddItemDialog'
 
 const NOVA = 'c'.repeat(32)
+const REAGAN = 'a'.repeat(32)
+const WORKSHOP = 'e'.repeat(32)
 
 describe('AddItemDialog (#4251)', () => {
   beforeEach(() => resetMockState())
@@ -317,4 +319,77 @@ describe('AddItemDialog (#4251)', () => {
     expect(after.mock.calls[1]![1]).toBe('item-1')
     expect(plain).not.toHaveBeenCalled()
   })
+
+  it('adds several recent renders of any model in one request (#4777)', async () => {
+    const add = vi.spyOn(api, 'addOrderItems')
+    const onClose = vi.fn()
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={onClose} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Recent renders' }))
+    const list = await within(dialog).findByRole('list', { name: 'Recent renders' })
+    // Newest first, each with its model and the parameters that differ from the defaults.
+    await waitFor(() =>
+      expect(within(list).getAllByRole('checkbox').map((box) => box.getAttribute('aria-label'))).toEqual(['Reagan', 'Nova', 'Workshop']),
+    )
+    const nova = within(list).getByTestId(`recent-${NOVA}`)
+    await waitFor(() => expect(nova).toHaveTextContent('Name Keychain'))
+    await waitFor(() => expect(nova).toHaveTextContent('Name on the tag: Nova'))
+    expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeDisabled()
+    await user.click(within(list).getByRole('checkbox', { name: 'Nova' }))
+    await user.click(within(list).getByRole('checkbox', { name: 'Workshop' }))
+    const quantity = within(list).getByLabelText('Quantity of Nova')
+    await user.clear(quantity)
+    await user.type(quantity, '2')
+    await user.click(within(dialog).getByRole('button', { name: 'Add 2 items' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(add).toHaveBeenCalledWith(ORDER_DRAFT, [
+      { output_id: NOVA, quantity: 2 },
+      { output_id: WORKSHOP, quantity: 1 },
+    ])
+    const order = await api.order(ORDER_DRAFT)
+    expect(order.items.filter((i) => i.output_id === NOVA || i.output_id === WORKSHOP).map((i) => i.quantity)).toEqual([2, 1])
+  })
+
+  it('filters recent renders by time, model, tag, text and whether an order has them (#4777)', async () => {
+    const list = vi.spyOn(api, 'listRecentOutputs')
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Recent renders' }))
+    const rows = await within(dialog).findByRole('list', { name: 'Recent renders' })
+    await waitFor(() => expect(within(rows).getAllByRole('checkbox')).toHaveLength(3))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'On an order' }), 'On an order')
+    await waitFor(() => expect(within(rows).getAllByRole('checkbox').map((box) => box.getAttribute('aria-label'))).toEqual(['Reagan']))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'On an order' }), 'Not on an order')
+    await waitFor(() => expect(within(rows).getAllByRole('checkbox')).toHaveLength(2))
+    await user.type(within(dialog).getByLabelText('Search renders'), 'work')
+    await waitFor(() => expect(within(rows).getAllByRole('checkbox').map((box) => box.getAttribute('aria-label'))).toEqual(['Workshop']))
+    await user.click(within(dialog).getByRole('button', { name: '24 h' }))
+    await waitFor(() => expect(within(dialog).getByText('No renders match.')).toBeInTheDocument())
+    const last = list.mock.lastCall?.[0]
+    expect(last).toMatchObject({ q: 'work', ordered: 'no' })
+    expect(Date.now() - Date.parse(last?.from ?? '')).toBeLessThan(25 * 3600 * 1000)
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Model' }), 'Name Keychain')
+    await waitFor(() => expect(list.mock.lastCall?.[0]).toMatchObject({ slug: ['name-keychain'] }))
+    await user.type(within(dialog).getByLabelText('Tag'), 'gift')
+    await waitFor(() => expect(list.mock.lastCall?.[0]).toMatchObject({ tag: 'gift' }))
+  })
+
+  it('asks before several renders change an accepted order, then adds them on the after-acceptance route (#4777)', async () => {
+    const add = vi.spyOn(api, 'addOrderItemsAfterAcceptance')
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <AddItemDialog open orderId={ORDER_ACCEPTED} mode="after_acceptance" order={{ number: 'ORD-2026-2', status: 'accepted' }} onAdded={() => {}} onClose={onClose} />,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Recent renders' }))
+    const list = await within(dialog).findByRole('list', { name: 'Recent renders' })
+    await user.click(await within(list).findByRole('checkbox', { name: 'Reagan' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Add 1 item' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toBeInTheDocument()
+    expect(add).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(add).toHaveBeenCalledWith(ORDER_ACCEPTED, [{ output_id: REAGAN, quantity: 1 }])
+  })
+
 })
