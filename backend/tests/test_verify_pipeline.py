@@ -84,3 +84,25 @@ async def test_a_case_runs_in_the_shape_the_api_gives_it(tmp_path: Path) -> None
     )
     # The first gets `v: 0` as the API stamps it; the second is refused as the API would.
     assert failures == ["case 2: inputs.params.width must be a number, string or boolean"]
+
+
+CALLS_AN_ACTIVITY = """\
+async def run(ctx, inputs):
+    total = await ctx.activity("add", 2, 3)
+    if total != {"sum": 5}:
+        raise RuntimeError(f"add gave {total!r}")
+    a = await ctx.render("model.scad", width=inputs["params"]["width"])
+    await ctx.output(plates=await ctx.pack([a]), name="n")
+"""
+
+
+async def test_a_case_that_calls_a_template_activity_passes(tmp_path: Path) -> None:
+    """The call holds the blob it emitted for the job (`_hold`), on verify's refs, which
+    hold nothing: they take the same arguments as the worker's."""
+    config = install_fake_openscad(tmp_path, DataPaths(tmp_path / "unused"))
+    template = _template(tmp_path, CALLS_AN_ACTIVITY)
+    (template / "pipeline" / "activities.py").write_text(
+        "def add(a, b):\n    return {'sum': a + b}\n"
+    )
+    failures = await verify(template, [{"params": {"width": 3}}], config=config)
+    assert failures == []

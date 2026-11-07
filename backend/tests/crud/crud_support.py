@@ -1,12 +1,12 @@
-"""The workers' CRUD routes served for a test (#5298): the routes of
-`api/crud_projects.py` over a real `FlowStore` and `OperationStore`, or `api/crud_render.py`
-over a settings pool and a `JobProjection`, and `api/crud_areas.py`, behind the real
-`auth_check` and gate and the CRUD listener on a local port, and a client that reaches them
-with an in-process credential, as the worker does. `api_payload_keys` gives the routes the
-API's payload keys on a store's schema, and `served_projects` serves a projects worker's
-store and payload keys as the worker's. `static_render_crud` is a render worker's client of
-a stand-in API that answers fixed store settings and serves no job route, for a test of the
-worker that renders nothing."""
+"""The workers' CRUD routes served for a test (#5298): the routes of `api/crud_projects.py`
+over a real `FlowStore` and `OperationStore`, or `api/crud_render.py` over a settings pool
+(its blob refs and piece geometry too) and a `JobProjection`, and `api/crud_areas.py`,
+behind the real `auth_check` and gate and the CRUD listener on a local port, and a client
+that reaches them with an in-process credential, as the worker does. `api_payload_keys`
+gives the routes the API's payload keys on a store's schema, and `served_projects` serves a
+projects worker's store and payload keys as the worker's. `static_render_crud` is a render
+worker's client of a stand-in API that answers fixed store settings and serves no job route,
+for a test of the worker that renders nothing."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from scadbuddy.crud import listener
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
-from scadbuddy.crud.render import RemoteJobProjection
+from scadbuddy.crud.render import RemoteBlobRefs, RemoteGeometryIndex, RemoteJobProjection
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.settings_store import RenderStoreSettings, SettingsStore
@@ -47,6 +47,7 @@ from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.store import BlobRefs
 from scadbuddy.store.index import Pool
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
@@ -195,13 +196,15 @@ def render_crud_app(
     projection: JobProjection | None = None,
 ) -> FastAPI:
     """The render routes, reading the store settings from ``pool`` under ``settings``
-    (none: a test of the job routes only) and writing the job rows through ``projection``."""
+    (none: a test of the job routes only), writing the job rows through ``projection``,
+    and the blob refs and piece geometry on ``pool``."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
     app.state.scadbuddy = SimpleNamespace(
         settings=settings or SimpleNamespace(auth_mode="enforce"),
         settings_store=SimpleNamespace(pool=pool),
         projection=projection,
+        refs=BlobRefs(pool),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_render.router, prefix="/api/v1")
@@ -251,6 +254,20 @@ async def served_render_jobs(
             jobs.close()
 
 
+@asynccontextmanager
+async def served_render_refs(
+    projection: JobProjection, **options: Any
+) -> AsyncIterator[tuple[RemoteBlobRefs, RemoteGeometryIndex]]:
+    """The render worker's `RemoteBlobRefs` and `RemoteGeometryIndex` over the routes on
+    ``projection``'s pool, as `served_render_crud` serves them."""
+    async with served_render_crud(projection.pool, projection=projection, **options) as crud:
+        client = crud.blocking()
+        try:
+            yield RemoteBlobRefs(client), RemoteGeometryIndex(client)
+        finally:
+            client.close()
+
+
 class FixedToken:
     """A render credential the stand-in API takes."""
 
@@ -261,14 +278,16 @@ class FixedToken:
 
 
 def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient:
-    """A render worker's client of an API that lists the ``settings`` and ``jobs`` areas
-    and answers ``current`` (the defaults: the local store) as the store settings. Its job
-    routes are missing (a 404)."""
+    """A render worker's client of an API that lists the ``settings``, ``jobs`` and
+    ``refs`` areas and answers ``current`` (the defaults: the local store) as the store
+    settings. Its job, ref and geometry routes are missing (a 404)."""
     body = (current or RenderStoreSettings()).model_dump(mode="json")
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/render/areas"):
-            return httpx.Response(200, json={"areas": ["settings", "jobs"]}, headers=CRUD_HEADERS)
+            return httpx.Response(
+                200, json={"areas": ["settings", "jobs", "refs"]}, headers=CRUD_HEADERS
+            )
         if request.url.path.endswith("/render/settings"):
             return httpx.Response(200, json=body, headers=CRUD_HEADERS)
         return httpx.Response(404, headers=CRUD_HEADERS)

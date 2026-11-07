@@ -327,7 +327,10 @@ class PipelineActivities:
     async def _hold(self, out_key: str, call: TemplateCall) -> None:
         # `dir_for` first (it touches the blob), as every claimant does before its ref.
         self.deps.blobs.dir_for(out_key)
-        await asyncio.to_thread(self.deps.refs.add, out_key, "job", call.job_id)
+        # Here, not at the top: `crud.client` imports the API, which imports this module.
+        from scadbuddy.crud.render import HOLD_BUDGET
+
+        await asyncio.to_thread(self.deps.refs.add, out_key, "job", call.job_id, budget=HOLD_BUDGET)
 
     async def _run_call(self, call: TemplateCall, model_dir: Path, out_key: str) -> Any:
         d = self.deps

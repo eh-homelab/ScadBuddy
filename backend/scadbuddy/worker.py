@@ -73,7 +73,12 @@ from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
-from scadbuddy.crud.render import RemoteJobProjection, RemoteRenderSettingsSource
+from scadbuddy.crud.render import (
+    RemoteBlobRefs,
+    RemoteGeometryIndex,
+    RemoteJobProjection,
+    RemoteRenderSettingsSource,
+)
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.library.assets import AssetStore
@@ -116,7 +121,6 @@ from scadbuddy.spools.component import Spools
 from scadbuddy.spools.providers import SettingsOnly, discover_providers
 from scadbuddy.spools.spool_providers import native_use_hook
 from scadbuddy.spools.store import SpoolStore
-from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
@@ -217,11 +221,14 @@ def build_worker_deps(
     current: RenderStoreSettings,
     *,
     jobs: RemoteJobProjection,
+    refs: RemoteBlobRefs,
+    geometry: RemoteGeometryIndex,
     metrics: Metrics | None = None,
     stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``current`` is ``source``'s first read, which the store is built from. ``jobs``
-    writes the job rows; its caller closes it. ``stopping`` ends the wait for the API's
+    writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry;
+    its caller closes their client. ``stopping`` ends the wait for the API's
     schema and grants (`WorkerStoppedError`)."""
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
@@ -237,8 +244,9 @@ def build_worker_deps(
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = metrics or worker_metrics(settings, "render")
-    # For the stores still on SQL, until #5298 Tasks 15-20 move them to CRUD routes: the
-    # job rows, their events and activity rows already go through them (``jobs``).
+    # For the stores still on SQL, until #5298 Tasks 16-20 move them to CRUD routes: the
+    # job rows, their events and activity rows (``jobs``), the blob refs (``refs``) and
+    # the piece geometry (``geometry``) already go through them.
     pool: Pool = ConnectionPool(
         settings.database_url,
         min_size=1,
@@ -287,9 +295,10 @@ def build_worker_deps(
         paths=paths,
         assets=assets,
         blobs=store.blobs,
-        refs=BlobRefs(pool),
+        refs=refs,
         projection=jobs,
-        geometry=GeometryIndex(pool),
+        geometry=geometry,
+        pool=pool,
         history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
@@ -1046,7 +1055,7 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
 
 
 #: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-RENDER_CRUD_AREAS = frozenset({"settings", "jobs"})
+RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs"})
 
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
@@ -1105,8 +1114,10 @@ async def run_worker(
             logger.info("stopped before the API answered this worker's store settings")
             return
         current = reading.result()
-        # Called from the activities' threads (`asyncio.to_thread`), so blocking.
-        jobs = RemoteJobProjection(crud.blocking())
+        # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
+        # client for the three, closed with ``jobs``.
+        remote = crud.blocking()
+        jobs = RemoteJobProjection(remote)
         try:
             # Off the loop, as the API's boot seeds its libraries: the seed copies trees,
             # and the rest opens the pool and waits for the API's schema and grants (#601).
@@ -1118,6 +1129,8 @@ async def run_worker(
                     source,
                     current,
                     jobs=jobs,
+                    refs=RemoteBlobRefs(remote),
+                    geometry=RemoteGeometryIndex(remote),
                     metrics=metrics,
                     stopping=stop.is_set,
                 )
@@ -1174,7 +1187,8 @@ async def _serve_render(
             with contextlib.suppress(asyncio.CancelledError):
                 await evicting
         await store.aclose()
-        deps.refs.pool.close()
+        if deps.pool is not None:
+            deps.pool.close()
         deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 
 
