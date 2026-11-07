@@ -8,7 +8,8 @@ projects worker's store and payload keys as the worker's. With a bootstrap verif
 also takes the service-token exchange, so a worker can get its own credential as it does
 with no database. `static_render_crud` is a render worker's client of a stand-in API that
 answers fixed store settings and serves no job route, for a test of the worker that renders
-nothing."""
+nothing. `FakeClock` is a client clock that moves only by the client's own waits, so a
+test's count of tries does not depend on wall time."""
 
 from __future__ import annotations
 
