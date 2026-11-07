@@ -20,7 +20,7 @@ the tool: `report` measures a file, `move` rewrites it.
 |---|---|---|
 | Bed | 330 x 320 mm | `render/plate_profiles.py` |
 | Left nozzle reaches x 0..325, right nozzle x 25..330 | usable by both: **x 25..325**, y 0..320 | same |
-| Prime tower | 60 mm square plus a 3 mm brim; 5 mm clearance to objects; 2 mm to the edge | `render/plate.py` |
+| Prime tower | 60 mm square plus a brim of 3 mm, or the auto brim for the tallest object (height / 100 x 8 mm, 8 mm from 100 mm up) when that is wider; 5 mm clearance to objects; 2 mm to the edge. A 133 mm plate with the tower at y 6 fails with -104, "G-code outside of the printable area" (#5545) | `render/plate.py` `tower_brim` |
 | Wrapping exclusion | x 145..251, y 310..326, tower only | `plate_profiles.py` |
 | `no_sparse_layers` keep-out | objects taller than 4 mm must stay **96 mm** from the tower hull | Bambu Studio `Print.cpp`, `extruder_clearance_max_radius` in the H2C profile |
 

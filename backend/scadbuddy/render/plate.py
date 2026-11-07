@@ -17,8 +17,26 @@ Every number here comes from Bambu Studio's own profiles:
   process profiles (60 mm, in 90 of the 91 of them; ``PrintConfig.cpp``'s own
   default is 35). The tower's *depth* is computed by the slicer from the flush
   volumes, so the reservation is square at the widest width rather than guessed;
-* :data:`PRIME_TOWER_BRIM` is ``prime_tower_brim_width``'s 3 mm default, which
-  sits outside the tower footprint.
+* the brim reserved round the tower is :func:`tower_brim`: the larger of
+  ``prime_tower_brim_width``'s 3 mm default (:data:`PRIME_TOWER_BRIM`) and the brim
+  Bambu Studio draws when that option is ``-1`` ("Auto"), which grows with the
+  tower's height to 8 mm (:data:`PRIME_TOWER_AUTO_BRIM`, #5545).
+
+The tower's brim is what the slicer's out-of-bed check catches (#5545). Bambu Studio
+02.08.02.61 places a rib-wall tower (``prime_tower_rib_wall``, on by default) so that
+its first-layer wall starts at ``wipe_tower_x``/``wipe_tower_y`` (``WipeTower.cpp``
+``generate_support_wall_new`` sets ``m_rib_offset`` from that wall's bounding box), and
+draws the brim outside the wall, ``int((brim + s/2) / s)`` loops ``s`` apart, about
+0.38 mm for a 0.4 nozzle. With ``prime_tower_brim_width`` at ``-1`` the brim is
+``WipeTower::get_auto_brim_by_height``: ``height / 100 * 8`` below 100 mm, 8 mm from
+there up. ``GCodeProcessor::check_multi_extruder_gcode_valid`` then fails a plate with
+any extrusion outside ``printable_area`` grown by 2 mm (error bit 4), which the CLI
+reports as -104, "Found G-code outside of the printable area". Measured on 2026-11-07
+with the deployed slicer image (``scadbuddy-slicer:sha-d54bcd4``), a 133 mm, 5-colour
+H2C plate: the tower's lowest extrusion is 8.2 mm in front of ``wipe_tower_y``, so y 6
+fails (an extrusion at y -2.205) and y 6.5 passes. The 3 mm reserved before put the
+tower at y 5. A 220 mm, 8-colour plate with the tower at y 10 (this rule's place) sliced, its
+lowest extrusion at y 1.809.
 
 Two kinds of area are kept clear, and not in the same way (#122):
 
@@ -58,11 +76,21 @@ from scadbuddy.render.plate_profiles import (
 #: Widest ``prime_tower_width`` across BBL process profiles, and the side of the
 #: square this module reserves for the tower.
 PRIME_TOWER_SIDE = 60.0
-#: ``prime_tower_brim_width``'s default, extending outside the tower footprint.
+#: ``prime_tower_brim_width``'s default (``PrintConfig.cpp``, and BBL's
+#: ``fdm_process_common.json``), extending outside the tower footprint: the least
+#: brim reserved, for a preset that states a width.
 PRIME_TOWER_BRIM = 3.0
+#: The widest brim ``WipeTower::get_auto_brim_by_height`` draws ("Auto", ``-1``),
+#: reached at :data:`AUTO_BRIM_FULL_HEIGHT`.
+PRIME_TOWER_AUTO_BRIM = 8.0
+#: The tower height from which the auto brim is :data:`PRIME_TOWER_AUTO_BRIM`; below
+#: it the brim is that in proportion.
+AUTO_BRIM_FULL_HEIGHT = 100.0
 #: Gap left between the object and the tower.
 TOWER_CLEARANCE = 5.0
 #: Gap left between the tower (with its brim) and the edge of the reachable area.
+#: It also covers the brim's last loop, which can end up to half a line past the
+#: brim width (the loop count rounds), about 0.2 mm.
 EDGE_MARGIN = 2.0
 
 #: A printer preset names its nozzle: "Bambu Lab H2C 0.4 nozzle".
@@ -72,6 +100,21 @@ _LAB_PREFIX = "bambu lab "
 
 class PlateFitError(ValueError):
     """The object, or the object plus its prime tower, does not fit the plate."""
+
+
+def tower_brim(height: float | None) -> float:
+    """The brim to reserve round a prime tower as tall as ``height`` (#5545).
+
+    The tower is as tall as the tallest object. Bambu Studio's auto brim
+    (``prime_tower_brim_width`` ``-1``, as in the H2C process preset #5545 sliced with) is
+    ``height / 100 * 8`` mm up to 8 mm (``WipeTower::get_auto_brim_by_height``); a
+    preset that states a width uses that, 3 mm by default. The process preset is not
+    known where the tower is placed, so this is the larger of the two. ``None`` (the
+    height is not known) is the widest auto brim."""
+    if height is None:
+        return PRIME_TOWER_AUTO_BRIM
+    auto = PRIME_TOWER_AUTO_BRIM * min(max(height, 0.0), AUTO_BRIM_FULL_HEIGHT)
+    return max(PRIME_TOWER_BRIM, auto / AUTO_BRIM_FULL_HEIGHT)
 
 
 @dataclass(frozen=True)
@@ -317,7 +360,7 @@ def _tower_sides(inset: Rect, area: Rect, tower: float) -> list[tuple[str, Rect,
 
 
 def _tower_corner(
-    side: str, strip: Rect, object_rect: Rect, plate: PlateGeometry, tower: float
+    side: str, strip: Rect, object_rect: Rect, plate: PlateGeometry, tower: float, brim: float
 ) -> tuple[float, float] | None:
     """Centre the tower in ``strip`` on the object's cross axis, then check it.
 
@@ -348,7 +391,7 @@ def _tower_corner(
     if any(footprint.overlaps(zone) for zone in plate.wrapping_exclusions):
         return None
     # ``wipe_tower_x``/``_y`` name the tower itself; the brim sits outside it.
-    return (x + PRIME_TOWER_BRIM, y + PRIME_TOWER_BRIM)
+    return (x + brim, y + brim)
 
 
 Axis = Literal["X", "Y", "Z"]
@@ -417,29 +460,37 @@ def _tower_inset(plate: PlateGeometry) -> Rect:
     )
 
 
-def tower_beside(object_rect: Rect, plate: PlateGeometry) -> tuple[float, float] | None:
+def tower_beside(
+    object_rect: Rect, plate: PlateGeometry, height: float | None = None
+) -> tuple[float, float] | None:
     """The ``wipe_tower_x``/``_y`` of a tower against the first edge of the reachable
     area it fits on clear of ``object_rect`` (:data:`TOWER_CLEARANCE`) and of the
     plate's cutouts, as :func:`place_on_plate` puts one beside a centred object; None
-    when no edge has room."""
-    reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+    when no edge has room. ``height`` is the tallest object's, which sets the brim
+    (:func:`tower_brim`); ``None`` reserves the widest."""
+    brim = tower_brim(height)
+    reserved = PRIME_TOWER_SIDE + 2 * brim
     for side, strip, _remainder in _tower_sides(_tower_inset(plate), plate.usable, reserved):
-        corner = _tower_corner(side, strip, object_rect, plate, reserved)
+        corner = _tower_corner(side, strip, object_rect, plate, reserved, brim)
         if corner is not None:
             return corner
     return None
 
 
 def tower_reaches(
-    corner: tuple[float, float], plate: PlateGeometry, side: float = PRIME_TOWER_SIDE
+    corner: tuple[float, float],
+    plate: PlateGeometry,
+    side: float = PRIME_TOWER_SIDE,
+    height: float | None = None,
 ) -> bool:
     """Whether a tower ``side`` wide at ``wipe_tower_x``/``_y`` ``corner`` lies, brim
     included, where every extruder reaches, clear of the plate's cutouts. ``side`` is
     the file's own ``prime_tower_width`` where it states one: judged by the square
     :func:`place_on_plate` reserves, an A1 mini's own tower at (15, 145) would not fit
-    the A1 mini."""
-    reserved = side + 2 * PRIME_TOWER_BRIM
-    x, y = corner[0] - PRIME_TOWER_BRIM, corner[1] - PRIME_TOWER_BRIM
+    the A1 mini. ``height`` sets the brim as in :func:`tower_beside`."""
+    brim = tower_brim(height)
+    reserved = side + 2 * brim
+    x, y = corner[0] - brim, corner[1] - brim
     footprint = Rect(x, y, x + reserved, y + reserved)
     inset = _tower_inset(plate)
     if (
@@ -506,14 +557,16 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
             )
         return Placement(offset=_offset(centre), tower=None)
 
-    reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+    height = float(high[2] - low[2])
+    brim = tower_brim(height)
+    reserved = PRIME_TOWER_SIDE + 2 * brim
     inset = _tower_inset(plate)
 
     # First choice: the object stays centred and the tower takes whichever edge
     # it fits against. Only if none does is the object moved.
     object_centre = _clear_of_exclusions(area.centre, width, depth, plate)
     if object_centre is not None:
-        corner = tower_beside(_rect_at(object_centre), plate)
+        corner = tower_beside(_rect_at(object_centre), plate, height)
         if corner is not None:
             return Placement(offset=_offset(object_centre), tower=corner)
 
@@ -524,7 +577,7 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
         if moved_centre is None:
             continue
         moved = _rect_at(moved_centre)
-        corner = _tower_corner(side, strip, moved, plate, reserved)
+        corner = _tower_corner(side, strip, moved, plate, reserved, brim)
         if corner is not None:
             return Placement(offset=_offset(moved_centre), tower=corner)
 

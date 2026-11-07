@@ -197,8 +197,8 @@ export function OrderPage() {
                 Add item
               </Button>
             )}
-            {editable && (
-              // #4954 — the entry row under the items takes it.
+            {adds && (
+              // #4954 — the entry row under the items takes it (#5541: after acceptance too).
               <Button variant="outline" disabled={busy} onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
                 Add custom item
               </Button>
@@ -260,7 +260,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
-          canAdd={!!adds}
+          addTo={adds && { mode: adds, number: order.number }}
           selected={current?.id ?? null}
           quoting={slices.runs}
           onHold={order.on_hold}
@@ -685,8 +685,9 @@ function ItemDrawer({
       </dl>
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {custom ? (
-        // #4954 — a custom item's price is the field above: its quotes are shown only.
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} onChanged={onChanged} />
+        // #4954 — a custom item's price is the field above: nothing is recorded here. A price
+        // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}

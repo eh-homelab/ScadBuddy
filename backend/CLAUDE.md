@@ -586,7 +586,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `x-takes-items`), which `afterAcceptance.test.ts` checks the browser's copy against. Agent
   `order_item_add_after_acceptance` (outward; `order_item_add` stays write); frontend
   `components/orders/afterAcceptance.ts` (the rules, the confirm text) in `AddItemDialog`,
-  `AddToOrderDialog` and the order page.
+  `AddToOrderDialog`, the order page and its custom item row (#5541); the item drawer
+  accepts a custom item's quoted price (`QuoteEditor` `acceptPending`).
   The charges changed after acceptance (#5351, spec §3.5 "As built"): `PUT
   …/charges/after-acceptance` (`Lifecycle.replace_charges_after_acceptance`, body
   `{charges}`) on a `TAKES_ITEMS` order not on hold; refused `order_not_accepted` before

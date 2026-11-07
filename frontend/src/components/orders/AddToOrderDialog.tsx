@@ -68,8 +68,9 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   }, [chosen, openOrders])
   const picked = openOrders.find((o) => o.id === orderId)
   const mode = (picked && addMode(picked)) || 'open'
-  // Another order picked asks again.
-  useEffect(() => setConfirming(false), [orderId])
+  // A new pick asks again (another customer, order or quantity): the confirm names what was
+  // picked when it was armed, as `AddItemDialog`'s does.
+  useEffect(() => setConfirming(false), [chosen, orderId, quantity])
 
   async function add() {
     const count = parseQuantity(quantity)

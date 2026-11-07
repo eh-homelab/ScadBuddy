@@ -334,8 +334,13 @@ ORD-2026-3).
 - One `item.added_after_acceptance` audit row, in the add's transaction, names the item,
   its title, its quantity and the order's status. The bus hears the item and the order
   after the commit, as for every item write.
-- The order page offers "Add item" on such an order, and "Add to order…" lists it. Both
-  ask the person to confirm first that the add changes an accepted order.
+- The order page offers "Add item" and the "Add custom item" entry row on such an order
+  (#5541), and "Add to order…" lists it. Each asks the person to confirm first that the
+  add changes an accepted order (`afterAcceptanceWarning`). A new pick (a customer, an
+  order, a quantity, a field of the row) asks again.
+- A custom item's quoted price is accepted from the item drawer: Accept on its newest
+  quote while none is accepted (#5541). It is `accept_quote`, the route
+  `order_item_accept_quote` calls, with that route's checks.
 
 **As built: the charges changed after acceptance, and a no-charge item (#5351).** A shop
 can agree a fixed total with a customer (an $80 cap). When an item is added after
@@ -357,7 +362,7 @@ only while the order was `draft` or `quoted` (seen on ORD-2026-3).
   `amount_minor`). The bus hears the order after the commit. The status does not move.
 - A no-charge item needs no new path. #5349's route takes a custom item at
   `unit_price_minor: 0`, quoted and not accepted. `POST …/quotes/{quote}/accept`
-  accepts it. The total does not change.
+  (the item drawer's Accept, #5541) accepts it. The total does not change.
 - Job cost (§6.4, `orders/costs.py`) counts such an item's real cost (its entries)
   against a revenue of 0: its margin is negative, `loss`, with no percent. A discount
   charge counts in the order's revenue, signed. Tax never counts.

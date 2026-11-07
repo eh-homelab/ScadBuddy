@@ -122,17 +122,17 @@ describe('OrderPage (#4249)', () => {
     expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
   })
 
-  it('points an empty accepted order at Add item, with no custom item row (#5349)', async () => {
+  it('points an empty accepted order at Add item and the custom item row (#5349, #5541)', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     const row = state.orders.find((o) => o.id === order.id)
     if (row) row.status = 'accepted'
     render(order.id)
     await screen.findByRole('heading', { name: order.number })
-    expect(screen.getByText('No items yet. Add one with Add item above.')).toBeInTheDocument()
+    expect(screen.getByText('No items yet. Add one with Add item above, or type a custom item below.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add item' })).toBeInTheDocument()
-    // The custom row adds on the plain route, which an accepted order refuses.
-    expect(screen.queryByText(/type a custom item below/)).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Add custom item' })).not.toBeInTheDocument()
+    // The custom row adds on the after-acceptance route, after a confirm.
+    expect(screen.getByRole('button', { name: 'Add custom item' })).toBeInTheDocument()
+    expect(screen.getByTestId('custom-item-row')).toBeInTheDocument()
   })
 
   it('points an empty table at Add item only where there is one', async () => {

@@ -38,7 +38,9 @@ const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
  * prices it with the price book), and the item's quotes with their lines and the accepted
  * one marked. `editable` while the order is draft or quoted, or past that while the item has
  * no accepted quote (#5349, `afterAcceptance.ts` `itemOpen`). The slice quote runs on the
- * page (`slice`, #4693), so it outlives the dialog and this drawer.
+ * page (`slice`, #4693), so it outlives the dialog and this drawer. `acceptPending` offers
+ * Accept on the pending quote alone, with nothing to record (#5541: a custom item, whose
+ * price is its own field, added after acceptance or by the agent with its price `quoted`).
  */
 export function QuoteEditor({
   orderId,
@@ -47,6 +49,7 @@ export function QuoteEditor({
   exponent,
   quotes,
   editable,
+  acceptPending = false,
   onChanged,
   item,
   slice,
@@ -58,6 +61,8 @@ export function QuoteEditor({
   exponent: number
   quotes: Quote[]
   editable: boolean
+  /** Offer Accept on the newest quote while none is accepted, though `editable` is false. */
+  acceptPending?: boolean
   onChanged: () => void
   /** What a slice quote slices: the item's output and its colours' filaments. */
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
@@ -133,7 +138,7 @@ export function QuoteEditor({
                 {quote.accepted ? (
                   <span className="text-xs text-primary">Accepted</span>
                 ) : (
-                  editable && (
+                  (editable || (acceptPending && quote.id === pending?.id)) && (
                     <Button size="xs" variant="outline" disabled={busy} onClick={() => void accept(quote.id)}>
                       Accept
                     </Button>

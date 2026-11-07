@@ -22,8 +22,8 @@ export function localDay(at: Date | string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
-/** A URL value that is a calendar day; any other is no value. */
-/** A real calendar day: `2026-02-31` rolls over to Mar 3 in `Date`, so the round trip rejects it. */
+/** A URL value that is a real calendar day; any other is no value. `2026-02-31` rolls over to
+ * Mar 3 in `Date`, so the round trip rejects it. */
 const isDay = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && localDay(localMidnight(value)) === value
 
 /** A day `offset` days from `day`, in the calendar. */

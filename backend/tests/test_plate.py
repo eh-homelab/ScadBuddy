@@ -8,6 +8,7 @@ import pytest
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     EDGE_MARGIN,
+    PRIME_TOWER_AUTO_BRIM,
     PRIME_TOWER_BRIM,
     PRIME_TOWER_SIDE,
     TOWER_CLEARANCE,
@@ -18,6 +19,7 @@ from scadbuddy.render.plate import (
     bed_types_for,
     place_on_plate,
     plate_for,
+    tower_brim,
 )
 
 # The keychain of library file 62: 176 x 46 mm in XY, 3 mm tall.
@@ -111,6 +113,70 @@ class TestPlateLookup:
     def test_printers_without_wrapping_detection_carry_no_strip(self) -> None:
         assert not plate_for("X1C").wrapping_exclusions
         assert not plate_for("A1").wrapping_exclusions
+
+
+class TestTowerBrim:
+    """#5545: the brim reserved round the tower follows Bambu Studio's auto brim
+    (``WipeTower::get_auto_brim_by_height``), never less than the 3 mm default."""
+
+    @pytest.mark.parametrize(
+        ("height", "brim"),
+        [
+            (3.0, 3.0),
+            (21.0, 3.0),
+            (37.5, 3.0),
+            (50.0, 4.0),
+            (100.0, 8.0),
+            (133.0, 8.0),
+            (325.0, 8.0),
+        ],
+    )
+    def test_the_brim_grows_with_the_tower_to_8_mm(self, height: float, brim: float) -> None:
+        assert tower_brim(height) == pytest.approx(brim)
+
+    def test_an_unknown_height_reserves_the_widest_brim(self) -> None:
+        assert tower_brim(None) == PRIME_TOWER_AUTO_BRIM == 8.0
+
+    @pytest.mark.parametrize(
+        ("size", "measured_fail_y"),
+        [
+            # basketball-trophy: 110 x 70 x 133 mm, 5 filaments. Sliced 2026-11-07 on
+            # scadbuddy-slicer:sha-d54bcd4, the tower at x 145: y 6 fails with -104
+            # (an extrusion at y -2.205), y 6.5 passes.
+            ((110.0, 70.0, 133.0), 6.0),
+            # basketball-coach-trophy: 150 x 150 x 220 mm, 8 filaments (ORD-2026-6): y 5
+            # fails; y 10 passes, its lowest extrusion at y 1.809.
+            ((150.0, 150.0, 220.0), 5.0),
+        ],
+    )
+    def test_a_tall_multi_colour_h2c_plate_keeps_the_tower_off_the_front_edge(
+        self, size: tuple[float, float, float], measured_fail_y: float
+    ) -> None:
+        placement = place_on_plate(_bounds(*size), plate_for("H2C"))
+        assert placement.tower is not None
+        x, y = placement.tower
+        assert y > measured_fail_y
+        assert y - PRIME_TOWER_AUTO_BRIM >= plate_for("H2C").usable.min_y + EDGE_MARGIN
+        assert x - PRIME_TOWER_AUTO_BRIM >= plate_for("H2C").usable.min_x + EDGE_MARGIN
+
+    def test_a_short_h2c_plate_keeps_the_tower_where_it_sliced(self) -> None:
+        """The 21 mm, 2-filament nameplate of #5545 sliced with the tower at y 5."""
+        placement = place_on_plate(_bounds(176.0, 46.0, 21.0), plate_for("H2C"))
+        assert placement.tower is not None
+        assert placement.tower[1] == 5.0
+
+    @pytest.mark.parametrize("model", ["A1 mini", "A1", "X1C", "P1S", "H2D", "H2S", "P2S"])
+    def test_a_tall_object_still_fits_beside_its_tower(self, model: str) -> None:
+        """The wider brim costs 10 mm of band; a 60 mm, 150 mm tall object still has
+        room on every plate, the A1 mini's 180 mm one included."""
+        plate = plate_for(model)
+        placement = place_on_plate(_bounds(60.0, 60.0, 150.0), plate)
+        assert placement.tower is not None
+        x, y = placement.tower
+        brim = tower_brim(150.0)
+        inset = EDGE_MARGIN + brim
+        assert plate.usable.min_x + inset <= x <= plate.usable.max_x - inset - PRIME_TOWER_SIDE
+        assert plate.usable.min_y + inset <= y <= plate.usable.max_y - inset - PRIME_TOWER_SIDE
 
 
 class TestPlacement:
