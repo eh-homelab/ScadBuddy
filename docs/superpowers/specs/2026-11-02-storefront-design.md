@@ -206,7 +206,9 @@ page bundle. The back-office routes are not mounted in it.
 **No direct SQL (amended 2026-11-07, the owner; CLAUDE.md "Database access (#5295)").**
 The storefront holds no database secret and opens no Postgres pool. It is an HTTP client
 of the CRUD service (today's API process), as every worker will be once #5298 lands
-(CLAUDE.md "Database access (#5295)"): every read and write goes to routes under `/api/v1/internal/storefront/*`, sent with the storefront's
+(CLAUDE.md "Database access (#5295)"): every read and write goes to routes under
+`/api/v1/internal/crud/storefront/*` (route class `crud.storefront`, by `auth/routes.py`
+`CRUD_PATH`, as for every caller), sent with the storefront's
 own short-lived service credential: a projected ServiceAccount token exchanged at the CRUD
 service for a 15-minute credential scoped to the storefront's routes, as
 [the service-credentials spec](2026-11-05-service-credentials-without-db-design.md) (#5325)
@@ -271,22 +273,26 @@ the customer's view.
 
 ### 5.4 Customize, estimate and the draft
 
-- The storefront validates inputs against the listing (`params` ∪ `fixed`), never only
-  against the schema, and renders through `RenderService` with `reuse_finished`, so two
-  visitors who choose the same inputs share one render.
+- The CRUD service's storefront render route validates inputs against the listing
+  (`params` ∪ `fixed`), never only against the schema, and renders through
+  `RenderService` with `reuse_finished`, so two visitors who choose the same inputs share
+  one render. It never relies on the storefront having checked the inputs.
 - **Render limits per visitor** **(call)**: settings `storefront_renders_per_minute`
   (default 3), `storefront_renders_per_day` (30), `storefront_render_concurrency` (2,
-  across all visitors), counted in Postgres per visitor and per client address
-  (`core/proxies.py`, `SCADBUDDY_TRUSTED_PROXIES`). A reused render costs nothing.
+  across all visitors), counted by the CRUD service in Postgres per visitor and per client
+  address. The storefront resolves the client address (`core/proxies.py` with its own
+  `SCADBUDDY_TRUSTED_PROXIES`) and sends it in a header (§6.4); the CRUD service sees only
+  the storefront pod, so it cannot find the address itself. A reused render costs nothing.
   Over the limit is a 429 with the time to retry.
 - **Estimate.** `GET /orders/estimate` needs a saved output (`api/orders.py:537-604`).
-  The storefront estimates from the render job instead: `estimate_grams` over the job's
+  The CRUD service's storefront estimate route estimates from the render job instead: `estimate_grams` over the job's
   part volumes (`orders/pricing.py:160`), at the listing's colours, priced from the price
   book. It is shown as "about $X, confirmed after we check it", never as a quote. The
   common part moves out of the route into `orders/estimate.py`.
-- **Add to order.** Adds an item to the visitor's draft: `kind=model` with revision 1
+- **Add to order.** The CRUD service adds an item to the visitor's draft: `kind=model` with revision 1
   from the listing's commit and the inputs, or `kind=request` with the text and uploads.
-  Uploads go through the claim store and `order_attachment_add`, typed by
+  The storefront streams each upload to a CRUD route, which goes through
+  `order_attachment_add`, typed by
   `orders/attachments.py` `sniff`, with storefront caps **(call)**: 25 MB a file, 10 files
   a request, images, video and PDF only.
 - **A draft before submit** **(call)**. It needs no customer and no number:
@@ -367,8 +373,10 @@ accepted), `revision_not_found` (404), `order_not_submitted`, `order_submitted`
 
 `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and the visitor's
 or account's id. The CRUD service builds it from the visitor id (and, once signed in, the
-account) that the storefront sends in request headers. It takes those headers only from a
-call made with the storefront's service credential, and never from a request body.
+account) that the storefront sends in request headers: `X-ScadBuddy-Visitor` (the verified
+visitor id) and `X-ScadBuddy-Store-Client` (the client address the storefront resolved,
+which keys the per-client render limit, §5.4). It takes those headers only from a call
+made with the storefront's service credential, and never from a request body.
 
 ## 7. Payments: what the storefront needs from #4957
 
