@@ -43,7 +43,7 @@ from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.part_settings import PartSettingsMap
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
@@ -118,7 +118,7 @@ class SliceQuoteRequest(BaseModel):
     #: run's own choice.
     path: Literal["bambuddy", "native"] | None = None
     #: Slicer settings for each slot's parts (#5571, `PrintRunRequest.part_settings`):
-    #: send the print the same ones, so the quote slices what prints.
+    #: recorded with the quote, and the item's print prints with them when it sends none.
     part_settings: PartSettingsMap | None = None
 
 
@@ -809,7 +809,17 @@ async def quote_run(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
-    return await _priced(run, order, item_id, sliced, scope, by, quote_id, revision_id)
+    return await _priced(
+        run,
+        order,
+        item_id,
+        sliced,
+        scope,
+        by,
+        quote_id,
+        revision_id,
+        part_settings=dumped(request.part_settings),
+    )
 
 
 async def _library_quote(
@@ -846,7 +856,18 @@ async def _library_quote(
         except LifecycleError as error:
             raise refused(error) from None
 
-    return await _priced(run, order, item.id, sliced, scope, by, quote_id, None, recolour)
+    return await _priced(
+        run,
+        order,
+        item.id,
+        sliced,
+        scope,
+        by,
+        quote_id,
+        None,
+        recolour,
+        part_settings=dumped(request.part_settings),
+    )
 
 
 async def _priced(
@@ -859,10 +880,13 @@ async def _priced(
     quote_id: str,
     revision_id: str | None,
     recolour: Callable[[Sequence[Plate]], Awaitable[None]] | None = None,
+    *,
+    part_settings: dict[str, dict[str, Any]] | None = None,
 ) -> Quote:
     """Each sliced plate fetched, read, kept and priced, then the quote recorded (or
     the run's holds dropped as it fails). ``recolour`` gives an item with no slots the
-    ones its plates use, before they are checked (a library file item, #5544)."""
+    ones its plates use, before they are checked (a library file item, #5544).
+    ``part_settings`` are the settings per slot it sliced with (#5571), recorded with it."""
     lifecycle = run.lifecycle
     store = lifecycle.store
     order_id = order.id
@@ -901,6 +925,7 @@ async def _priced(
                     by=by,
                     revision_id=revision_id,
                     quote_id=quote_id,
+                    part_settings=part_settings,
                 ),
             )
         except LifecycleError as error:

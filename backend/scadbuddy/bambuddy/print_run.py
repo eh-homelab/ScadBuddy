@@ -187,7 +187,7 @@ from scadbuddy.rack.usage import (
     record_seen,
     save_picks,
 )
-from scadbuddy.render.bambu3mf import FilamentMap
+from scadbuddy.render.bambu3mf import FilamentMap, model_settings_text, printed_part_slots
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 from scadbuddy.slicing.values import values_for
@@ -346,7 +346,9 @@ class PrintRunRequest(BaseModel):
     path: RunPath | None = None
     #: Slicer settings for the parts of each filament slot (#5571), by ``slot_id``:
     #: written into the laid-out copy as per-part overrides over the process. Only an
-    #: output takes them; a slot the output lacks is refused (``prepare_run``).
+    #: output takes them; a slot no printed part is made in is refused (``prepare_run``).
+    #: An order item's print that sends none prints with its quote's
+    #: (``orders/operations.py`` ``print_body``).
     part_settings: PartSettingsMap | None = None
 
     @field_validator("part_settings")
@@ -747,21 +749,24 @@ PART_SETTINGS_OUTPUT_ONLY = (
 )
 
 
-def part_settings_refusal(source: PrintSource, request: PrintRunRequest) -> str | None:
+async def part_settings_refusal(source: PrintSource, request: PrintRunRequest) -> str | None:
     """Why ``request``'s ``part_settings`` cannot print from ``source`` (#5571): it is
-    not an output, or it names a slot the output lacks. ``None`` when they can."""
+    not an output, or it names a slot no printed part of the output is made in (one only
+    painted on another part's faces among them). ``None`` when they can."""
     if request.part_settings is None:
         return None
     if not isinstance(source, OutputSource) or source.is_sliced:
         return PART_SETTINGS_OUTPUT_ONLY
-    unknown = unknown_slots(request.part_settings, len(source.colours))
+    payload = await source.fetch_3mf(None)
+    text = None if payload is None else await asyncio.to_thread(model_settings_text, payload)
+    slots = printed_part_slots(text) if text is not None else set()
+    unknown = unknown_slots(request.part_settings, slots)
     if not unknown:
         return None
-    count = len(source.colours)
+    named = ", ".join(map(str, sorted(slots))) or "none"
     return (
-        f"part_settings names slot {', '.join(map(str, unknown))}, but this output has"
-        f" {count} filament slot{'s' if count != 1 else ''}"
-        f" ({'1' if count == 1 else f'1-{count}'})."
+        f"part_settings names slot {', '.join(map(str, unknown))}, but no printed part of"
+        f" this output is made in it (its parts' slots: {named})."
     )
 
 
@@ -2264,7 +2269,7 @@ async def prepare_run(
         await require_destination_folder(
             bambuddy_client(client), request.folder_id, settings.library_folder_id
         )
-    part_refusal = part_settings_refusal(source, request)
+    part_refusal = await part_settings_refusal(source, request)
     if part_refusal is not None:
         raise RunRefusalError(part_refusal)
     laid_out = await source.plate_ids(client)

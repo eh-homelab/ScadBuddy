@@ -221,7 +221,7 @@ const sliceQuote = z
       ),
     // #5352: the quote slices on the route its print will take, so that print queues the quote's slice.
     path: printPath,
-    // #5571: send order_item_print the same, so the quote slices what prints.
+    // #5571: recorded with the quote; order_item_print prints with them when it sends none.
     part_settings: partSettings,
   })
   .strict()
@@ -1094,7 +1094,8 @@ export const orderTools: Tool[] = [
       ),
       path: printPath,
       part_settings: partSettings.describe(
-        "As order_item_quote's `slice.part_settings`: send the quote's, so the print slices what was quoted",
+        "Omit to print with the accepted quote's own (order_item_quote's `slice.part_settings`), so the print slices " +
+          'what was priced. Settings that differ from the quote\'s are refused `requote_needed`: quote with them first',
       ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +

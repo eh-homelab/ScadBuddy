@@ -380,26 +380,25 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return with_part_settings(
-                hint_painted_slots(
-                    towers_within_reach(
-                        state_nozzles(
-                            payload,
-                            nozzle_stats=target.nozzle_stats,
-                            nozzle_volume_type=target.nozzle_volume_type,
-                            filament_colour=colours,
-                            filament_map=target.filament_map,
-                        ),
-                        target.plate,
-                    )
-                ),
-                target.part_settings,
+            laid = hint_painted_slots(
+                towers_within_reach(
+                    state_nozzles(
+                        payload,
+                        nozzle_stats=target.nozzle_stats,
+                        nozzle_volume_type=target.nozzle_volume_type,
+                        filament_colour=colours,
+                        filament_map=target.filament_map,
+                    ),
+                    target.plate,
+                )
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
             # prints as it is.
             logger.warning("the 3MF inflates past the cap; printing it as it is")
-            return payload
+            laid = payload
+        # Outside the guard: a copy keyed with its part settings always carries them.
+        return with_part_settings(laid, target.part_settings)
     try:
         payload = replate_3mf(
             payload,

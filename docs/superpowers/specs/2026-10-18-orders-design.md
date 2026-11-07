@@ -682,10 +682,11 @@ settles only by hand (`PATCH` the fulfilment attempt, §6.1).
 quote's file: `order_not_accepted`, `order_on_hold`, `item_custom`, `item_not_approved`
 (an item already printing among them), `item_made` (its attempts made its quantity), and
 `requote_needed` (no accepted quote, the item's output gone or no longer its reference's,
-or a slice quote whose `quote-<sha256>/sliced.3mf` is gone or reads to another digest).
+or a slice quote whose `quote-<sha256>/sliced.3mf` is gone or reads to another digest,
+or a body whose `part_settings` are not the ones the quote sliced with, #5571).
 The run starts the print as `POST /print/outputs/{id}/run` does (`api/printing.py`
 `accept_run`, `PrintRunWorkflow` on the item's output), with the body's printer, spools and
-choices, every plate, `copies` the quantity still to print and a `request_id` made from the
+choices (and the quote's `part_settings` when the body sends none, #5571), every plate, `copies` the quantity still to print and a `request_id` made from the
 operation's key, so a retry or a re-send repeats the run. The item is claimed before
 the print starts (`Lifecycle.claim_print`, under the order's lock): the attempt, keyed by
 that `request_id` (`print_request_id`, unique), with `copies`, the quote's `sliced_sha256`

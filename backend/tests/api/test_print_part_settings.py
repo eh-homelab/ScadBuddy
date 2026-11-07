@@ -10,19 +10,15 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy.print_run import (
-    PART_SETTINGS_OUTPUT_ONLY,
-    PrintRunRequest,
-    part_settings_refusal,
-)
-from scadbuddy.bambuddy.print_source import LibrarySource
+from scadbuddy.bambuddy.print_run import PART_SETTINGS_OUTPUT_ONLY, PrintRunRequest
 from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import prepared
+from tests.api.test_print_library import SLICED_RUN, library_file, run_library, sliced_file
 from tests.api.test_print_run_choices import body, run_print
 from tests.api.test_print_supports import routes
-from tests.api.test_send import _uploaded_3mf, upload_route
+from tests.api.test_send import _uploaded_3mf, configure, upload_route
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -68,10 +64,26 @@ def test_a_setting_out_of_range_is_refused(client: TestClient, model: str) -> No
     assert response.status_code == 422, response.text
 
 
-def test_only_an_output_takes_part_settings() -> None:
-    request = PrintRunRequest.model_validate({**body(), "part_settings": {"1": {"wall_loops": 3}}})
-    library = LibrarySource.__new__(LibrarySource)
-    assert part_settings_refusal(library, request) == PART_SETTINGS_OUTPUT_ONLY
+@respx.mock
+@pytest.mark.parametrize("sliced", [False, True])
+def test_a_library_file_takes_no_part_settings(client: TestClient, sliced: bool) -> None:
+    """#5571 review: a library file keeps its author's parts (#5628), and a sliced one
+    prints as it was sliced: either is refused before anything is uploaded or sliced."""
+    configure(client)
+    routes()
+    if sliced:
+        sliced_file(104)
+        file_id, request = 104, dict(SLICED_RUN)
+    else:
+        library_file(89)
+        plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+        file_id, request = 89, {**body(), "filament_plan": plan}
+    request["part_settings"] = {"1": {"wall_loops": 3}}
+
+    response = run_library(client, file_id, json=request)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == PART_SETTINGS_OUTPUT_ONLY
 
 
 def test_a_quote_takes_the_same_settings_as_the_print() -> None:

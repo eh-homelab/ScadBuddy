@@ -18,7 +18,8 @@ takes the ``wall_loops`` bound, 1000, for them too.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from collections.abc import Collection
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -102,6 +103,16 @@ def overrides_of(value: PartSettingsMap | None) -> PartOverrides | None:
     return tuple((slot, settings.metadata()) for slot, settings in kept.items())
 
 
-def unknown_slots(value: PartSettingsMap | None, slots: int) -> list[int]:
-    """The slots ``value`` names that a file of ``slots`` filaments lacks."""
-    return [slot for slot in (normalised(value) or {}) if slot > slots]
+def unknown_slots(value: PartSettingsMap | None, slots: Collection[int]) -> list[int]:
+    """The slots ``value`` names that no printed part of the file is made in: ``slots``
+    are those its parts are (:func:`~scadbuddy.render.bambu3mf.printed_part_slots`)."""
+    return [slot for slot in (normalised(value) or {}) if slot not in slots]
+
+
+def dumped(value: PartSettingsMap | None) -> dict[str, dict[str, Any]] | None:
+    """``value`` as a quote stores it (#5571): slots as strings, each setting sent, in slot
+    order; ``None`` for nothing set. Two requests set the same when these are equal."""
+    kept = normalised(value)
+    if kept is None:
+        return None
+    return {str(slot): settings.model_dump(exclude_none=True) for slot, settings in kept.items()}

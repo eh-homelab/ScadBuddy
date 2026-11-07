@@ -155,6 +155,7 @@ async def print_check(
     item_id: str,
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
     library: LibraryFiles | None = None,
+    part_settings: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
     unknown order or item; 409 ``order_<status>`` for an ended order,
@@ -169,7 +170,10 @@ async def print_check(
     ``schema_of`` is the reference commit's schema, as the quote's ``output_matches``
     reads it. A library file item (#5544) is checked against its file in ``library``
     instead of an output: ``library_file_gone`` once it is not there; what the run needs
-    is then ``library_file_id`` in place of ``output_id``."""
+    is then ``library_file_id`` in place of ``output_id``. ``part_settings`` are the
+    request's settings per slot (#5571, ``part_settings.dumped``): sent and not the
+    quote's, they are ``requote_needed``; what the run needs then carries the quote's
+    ``part_settings``, which a request that sends none prints with."""
     order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
         raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
@@ -198,6 +202,7 @@ async def print_check(
     quote = accepted_quote(await asyncio.to_thread(store.quotes, item.id))
     if quote is None:
         raise requote(item, "it has no accepted quote")
+    _same_part_settings(item, quote, part_settings)
     if reference is None:
         return await _library_stands(library, blobs, item, quote, copies)
     return await _stands(outputs, blobs, item, reference, quote, copies, schema_of)
@@ -213,6 +218,7 @@ async def test_print_check(
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
     *,
     by: Actor,
+    part_settings: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """A test print's refusals (storefront spec §4.4), writing nothing: one copy of the
     item's output, on an order accepted or not and an item in any open state. 404 for an
@@ -267,7 +273,22 @@ async def test_print_check(
     ]
     if not quotes:
         raise requote(item, "it has no slice quote of its current revision")
+    _same_part_settings(item, quotes[-1], part_settings)
     return await _stands(outputs, blobs, item, reference, quotes[-1], 1, schema_of)
+
+
+def _same_part_settings(
+    item: OrderItem, quote: Quote, asked: dict[str, dict[str, Any]] | None
+) -> None:
+    """``requote_needed`` when a print sends settings per slot (#5571) that are not the
+    ones ``quote`` sliced with: it would print what was not priced. None sent is the
+    quote's own."""
+    if asked is not None and asked != (quote.part_settings or None):
+        raise requote(
+            item,
+            "its print sends part_settings the quote was not sliced with: quote with them,"
+            " or send none to print with the quote's",
+        )
 
 
 async def _none_in_flight(store: OrderStore, item: OrderItem) -> None:
@@ -319,6 +340,7 @@ async def _stands(
         "quote_id": quote.id,
         "sliced_sha256": quote.sliced_sha256,
         "sliced_blob_key": quote.sliced_blob_key,
+        "part_settings": quote.part_settings,
     }
 
 
@@ -344,6 +366,7 @@ async def _library_stands(
         "quote_id": quote.id,
         "sliced_sha256": quote.sliced_sha256,
         "sliced_blob_key": quote.sliced_blob_key,
+        "part_settings": quote.part_settings,
     }
 
 

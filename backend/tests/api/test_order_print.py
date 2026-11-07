@@ -22,7 +22,10 @@ from fastapi.testclient import TestClient
 import scadbuddy.orders.projects as projects_module
 from scadbuddy.activity.component import ACTIVITY
 from scadbuddy.api import orders as orders_api
+from scadbuddy.api import printing as printing_api
 from scadbuddy.api.printing import accept_run
+from scadbuddy.bambuddy.part_settings import dumped
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.trays import tray_spool_id
@@ -712,3 +715,39 @@ def test_a_print_records_whether_a_caller_of_the_api_asked(
     page = {**press(), "X-ScadBuddy-Request": "1"}
     assert client.post(url, json=body(), headers=page).status_code == 418
     assert [request.get("api") for request in sent] == [True, None]
+
+
+def test_a_print_that_sends_no_part_settings_prints_with_the_quotes(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5571 review: the quote sliced with settings per slot, so a print that sends none
+    (the order page's) prints with them, and one that sends others wants a new quote."""
+    sent: list[PrintRunRequest] = []
+
+    async def recorded(*args: Any, request: PrintRunRequest, **kwargs: Any) -> Any:
+        sent.append(request)
+        return await accept_run(*args, request=request, **kwargs)
+
+    monkeypatch.setattr(printing_api, "accept_run", recorded)
+    shop = QuoteShop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    settings = {"2": {"top_shell_layers": 8}}
+    started = shop.post(part_settings=settings)
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert quote["part_settings"] == settings
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    _books_spools(shop)
+
+    other = {**body(), "part_settings": {"2": {"top_shell_layers": 9}}}
+    problem(bambuddy.post(f"{shop.path}/print", json=other, headers=press()), "requote_needed")
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=body(), headers=press()))
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+    [request] = sent
+    assert dumped(request.part_settings) == settings

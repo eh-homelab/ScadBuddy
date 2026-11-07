@@ -326,8 +326,9 @@ export const partSettings = z
   .describe(
     'Slicer settings for the parts of one filament slot (#5571), keyed by slot id (from 1, as `filament_plan`), ' +
       'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Each omitted setting is the ' +
-      "process's. Only a ScadBuddy output takes them; a slot the output lacks, an unknown key or a value out of range " +
-      'is refused (422). A painted part takes the settings of the slot it is made in, not of its painted faces.',
+      "process's. Only a ScadBuddy output takes them; a slot no printed part of the output is made in (one only painted " +
+      'on faces among them), an unknown key or a value out of range is refused (422). A painted part takes the ' +
+      'settings of the slot it is made in, not of its painted faces.',
   )
 
 /** `part_settings`' phrase in an approval line. */

@@ -264,23 +264,31 @@ written `N%`), `sparse_infill_pattern` and `ironing_type` (Bambu Studio's
 `enum_values`). The limits are Bambu Studio v02.08.02.61's `PrintConfig.cpp` (lines
 5954, 1363, 4596, 3085, 3102 and 4069): the shell layers have a minimum of 0 and no
 maximum there, so they take `wall_loops`' maximum, 1000. An unknown key, a value out of
-range or slot 0 is a 422 from the request's validation. A slot the output lacks is a 422
-from `prepare_run` (`part_settings_refusal`), so the dialog's check lists it too. Only an
-output takes them: a library file keeps its author's parts, and a sliced file prints as
-it was sliced.
+range or slot 0 is a 422 from the request's validation. A slot that no printed part of
+the output is made in is a 422 from `prepare_run` (`part_settings_refusal`, which reads the
+output's `model_settings.config` with `printed_part_slots`), so the dialog's check lists
+it too. A slot only painted on another part's faces is among them: it has no part of its
+own to carry the settings. Only an output takes them: a library file keeps its author's
+parts, and a sliced file prints as it was sliced.
 
 They are written into the laid-out copy, not the process. `send._laid_out_for` adds
 each slot's settings to every printed `<part>` of that slot in
 `Metadata/model_settings.config` (`render/bambu3mf.py` `set_part_settings`), as
 `<metadata key="top_shell_layers" value="8"/>`, after the layout. A part's slot is its
 `extruder` metadata, else its object's. A negative part or a modifier gets none. A
-painted part takes the settings of the slot it is made in, not those of its painted
-faces. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
+self-closing `<part …/>` becomes an open and a close tag around them. A painted part
+takes the settings of the slot it is made in, not those of its painted faces. In an
+author's file they are written even when its layout falls back to the file as it is
+(`ArchiveTooLargeError`), so the copy's key never names settings its bytes lack. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
 colours, so a copy with settings is never reused for one without, nor the other way
 round; a copy without settings keeps the key it had. `plan_run` builds the copy for the
-run, the dialog's background slice and the quote alike, so the quote slices the bytes
-the print slices when both send the same settings. `PrintRunRequest.part_settings` is in
-`run_key` only when it sets something, so every older run keeps its key.
+run, the dialog's background slice and the quote alike. A slice quote records the
+settings it sliced with (`order_item_quotes.part_settings`, `part_settings.dumped`). An
+item's print that sends none prints with its quote's (`orders/operations.py`
+`print_body`, from what `print_check` returns), so it slices the bytes the quote priced;
+one that sends others is `requote_needed` (`printing.py` `_same_part_settings`).
+`PrintRunRequest.part_settings` is in `run_key` only when it sets something, so every
+older run keeps its key.
 
 Bambu Studio honours them. Its 3MF loader reads every `<part>` metadata key that is not
 one of its own (name, subtype, source, matrix …) into the volume's config

@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.runs import run_key
 from scadbuddy.bambuddy.send import Target, _laid_out_for
 from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
+    printed_part_slots,
     set_part_settings,
     with_part_settings,
     write_bambu_3mf,
@@ -97,8 +98,8 @@ def test_overrides_are_in_slot_order_and_unknown_slots_are_named() -> None:
         (1, (("top_shell_layers", "6"),)),
         (3, (("wall_loops", "4"),)),
     )
-    assert unknown_slots(request.part_settings, 2) == [3]
-    assert unknown_slots(request.part_settings, 3) == []
+    assert unknown_slots(request.part_settings, {1, 2}) == [3]
+    assert unknown_slots(request.part_settings, {1, 3}) == []
 
 
 def test_a_copy_with_part_settings_keys_apart_from_one_without() -> None:
@@ -162,6 +163,43 @@ def test_each_printed_part_of_a_slot_gets_its_settings() -> None:
 
 def test_a_slot_no_part_prints_with_changes_nothing() -> None:
     assert set_part_settings(SETTINGS, ((7, (("wall_loops", "3"),)),)) == SETTINGS
+
+
+def test_only_the_slots_printed_parts_are_made_in_count() -> None:
+    # Slot 1 and the object's slot 2; the negative part's slot 1 adds nothing.
+    # A slot only painted on a part's faces (the file has 3 filaments, say) is no
+    # part's, so it is not among them (#5571 review).
+    assert printed_part_slots(SETTINGS) == {1, 2}
+
+
+SELF_CLOSING = """<config>
+ <object id="4">
+  <metadata key="extruder" value="2"/>
+  <part id="1" subtype="normal_part"/>
+  <part id="2" subtype="normal_part">
+   <metadata key="extruder" value="1"/>
+  </part>
+ </object>
+</config>
+"""
+
+
+def test_a_self_closing_part_takes_its_settings_and_leaves_the_next_part_alone() -> None:
+    assert printed_part_slots(SELF_CLOSING) == {1, 2}
+    written = set_part_settings(SELF_CLOSING, ((2, (("wall_loops", "3"),)),))
+    assert written == SELF_CLOSING.replace(
+        '  <part id="1" subtype="normal_part"/>',
+        '  <part id="1" subtype="normal_part">\n'
+        '   <metadata key="wall_loops" value="3"/>\n'
+        "  </part>",
+    )
+    # Slot 1's part keeps its own body; the self-closing one is not swallowed into it.
+    written = set_part_settings(SELF_CLOSING, ((1, (("wall_loops", "4"),)),))
+    assert written == SELF_CLOSING.replace(
+        '   <metadata key="extruder" value="1"/>\n  </part>',
+        '   <metadata key="extruder" value="1"/>\n'
+        '   <metadata key="wall_loops" value="4"/>\n  </part>',
+    )
 
 
 def _two_colours(tmp_path: Path) -> bytes:
