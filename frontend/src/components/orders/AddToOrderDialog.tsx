@@ -137,7 +137,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
           {open && <RoughEstimate outputId={outputId} />}
           {confirming && picked && (
             <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
-              {afterAcceptanceWarning(picked.number)}
+              {afterAcceptanceWarning(picked)}
             </p>
           )}
           {(error ?? customers.error?.message) && (

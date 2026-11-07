@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { OrderStatus } from '../../api/types'
-import { addMode, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
+import { addMode, afterAcceptanceWarning, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
 
 type Extension = 'x-open-for-edits' | 'x-takes-items'
 
@@ -45,6 +45,14 @@ describe('afterAcceptance', () => {
     ['cancelled', false, null],
   ])('adds to a %s order (on hold: %s) by %s', (status, onHold, mode) => {
     expect(addMode({ status, on_hold: onHold })).toBe(mode)
+  })
+
+  it.each<[OrderStatus, RegExp]>([
+    ['accepted', /^ORD-2026-2 is accepted\. Adding an item changes what the customer gets\. The new item/],
+    ['in_production', /^ORD-2026-2 is in production\. Adding an item changes what the customer gets\. The new item/],
+    ['ready', /^ORD-2026-2 is ready\. Adding an item changes what the customer gets\. The order goes back to in production until the new item is made\./],
+  ])('names a %s order in the confirm', (status, text) => {
+    expect(afterAcceptanceWarning({ number: 'ORD-2026-2', status })).toMatch(text)
   })
 
   it("opens an item past `quoted` only while it has no accepted quote", () => {

@@ -28,10 +28,16 @@ export function itemOpen(order: Pick<Order, 'status'>, quotes: readonly Pick<Quo
   return TAKES_ITEMS.has(order.status) && !quotes.some((quote) => quote.accepted)
 }
 
-/** What the confirm says before an item is added to an accepted order. */
-export function afterAcceptanceWarning(number: string): string {
+/** How the confirm names each status that takes an item after acceptance. */
+const STATUS_TEXT: Record<string, string> = { accepted: 'accepted', in_production: 'in production', ready: 'ready' }
+
+/** What the confirm says before an item is added to an accepted order: the order's own
+ * status, and for a `ready` order that it goes back to production (`derive`). */
+export function afterAcceptanceWarning(order: Pick<Order, 'number' | 'status'>): string {
+  const back = order.status === 'ready' ? 'The order goes back to in production until the new item is made. ' : ''
   return (
-    `${number} is already accepted. Adding an item changes what the customer gets. ` +
+    `${order.number} is ${STATUS_TEXT[order.status] ?? order.status}. Adding an item changes what the customer gets. ` +
+    back +
     'The new item needs its own quote, and the customer must accept that quote before it is made. ' +
     'The accepted prices and charges do not change.'
   )

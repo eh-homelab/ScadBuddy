@@ -260,7 +260,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
-          canAdd={editable}
+          canAdd={!!adds}
           selected={current?.id ?? null}
           quoting={slices.runs}
           onHold={order.on_hold}
@@ -451,7 +451,7 @@ export function OrderPage() {
           )}
         </section>
       </div>
-      {adds && <AddItemDialog open={adding} orderId={order.id} mode={adds} orderNumber={order.number} onAdded={reload} onClose={() => setAdding(false)} />}
+      {adds && <AddItemDialog open={adding} orderId={order.id} mode={adds} order={order} onAdded={reload} onClose={() => setAdding(false)} />}
       {current && (
         <ItemDrawer key={current.id} detail={detail} item={current} slices={slices} unfulfilAllowed={unfulfilAllowed} onClose={() => setOpenItem(null)} onChanged={reload} />
       )}

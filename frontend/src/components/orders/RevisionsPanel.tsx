@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
 
-/** The order states in which an item's design can still change; its approval changes in any open one. */
+/** The order states a person's decision has ended: an item's approval no longer changes. */
 const ENDED = new Set(['closed', 'cancelled'])
 
 const APPROVALS: Record<Approval, string> = { design_first: 'Design first', together: 'Design and price together' }

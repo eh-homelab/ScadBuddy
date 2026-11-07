@@ -5,7 +5,7 @@ import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
-import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -122,6 +122,19 @@ describe('OrderPage (#4249)', () => {
     expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
   })
 
+  it('points an empty accepted order at Add item, with no custom item row (#5349)', async () => {
+    const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
+    const row = state.orders.find((o) => o.id === order.id)
+    if (row) row.status = 'accepted'
+    render(order.id)
+    await screen.findByRole('heading', { name: order.number })
+    expect(screen.getByText('No items yet. Add one with Add item above.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add item' })).toBeInTheDocument()
+    // The custom row adds on the plain route, which an accepted order refuses.
+    expect(screen.queryByText(/type a custom item below/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add custom item' })).not.toBeInTheDocument()
+  })
+
   it('points an empty table at Add item only where there is one', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     await api.cancelOrder(order.id)
@@ -140,7 +153,7 @@ describe('OrderPage (#4249)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Design request' }))
     await user.type(within(dialog).getByLabelText('Title'), 'Tag 49')
     await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
-    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is already accepted/)
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is accepted\. Adding an item changes what the customer gets/)
     await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
     await waitFor(() => expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, { kind: 'request', title: 'Tag 49', quantity: 1, notes: '' }))
     const added = (await api.order(ORDER_ACCEPTED)).items.find((i) => i.title === 'Tag 49')

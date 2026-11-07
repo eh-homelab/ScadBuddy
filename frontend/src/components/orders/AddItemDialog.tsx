@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api/client'
-import type { ModelSummary, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
+import type { ModelSummary, Order, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -82,7 +82,7 @@ export function AddItemDialog({
   onClose,
   revise,
   mode = 'open',
-  orderNumber = 'This order',
+  order,
 }: {
   open: boolean
   orderId: string
@@ -91,7 +91,8 @@ export function AddItemDialog({
   revise?: { itemId: string; slug: string | null }
   /** #5349 — `after_acceptance` adds on that route, after a confirm. */
   mode?: AddMode
-  orderNumber?: string
+  /** The order the add changes: its number and status, for the confirm's text. */
+  order?: Pick<Order, 'number' | 'status'>
 }) {
   const models = useAsync(() => (open ? api.listModels() : Promise.resolve([] as ModelSummary[])), [open])
   const [query, setQuery] = useState('')
@@ -130,6 +131,8 @@ export function AddItemDialog({
       setConfirming(false)
     }
   }, [open, revise?.slug])
+  // A new pick asks again: the confirm names what was picked when it was armed.
+  useEffect(() => setConfirming(false), [request, slug, choice, quantity, title, note])
   /** Another template, or none, starting from its own default pick in the same render. */
   function pickTemplate(next: string | null) {
     setSlug(next)
@@ -333,7 +336,7 @@ export function AddItemDialog({
 
           {confirm && confirming && (
             <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
-              {afterAcceptanceWarning(orderNumber)}
+              {afterAcceptanceWarning(order ?? { number: 'This order', status: 'accepted' })}
             </p>
           )}
           {(error ?? models.error?.message) && (

@@ -67,7 +67,7 @@ describe('AddToOrderDialog (#4249)', () => {
     await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), orderNumberMatcher('ORD-2026-2'))
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
-    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is already accepted/)
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is accepted\. Adding an item changes what the customer gets/)
     expect(after).not.toHaveBeenCalled()
     await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${ORDER_ACCEPTED}`))
