@@ -57,5 +57,7 @@ describe('the profit report period (#5546)', () => {
     expect(shownPeriod('2026-10-01', '', now)).toEqual({ from: '2026-10-01', to: '2026-11-05' })
     // A `to` long past with no `from`: the request sends the `from` the inputs show.
     expect(periodOf('', '2026-03-31', now)).toEqual({ from: '2026-01-01T08:00:00.000Z', to: '2026-04-01T07:00:00.000Z' })
+    // A URL value that is no day is no value.
+    expect(shownPeriod('soon', 'x', now)).toEqual(shownPeriod('', '', now))
   })
 })

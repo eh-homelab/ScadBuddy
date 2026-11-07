@@ -12,7 +12,7 @@ const pad = (n: number) => String(n).padStart(2, '0')
 
 /** The browser's local midnight of a `YYYY-MM-DD` day, `offset` days later. */
 function localMidnight(day: string, offset = 0): Date {
-  const [y, m, d] = day.split('-').map(Number)
+  const [y = NaN, m = NaN, d = NaN] = day.split('-').map(Number)
   return new Date(y, m - 1, d + offset)
 }
 
@@ -21,6 +21,9 @@ export function localDay(at: Date | string): string {
   const date = typeof at === 'string' ? new Date(at) : at
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
+
+/** A URL value that is a calendar day; any other is no value. */
+const isDay = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(localMidnight(value).getTime())
 
 /** A day `offset` days from `day`, in the calendar. */
 function addDays(day: string, offset: number): string {
@@ -33,8 +36,8 @@ function addDays(day: string, offset: number): string {
  * `DEFAULT_DAYS` days to `to` (or to today), as the server's default; with no `to`, it ends today.
  */
 export function shownPeriod(from: string, to: string, now: Date = new Date()): { from: string; to: string } {
-  const last = to || localDay(now)
-  return { from: from || addDays(last, 1 - DEFAULT_DAYS), to: last }
+  const last = isDay(to) ? to : localDay(now)
+  return { from: isDay(from) ? from : addDays(last, 1 - DEFAULT_DAYS), to: last }
 }
 
 /**
