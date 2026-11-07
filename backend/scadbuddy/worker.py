@@ -38,9 +38,7 @@ from temporalio.worker import Worker
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
 from scadbuddy.auth.service_credentials import (
-    ExchangeReader,
     ServiceAuth,
-    ServiceCredentialConfigError,
     exchange_source,
     token_source,
 )
@@ -1069,17 +1067,7 @@ def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClien
             " store settings through the API's CRUD routes (#5298), e.g."
             " http://scadbuddy:8082"
         )
-    proof: Literal["k8s", "bootstrap"]
-    if settings.service_token_file is not None:
-        proof_file, proof = settings.service_token_file, "k8s"
-    elif settings.service_bootstrap_file is not None:
-        proof_file, proof = settings.service_bootstrap_file, "bootstrap"
-    else:
-        raise ServiceCredentialConfigError(
-            "SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE is required for"
-            " the render worker: it exchanges that proof for its service credential (#5494)"
-        )
-    credential = ServiceAuth(ExchangeReader("render", settings.api_internal_url, proof_file, proof))
+    credential = ServiceAuth(exchange_source("render", settings))
     return CrudClient(settings.api_internal_url, "render", credential, metrics=metrics)
 
 

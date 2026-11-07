@@ -859,8 +859,8 @@ def token_source(caller: ServiceCaller, settings: Settings, kek: Kek | None) -> 
 def exchange_source(caller: ServiceCaller, settings: Settings) -> ExchangeReader:
     """The credential of a caller that holds no database (#5298): only the exchange of
     ``SCADBUDDY_SERVICE_TOKEN_FILE`` or ``SCADBUDDY_SERVICE_BOOTSTRAP_FILE``, with no view
-    to fall back to, whatever ``SCADBUDDY_DATABASE_URL`` says. The projects worker's
-    now, the render worker's once its CRUD client takes it."""
+    to fall back to, whatever ``SCADBUDDY_DATABASE_URL`` says: the projects and render
+    workers'."""
     proof: Literal["k8s", "bootstrap"]
     if settings.service_token_file is not None:
         proof_file, proof = settings.service_token_file, "k8s"
