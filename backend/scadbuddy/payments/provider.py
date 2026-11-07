@@ -1,0 +1,63 @@
+"""The provider seam (#4957): what a payment provider must offer ScadBuddy. A provider
+adapter (the fake one here, Stripe in #4958) holds no state; the shop's credential comes
+in with each call."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from scadbuddy.payments.models import HostedRequest, PaymentRequestView, ProviderEvent
+
+
+@dataclass(frozen=True)
+class Credential:
+    """The shop's account at a provider: plain settings and opened secrets. The secrets
+    stay out of ``repr``."""
+
+    settings: Mapping[str, str]
+    secrets: Mapping[str, str] = field(repr=False)
+
+
+class ProviderField(BaseModel):
+    """One input the connect form asks for."""
+
+    name: str
+    label: str
+    secret: bool
+
+
+class BadSignatureError(Exception):
+    """A webhook whose signature does not match. Nothing of it was read."""
+
+
+class ProviderError(Exception):
+    """A provider call failed. The message is safe to show: it carries no secret."""
+
+
+class PaymentProvider(Protocol):
+    id: str
+    label: str
+    fields: Sequence[ProviderField]
+
+    async def verify(self, credential: Credential) -> str:
+        """Check the credential; the account label for "Connected as ..."."""
+        ...
+
+    async def create_request(
+        self,
+        credential: Credential,
+        request: PaymentRequestView,
+        *,
+        return_url: str | None,
+        idempotency_key: str,
+    ) -> HostedRequest: ...
+
+    def parse_webhook(
+        self, credential: Credential, headers: Mapping[str, str], body: bytes
+    ) -> ProviderEvent:
+        """Raises `BadSignatureError` before it parses anything."""
+        ...

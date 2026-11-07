@@ -6,7 +6,11 @@ import pytest
 
 from scadbuddy.orders.models import Actor, Order
 from scadbuddy.orders.store import OrderStore
-from scadbuddy.payments.models import PaymentRequest, ProviderEvent
+from scadbuddy.payments.models import (
+    PaymentRequest,
+    PaymentRequestStatus,
+    ProviderEvent,
+)
 from scadbuddy.payments.store import (
     default_provider,
     finish_event,
@@ -123,3 +127,16 @@ def test_has_open_requests_and_the_default_provider(rows: OrderStore, order: Ord
             " VALUES ('fake', 'Fake', '\\x00', '\\x00', 'k', true)"
         )
         assert default_provider(conn) == "fake"
+
+
+@pytest.mark.parametrize("status", ["cancelled", "expired"])
+def test_closing_without_payment_leaves_paid_at_empty(
+    rows: OrderStore, order: Order, status: PaymentRequestStatus
+) -> None:
+    with rows.transaction() as conn:
+        req = insert_request(
+            conn, order_id=order.id, kind="deposit", provider=None, amount_minor=500,
+            currency="USD", created_by=BY,
+        )  # fmt: skip
+        closed = set_request_status(conn, req.id, status)
+    assert closed.status == status and closed.paid_at is None

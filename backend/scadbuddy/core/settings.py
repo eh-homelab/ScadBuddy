@@ -470,6 +470,11 @@ class Settings(BaseSettings):
     # API process (#1060), as SCADBUDDY_TEMPORAL_WORKER_INPROCESS does with every queue,
     # for a deployment without the `scadbuddy-print` worker.
     temporal_print_worker_inprocess: bool = False
+
+    # SCADBUDDY_PAYMENTS_FAKE_PROVIDER (#4957): offer the fake payment provider, which
+    # needs no network, for dev runs and tests. Not a stored setting, so prod cannot pick it.
+    payments_fake_provider: bool = False
+
     # SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS: serve the `projects` queue (flow
     # runs, #1057) inside the API process, as the print flag does for `bambuddy`.
     temporal_projects_worker_inprocess: bool = False
@@ -825,6 +830,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "download_cache_max_bytes": (
             "Paired with the download cache's directory: a budget of the volume the"
             " deployment mounts it from."
+        ),
+        "payments_fake_provider": (
+            "Whether the fake payment provider is offered. A dev and test aid: a stored value"
+            " would let a form switch it on in prod."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",
