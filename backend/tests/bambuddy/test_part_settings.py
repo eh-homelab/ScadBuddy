@@ -550,3 +550,24 @@ def test_a_part_the_writer_reads_as_another_slot_is_refused() -> None:
     assert printed_part_slots(text) == {1, 2}
     with pytest.raises(PartSettingsUnwritableError):
         set_part_settings(text, ((2, (("wall_loops", "3"),)),))
+
+
+def test_a_nested_object_with_a_part_outside_any_object_is_refused() -> None:
+    """#5656 (the review of PR #5657): a nested object counts its part twice in the walk
+    object by object, and a part outside any object counts once in document order only.
+    Together the two counts match, and the old check zipped the written part ``a`` with
+    the old part ``b`` and passed. The check now compares the walk with the document
+    order part by part and refuses the file."""
+    from xml.etree import ElementTree as ET
+
+    from scadbuddy.render.bambu3mf import _check_written
+
+    text = (
+        '<config><object id="1"><metadata key="extruder" value="2"/>'
+        '<object id="2"><part id="a" subtype="normal_part">'
+        '<metadata key="wall_loops" value="3"/></part></object></object>'
+        '<part id="b" subtype="normal_part"><metadata key="wall_loops" value="3"/></part>'
+        "</config>"
+    )
+    with pytest.raises(PartSettingsUnwritableError, match="exactly one object"):
+        _check_written(ET.fromstring(text), ET.fromstring(text), {2: (("wall_loops", "3"),)})
