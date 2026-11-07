@@ -119,6 +119,33 @@ describe('custom line items', () => {
     await waitFor(() => expect(within(drawer).queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument())
   })
 
+  it("offers no Accept in the drawer of an accepted order on hold (#5555 review)", async () => {
+    const item = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'custom', title: 'Rush fee', quantity: 2, unit_price_minor: 400 })
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    const quote = state.quotes.find((q) => q.order_item_id === item.id)!
+    const { user } = render(ORDER_ACCEPTED)
+    await user.click(await screen.findByRole('button', { name: 'Rush fee' }))
+    const drawer = await screen.findByRole('dialog')
+    expect(within(drawer).getByTestId(`quote-${quote.id}`)).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
+  })
+
+  it('asks again after a confirmed add fails (#5555 review)', async () => {
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance').mockRejectedValueOnce(new Error('refused'))
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(screen.getByRole('button', { name: 'Add custom item' }))
+    await user.type(screen.getByRole('textbox', { name: 'Custom item title' }), 'Rush fee')
+    await user.type(screen.getByRole('textbox', { name: 'Custom item unit price' }), '8{Enter}')
+    await user.click(await screen.findByRole('button', { name: 'Confirm custom item' }))
+    await waitFor(() => expect(after).toHaveBeenCalledTimes(1))
+    // The failure clears the confirm: the next save asks first and sends nothing.
+    await waitFor(() => expect(screen.queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Save custom item' }))
+    expect(await screen.findByRole('alert', { name: 'Confirm the change' })).toBeInTheDocument()
+    expect(after).toHaveBeenCalledTimes(1)
+  })
+
   it("offers no Accept on a custom item's accepted price", async () => {
     await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Packaging', quantity: 1, unit_price_minor: 300 })
     const { user } = render(ORDER_DRAFT)
