@@ -54,11 +54,11 @@ describe('orders mock (#4249)', () => {
     // The rest of the lax int (#5573): booleans, `_` separators and a zero fraction pass;
     // a fraction or an exponent does not.
     const as = (v: unknown) => [{ ...post, amount_minor: v as number }]
-    for (const [sent, stored] of [[true, 1], [false, 0], ['1_000', 1000], ['5.0', 5], [' +4 ', 4]] as const) {
+    for (const [sent, stored] of [[true, 1], [false, 0], ['1_000', 1000], ['5.0', 5], [' +4 ', 4], ['5.00', 5], ['1_000.0', 1000]] as const) {
       await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, as(sent))
       expect((await api.order(ORDER_ACCEPTED)).charges.map((c) => c.amount_minor)).toEqual([stored])
     }
-    for (const sent of ['5.5', '1e3']) {
+    for (const sent of ['5.5', '5.', '1e3']) {
       expect((await failure(api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, as(sent))))?.status).toBe(422)
     }
   })
