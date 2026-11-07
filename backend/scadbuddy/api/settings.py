@@ -65,6 +65,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
 )
 from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
@@ -130,6 +131,15 @@ class SettingsView(BaseModel):
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
     orders_thin_margin_percent: str = "15"
+    #: Auto tax (#5281): the percent of an open order's items, and whether shipping is
+    #: in its base.
+    orders_tax_percent: str = "0"
+    orders_tax_shipping: bool = False
+    #: The shop's money rules (#5281), stored only: the deposit policy, the shipping
+    #: options and how a customer pays by hand. An empty list is none.
+    orders_deposit_policy: list[DepositRule] = Field(default_factory=list)
+    storefront_shipping_options: list[ShippingOption] = Field(default_factory=list)
+    storefront_payment_instructions: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -417,6 +427,9 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         last_project_id=stored.last_project_id,
         destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
+        orders_deposit_policy=stored.orders_deposit_policy or [],
+        storefront_shipping_options=stored.storefront_shipping_options or [],
+        storefront_payment_instructions=stored.storefront_payment_instructions,
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         has_git_remote_token=bool(runtime.git_remote_token),
         sources=snapshot.sources,

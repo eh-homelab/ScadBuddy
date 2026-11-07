@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Annotated
 
 from psycopg import Connection
@@ -28,6 +29,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.money import OrderRules
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
@@ -73,10 +75,23 @@ class OrdersComponent:
             self.core.settings_store, self.store, spool_import=self.integrations.linked
         )
 
+    def rules(self) -> OrderRules:
+        """The shop's money rules (#5281) as stored now: the lifecycle reads them on each
+        use, so a change applies to the next transition."""
+        snapshot = self.core.settings_store.snapshot()
+        runtime, stored = snapshot.runtime, snapshot.stored
+        return OrderRules(
+            shop_currency=runtime.orders_currency,
+            tax_percent=Decimal(runtime.orders_tax_percent),
+            tax_shipping=runtime.orders_tax_shipping,
+            deposit_policy=tuple(stored.orders_deposit_policy or ()),
+            shipping_options=tuple(stored.storefront_shipping_options or ()),
+        )
+
     @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
-            self._lifecycle = Lifecycle(self.store, self.core.events, self.refs)
+            self._lifecycle = Lifecycle(self.store, self.core.events, self.refs, self.rules)
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
             )

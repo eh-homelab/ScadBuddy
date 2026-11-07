@@ -26,7 +26,7 @@ was for. The print follow (``follow_print``) records what a printer did, on hold
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -71,6 +71,7 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
+from scadbuddy.orders.money import NO_RULES, OrderRules
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartRow,
@@ -448,11 +449,20 @@ def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
 
 
 class Lifecycle:
-    def __init__(self, store: OrderStore, bus: EventBus | None, refs: BlobRefs | None = None):
+    def __init__(
+        self,
+        store: OrderStore,
+        bus: EventBus | None,
+        refs: BlobRefs | None = None,
+        rules: Callable[[], OrderRules] = lambda: NO_RULES,
+    ):
         self.store = store
         self.bus = bus
         #: The slice quotes' holds (#4250 Ruling 3); None where nothing holds a file.
         self.refs = refs
+        #: The shop's money rules (#5281: tax, deposits, shipping options), read when a
+        #: transition needs them, so a settings change applies to the next one.
+        self.rules = rules
         #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
         self.parts = PartStore(store)
         #: The payment providers offered (#4957, ``payments/registry.py``): a default

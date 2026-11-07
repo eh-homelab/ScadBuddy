@@ -77,6 +77,7 @@ from scadbuddy.core.secrets import (
 from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
+from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -400,6 +401,14 @@ class StoredSettings(BambuddyIds):
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
 
+    # -- the shop's money rules (#5281), stored only: no environment seeds them --------
+    #: The deposit policy's rules; ``None`` asks no deposit.
+    orders_deposit_policy: list[DepositRule] | None = None
+    #: The ways an order reaches its customer; ``None`` offers none.
+    storefront_shipping_options: list[ShippingOption] | None = None
+    #: How a customer pays by hand (shown as text, never HTML).
+    storefront_payment_instructions: str | None = None
+
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
     #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
     #: :meth:`SettingsStore.set_library_choices`).
@@ -625,6 +634,13 @@ class SettingsPatch(BaseModel):
     #: it: no agent tool writes settings.
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
 
+    # -- the shop's money rules (#5281), stored only; only the user sets them ----------
+    #: ``null`` asks no deposit.
+    orders_deposit_policy: list[DepositRule] | None = Field(default=None, max_length=20)
+    #: The ids are unique; ``null`` offers none.
+    storefront_shipping_options: list[ShippingOption] | None = Field(default=None, max_length=20)
+    storefront_payment_instructions: str | None = Field(default=None, max_length=2000)
+
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
     template_activity_max_timeout: float | None = None
@@ -685,6 +701,9 @@ class SettingsPatch(BaseModel):
     pricing_labour_rate_per_hour: str | None = None
     pricing_usd_rate: str | None = None
     orders_thin_margin_percent: str | None = None
+    #: Auto tax (#5281): the percent, and whether shipping is in its base.
+    orders_tax_percent: str | None = None
+    orders_tax_shipping: bool | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -722,6 +741,17 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("storefront_shipping_options")
+    @classmethod
+    def _unique_option_ids(
+        cls, options: list[ShippingOption] | None
+    ) -> list[ShippingOption] | None:
+        ids = [option.id for option in options or ()]
+        repeated = sorted({option_id for option_id in ids if ids.count(option_id) > 1})
+        if repeated:
+            raise ValueError(f"shipping option ids are unique: {', '.join(repeated)}")
+        return options
 
     @field_validator("reset")
     @classmethod

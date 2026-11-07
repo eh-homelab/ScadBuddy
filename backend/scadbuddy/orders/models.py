@@ -194,12 +194,17 @@ class ChargeInput(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     #: Signed: a discount is negative.
     amount_minor: Money
+    #: The shipping option a ``shipping`` charge was chosen from (#5281), if any.
+    shipping_option_id: str | None = None
 
 
 class Charge(ChargeInput):
     id: str
     order_id: str
     position: int
+    #: The tax ScadBuddy computes from ``orders_tax_percent`` (#5281): no body writes it,
+    #: and a save of the charges keeps it.
+    auto: bool = False
 
 
 class Payment(BaseModel):
@@ -254,6 +259,12 @@ class Order(BaseModel):
     created_at: datetime
     updated_at: datetime
     created_by: Actor
+    #: What the order asks before production (#5281), in its currency; None asks none.
+    deposit_minor: Money | None = None
+    #: Why the shop went on without the deposit ("Proceed without deposit")...
+    deposit_waived_reason: str | None = None
+    #: ...and why it ships without full payment ("Ship without full payment").
+    balance_waived_reason: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -25,9 +26,12 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.money import NO_RULES, DepositRule, ShippingOption
 from scadbuddy.workflows.client import connect, connect_lazily
 from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
+from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
@@ -59,6 +63,11 @@ DEFAULTS: dict[str, object] = {
     "pricing_labour_rate_per_hour": "0",
     "pricing_usd_rate": "1",
     "orders_thin_margin_percent": "15",
+    "orders_tax_percent": "0",
+    "orders_tax_shipping": False,
+    "orders_deposit_policy": [],
+    "storefront_shipping_options": [],
+    "storefront_payment_instructions": None,
     "lan_require_plate_clear": False,
     "git_remote_url": None,
     "git_remote_username": None,
@@ -711,3 +720,101 @@ def test_the_activity_settings_round_trip(client: TestClient, settings: Settings
 )
 def test_a_bad_activity_setting_is_refused(client: TestClient, patch: dict[str, object]) -> None:
     assert client.put("/api/v1/settings", json=patch).status_code == 422
+
+
+def test_the_money_settings_round_trip(client: TestClient, settings: Settings) -> None:
+    """#5281: the tax is env-seeded and live; the policy, the options and the payment
+    instructions are stored only."""
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "orders_tax_percent": "8.25",
+            "orders_tax_shipping": True,
+            "orders_deposit_policy": [{"criterion": "has_request", "amount_minor": 2000}],
+            "storefront_shipping_options": [
+                {"id": "pickup", "label": "Pick up", "amount_minor": 0, "ships": False}
+            ],
+            "storefront_payment_instructions": "Venmo @shop",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    got = client.get("/api/v1/settings").json()
+    assert got["orders_tax_percent"] == "8.25"
+    assert got["orders_tax_shipping"] is True
+    assert got["applies"]["orders_tax_percent"] == "live"
+    assert got["applies"]["orders_tax_shipping"] == "live"
+    assert got["orders_deposit_policy"] == [
+        {"criterion": "has_request", "above_minor": None, "percent": None, "amount_minor": 2000}
+    ]
+    assert got["storefront_shipping_options"] == [
+        {"id": "pickup", "label": "Pick up", "amount_minor": 0, "ships": False}
+    ]
+    assert got["storefront_payment_instructions"] == "Venmo @shop"
+    assert read_stored(settings.database_url)["orders_tax_percent"] == "8.25"
+
+    cleared = client.put(
+        "/api/v1/settings",
+        json={"orders_deposit_policy": None, "storefront_payment_instructions": None},
+    ).json()
+    assert cleared["orders_deposit_policy"] == []
+    assert cleared["storefront_payment_instructions"] is None
+
+
+@pytest.mark.parametrize("percent", ["100", "-1", "lots"])
+def test_a_tax_percent_of_100_is_refused(client: TestClient, percent: str) -> None:
+    refused = client.put("/api/v1/settings", json={"orders_tax_percent": percent})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", "orders_tax_percent"]
+    assert client.put("/api/v1/settings", json={"orders_tax_percent": "99.99"}).status_code == 200
+
+
+def test_duplicate_option_ids_are_refused(client: TestClient) -> None:
+    option = {"id": "post", "label": "Post", "amount_minor": 500, "ships": True}
+    refused = client.put("/api/v1/settings", json={"storefront_shipping_options": [option, option]})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"][:2] == ["body", "storefront_shipping_options"]
+
+
+def test_the_money_lists_and_text_are_bounded(client: TestClient) -> None:
+    rule = {"criterion": "has_request", "amount_minor": 1}
+    too_many = client.put("/api/v1/settings", json={"orders_deposit_policy": [rule] * 21})
+    assert too_many.status_code == 422
+    options = [{"id": f"o{i}", "label": "x", "amount_minor": 0, "ships": False} for i in range(21)]
+    assert (
+        client.put("/api/v1/settings", json={"storefront_shipping_options": options}).status_code
+        == 422
+    )
+    long = client.put("/api/v1/settings", json={"storefront_payment_instructions": "x" * 2001})
+    assert long.status_code == 422
+    bad = client.put(
+        "/api/v1/settings",
+        json={"orders_deposit_policy": [{"criterion": "total_above", "amount_minor": 5}]},
+    )
+    assert bad.status_code == 422
+
+
+def test_the_lifecycle_reads_the_money_rules_as_saved(client: TestClient) -> None:
+    lifecycle = _state(client).components.get(ORDERS).lifecycle
+    assert lifecycle.rules() == NO_RULES
+    client.put(
+        "/api/v1/settings",
+        json={
+            "orders_currency": "EUR",
+            "orders_tax_percent": "20",
+            "orders_tax_shipping": True,
+            "orders_deposit_policy": [{"criterion": "first_order", "percent": "25"}],
+            "storefront_shipping_options": [
+                {"id": "post", "label": "Post", "amount_minor": 500, "ships": True}
+            ],
+        },
+    )
+    rules = lifecycle.rules()
+    assert (rules.shop_currency, rules.tax_percent, rules.tax_shipping) == (
+        "EUR",
+        Decimal("20"),
+        True,
+    )
+    assert rules.deposit_policy == (DepositRule(criterion="first_order", percent="25"),)
+    assert rules.shipping_options == (
+        ShippingOption(id="post", label="Post", amount_minor=500, ships=True),
+    )

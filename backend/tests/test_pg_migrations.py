@@ -536,3 +536,58 @@ def test_the_payments_seam_migration(pg_conninfo: str) -> None:
         conn.execute(cred, ("one",))
         with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
             conn.execute(cred, ("two",))
+
+
+@pytest.mark.requires_postgres
+def test_the_deposits_tax_migration(pg_conninfo: str) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("order_deposits_tax")])
+        customer_id = conn.execute(
+            "INSERT INTO customers (display_name) VALUES ('Ada') RETURNING id"
+        ).fetchone()[0]  # type: ignore[index]
+        order_id = conn.execute(
+            "INSERT INTO orders (number, customer_id, currency, created_by)"
+            " VALUES ('2026-9002', %s, 'USD', '{}') RETURNING id",
+            (customer_id,),
+        ).fetchone()[0]  # type: ignore[index]
+        conn.execute(
+            "INSERT INTO order_charges (order_id, kind, label, amount_minor, position)"
+            " VALUES (%s, 'tax', 'VAT', 100, 0)",
+            (order_id,),
+        )
+        assert migrate(conn)[0] == MIGRATIONS[_index("order_deposits_tax")].id
+        # the old charge is typed, with no option, and the order has no deposit
+        assert conn.execute("SELECT auto, shipping_option_id FROM order_charges").fetchall() == [
+            (False, None)
+        ]
+        assert conn.execute(
+            "SELECT deposit_minor, deposit_waived_reason, balance_waived_reason FROM orders"
+        ).fetchall() == [(None, None, None)]
+        charge = (
+            "INSERT INTO order_charges"
+            " (order_id, kind, label, amount_minor, position, auto, shipping_option_id)"
+            " VALUES (%s, %s, 'x', 1, 1, %s, %s)"
+        )
+        # an auto charge must be tax
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(charge, (order_id, "fee", True, None))
+        # an option is a shipping charge's
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(charge, (order_id, "fee", False, "pickup"))
+        conn.execute(charge, (order_id, "shipping", False, "pickup"))
+        conn.execute(charge, (order_id, "tax", True, None))
+        # two auto rows on one order are refused
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute(charge, (order_id, "tax", True, None))
+        update = "UPDATE orders SET {column} = %s WHERE id = %s"
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(update.format(column="deposit_minor"), (0, order_id))
+        for column in ("deposit_waived_reason", "balance_waived_reason"):
+            for reason in ("", "x" * 501):
+                with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                    conn.execute(update.format(column=column), (reason, order_id))
+        conn.execute(
+            "UPDATE orders SET deposit_minor = 1, deposit_waived_reason = %s,"
+            " balance_waived_reason = %s WHERE id = %s",
+            ("x" * 500, "y", order_id),
+        )
