@@ -5426,6 +5426,28 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     await waitFor(() => expect(runs.bodies[0]).toMatchObject({ printer: garage.id, printer_id: null }))
   })
 
+  it('drops a calibration value the LAN refuses when the printer turns native (#5352)', async () => {
+    setHotPath(true)
+    server.use(hybridChoices(0))
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByText(/sends it to the printer over the LAN/)).toBeInTheDocument())
+    await choose(user, await screen.findByRole('combobox', { name: 'Printer' }), new RegExp(`^${otherPrinter().name}`))
+    await waitFor(() => expect(screen.queryByText(/sends it to the printer over the LAN/)).not.toBeInTheDocument())
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(await screen.findByText('Options'))
+    await choose(user, await screen.findByRole('combobox', { name: 'Flow calibration' }), 'On')
+    await choose(user, screen.getByRole('combobox', { name: 'Timelapse' }), 'On')
+
+    await choose(user, screen.getByRole('combobox', { name: 'Printer' }), new RegExp(`^${choicesView.printers![0]!.name}`))
+    await waitFor(() => expect(screen.getByText(/sends it to the printer over the LAN/)).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    // Flow calibration on is refused over the LAN, so it is dropped; the timelapse stays.
+    expect(runs.bodies[0]?.options).toEqual({ timelapse: true })
+  })
+
   it('offers the folders, not projects, in Advanced', async () => {
     setHotPath(true)
     const { user } = renderPicker()

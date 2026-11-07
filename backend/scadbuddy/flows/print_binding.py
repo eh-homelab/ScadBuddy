@@ -96,8 +96,17 @@ async def bind_call(
     row = await lookup(printer)
     if row is None:
         summary = f"Prints on printer {printer}, which the registry does not hold"
+    elif row.bambuddy_printer_id is None and args.get("path") == "bambuddy":
+        # #5352: the run refuses it, as the agent's `printerOf` does: nothing goes out.
+        summary = (
+            f"Refused: {row.name} links no Bambuddy printer, so it cannot print through"
+            " Bambuddy's queue"
+        )
     elif row.bambuddy_printer_id is None:
         summary = f"Prints on {row.name} over the LAN"
+    elif args.get("path") == "bambuddy":
+        # #5352: the call asked for Bambuddy's queue, so the run goes through Bambuddy.
+        summary = f"Prints on {row.name} (Bambuddy printer {row.bambuddy_printer_id})"
     else:
         summary = f"Prints on {row.name}{await _path_of(row, native)}"
     if "printer_id" in args:

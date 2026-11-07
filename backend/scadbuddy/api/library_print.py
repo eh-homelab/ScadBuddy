@@ -1646,7 +1646,12 @@ async def post_library_check(
     settings = store.load()
     native = await library.serving_native()
     route = await dialog_route(
-        settings, printers.store, printers.reports, printer=body.printer, printer_id=body.printer_id
+        settings,
+        printers.store,
+        printers.reports,
+        printer=body.printer,
+        printer_id=body.printer_id,
+        asked=body.path,
     )
     # Naming no printer, the check judges nothing (`check_print`): the file is still
     # read, which the native library does with no client.

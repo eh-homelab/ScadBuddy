@@ -29,7 +29,13 @@ function Harness({
   printerId,
   registryPrinter,
   subject = MODEL,
-}: { printerId?: number | null; registryPrinter?: string | null; subject?: OptionsSubject } = {}) {
+  native,
+}: {
+  printerId?: number | null
+  registryPrinter?: string | null
+  subject?: OptionsSubject
+  native?: boolean
+} = {}) {
   const [value, setValue] = useState<PrintOptions>({})
   return (
     <>
@@ -37,6 +43,7 @@ function Harness({
         subject={subject}
         printerId={printerId}
         registryPrinter={registryPrinter}
+        native={native}
         value={value}
         onChange={setValue}
       />
@@ -520,6 +527,14 @@ describe('PrintOptionsDisclosure', () => {
       server.events.removeAllListeners()
     })
 
+    it('shows the held job in Simple mode over the LAN too, with no calibration row (#5352)', async () => {
+      const known = { ...printOptionsFixture, global_options: { manual_start: true, flow_cali: 'off' as const } }
+      render(<PrintOptionsDisclosure subject={MODEL} value={{}} onChange={() => {}} heldOnly known={known} native />)
+      expect(await screen.findByTestId('holding-manual_start')).toHaveTextContent('Waits for a manual start.')
+      expect(screen.queryByRole('combobox', { name: 'Flow calibration' })).not.toBeInTheDocument()
+      expect(screen.queryByText(/Over the LAN/)).not.toBeInTheDocument()
+    })
+
     it("sets every changed option back to Bambuddy's default for this print", async () => {
       remembered()
       const user = userEvent.setup()
@@ -545,5 +560,47 @@ describe('PrintOptionsDisclosure', () => {
     await user.click(screen.getByText('Options'))
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('no Bambuddy URL'))
+  })
+
+  // #5352: the LAN start sends flow calibration off and leaves the rest to the printer.
+  it('offers a print over the LAN only the calibration values the LAN start does', async () => {
+    const user = userEvent.setup()
+    render(<Harness native />)
+    await open(user)
+
+    const flow = screen.getByRole('combobox', { name: 'Flow calibration' })
+    expect(await optionDisabled(user, flow, 'Off')).toBe(false)
+    expect(await optionDisabled(user, flow, 'On')).toBe(true)
+    expect(await optionDisabled(user, flow, 'Auto')).toBe(true)
+    for (const label of ['Bed levelling', 'Nozzle offset calibration']) {
+      const select = screen.getByRole('combobox', { name: label })
+      expect(await optionDisabled(user, select, 'Auto')).toBe(false)
+      expect(await optionDisabled(user, select, 'On')).toBe(true)
+      expect(await optionDisabled(user, select, 'Off')).toBe(true)
+    }
+    const vibration = screen.getByRole('combobox', { name: 'Vibration calibration' })
+    expect(await optionDisabled(user, vibration, 'On')).toBe(true)
+    expect(await optionDisabled(user, vibration, 'Off')).toBe(true)
+    expect(await optionDisabled(user, vibration, /^Bambuddy default/)).toBe(false)
+
+    expect(within(row('Flow calibration')).getByText(/Over the LAN: Off; only Bambuddy's queue sets it otherwise/)).toBeInTheDocument()
+    expect(within(row('Vibration calibration')).getByText(/Over the LAN: set by the printer/)).toBeInTheDocument()
+    // Not a calibration: the LAN start takes it.
+    expect(await optionDisabled(user, screen.getByRole('combobox', { name: 'Timelapse' }), 'On')).toBe(false)
+    expect(within(row('Timelapse')).queryByText(/Over the LAN/)).toBeNull()
+
+    await pick(user, 'Flow calibration', 'off')
+    expect(screen.getByTestId('sent')).toHaveTextContent('{"flow_cali":"off"}')
+  })
+
+  it('offers every calibration value through Bambuddy', async () => {
+    const user = userEvent.setup()
+    render(<Harness />)
+    await open(user)
+
+    const flow = screen.getByRole('combobox', { name: 'Flow calibration' })
+    expect(await optionDisabled(user, flow, 'On')).toBe(false)
+    expect(await optionDisabled(user, screen.getByRole('combobox', { name: 'Vibration calibration' }), 'On')).toBe(false)
+    expect(screen.queryByText(/Over the LAN/)).toBeNull()
   })
 })

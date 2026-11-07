@@ -150,6 +150,7 @@ class PreviewSlicer:
             printer_id=request.printer_id,
             filament_plan=request.filament_plan,
             choices=request.choices,
+            path=request.path,
         )
         registry = self.components.get(PRINTERS)
         # The run's own decision (plan 2026-10-18 D2), as the dialog's background slice
@@ -161,6 +162,7 @@ class PreviewSlicer:
             registry.reports,
             printer=body.printer,
             printer_id=body.printer_id,
+            asked=body.path,
         )
         lan = route is not None and route.native
         native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
@@ -491,6 +493,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 printers.reports,
                 printer=body.printer,
                 printer_id=body.printer_id,
+                asked=body.path,
             )
         except ApiError:
             return False
@@ -515,6 +518,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     printers.reports,
                     printer=body.printer,
                     printer_id=body.printer_id,
+                    asked=body.path,
                 )
             except ApiError:
                 # The run refuses it itself, with its own words.

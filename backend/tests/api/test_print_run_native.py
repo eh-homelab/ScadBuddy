@@ -11,6 +11,7 @@ import json
 import os
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,12 +29,15 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.models import LanLink, PrinterPatch
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import FAILED, SliceRunInput
 from scadbuddy.workflows.printing import HEARTBEAT, PLAN_TIMEOUT
 from scadbuddy.workflows.slicing_activities import WAITING, RunActivities
 from tests.api.conftest import follow_operation
 from tests.api.test_analyzers import TIMELAPSE_SOURCE
+from tests.api.test_library_native import _one_colour, _upload
 from tests.api.test_print_filaments import prepared
 from tests.api.test_print_preview_native import (
     COPY,
@@ -642,3 +646,111 @@ def test_a_native_run_applies_the_accepted_fixes_it_names(
     assert sliced["plan"]["bed_type"] == "High Temp Plate"
     (item,) = library.queue_bodies
     assert item["timelapse"] is True
+
+
+# ── #5352: a check that asks for Bambuddy's queue on a printer the LAN reaches ──────
+
+#: A fresh LAN report of an H2C (`tests/printers/fixtures`).
+LAN_REPORT = json.loads(
+    (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c.json").read_text()
+)
+
+
+def _lan_routed(client: TestClient) -> str:
+    """Bambuddy printer 1's registry row, linked over the LAN, set to print natively,
+    with a fresh report: on the hot path's backends a run on it goes over the LAN."""
+    printers: Printers = _state(client).components.get(PRINTERS)
+    row = printers.store.ensure_bambuddy(1, serial="0938AB000000001", name="Garage", model="H2C")
+    printers.store.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
+    )
+    printers.store.patch(row.id, PrinterPatch.model_validate({"preferred_path": "native"}))
+    printers.reports.put(row.id, LAN_REPORT["print"], datetime.now(UTC))
+    return row.id
+
+
+def _status_reads() -> int:
+    """How many times Bambuddy's status of printer 1 was read: only the Bambuddy check
+    reads it (the native check reads the LAN report)."""
+    return sum(1 for call in respx.calls if call.request.url.path == "/api/v1/printers/1/status")
+
+
+def test_an_outputs_check_asked_through_bambuddy_is_bambuddys_check(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,
+    tmp_path: Path,
+    library: FakeLibrary,
+) -> None:
+    """A row a run reaches over the LAN, checked with `path: "bambuddy"`, is checked as
+    the Bambuddy run it will be: a 200, with Bambuddy's status read, never a 500 from a
+    client the native check did not build."""
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        output_id = prepared(client, model)
+        row = _lan_routed(client)
+        before = _status_reads()
+        checked = client.post(
+            f"/api/v1/print/outputs/{output_id}/check",
+            json={**body(), "printer": row, "path": "bambuddy"},
+        )
+        assert checked.status_code == 200, checked.text
+        assert _status_reads() > before
+
+
+def test_a_library_files_check_asked_through_bambuddy_is_bambuddys_check(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,
+    tmp_path: Path,
+    library: FakeLibrary,
+) -> None:
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        prepared(client, model)
+        plug = _upload(client, _one_colour(tmp_path / "plug.3mf"))
+        row = _lan_routed(client)
+        before = _status_reads()
+        checked = client.post(
+            f"/api/v1/print/library/{plug.id}/check",
+            json={**body(), "printer": row, "path": "bambuddy"},
+        )
+        assert checked.status_code == 200, checked.text
+        assert _status_reads() > before
+
+
+def _bambuddy_calls() -> int:
+    return sum(1 for call in respx.calls if call.request.url.host == "bambuddy.test")
+
+
+def test_an_analysis_asked_through_bambuddy_reads_bambuddy(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,
+    tmp_path: Path,
+    library: FakeLibrary,
+) -> None:
+    """The analyzers judge the print the run will make: on a row the LAN reaches they
+    ask Bambuddy nothing (#4629), and with `path: "bambuddy"` they read it, as that run
+    does."""
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        output_id = prepared(client, model)
+        row = _lan_routed(client)
+        request = {k: v for k, v in body().items() if k != "printer_id"}
+        before = _bambuddy_calls()
+        native = client.post(
+            "/api/v1/analyzers/run",
+            json={"target": {"output_id": output_id}, "request": {**request, "printer": row}},
+        )
+        assert native.status_code == 200, native.text
+        assert _bambuddy_calls() == before
+        asked = client.post(
+            "/api/v1/analyzers/run",
+            json={
+                "target": {"output_id": output_id},
+                "request": {**request, "printer": row, "printer_id": 1, "path": "bambuddy"},
+            },
+        )
+        assert asked.status_code == 200, asked.text
+        assert _bambuddy_calls() > before

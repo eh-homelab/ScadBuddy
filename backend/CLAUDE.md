@@ -313,7 +313,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md`): a print that
   touches Bambuddy nowhere. `hot_path_native(settings, path)` decides per run from the
   stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3` or
-  `bambuddy`) and the printer row's resolved path; there is no switch of its own. A
+  `bambuddy`) and the printer row's resolved path; there is no stored switch of its own.
+  One request may choose (#5352, print-flow spec §2 "As built: the request picks the
+  path"): `PrintRunRequest.path` `bambuddy` is Bambuddy's queue whatever the row says
+  (`run_route`/`ensured_route` `asked`, no LAN report read; the printer must link
+  Bambuddy), and `native` is refused when the run would not go over the LAN
+  (`LAN_PATH_REFUSAL`). Every reader that takes the request passes it: the dialog's
+  checks (`dialog_route` `asked`), the background and quote slices (`slice_route`
+  `asked`, `SliceQuoteRequest.path`) and the analyzers (`AnalysisRequest.path`). A
+  native run refuses a request whose own `options` ask a calibration value the LAN start
+  cannot honour (`options.lan_calibration_refusal`, 422): it sends `flow_cali` false and no
+  field for the other three, so `flow_cali` `"off"` and `bed_levelling`/`nozzle_offset_cali`
+  `"auto"` pass (`LAN_CALIBRATIONS`), and any `vibration_cali` is refused. An order print
+  with `path` `bambuddy` of a quote sliced over the LAN slices again (orders spec §5.4). A
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
@@ -484,10 +496,27 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `attribute_request(activity.index, "<source>:<id>")` (author headers, else `browser`), as
   `render_model`, `post_run` and `arrange_outputs` do. `api/activity.py` serves
   `/activity`, `/activity/facets` and `/activity/{id}`, and the realtime `activity` topic;
-  both read everything, as the browser does. The `housekeeping_activity` sweep (last in
+  both read everything, as the browser does. `/activity` with `subject` repeated (at most
+  `MAX_SUBJECTS`, 200) reads each subject's newest `limit` rows in one query
+  (`ActivityIndex.list_per_subject`, a keyset walk per subject of the expression index
+  `activity_subject_key`), with `subject_cursors` to page one subject (#5596). The `housekeeping_activity` sweep (last in
   `SWEEPS`, behind `workflow.patched("housekeeping-activity")`) repairs, then prunes, on the
   prune Schedule (settings `activity_ttl_seconds`, `activity_repair_window_seconds`,
-  `activity_follow`). The agent: `src/activity/kinds.ts` (its kinds) and `tools/activity.ts`
+  `activity_follow`). Table size (#5599): the prune (`ActivityIndex._prune`) deletes a row
+  `activity_ttl_seconds` after its `finished_at` (default `ACTIVITY_TTL_DEFAULT`, 30 days;
+  the setting is at least one day, `library/settings_store.py`) and a placeholder after
+  the repair window (default one day), every `PRUNE_INTERVAL` (300 s,
+  `workflows/housekeeping.py` `PRUNE_SWEEPS`). So the table holds about 30 days of
+  finished jobs plus the jobs still running: one row per job, never one per event. An
+  operator who raises the TTL makes the table grow by the same factor. The migration
+  `20261107T0625Z_activity_subject_key.sql` builds its index with a plain `CREATE INDEX`.
+  That takes a `SHARE` lock: reads go on, but every insert, update and delete of
+  `activity` waits until the index is built
+  ([PostgreSQL docs](https://www.postgresql.org/docs/18/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY)).
+  `render/pg_store.py` `migrate` runs all pending files in one transaction, so the lock
+  holds until they all commit, and `CONCURRENTLY` cannot run there. On a table
+  bounded to 30 days the build is short. A new index on `activity` with a much larger
+  TTL needs another plan; never edit a merged migration. The agent: `src/activity/kinds.ts` (its kinds) and `tools/activity.ts`
   (`activity_list`, `activity_get`, `activity_watch`), the tier boundary: a caller without
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
@@ -685,7 +714,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
   starts the item's output's print through `api/printing.py` `accept_run`, never a path of
-  its own, its `request_id` from the operation's key. The item is claimed first, under the
+  its own, its `request_id` from the operation's key. Its body's `path` and `options` are
+  the print route's (#5352): with `path` `bambuddy` the print files under the item's
+  project (`item_project_of` judges the route with `asked`) and the calibrations and
+  timelapse reach the queue item. The item is claimed first, under the
   order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
   file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
   item; then the run is attached (`attach_print`) or a refused start releases the claim

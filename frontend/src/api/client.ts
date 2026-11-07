@@ -114,6 +114,7 @@ import type {
   ActivityDetail,
   ActivityFacets,
   ActivityPage,
+  Activity,
   PrintProgress,
   PrintersNow,
   PrinterRow,
@@ -353,6 +354,10 @@ export const SETTINGS_SHARE_MS = 5_000
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
 /** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
 export const MODELS_PAGE_LIMIT = 500
+/** #5596 — the most `subject`s one `GET /activity` takes (`activity/index.py` `MAX_SUBJECTS`). */
+export const ACTIVITY_SUBJECTS = 200
+/** A slice quote's activity subject is `order_item:<id>`. */
+const ORDER_ITEM = 'order_item:'
 
 /** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
 export interface ModelFilters {
@@ -2506,16 +2511,36 @@ export const api = {
    */
   runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
   /**
-   * #5554 — the newest `failed` activity row of one item's slice quotes since `since` (the
-   * item's `created_at`): a failure the page did not start (over MCP, in another tab) shows
-   * on its item with its start and end. The rows carry no error; `followQuote` reads it.
-   * #5585 — filtered by the item's subject, so no other order's failures push it off the
-   * page. A failed quote whose row stayed `running` is not here; `useSliceQuotes` finds it.
+   * #5554 — the newest `failed` activity row of each item's slice quotes, by item id: a
+   * failure the page did not start (over MCP, in another tab) shows on its item with its
+   * start and end. The rows carry no error; `followQuote` reads it. #5585 — filtered by
+   * each item's subject, so no other order's failures push one off the page. #5596 — one
+   * request per `ACTIVITY_SUBJECTS` items (the route's bound), since the oldest item's
+   * `created_at`, one row per subject. #5599 — a request that fails drops its own items
+   * only: the map holds the other requests' rows. A failed quote whose row stayed
+   * `running` is not here; `useSliceQuotes` finds it.
    */
-  failedQuotes: (itemId: string, since: string) =>
-    request<ActivityPage>(
-      `/activity?${new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', subject: `order_item:${itemId}`, since, limit: '1' })}`,
-    ),
+  failedQuotes: async (items: readonly { id: string; created_at: string }[]) => {
+    const newest = new Map<string, Activity>()
+    for (let at = 0; at < items.length; at += ACTIVITY_SUBJECTS) {
+      const chunk = items.slice(at, at + ACTIVITY_SUBJECTS)
+      const since = chunk.reduce((a, b) => (Date.parse(b.created_at) < Date.parse(a) ? b.created_at : a), chunk[0]!.created_at)
+      const query = new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '1' })
+      for (const item of chunk) query.append('subject', `${ORDER_ITEM}${item.id}`)
+      // #5599 — a failed chunk loses its own items' failures only, not the other chunks'.
+      let page: ActivityPage
+      try {
+        page = await request<ActivityPage>(`/activity?${query}`)
+      } catch (cause) {
+        console.debug('could not read the failed slice quotes of some items; they show none', cause)
+        continue
+      }
+      for (const row of page.items) {
+        if (row.subject.startsWith(ORDER_ITEM)) newest.set(row.subject.slice(ORDER_ITEM.length), row)
+      }
+    }
+    return newest
+  },
   /**
    * #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows
    * its own (`followRunning`). `onRunning` is told once the first read finds it still

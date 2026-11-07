@@ -1355,6 +1355,7 @@ async def post_check(
         printers.reports,
         printer=body.printer,
         printer_id=body.printer_id,
+        asked=body.path,
     )
     bare = names_no_printer(settings, body.printer, body.printer_id)
     async with maybe_client(settings, native=route is not None or bare) as client:

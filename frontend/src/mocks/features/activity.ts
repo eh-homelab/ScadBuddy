@@ -211,7 +211,13 @@ export const handlers = [
       const value = sp.get(name)
       if (value !== null && !validTime(value)) return problem(request, 422, `${name} is not a datetime`)
     }
+    // #5596 — `subject` repeated: each subject's newest `limit` rows, at most 200 subjects.
+    const subjects = sp.getAll('subject')
+    if (subjects.length > 200) return problem(request, 422, 'at most 200 subjects', `${PROBLEM}bad-parameter-value`)
     const cursorText = sp.get('cursor')
+    if (subjects.length > 1 && cursorText !== null) {
+      return problem(request, 400, 'a cursor pages one subject: send it with that subject alone', `${PROBLEM}bad-cursor`)
+    }
     const cursor = cursorText === null ? null : decodeCursor(cursorText)
     if (cursorText !== null && cursor === null) {
       return problem(request, 400, 'cursor is not a next_cursor', `${PROBLEM}bad-cursor`)
@@ -226,7 +232,7 @@ export const handlers = [
       .filter((r) => !sp.has('principal') || r.principal === sp.get('principal'))
       .filter((r) => !sp.has('session') || r.session === sp.get('session'))
       .filter((r) => !sp.has('via_tool') || r.via_tool === sp.get('via_tool'))
-      .filter((r) => !sp.has('subject') || subjectKey(r.subject) === subjectKey(sp.get('subject')!))
+      .filter((r) => subjects.length === 0 || subjects.some((s) => subjectKey(s) === subjectKey(r.subject)))
       .filter((r) => !sp.has('parent') || r.parent_id === sp.get('parent'))
       .filter((r) => !since || at(r) >= Date.parse(since))
       .filter((r) => !until || at(r) <= Date.parse(until))
@@ -237,8 +243,22 @@ export const handlers = [
     const after = cursor
       ? filtered.filter((r) => at(r) < Date.parse(cursor[0]) || (at(r) === Date.parse(cursor[0]) && r.id < cursor[1]))
       : filtered
-    const page = after.slice(0, limit)
     const advanced = ['1', 'true'].includes(sp.get('advanced') ?? '')
+    if (subjects.length > 1) {
+      // By key, the first spelling sent names it back (`index.py` `list_per_subject`).
+      const given = new Map<string, string>()
+      for (const s of subjects) if (!given.has(subjectKey(s))) given.set(subjectKey(s), s)
+      const kept: Activity[] = []
+      const subjectCursors: Record<string, string> = {}
+      for (const [key, sent] of given) {
+        const mine = filtered.filter((r) => subjectKey(r.subject) === key)
+        kept.push(...mine.slice(0, limit))
+        if (mine.length > limit) subjectCursors[sent] = encodeCursor(mine[limit - 1]!)
+      }
+      kept.sort((a, b) => at(b) - at(a) || b.id.localeCompare(a.id))
+      return HttpResponse.json({ items: kept.map((r) => shape(r, advanced)), next_cursor: null, subject_cursors: subjectCursors })
+    }
+    const page = after.slice(0, limit)
     return HttpResponse.json(
       {
         items: page.map((r) => shape(r, advanced)),

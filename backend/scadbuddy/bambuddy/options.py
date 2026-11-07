@@ -127,3 +127,45 @@ def resolve(*scopes: PrintOptions | None) -> PrintOptions:
         if scope is not None:
             merged.update(scope.queue_fields())
     return PrintOptions.model_validate(merged)
+
+
+#: What a print over the LAN does with each calibration (#5352), as the one value of
+#: Bambuddy's option that means the same thing; ``None`` where no value does.
+#: `printers/lan.py` `project_file_command` (line 173) sends ``flow_cali`` from
+#: `lan_models.ProjectFile.flow_cali` (line 35, default ``False``), which
+#: `printers/print_activities.py` `_command` never sets: always ``false``, so ``"off"``.
+#: It sends no field for bed levelling, nozzle offset or vibration, so the printer applies
+#: its own default (`.claude/skills/h2c-print-from-scadbuddy/references/lan-path.md`).
+#: That is ``"auto"`` for the two three-way options, whose ``auto`` leaves the stage to
+#: the printer. ``vibration_cali`` is a plain bool with no "the printer decides", so
+#: neither value is what the LAN does.
+LAN_CALIBRATIONS: dict[str, str | None] = {
+    "bed_levelling": "auto",
+    "flow_cali": "off",
+    "nozzle_offset_cali": "auto",
+    "vibration_cali": None,
+}
+
+
+def lan_calibration_refusal(options: PrintOptions) -> str | None:
+    """The 422 for a print's own ``options`` that ask a run over the LAN for a
+    calibration it cannot honour (#5352), else ``None``: refused, never dropped without
+    a word. The value the LAN start sends (`LAN_CALIBRATIONS`) passes. Only the request's
+    own options are judged; a remembered one is Bambuddy's queue option, as before."""
+    asked = [
+        f"{name} {_shown(getattr(options, name))}"
+        for name, honoured in LAN_CALIBRATIONS.items()
+        if getattr(options, name) is not None and getattr(options, name) != honoured
+    ]
+    if not asked:
+        return None
+    return (
+        f"A print over the LAN cannot set {', '.join(asked)}: it sends flow calibration off"
+        " and leaves bed levelling, nozzle offset and vibration calibration to the printer."
+        " Leave them at the default, or print through Bambuddy's queue: in Settings > Printers,"
+        ' set how the printer prints to "Through Bambuddy" (it must link a Bambuddy printer).'
+    )
+
+
+def _shown(value: object) -> str:
+    return f'"{value}"' if isinstance(value, str) else str(value).lower()

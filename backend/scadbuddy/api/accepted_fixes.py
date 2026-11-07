@@ -55,6 +55,7 @@ def analysis_request(request: PrintRunRequest) -> AnalysisRequest:
         plate_ids=request.plate_ids,
         copies=request.copies,
         options=request.options,
+        path=request.path,
     )
 
 

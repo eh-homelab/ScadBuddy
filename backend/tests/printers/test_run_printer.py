@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,19 +19,28 @@ import respx
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.options import lan_calibration_refusal
 from scadbuddy.bambuddy.print_run import (
     LAN_NEEDS_KEK,
+    LAN_PATH_REFUSAL,
     PreparedRun,
     PrintRunRequest,
+    asked_path_refusal,
     check_print,
+    dialog_route,
     ensured_route,
     prepare_run,
     run_route,
+    slice_route,
 )
 from scadbuddy.bambuddy.print_source import PrintSource
+from scadbuddy.bambuddy.runs import run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.orders import operations as order_operations
+from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.printers.reports import PrinterReportStore
@@ -647,3 +657,267 @@ async def test_the_check_reads_a_native_printers_status_from_its_report(
 
     assert check.errors == []
     assert not status.called
+
+
+# ── #5352: the request picks the path; calibrations only on Bambuddy's ──────────────
+
+
+@respx.mock
+async def test_asked_bambuddy_takes_bambuddys_path_on_a_lan_printer(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """A row the run would reach over the LAN, even one set to ``native`` with a stale
+    report, takes Bambuddy's path when the request asks for it: no LAN report refuses."""
+    status = bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports, preferred_path="native")
+    settings = StoredSettings(**HOT_PATH)
+
+    native = await run_route(settings, printers_with_kek, reports, printer=pid, printer_id=None)
+    assert native.native
+    reports.put(pid, REPORT["print"], datetime.now(UTC) - timedelta(minutes=5))
+    route = await run_route(
+        settings, printers_with_kek, reports, printer=pid, printer_id=None, asked="bambuddy"
+    )
+    assert (route.native, route.path, route.printer_id, route.status) == (
+        False,
+        "bambuddy",
+        1,
+        None,
+    )
+
+    prepared = await prepare(
+        printers_with_kek, reports, run_request(printer=pid, path="bambuddy"), settings
+    )
+    assert (prepared.printer, prepared.path, prepared.printer_id) == (pid, "bambuddy", 1)
+    assert status.called
+
+
+@respx.mock
+async def test_asked_bambuddy_on_a_lan_only_printer_is_refused(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports, preferred_path="native")
+    printers_with_kek.unlink_bambuddy(pid)
+
+    with pytest.raises(ApiError) as refused:
+        await run_route(
+            StoredSettings(**HOT_PATH),
+            printers_with_kek,
+            reports,
+            printer=pid,
+            printer_id=None,
+            asked="bambuddy",
+        )
+
+    assert refused.value.status == 422
+    assert "only over the LAN" in refused.value.detail
+
+
+@respx.mock
+async def test_asked_bambuddy_on_a_first_run_makes_the_row_and_stays_on_bambuddy(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """`ensured_route` merges a LAN-linked row on a first run (#4442 M2); asked for
+    Bambuddy, the merged row still takes Bambuddy's path."""
+    bambuddy_routes()
+    row = printers_with_kek.create(PrinterCreate(serial=SERIAL, name="Garage", model="H2C"))
+    printers_with_kek.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256=CERT
+    )
+    reports.put(row.id, REPORT["print"], datetime.now(UTC))
+    settings = StoredSettings(**HOT_PATH)
+    route = await run_route(
+        settings, printers_with_kek, reports, printer=None, printer_id=1, asked="bambuddy"
+    )
+    async with BambuddyClient(BambuddyConfig(base_url=BASE, api_key="k")) as client:
+        route = await ensured_route(
+            client, settings, printers_with_kek, reports, route, asked="bambuddy"
+        )
+
+    assert route.row is not None and route.row.id == row.id
+    assert (route.native, route.path) == (False, "bambuddy")
+
+
+@respx.mock
+async def test_asked_native_off_the_lan_is_refused_by_the_check(
+    printers: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """A request that asks for the LAN on a run that would go through Bambuddy is
+    refused, never sent through Bambuddy instead."""
+    bambuddy_routes()
+    async with BambuddyClient(BambuddyConfig(base_url=BASE, api_key="k")) as client:
+        check = await check_print(
+            client,
+            cast(PrintSource, OnePlate()),
+            StoredSettings(),
+            run_request(printer_id=1, path="native"),
+            printers=printers,
+            reports=reports,
+        )
+
+    assert check.errors == [LAN_PATH_REFUSAL]
+
+
+@respx.mock
+async def test_a_calibration_over_the_lan_is_refused_not_dropped(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """The LAN start cannot set them, so a native run refuses a request that sets one,
+    before anything is read of the source or the library."""
+    status = bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports)
+    settings = StoredSettings(**HOT_PATH)
+    route = await run_route(settings, printers_with_kek, reports, printer=pid, printer_id=None)
+    assert route.native
+    request = run_request(printer=pid, options={"flow_cali": "on", "vibration_cali": True})
+    with pytest.raises(ApiError) as refused:
+        await prepare_run(
+            None,
+            cast(PrintSource, OnePlate()),
+            settings,
+            request,
+            native=cast(Any, object()),
+            printers=printers_with_kek,
+            reports=reports,
+            route=route,
+        )
+    assert refused.value.status == 422
+    assert refused.value.detail == lan_calibration_refusal(request.options)
+    assert 'flow_cali "on", vibration_cali true' in refused.value.detail
+    assert asked_path_refusal(request, True) == refused.value.detail
+    # Timelapse is the LAN start's own field, and Bambuddy's path takes them all.
+    assert asked_path_refusal(run_request(options={"timelapse": True}), True) is None
+    assert asked_path_refusal(request, False) is None
+    assert not status.called
+
+
+async def test_the_check_activity_refuses_a_calibration_over_the_lan(
+    printers_with_kek: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's own check refuses it with a 422 before anything is recorded."""
+    pid = lan_linked(printers_with_kek, reports)
+    settings = StoredSettings(**HOT_PATH)
+    unused: Any = None
+    activities = PrintActivities(
+        PrintDeps(
+            settings_store=cast(Any, SimpleNamespace(load=lambda: settings)),
+            outputs=unused,
+            uploads=unused,
+            prints=unused,
+            store=unused,
+            observer=unused,
+            library=cast(Any, object()),
+            native=cast(Any, SimpleNamespace(profiles=unused)),
+            printers=printers_with_kek,
+            reports=reports,
+        )
+    )
+
+    async def never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("refused before the run is prepared")
+
+    monkeypatch.setattr(print_activities, "prepare_run", never)
+    check = CheckInput(
+        input=run_input().model_copy(
+            update={
+                "request": run_request(printer=pid, options={"bed_levelling": "on"}),
+                "source": SourceSpec(kind="library", file_id=NATIVE_ID_BASE + 1),
+            }
+        ),
+        started_at=datetime.now(UTC),
+    )
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(activities.check, check)
+
+    assert raised.value.details[0].status == 422, raised.value
+    assert "cannot set bed_levelling" in raised.value.details[0].detail
+
+
+def test_the_path_keys_the_run_only_when_sent() -> None:
+    """Omitted, the run's key is what it was before the field existed (#470)."""
+    before = run_key("o1", run_request(printer_id=1))
+    assert run_key("o1", run_request(printer_id=1, path=None)) == before
+    assert run_key("o1", run_request(printer_id=1, path="bambuddy")) != before
+    with pytest.raises(ValueError):
+        run_request(path="cloud")
+
+
+@respx.mock
+async def test_the_dialog_and_slice_routes_take_the_asked_path(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """The dialog's reads and the background slices pick the route the run will take:
+    asked for Bambuddy, a row the LAN reaches is read and sliced through Bambuddy."""
+    bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports, preferred_path="native")
+    settings = StoredSettings(**HOT_PATH)
+    dialog = partial(dialog_route, settings, printers_with_kek, reports, printer=pid, printer_id=1)
+    native = await dialog()
+    assert native is not None and native.native
+    assert await dialog(asked="native") is not None
+    assert await dialog(asked="bambuddy") is None
+
+    sliced = partial(slice_route, settings, printers_with_kek, reports, printer=pid, printer_id=1)
+    plain = await sliced()
+    assert plain is not None and plain.native
+    asked = await sliced(asked="bambuddy")
+    assert asked is not None and (asked.native, asked.path) == (False, "bambuddy")
+
+
+class _StopError(Exception):
+    """Raised by a recorded `slice_route`, so nothing past the route is run."""
+
+
+def recorded_route(seen: dict[str, Any]) -> Any:
+    async def slice_route(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _StopError
+
+    return slice_route
+
+
+async def test_the_dialogs_background_slice_takes_the_asked_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`preview_slice` slices on the route the run will take, so a `path: "bambuddy"`
+    print finds its background slice and is not sliced again."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(bambuddy_operations, "slice_route", recorded_route(seen))
+    unused: Any = None
+    kinds = bambuddy_operations.bambuddy_kinds_over(
+        settings_store=cast(Any, SimpleNamespace(load=StoredSettings)),
+        outputs=unused,
+        uploads=unused,
+        links=unused,
+        archive_cache=unused,
+        printers=unused,
+        reports=unused,
+    )
+    (preview,) = [kind for kind in kinds if kind.name == "preview_slice"]
+    request = run_request(printer_id=1, path="bambuddy").model_dump(mode="json")
+    with pytest.raises(_StopError):
+        await preview.run({"request": request, "output_id": "o1"}, {})
+    assert seen["asked"] == "bambuddy"
+
+
+async def test_a_quotes_slice_takes_the_asked_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A quote slices on the route its print will take (`SliceQuoteRequest.path`)."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(order_operations, "slice_route", recorded_route(seen))
+    core = cast(Any, SimpleNamespace(settings_store=SimpleNamespace(load=StoredSettings)))
+    registry = SimpleNamespace(store=None, reports=None)
+    components = cast(Any, SimpleNamespace(get=lambda key: registry))
+    quote = SliceQuoteRequest.model_validate(
+        {
+            "printer_id": 1,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "choices": {"nozzles": [{"size": "0.2"}], "tier": "fine"},
+            "path": "bambuddy",
+        }
+    )
+    with pytest.raises(_StopError):
+        await order_operations.PreviewSlicer(core, components).start("o1", quote, "s")
+    assert seen["asked"] == "bambuddy"

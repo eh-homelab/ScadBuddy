@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,7 +24,10 @@ from scadbuddy.activity.component import ACTIVITY
 from scadbuddy.api.printing import accept_run
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.core.events import PrintOutcome
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import FULFILMENT_HOLDER
@@ -37,11 +41,19 @@ from tests.api.test_order_quote import Shop as QuoteShop
 from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item, problem, quote_and_accept
 from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_preview_native import kek_file  # noqa: F401
 from tests.api.test_print_run_choices import body, follow_run, run_routes
+from tests.api.test_print_run_native import (
+    FakeLibrary,
+    _app,
+    _lan_routed,
+    library,  # noqa: F401
+)
 from tests.api.test_send import API, configure, make_output, upload_route
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG, upload
 from tests.orders.test_lifecycle import BY
+from tests.support.fake_slicer import fake_slicer_worker
 from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
@@ -534,3 +546,146 @@ def test_a_test_print_without_a_slice_quote_is_requote_needed(bambuddy: TestClie
     assert answer.status_code == 409 and answer.json()["type"].endswith("/requote_needed")
     store = _state(bambuddy).components.get(ORDERS).store
     assert store.fulfilments(item.item["id"], purpose=None) == []
+
+
+#: #5352: the calibrations and timelapse a print sets on Bambuddy's queue.
+CALIBRATIONS = {
+    "bed_levelling": "on",
+    "flow_cali": "on",
+    "nozzle_offset_cali": "off",
+    "vibration_cali": False,
+    "timelapse": True,
+}
+
+
+def test_an_item_prints_through_bambuddys_queue_with_its_calibrations(
+    bambuddy: TestClient,
+) -> None:
+    """#5352: asked through Bambuddy's queue, the item's print is filed under the item's
+    project in the order's and carries the calibrations and timelapse to the queue item.
+    The quote's own slice is printed: nothing is sliced or uploaded again."""
+    shop = QuoteShop(bambuddy)
+    slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    # The book's records are made the spools' filaments (as in the slice quote test).
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = bambuddy.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+    queued = queue_route()
+
+    def uploads() -> int:
+        return sum(
+            1
+            for call in respx.calls
+            if call.request.method == "POST" and call.request.url.path == "/api/v1/library/files"
+        )
+
+    sliced_before, uploaded_before = slices.posted.call_count, uploads()
+    attempt = answered(
+        bambuddy,
+        bambuddy.post(
+            f"{shop.path}/print",
+            json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+            headers=press(),
+        ),
+    )
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["status"] == "succeeded", run
+
+    item_project = next(
+        p["project_id"]
+        for p in bambuddy.get(f"/api/v1/orders/{shop.order['id']}").json()["projects"]
+        if p["item_id"] == shop.item["id"]
+    )
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["project_id"] == item_project
+    assert {name: sent[name] for name in CALIBRATIONS} == CALIBRATIONS
+    # The queue item is the quote's own sliced file (`BambuddySlices`: 300 + plate): no
+    # second slice, and no sliced file uploaded. The one upload is the unsliced copy
+    # filed in the item's project folder (#79).
+    assert sent["library_file_id"] == 301
+    assert slices.posted.call_count == sliced_before
+    assert uploads() == uploaded_before + 1
+
+
+def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,  # noqa: F811
+    tmp_path: Path,
+    fake_openscad: str,
+    library: FakeLibrary,  # noqa: F811
+) -> None:
+    """#5352: a quote made on the native route (no `path`) still stands for an item
+    printed with `path: "bambuddy"`: never `requote_needed`, since the quote's file and
+    digest are unchanged. The run cannot queue the LAN's slice (it is planned for the
+    LAN start and the printer's trays), so it slices the output again on Bambuddy's
+    route. A quote asked with `path: "bambuddy"` is the one whose slice the print reuses."""
+    two_colours(fake_openscad)
+    Projects()
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        configure(client)
+        with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
+            slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
+            row = _lan_routed(client)
+            shop = QuoteShop(client)
+            # The report's PLA tray for both slots: the test tree has no 0.4 PETG preset.
+            lan_plan = {
+                "slots": [
+                    {"slot_id": 1, "spool_id": tray_spool_id(0, 1)},
+                    {"slot_id": 2, "spool_id": tray_spool_id(0, 1)},
+                ]
+            }
+            started = shop.post(
+                printer=row,
+                printer_id=None,
+                filament_plan=lan_plan,
+                choices={"nozzles": [{"size": "0.4"}], "tier": "standard"},
+            )
+            assert started.status_code == 202, started.text
+            op = follow_operation(client, started.json(), timeout=120, poll=0.2)
+            assert op["status"] == "succeeded", op
+            quote = op["result"]
+            assert slicer.calls == 1
+            assert client.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+            assert client.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+            # Bambuddy's spools 9 and 5 are of the item's filaments, as in the test above.
+            for record, (material, subtype, colour) in (
+                (shop.pla, ("PETG", "Basic", "#688197")),
+                (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+            ):
+                fixed = client.patch(
+                    f"/api/v1/orders/price-book/filaments/{record}",
+                    json={
+                        "material": material,
+                        "subtype": subtype,
+                        "brand": "Bambu Lab",
+                        "colour": colour,
+                    },
+                )
+                assert fixed.status_code == 200, fixed.text
+
+            attempt = answered(
+                client,
+                client.post(
+                    f"{shop.path}/print",
+                    json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+                    headers=press(),
+                ),
+            )
+            run = follow_run(client, attempt["print_run_id"], timeout=120)
+            assert run["status"] == "succeeded", run
+            assert slicer.calls == 2
+            (queued,) = library.queue_bodies
+            assert {name: queued[name] for name in CALIBRATIONS} == CALIBRATIONS
