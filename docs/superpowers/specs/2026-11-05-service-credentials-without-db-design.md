@@ -331,6 +331,7 @@ differs.
 | agent worker | `scadbuddy-agent-worker` | `agent` | the agent |
 | agent sidecar | `scadbuddy` (the API pod's) | `agent` | the `agent` container only |
 | agent-durable | none: `automountServiceAccountToken: false`, no projected token | — | — |
+| storefront (#5282, added 2026-11-07) | `scadbuddy-storefront` | `storefront` (new), scope `crud.storefront` only | the storefront container |
 | slicer | none, unchanged (transfer tokens) | — | — |
 
 The CRUD service keeps a fixed map from `system:serviceaccount:<namespace>:<name>` to the
@@ -402,7 +403,7 @@ loop cannot fill the table: 6 a minute per pod and 30 a minute per caller, then 
   the current credential until it expires and retries every 5 s doubling to 60 s.
 - Rows: about one per pod per 7.5 minutes; 10 caller pods today (§2.4 replicas: render 2,
   print 1, projects 1, agent worker 3, API 3 sidecars, agent-durable 0) make about 1,900 rows
-  a day. `delete_expired` already forgets rows expired more than `older_than` ago
+  a day. The storefront (#5282) adds its pods to this count once it is built. `delete_expired` already forgets rows expired more than `older_than` ago
   (`service_credentials.py:193-204`); its default becomes a day for `proof` ≠ `legacy`.
 
 ### 6.4 Authorization: one scope set per caller, deny by default
@@ -417,6 +418,7 @@ test already fails for an unclassified route (`routes.py:1-7`). Each new CRUD ro
 | `print` | `internal.outputs`, `internal.library`, `crud.print` |
 | `projects` | `flow.host` (the 11 routes in `backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`: render, the job and operation reads, outputs create, read and arrange, print runs create (output and library) and read, the print options read, and the printer read of `flow_decide`), `crud.projects` |
 | `agent` | `api`, `internal.workspace`, `crud.agent` |
+| `storefront` (added 2026-11-07, #5282) | `crud.storefront` |
 
 - Today `would_refuse` checks the credential's classes for `internal.*` and `api` only
   (`routes.py:172-192`). The change makes it one rule for a service credential: it passes a

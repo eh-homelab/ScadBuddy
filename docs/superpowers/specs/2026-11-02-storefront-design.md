@@ -30,8 +30,10 @@ already manages (orders spec §3).
    first and the price after, or both in one step.
 4. **No sign-in wall.** A visitor works without an account. "Sign up to save" makes an
    account and keeps their work.
-5. **A separate public site** with its own reduced API, on the same database and orders.
-   The back office stays behind the front door.
+5. **A separate public site** with its own reduced API, on the same orders. It holds no
+   database secret: it reaches the orders only through the CRUD service's HTTP routes
+   (amended 2026-11-07, the owner: "No direct SQL", #5295). The back office stays behind
+   the front door.
 6. **Price.** The rough estimate at once; the firm price is a slice quote, sent later
    with a revision. A design request shows no price until the shop quotes it.
 7. **What is for sale.** The shop lists a template and chooses which parameters a
@@ -65,7 +67,8 @@ Anti-goals, which make it a failure even if it works:
   process with its own routes; it does not proxy `/api/v1`.
 - **A stranger who can cost the shop money**: unbounded renders, uploads or slices.
 - **A customer who sees another customer's anything.**
-- **A second order model.** The storefront writes orders only through `Lifecycle`.
+- **A second order model.** The storefront writes orders only through the CRUD service's routes, which call
+  `Lifecycle`.
 - **A sign-in wall** before a visitor can customize or submit.
 
 ## 4. Design revisions (back office first)
@@ -198,18 +201,30 @@ operation (`library/media_operations.py`); the order's copy stays.
 
 A second process from the same image: `python -m scadbuddy.storefront`, port 8083
 **(call)**, with its own FastAPI app, its own routes under `/api/store/v1`, and its own
-page bundle. It shares Postgres, Temporal and the blob store with the API, and calls the
-same Python (`Lifecycle`, `RenderService`, the estimate) in-process; it never calls the
-back-office API over HTTP, and the back-office routes are not mounted in it.
+page bundle. The back-office routes are not mounted in it.
 
-- It mounts no data volume and needs `store_backend` `s3` **(call)**: it refuses to start
-  on `local` or `bambuddy`. Uploads go straight to the content store from the storefront
-  process (no claim store, no `library`-queue operation); it writes the attachment row and
-  its `blob_refs` holder in one transaction, as `order_attachment_add` does. Previews and
-  attachments are served from presigned GETs. Prod already runs on S3 (epic #3818).
-- It connects as its own Postgres role, `scadbuddy_storefront`, granted only what
-  `storefront/role.py` `STOREFRONT_GRANTS` lists, granted by the API at start, as
-  `render/worker_role.py` does for the render worker.
+**No direct SQL (amended 2026-11-07, the owner; CLAUDE.md "Database access (#5295)").**
+The storefront holds no database secret and opens no Postgres pool. It is an HTTP client
+of the CRUD service (today's API process), as every worker will be once #5298 lands
+(CLAUDE.md "Database access (#5295)"): every read and write goes to routes under
+`/api/v1/internal/crud/storefront/*` (route class `crud.storefront`, by `auth/routes.py`
+`CRUD_PATH`, as for every caller), sent with the storefront's
+own short-lived service credential: a projected ServiceAccount token exchanged at the CRUD
+service for a 15-minute credential scoped to the storefront's routes, as
+[the service-credentials spec](2026-11-05-service-credentials-without-db-design.md) (#5325)
+decides for every caller. An
+earlier draft gave it its own Postgres role, `scadbuddy_storefront`, limited by a
+`STOREFRONT_GRANTS` list; that is dropped, because a role per caller in one database is
+not a boundary (the review of PR #5287).
+
+- The internal storefront routes are the boundary. Each one does only what the public may
+  do, and the CRUD service checks ownership itself: it scopes every draft read and write
+  to the visitor id the storefront sends, and it never trusts the storefront to have
+  checked it. The Lifecycle, `RenderService` and the estimate run in the CRUD service.
+- The storefront mounts no data volume and holds no Temporal, blob store or KEK secret.
+  Renders start through the CRUD service. Uploads, previews and attachments move through
+  URLs or routes the CRUD service gives it (presigned on `s3`), so it needs no store
+  credentials of its own.
 - Its ingress is a public host of its own (§10). The back office host is unchanged.
 - The page is a second Vite entry in `frontend/` (`storefront.html`, `src/storefront/`)
   **(call)**, so the 3D viewer and money formatting are shared; it imports nothing from
@@ -217,9 +232,11 @@ back-office API over HTTP, and the back-office routes are not mounted in it.
 
 ### 5.2 Visitors, accounts and the order link
 
-- **Visitor.** The first request sets a random token in a `Secure`, `HttpOnly`,
-  `SameSite=Lax` cookie. `storefront_visitors` stores its sha256, created and last-seen
-  times, and the account it belongs to, if any. A draft order names its visitor
+- **Visitor.** The first request sets a random visitor id in a `Secure`, `HttpOnly`,
+  `SameSite=Lax` cookie, signed (HMAC) with the storefront's own key (§10), so the
+  storefront drops a forged or garbled cookie before it calls the CRUD service. The
+  storefront sends the verified id to the CRUD service in a header (§6.4).
+  `storefront_visitors` stores the id's sha256, created and last-seen times, and the account it belongs to, if any. A draft order names its visitor
   (`orders.storefront_visitor_id`).
 - **Account.** "Sign up to save" asks for an email and sends a six-digit code **(call:
   passwordless, no passwords to store or reset)**. `storefront_accounts`: email
@@ -256,22 +273,26 @@ the customer's view.
 
 ### 5.4 Customize, estimate and the draft
 
-- The storefront validates inputs against the listing (`params` ∪ `fixed`), never only
-  against the schema, and renders through `RenderService` with `reuse_finished`, so two
-  visitors who choose the same inputs share one render.
+- The CRUD service's storefront render route validates inputs against the listing
+  (`params` ∪ `fixed`), never only against the schema, and renders through
+  `RenderService` with `reuse_finished`, so two visitors who choose the same inputs share
+  one render. It never relies on the storefront having checked the inputs.
 - **Render limits per visitor** **(call)**: settings `storefront_renders_per_minute`
   (default 3), `storefront_renders_per_day` (30), `storefront_render_concurrency` (2,
-  across all visitors), counted in Postgres per visitor and per client address
-  (`core/proxies.py`, `SCADBUDDY_TRUSTED_PROXIES`). A reused render costs nothing.
+  across all visitors), counted by the CRUD service in Postgres per visitor and per client
+  address. The storefront resolves the client address (`core/proxies.py` with its own
+  `SCADBUDDY_TRUSTED_PROXIES`) and sends it in a header (§6.4); the CRUD service sees only
+  the storefront pod, so it cannot find the address itself. A reused render costs nothing.
   Over the limit is a 429 with the time to retry.
 - **Estimate.** `GET /orders/estimate` needs a saved output (`api/orders.py:537-604`).
-  The storefront estimates from the render job instead: `estimate_grams` over the job's
+  The CRUD service's storefront estimate route estimates from the render job instead: `estimate_grams` over the job's
   part volumes (`orders/pricing.py:160`), at the listing's colours, priced from the price
   book. It is shown as "about $X, confirmed after we check it", never as a quote. The
   common part moves out of the route into `orders/estimate.py`.
-- **Add to order.** Adds an item to the visitor's draft: `kind=model` with revision 1
+- **Add to order.** The CRUD service adds an item to the visitor's draft: `kind=model` with revision 1
   from the listing's commit and the inputs, or `kind=request` with the text and uploads.
-  Uploads go through the claim store and `order_attachment_add`, typed by
+  The storefront streams each upload to a CRUD route, which goes through
+  `order_attachment_add`, typed by
   `orders/attachments.py` `sniff`, with storefront caps **(call)**: 25 MB a file, 10 files
   a request, images, video and PDF only.
 - **A draft before submit** **(call)**. It needs no customer and no number:
@@ -309,9 +330,11 @@ shipment and its tracking text.
 
 ### 5.7 Mail
 
-The storefront sends its own transactional mail **(call)**: the sign-in code, the order
-link, "a revision is ready", "your price is ready", "payment requested", "shipped".
-Settings: SMTP host, port, user, sender, and the password sealed under the KEK. Every
+The CRUD service sends the storefront's transactional mail **(call)**: the sign-in code,
+the order link, "a revision is ready", "your price is ready", "payment requested",
+"shipped". It sends each one when the storefront calls the route that needs it, or when
+the back office makes the change. Settings: SMTP host, port, user, sender, and the
+password sealed under the CRUD service's KEK; the storefront never holds them. Every
 other customer notification stays a plugin's job (orders spec §12).
 
 ### 5.8 Abuse
@@ -349,7 +372,11 @@ accepted), `revision_not_found` (404), `order_not_submitted`, `order_submitted`
 ### 6.4 The customer actor
 
 `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and the visitor's
-or account's id. `orders/actor.py` takes it from the storefront's session, never a body.
+or account's id. The CRUD service builds it from the visitor id (and, once signed in, the
+account) that the storefront sends in request headers: `X-ScadBuddy-Visitor` (the verified
+visitor id) and `X-ScadBuddy-Store-Client` (the client address the storefront resolved,
+which keys the per-client render limit, §5.4). It takes those headers only from a call
+made with the storefront's service credential, and never from a request body.
 
 ## 7. Payments: what the storefront needs from #4957
 
@@ -408,11 +435,14 @@ own instructions text (cash, Venmo handle, …) and the shop records the payment
 
 - The same image; the storefront is a new Deployment in eh-homelab/clusters with its own
   public host behind Cloudflare and the UDM/ingress path, the back office host unchanged.
-- Environment: `SCADBUDDY_DATABASE_URL` (the `scadbuddy_storefront` role),
-  `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_SECRET_KEY_FILE` (mail password, link tokens),
-  `SCADBUDDY_STOREFRONT_PUBLIC_URL`, `SCADBUDDY_TRUSTED_PROXIES`.
-- It refuses to start if its role can read any table outside `STOREFRONT_GRANTS`; a test
-  runs the storefront as that role, as `tests/test_render_worker_role.py` does.
+- Environment: the CRUD service's in-cluster URL, the projected ServiceAccount token it
+  exchanges for its credential (#5325), a signing key of its own for the visitor cookie (never the KEK),
+  `SCADBUDDY_STOREFRONT_PUBLIC_URL`, `SCADBUDDY_TRUSTED_PROXIES`. No
+  `SCADBUDDY_DATABASE_URL`, no Temporal address and no `SCADBUDDY_SECRET_KEY_FILE`: mail
+  and link tokens are made in the CRUD service.
+- A test starts the storefront with no database URL and checks that it opens no Postgres
+  connection (#5295: no untrusted or public-facing pod holds a database secret).
+- Public host: `michaels-workshop.nullreference.io` (the owner, 2026-11-07, #5284).
 - README "Deploying" gets a Storefront section.
 
 ## 11. Phases
@@ -424,8 +454,8 @@ own instructions text (cash, Venmo handle, …) and the shop records the payment
 2. **The payments seam**, #4957, built whole (registry, credentials, webhooks, a fake
    provider) with §7's additions, plus deposits (§8) and shipping and tax (§9) in the back
    office, #5281. Stripe (#4958) can follow at once.
-3. **The public site, read and customize**, #5282: the process, role, listings and the
-   Storefront page, visitor tokens, customize, render limits, estimate, drafts and the
+3. **The public site, read and customize**, #5282: the process, its internal CRUD
+   routes, listings and the Storefront page, visitor tokens, customize, render limits, estimate, drafts and the
    draft sweep (§5.1, §5.3, §5.4).
 4. **Submit and follow**, #5283: submit, accounts, order links, mail, the customer's order page,
    revision answers and payment, abuse checks (§5.2, §5.5–5.8).
