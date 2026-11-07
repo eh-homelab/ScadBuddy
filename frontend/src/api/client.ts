@@ -2503,6 +2503,13 @@ export const api = {
    */
   runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
   /**
+   * #5554 — the slice quotes that failed since `since` (the order's oldest item), newest
+   * first: a failure the page did not start (over MCP, in another tab) shows on its item
+   * with its start and end. The rows carry no error; `followQuote` reads it.
+   */
+  failedQuotes: (since: string) =>
+    request<ActivityPage>(`/activity?${new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '200' })}`),
+  /**
    * #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows
    * its own (`followRunning`). `onRunning` is told once the first read finds it still
    * running: an activity row can say running of one that has already ended.
