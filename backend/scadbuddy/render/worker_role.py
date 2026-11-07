@@ -34,15 +34,12 @@ RENDER_ROLE = "scadbuddy_render"
 RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # No `render_jobs`, `events` or `activity`: the job's row, its job.* events and its
     # activity row go through the API's CRUD routes (#5298, `crud/render.py`
-    # `RemoteJobProjection`). Nor `blob_refs`, `piece_geometry`, `store_blobs` or
-    # `store_folders`: a finished job's blob refs, a finished piece's geometry, the blob
-    # index and the Bambuddy store's folders go through them too (`RemoteBlobRefs`,
-    # `RemoteGeometryIndex`, `RemoteBlobIndex`, `RemoteStoreFolders`; the API finds a
-    # folder itself). A role granted them before keeps them until #5298 Task 22 revokes
-    # them.
-    # `// file` uploads a render reads (`library/assets.py` `use`, `adopt`,
-    # `prune_local`'s row lock). Never deleted here: the API's sweep decides.
-    "assets": ("SELECT", "INSERT", "UPDATE"),
+    # `RemoteJobProjection`). Nor `blob_refs`, `piece_geometry`, `store_blobs`,
+    # `store_folders` or `assets`: a finished job's blob refs, a finished piece's
+    # geometry, the blob index, the Bambuddy store's folders and the uploads' rows go
+    # through them too (`RemoteBlobRefs`, `RemoteGeometryIndex`, `RemoteBlobIndex`,
+    # `RemoteStoreFolders`, `RemoteAssetRows`; the API finds a folder itself). A role
+    # granted them before keeps them until #5298 Task 22 revokes them.
     # Render leases, pins in flight and install slots (`library/libraries.py`).
     "library_leases": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "library_pin_holds": ("SELECT", "INSERT", "UPDATE", "DELETE"),

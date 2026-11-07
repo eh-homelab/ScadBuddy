@@ -27,6 +27,14 @@ target and key, under the folder's advisory lock, and records it, all in one req
 does so only for the Bambuddy and inbox the worker names, which must be the API's own.
 Every call is natural: a find sent again answers the folder the first one recorded, and a
 forget of nothing is a success.
+
+`RemoteAssetRows` is the ``assets`` rows of `library/assets.py` `RemoteAssetStore`, the
+worker's uploads, whose files stay on the worker's volume: get, use, adopt and the last
+uses a prune reads. Each refusal is the error the SQL store raised: no row is
+`AssetNotFoundError`, an adopt the API refuses `AssetRejectedError`. A failure that passes
+(the API out of reach) stays the client's `CrudUnavailableError`, which the activity
+retries, never a not-found a render fails on for good. Every call is natural: an adopt
+sent again is the same row (ON CONFLICT), a use stamps the row again.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
+from scadbuddy.library.assets import AssetMeta, AssetNotFoundError, AssetRejectedError
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
@@ -539,6 +548,50 @@ class RemoteStoreFolders:
             "GET", _with(f"{BASE}/store-folders/work", _where(inbox))
         )
         return {int(folder_id) for folder_id in response.json()}
+
+
+class RemoteAssetRows:
+    """`AssetRows` over the routes. Each call has the client's own budget, as each SQL
+    call waited the pool's default for a connection; a `use` waits there on the API's
+    sweep's row lock, as the SQL `use` did."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    def _meta(self, method: str, asset_id: str, path: str = "") -> AssetMeta:
+        try:
+            response = self._client.request(method, f"{BASE}/assets/{_part(asset_id)}{path}")
+        except CrudRefusedError as error:
+            if error.status == 404:
+                raise AssetNotFoundError(asset_id) from error
+            raise
+        return AssetMeta.model_validate(response.json())
+
+    def get(self, asset_id: str) -> AssetMeta:
+        return self._meta("GET", asset_id)
+
+    def use(self, asset_id: str) -> AssetMeta:
+        return self._meta("POST", asset_id, "/use")
+
+    def adopt(self, meta: AssetMeta) -> None:
+        """A refusal (no copy of the id in the API's blob store, a copy of another kind
+        or size, a malformed id) is the `AssetRejectedError` of a fetched file that does
+        not match: `RemoteAssets.ensure` then reports the upload as not in the store."""
+        try:
+            self._client.request(
+                "POST", f"{BASE}/assets/{_part(meta.id)}/adopt", json=meta.model_dump(mode="json")
+            )
+        except CrudRefusedError as error:
+            if error.status in (404, 422):
+                raise AssetRejectedError(str(error.problem.get("detail", ""))) from error
+            raise
+
+    def last_used(self, ids: Sequence[str]) -> dict[str, datetime | None]:
+        response = self._client.request("POST", f"{BASE}/assets/last-used", json={"ids": list(ids)})
+        return {
+            asset_id: None if stamp is None else datetime.fromisoformat(stamp)
+            for asset_id, stamp in response.json().items()
+        }
 
 
 def _where(inbox: Inbox, **query: Any) -> dict[str, Any]:
