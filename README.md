@@ -1344,6 +1344,11 @@ folder (or the S3 values) in Settings and choose that store again:
 UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
 ```
 
+On `local` the render worker Deployments stay down: a worker with no database refuses
+to start on the local store (#5298 plan D11), and renders run only in-process
+(`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) until a remote store is set again and the
+workers restart.
+
 When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy` or `s3`),
 set `SCADBUDDY_STORE_BACKEND=local` instead.
 

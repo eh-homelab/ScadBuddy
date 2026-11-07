@@ -11,6 +11,7 @@ import faulthandler
 import logging
 import secrets
 import socket
+import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -75,6 +76,18 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return refused
 
     monkeypatch.setattr(psycopg, "connect", refuse("psycopg.connect", psycopg.connect))
+    # `psycopg.connect` is a copy of `Connection.connect`, so it is refused too. The
+    # API's pools grow through it from their own threads, outside any request, so a
+    # call from `psycopg_pool` passes: the worker's own pool is refused at its start.
+    connect = psycopg.Connection.connect
+
+    def connection_connect(cls: type[psycopg.Connection[Any]], *args: Any, **kwargs: Any) -> Any:
+        if _API_SIDE.get() or _from_a_pool():
+            return connect(*args, **kwargs)
+        tried.append("Connection.connect")
+        raise AssertionError("the render worker called Connection.connect")
+
+    monkeypatch.setattr(psycopg.Connection, "connect", classmethod(connection_connect))
     monkeypatch.setattr(
         psycopg.AsyncConnection,
         "connect",
@@ -91,6 +104,16 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         refuse("AsyncConnectionPool", psycopg_pool.AsyncConnectionPool.__init__),
     )
     return tried
+
+
+def _from_a_pool() -> bool:
+    """Whether a `psycopg_pool` frame is on the caller's stack: a pool growing."""
+    frame = sys._getframe(2)
+    while frame is not None:
+        if frame.f_globals.get("__name__", "").startswith("psycopg_pool"):
+            return True
+        frame = frame.f_back  # type: ignore[assignment]
+    return False
 
 
 def test_the_render_queue_reads_settings_with_no_database_url(
