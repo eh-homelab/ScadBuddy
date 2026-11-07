@@ -156,7 +156,10 @@ def test_a_library_file_item_prints_its_file(bambuddy: TestClient) -> None:
     assert run["subject"] == f"library:{FILE_ID}"
     assert json.loads(queued.calls.last.request.content)["quantity"] == 2
     detail = bambuddy.get(f"/api/v1/orders/{order['id']}").json()
-    assert detail["items"][0]["status"] == "queued"
+    # Queued, or already printing: the run's follow announces the print as it starts
+    # (`bambuddy/progress.py`, `print.progress`), and `Lifecycle.follow_print` then moves
+    # a queued item to printing, at a time this test does not control.
+    assert detail["items"][0]["status"] in ("queued", "printing")
 
 
 def test_a_file_gone_since_is_refused_on_quote_and_print(bambuddy: TestClient) -> None:
