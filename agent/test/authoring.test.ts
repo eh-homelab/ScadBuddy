@@ -3,7 +3,14 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { AUTHOR_HEADER, AUTHOR_SESSION_HEADER, TOOL_HEADER, authorHeaders, principalHeader } from '../src/tools/authorship.js'
+import {
+  AUTHOR_HEADER,
+  AUTHOR_SESSION_HEADER,
+  FLOW_RUN_HEADER,
+  TOOL_HEADER,
+  authorHeaders,
+  principalHeader,
+} from '../src/tools/authorship.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -169,6 +176,10 @@ describe('agent authorship (#252)', () => {
     const principal = { id: 'token:t1', kind: 'bearer' as const, tiers: tiersUpTo('write') }
     expect(authorHeaders(principal, 'sess-1\n')).not.toHaveProperty(AUTHOR_SESSION_HEADER)
     expect(authorHeaders(principal, 'sess-1')).toHaveProperty(AUTHOR_SESSION_HEADER, 'sess-1')
+    // #4252: a flow run's call names its run; a malformed one names none.
+    expect(authorHeaders(principal, undefined, 'order_get', 'run-1')).toHaveProperty(FLOW_RUN_HEADER, 'run-1')
+    expect(authorHeaders(principal, undefined, 'order_get', 'run 1')).not.toHaveProperty(FLOW_RUN_HEADER)
+    expect(authorHeaders(principal)).not.toHaveProperty(FLOW_RUN_HEADER)
   })
 
   it('leaves out the session outside one', async () => {

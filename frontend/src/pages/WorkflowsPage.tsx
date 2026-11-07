@@ -98,6 +98,7 @@ function Runs() {
   const session = params.get('session') ?? undefined
   const runs = useAsync(() => api.listFlowRuns({ session }), [session], TOPICS)
   usePollWhileUnavailable(() => runs.refresh(), FLOW_POLL_MS)
+  const tree = runs.data ? runTree(runs.data) : null
 
   return (
     <>
@@ -117,8 +118,8 @@ function Runs() {
         <Loading label="Loading the runs" />
       ) : runs.data && runs.data.length > 0 ? (
         <ul aria-label="Flow runs" className={LIST}>
-          {runs.data.map((run) => (
-            <RunRow key={run.id} run={run} />
+          {tree?.roots.map((run) => (
+            <RunRow key={run.id} run={run} tree={tree} />
           ))}
         </ul>
       ) : (
@@ -263,7 +264,40 @@ function FlowRow({
   )
 }
 
-function RunRow({ run }: { run: FlowRun }) {
+interface RunTree {
+  roots: FlowRun[]
+  children: Map<string, FlowRun[]>
+}
+
+/**
+ * #4252 (orders spec §7.2) — runs a run started (`parent_run_id`) under it, when the
+ * parent is among the runs listed; a child whose parent is not listed stands on its own.
+ */
+function runTree(runs: FlowRun[]): RunTree {
+  const parentOf = new Map(runs.map((run) => [run.id, run.parent_run_id ?? null]))
+  // A listed parent whose own chain leads back to the run (a cycle) is no parent: the run
+  // is shown as a root, so every listed run is rendered once.
+  const inCycle = (id: string) => {
+    const seen = new Set<string>()
+    for (let at: string | null | undefined = id; at && parentOf.has(at); at = parentOf.get(at)) {
+      if (seen.has(at)) return true
+      seen.add(at)
+    }
+    return false
+  }
+  const children = new Map<string, FlowRun[]>()
+  const roots: FlowRun[] = []
+  for (const run of runs) {
+    const parent = run.parent_run_id
+    if (parent && parentOf.has(parent) && !inCycle(run.id)) children.set(parent, [...(children.get(parent) ?? []), run])
+    else roots.push(run)
+  }
+  return { roots, children }
+}
+
+function RunRow({ run, tree, seen = new Set<string>() }: { run: FlowRun; tree: RunTree; seen?: Set<string> }) {
+  const children = seen.has(run.id) ? [] : (tree.children.get(run.id) ?? [])
+  const within = new Set([...seen, run.id])
   return (
     <li data-run={run.id} className="px-3 py-2.5">
       <div className="flex items-center gap-2">
@@ -271,6 +305,11 @@ function RunRow({ run }: { run: FlowRun }) {
           {flowTitle(run)} v{run.version}
         </Link>
         <Badge variant="outline">{FLOW_STATUS_LABEL[run.status]}</Badge>
+        {run.order_id && (
+          <Link to={`/orders/${encodeURIComponent(run.order_id)}`} className="text-[12px] text-primary hover:underline">
+            For order
+          </Link>
+        )}
         <span className="ml-auto text-[12px] text-muted-foreground">{timeAgo(run.created_at)}</span>
       </div>
       {run.waiting_on.map((entry) => (
@@ -278,6 +317,13 @@ function RunRow({ run }: { run: FlowRun }) {
           {waitingText(entry)}
         </p>
       ))}
+      {children.length > 0 && (
+        <ul aria-label="Runs it started" className="mt-2 ml-4 divide-y border-l pl-2">
+          {children.map((child) => (
+            <RunRow key={child.id} run={child} tree={tree} seen={within} />
+          ))}
+        </ul>
+      )}
     </li>
   )
 }

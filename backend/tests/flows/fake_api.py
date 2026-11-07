@@ -147,6 +147,9 @@ class FakeApi:
             return problem(500, "the run may have started")
         if request.path_params["item_id"] == "unknown":
             return problem(404, "no item unknown")
+        if request.path_params["item_id"] == "lost":
+            # Its run started, and then cannot be read (review of #5645).
+            return JSONResponse({"id": "f1", "status": "queued", "print_run_id": "run-lost"})
         if request.path_params["item_id"] == "broken":
             return JSONResponse(
                 {"id": "op-broken", "kind": "order_item_print", "status": "running"},
@@ -157,6 +160,8 @@ class FakeApi:
         return JSONResponse({"id": "f1", "status": "queued", "print_run_id": run_id})
 
     async def run(self, request: Request) -> JSONResponse:
+        if request.path_params["run_id"] not in self.runs:
+            return problem(404, f"no run {request.path_params['run_id']}")
         return JSONResponse({**self.runs[request.path_params["run_id"]], "status": "succeeded"})
 
     async def arrange(self, request: Request) -> JSONResponse:

@@ -34,6 +34,7 @@ from scadbuddy.flows.grants import (
     GrantStatus,
     GrantUse,
     RuleUse,
+    inherited,
     picker,
 )
 from scadbuddy.flows.models import (
@@ -61,7 +62,7 @@ _DECISION = (
 _DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 _GRANT = (
     "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
-    " revoked_at, expires_at, created_at"
+    " revoked_at, expires_at, created_at, parent_grant_id"
 )
 _GRANT_USE = (
     "request_id, grant_id, run_id, fn, tool, input_hash, rule_index, prints, filament_g,"
@@ -70,7 +71,12 @@ _GRANT_USE = (
 _RUN = (
     "id, definition_id, version, name, status, waiting_on, steps, result,"
     " result_truncated, approval_timeout_s, commit, inputs, workflow_id, workflow_run_id,"
-    " started_by, created_at, updated_at"
+    " started_by, created_at, updated_at,"
+    # The API's own record of what the run is linked to (#4252), beside the run's row.
+    " (SELECT l.parent_run_id FROM workflow_run_links l WHERE l.run_id = workflow_runs.id)"
+    " AS parent_run_id,"
+    " (SELECT l.order_id FROM workflow_run_links l WHERE l.run_id = workflow_runs.id)"
+    " AS order_id"
 )
 
 
@@ -253,10 +259,26 @@ class FlowStore:
         return await asyncio.to_thread(self._reset_floor, run_id)
 
     async def list_runs(
-        self, *, definition_id: str | None = None, session: str | None = None, limit: int = 50
+        self,
+        *,
+        definition_id: str | None = None,
+        session: str | None = None,
+        order_id: str | None = None,
+        limit: int = 50,
     ) -> list[Run]:
-        """The newest runs first; ``session`` is the agent session that started them."""
-        return await asyncio.to_thread(self._list_runs, definition_id, session, limit)
+        """The newest runs first; ``session`` is the agent session that started them,
+        ``order_id`` the order they are for (#4252)."""
+        return await asyncio.to_thread(self._list_runs, definition_id, session, order_id, limit)
+
+    async def link_run(
+        self, run_id: str, *, parent_run_id: str | None = None, order_id: str | None = None
+    ) -> None:
+        """Record what run `run_id` is linked to (#4252, orders spec §7.2, §7.4): the run
+        that started it, the order it is for. Before its start, so its row reads them from
+        the first; a repeated start keeps the first record."""
+        if parent_run_id is None and order_id is None:
+            return
+        await asyncio.to_thread(self._link_run, run_id, parent_run_id, order_id)
 
     async def insert_run(self, record: FlowRecord) -> Run:
         """The run's row; the existing one when a retried activity inserts it again,
@@ -398,6 +420,25 @@ class FlowStore:
         when the run has one already (a repeated start)."""
         return await asyncio.to_thread(self._insert_grant, run_id, spec, status, requested_by)
 
+    async def inherit_grant(
+        self,
+        run_id: str,
+        parent_run_id: str,
+        order_id: str | None,
+        requested_by: dict[str, Any],
+        *,
+        approved: bool,
+    ) -> Grant | None:
+        """The grant run `run_id`, started from run `parent_run_id`, inherits (#4252,
+        orders spec §7.2): `grants.inherited` of the parent's grant. `approved` (the caller
+        checked `api/flows.py` `may_inherit`), it is approved as the parent's was, expires
+        with it, and is in force only while it is; else it is only `requested`, an ordinary
+        request a person decides. None when the parent has no grant in force; the existing
+        one when the run has one already."""
+        return await asyncio.to_thread(
+            self._inherit_grant, run_id, parent_run_id, order_id, requested_by, approved
+        )
+
     async def get_grant(self, run_id: str) -> Grant | None:
         return await asyncio.to_thread(self._get_grant, run_id)
 
@@ -483,6 +524,75 @@ class FlowStore:
         assert row is not None
         return Grant.model_validate(row)
 
+    def _inherit_grant(
+        self,
+        run_id: str,
+        parent_run_id: str,
+        order_id: str | None,
+        requested_by: dict[str, Any],
+        approved: bool,
+    ) -> Grant | None:
+        with self._pool.connection() as conn, conn.transaction():
+            # Under the parent's lock, as a revocation takes it: wholly before or after.
+            parent = self._locked_grant(conn, parent_run_id)
+            if parent is None or not self._chain_in_force(conn, parent):
+                return None
+            spec = inherited(parent.spec, order_id)
+            row = conn.execute(
+                "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by,"
+                " approved_at, expires_at, parent_grant_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s, CASE WHEN %s THEN now() END, %s, %s)"
+                f" ON CONFLICT (run_id) DO NOTHING RETURNING {_GRANT}",
+                (
+                    str(uuid.uuid4()),
+                    run_id,
+                    "approved" if approved else "requested",
+                    Jsonb(spec.model_dump(mode="json", by_alias=True)),
+                    Jsonb(requested_by),
+                    f"parent-run:{parent_run_id}" if approved else None,
+                    approved,
+                    parent.expires_at if approved else None,
+                    parent.id if approved else None,
+                ),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    f"SELECT {_GRANT} FROM flow_grants WHERE run_id = %s", (run_id,)
+                ).fetchone()
+        assert row is not None
+        return Grant.model_validate(row)
+
+    def _chain_in_force(self, conn: Connection[DictRow], grant: Grant) -> bool:
+        """Whether `grant` and every grant it inherits from (`parent_grant_id`) is in
+        force, and the standing grant any of them was seeded from is still in force under
+        the approval that seeded it (#4252)."""
+        rows = conn.execute(
+            "WITH RECURSIVE chain AS ("
+            " SELECT id, parent_grant_id, status, revoked_at, expires_at, standing_grant_id,"
+            " standing_approval_id, 0 AS depth FROM flow_grants WHERE id = %s"
+            " UNION ALL SELECT g.id, g.parent_grant_id, g.status, g.revoked_at, g.expires_at,"
+            " g.standing_grant_id, g.standing_approval_id, c.depth + 1"
+            " FROM flow_grants g JOIN chain c ON g.id = c.parent_grant_id WHERE c.depth < 64)"
+            " SELECT c.*, (t.status = 'approved' AND t.revoked_at IS NULL"
+            " AND t.expires_at > now() AND t.approval_id = c.standing_approval_id)"
+            " AS standing_in_force FROM chain c"
+            " LEFT JOIN flow_trigger_grants t ON t.id = c.standing_grant_id",
+            (grant.id,),
+        ).fetchall()
+        now = datetime.now(UTC)
+        return (
+            bool(rows)
+            and all(
+                row["status"] == "approved"
+                and row["revoked_at"] is None
+                and row["expires_at"] is not None
+                and now < row["expires_at"]
+                and (row["standing_grant_id"] is None or row["standing_in_force"] is True)
+                for row in rows
+            )
+            and any(row["parent_grant_id"] is None for row in rows)
+        )  # reached its root
+
     def _get_grant(self, run_id: str) -> Grant | None:
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -543,6 +653,15 @@ class FlowStore:
                 f" RETURNING {_GRANT}",
                 (revoked_by, grant.id),
             ).fetchone()
+            # And every grant inherited from it, at any depth (#4252): each would stop at
+            # its next call anyway; revoked, its run's page says so.
+            conn.execute(
+                "WITH RECURSIVE kids AS (SELECT id FROM flow_grants WHERE parent_grant_id = %s"
+                " UNION SELECT g.id FROM flow_grants g JOIN kids k ON g.parent_grant_id = k.id)"
+                " UPDATE flow_grants SET revoked_by = %s, revoked_at = now()"
+                " WHERE id IN (SELECT id FROM kids) AND revoked_at IS NULL",
+                (grant.id, f"parent-grant:{grant.id}"),
+            )
         assert row is not None
         return Grant.model_validate(row)
 
@@ -595,6 +714,9 @@ class FlowStore:
             grant = self._locked_grant(conn, run_id)
             if grant is None:
                 return "no grant in force"
+            if grant.parent_grant_id is not None and not self._chain_in_force(conn, grant):
+                # Inherited (#4252): the run it was started from no longer grants it.
+                return "the grant this run inherits is not in force"
             # After the lock: a concurrent check of the same request id has committed.
             prior = conn.execute(
                 f"SELECT {_GRANT_USE} FROM flow_grant_uses WHERE request_id = %s", (request_id,)
@@ -925,16 +1047,33 @@ class FlowStore:
             ).fetchone()
         return None if row is None else row["reset_floor"]
 
-    def _list_runs(self, definition_id: str | None, session: str | None, limit: int) -> list[Run]:
+    def _list_runs(
+        self, definition_id: str | None, session: str | None, order_id: str | None, limit: int
+    ) -> list[Run]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_RUN} FROM workflow_runs"
                 " WHERE (%(definition)s::text IS NULL OR definition_id = %(definition)s)"
                 " AND (%(session)s::text IS NULL OR started_by ->> 'session' = %(session)s)"
+                " AND (%(order)s::text IS NULL OR id IN"
+                " (SELECT run_id FROM workflow_run_links WHERE order_id = %(order)s))"
                 " ORDER BY created_at DESC LIMIT %(limit)s",
-                {"definition": definition_id, "session": session, "limit": limit},
+                {
+                    "definition": definition_id,
+                    "session": session,
+                    "order": order_id,
+                    "limit": limit,
+                },
             ).fetchall()
         return [Run.model_validate(row) for row in rows]
+
+    def _link_run(self, run_id: str, parent_run_id: str | None, order_id: str | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO workflow_run_links (run_id, parent_run_id, order_id)"
+                " VALUES (%s, %s, %s) ON CONFLICT (run_id) DO NOTHING",
+                (run_id, parent_run_id, order_id),
+            )
 
     def _insert_run(self, record: FlowRecord) -> Run:
         with self._pool.connection() as conn, conn.transaction():
@@ -1153,8 +1292,20 @@ class FlowStore:
             # Its decisions go by cascade; the operations that made them carry the
             # answers in their requests, so they go too.
             conn.execute("DELETE FROM operations WHERE subject = %s", (f"flow:{run_id}",))
+            # Every grant inherited from its grant, at any depth, is revoked first: with
+            # its parent gone it would otherwise stand in force alone (#4252).
+            conn.execute(
+                "WITH RECURSIVE kids AS (SELECT g.id FROM flow_grants g JOIN flow_grants p"
+                " ON g.parent_grant_id = p.id WHERE p.run_id = %s"
+                " UNION SELECT g.id FROM flow_grants g JOIN kids k ON g.parent_grant_id = k.id)"
+                " UPDATE flow_grants SET revoked_by = %s, revoked_at = now()"
+                " WHERE id IN (SELECT id FROM kids) AND revoked_at IS NULL",
+                (run_id, f"parent-run-deleted:{run_id}"),
+            )
             # Its grant's uses go by cascade.
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
+            # Its links (#4252); a child's link to it stays, naming a run that is gone.
+            conn.execute("DELETE FROM workflow_run_links WHERE run_id = %s", (run_id,))
             cur = conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
         return cur.rowcount > 0
 

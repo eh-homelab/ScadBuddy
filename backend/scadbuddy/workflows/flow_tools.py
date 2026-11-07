@@ -549,9 +549,20 @@ async def _item_print(
         return PrintOutcome(
             run_id="", status="failed", error="the print did not start", narrowed_by=narrowed_by
         )
-    run = await _follow(
-        f"/api/v1/print/runs/{_segment(run_id, 'run id')}", _RUN_SETTLED, timedelta(hours=24)
-    )
+    try:
+        run = await _follow(
+            f"/api/v1/print/runs/{_segment(run_id, 'run id')}", _RUN_SETTLED, timedelta(hours=24)
+        )
+    except RouteRefusedError as refused:
+        # The run started and then could not be read: the same shape as an operation
+        # follow that failed (review of #5645).
+        return PrintOutcome(
+            run_id=run_id,
+            status="failed",
+            may_have_queued=True,
+            error=str(refused),
+            narrowed_by=narrowed_by,
+        )
     return PrintOutcome(
         run_id=run["id"],
         status=run["status"],

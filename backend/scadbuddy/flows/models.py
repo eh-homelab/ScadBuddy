@@ -151,6 +151,11 @@ class Run(BaseModel):
     started_by: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    #: The run whose `tool("start_flow_run", …)` started it (#4252, orders spec §7.2): a
+    #: linked run, not a child workflow, so it outlives its parent and is not reset with it.
+    parent_run_id: str | None = None
+    #: The order it is for (§7.4): its trigger's order event, or the start's `order_id`.
+    order_id: str | None = None
 
 
 class Proposal(BaseModel):

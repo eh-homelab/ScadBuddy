@@ -40,9 +40,11 @@ def spec(*rules: dict[str, Any], **fields: Any) -> GrantSpec:
     )
 
 
-async def run_row(store: FlowStore, *, session: str | None = None) -> str:
+async def run_row(
+    store: FlowStore, *, session: str | None = None, run_id: str | None = None
+) -> str:
     definition = await define(store, "grants")
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     author: dict[str, Any] = {"kind": "browser"}
     if session is not None:
         author = {"kind": "agent", "principal": "token:t", "session": session}

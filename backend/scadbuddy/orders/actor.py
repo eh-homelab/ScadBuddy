@@ -13,4 +13,10 @@ def current_actor() -> Actor:
     author = current_author()
     if author is None:
         return Actor(kind="browser", principal=current_person())
-    return Actor(kind="agent", principal=author.principal, session=author.session)
+    return Actor(
+        kind="agent",
+        principal=author.principal,
+        session=author.session,
+        # The flow run it was made from (#4252, §7.4): the audit line says so.
+        run_id=author.flow_run,
+    )

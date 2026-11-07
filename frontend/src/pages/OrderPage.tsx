@@ -11,6 +11,7 @@ import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
+import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
@@ -37,6 +38,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { dueAt, dueDay, timeAgo } from '../lib/format'
 import { formatMoney, toMajor, toMinor } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
+import { flowRunPath } from '../lib/flows'
 
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
@@ -468,6 +470,8 @@ export function OrderPage() {
           )
         )}
 
+        <OrderFlowRuns orderId={order.id} />
+
         <section className="flex flex-col gap-1" aria-label="Audit line">
           <h2 className="text-sm font-medium">History</h2>
           {events.data && events.data.length > 0 ? (
@@ -476,6 +480,15 @@ export function OrderPage() {
                 <li key={e.id}>
                   <span className="text-foreground">{e.kind}</span>
                   {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : 'browser'}
+                  {/* #4252 (§7.4): what a flow did, under which run. */}
+                  {e.by.run_id && (
+                    <>
+                      {' · '}
+                      <Link to={flowRunPath(e.by.run_id)} className="text-primary hover:underline">
+                        flow run
+                      </Link>
+                    </>
+                  )}
                 </li>
               ))}
             </ol>

@@ -21,6 +21,10 @@ const flowCommit = z
   .regex(/^[0-9a-f]{7,40}$/)
   .describe("One of the flow's versions' commits, as list_flow_versions returns it")
 const runId = z.string().uuid().describe('A flow run id, as start_flow_run returns it')
+/** The backend's `OrderIds` (`flows/grants.py`); `test/flows.test.ts` checks both
+ *  against the exported spec. */
+export const ORDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+export const MAX_ORDERS = 256
 export const grantRule = z
   .object({
     fn: z.enum(['queue_print', 'arrange', 'tool']),
@@ -29,7 +33,7 @@ export const grantRule = z
     models: z.array(z.string()).optional().describe('queue_print, arrange: template slugs'),
     library_files: z.array(z.number().int()).optional().describe("queue_print: Bambuddy library file ids"),
     orders: z
-      .union([z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)).min(1).max(256), z.literal('any')])
+      .union([z.array(z.string().regex(ORDER_ID)).min(1).max(MAX_ORDERS), z.literal('any')])
       .optional()
       .describe(
         "queue_print of a line item, tool: the orders the call may name (a print's source `order_id`, an order " +
@@ -380,16 +384,25 @@ export const flowTools: Tool[] = [
       '`approval_timeout` overrides the flow\'s for this run. The run is recorded as started by this session. ' +
       '`grant` proposes what its outward calls may do without asking; it is requested, never approved, until ' +
       'the user approves it on the run page. The run starts at once, and its outward calls wait meanwhile. ' +
-      '`inputs` are the run\'s typed inputs, recorded on the run; a Reset replays the same ones.',
+      '`inputs` are the run\'s typed inputs, recorded on the run; a Reset replays the same ones. ' +
+      '`order_id` names the order the run is for, shown with the run and on the order. Called from a flow ' +
+      "run's `tool(...)`, the new run is linked to that run (a child it does not wait on: follow it with " +
+      "get_flow_run), and without `grant` it inherits the run's grant, narrowed to `order_id` when given, " +
+      'with no rule that counts prints, grams or calls.',
     input: z.object({
       definition_id: definitionId,
       approval_timeout: approvalTimeout.optional(),
       grant: grantSpec.optional(),
       inputs: runInputs.optional(),
+      order_id: z
+        .string()
+        .regex(ORDER_ID)
+        .optional()
+        .describe('The order the run is for'),
     }),
     risk: 'write',
     routes: ['POST /api/v1/workflows/{definition_id}/runs'],
-    handler: async ({ definition_id, approval_timeout, grant, inputs }, ctx) => {
+    handler: async ({ definition_id, approval_timeout, grant, inputs, order_id }, ctx) => {
       // One key for this call, re-sent after an answer that never came, so a re-send reaches the same run.
       const headers = { 'Idempotency-Key': idempotencyKey(ctx) }
       const what = `start flow ${definition_id}`
@@ -399,12 +412,13 @@ export const flowTools: Tool[] = [
           ctx.backend.POST('/api/v1/workflows/{definition_id}/runs', {
             params: { path: { definition_id } },
             body:
-              approval_timeout === undefined && grant === undefined && inputs === undefined
+              approval_timeout === undefined && grant === undefined && inputs === undefined && order_id === undefined
                 ? null
                 : {
                     ...(approval_timeout === undefined ? {} : { approval_timeout }),
                     ...(grant === undefined ? {} : { grant }),
                     ...(inputs === undefined ? {} : { inputs }),
+                    ...(order_id === undefined ? {} : { order_id }),
                   },
             headers,
           }),

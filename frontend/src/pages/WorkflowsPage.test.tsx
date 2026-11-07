@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { flowRequests, setFlowDefinitions, setFlowDetails, setFlowRuns, setFlowState } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
+import type { FlowRun } from '../api/types'
 import { WorkflowsPage } from './WorkflowsPage'
 
 // #1057 — the Workflows list (plan 2026-10-09 Task F1) over the msw flow runs
@@ -32,6 +33,36 @@ describe('WorkflowsPage', () => {
     expect(within(row('run-print')).getByRole('link', { name: 'plates v2' })).toBeInTheDocument()
     expect(row('run-print')).toHaveTextContent('Waiting for approval: queue_print')
     expect(row('run-done')).toHaveTextContent('Succeeded')
+  })
+
+  it('nests the runs a run started under it, and links the order a run is for (#4252)', async () => {
+    const base = (await (await fetch('/api/v1/workflow-runs')).json()) as FlowRun[]
+    const done = base.find((r) => r.id === 'run-done')!
+    setFlowRuns([
+      { ...done, id: 'run-parent', order_id: 'ord-1' },
+      { ...done, id: 'run-child', parent_run_id: 'run-parent', order_id: 'ord-1' },
+      { ...done, id: 'run-orphan', parent_run_id: 'run-gone' },
+    ])
+    render()
+    const runs = await list()
+    const top = Array.from(runs.children).map((li) => li.getAttribute('data-run'))
+    expect(top).toEqual(['run-parent', 'run-orphan'])
+    const started = within(row('run-parent')).getByRole('list', { name: 'Runs it started' })
+    expect(within(started).getByRole('listitem')).toHaveAttribute('data-run', 'run-child')
+    expect(within(row('run-child')).getByRole('link', { name: 'For order' })).toHaveAttribute('href', '/orders/ord-1')
+  })
+
+  it('shows two runs that name each other as parent, each once (review of #5668)', async () => {
+    const base = (await (await fetch('/api/v1/workflow-runs')).json()) as FlowRun[]
+    const done = base.find((r) => r.id === 'run-done')!
+    setFlowRuns([
+      { ...done, id: 'run-a', parent_run_id: 'run-b' },
+      { ...done, id: 'run-b', parent_run_id: 'run-a' },
+    ])
+    render()
+    const runs = await list()
+    const top = Array.from(runs.children).map((li) => li.getAttribute('data-run'))
+    expect(top).toEqual(['run-a', 'run-b'])
   })
 
   it('keeps the runs one assistant session started', async () => {

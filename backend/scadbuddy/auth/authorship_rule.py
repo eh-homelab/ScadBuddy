@@ -101,6 +101,8 @@ class AuthorshipRule:
         run_id = None if token is None or key is None else run_of_token(key, token)
         if run_id is None:
             return "wrong_author"
+        if author.flow_run is not None and author.flow_run != run_id:
+            return "wrong_author"  # its run is the token's, never another (#4252)
         try:
             started_by = await asyncio.to_thread(self._started_by, run_id)
         except psycopg.Error as error:
