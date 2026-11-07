@@ -1,27 +1,36 @@
 """#5571: a print's settings per filament slot reach the copy the run uploads, and a
-slot the output lacks or a setting out of range is refused before anything goes."""
+slot the file lacks or a setting out of range is refused before anything goes. #5628:
+a library file takes them as an output does."""
 
 from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy.print_run import PART_SETTINGS_OUTPUT_ONLY, PrintRunRequest
+from scadbuddy.bambuddy.print_run import PART_SETTINGS_SLICED, PrintRunRequest
 from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.orders.quote import SliceQuoteRequest
-from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME
+from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, layout_of
 from tests.api.test_filament_profiles import preset_values
-from tests.api.test_print_filaments import prepared
-from tests.api.test_print_library import SLICED_RUN, library_file, run_library, sliced_file
-from tests.api.test_print_run_choices import body, run_print
+from tests.api.test_print_filaments import prepared, queue_route, slice_routes
+from tests.api.test_print_library import (
+    SLICED_RUN,
+    flow_copy_routes,
+    library_3mf,
+    library_file,
+    run_library,
+    sliced_file,
+)
+from tests.api.test_print_run_choices import body, run_print, run_routes
 from tests.api.test_print_supports import routes
 from tests.api.test_send import _uploaded_3mf, configure, upload_route
-from tests.bambuddy.test_part_settings import without_project_settings
+from tests.bambuddy.test_part_settings import author_two_colours, without_project_settings
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -92,25 +101,84 @@ def test_a_setting_out_of_range_is_refused(client: TestClient, model: str) -> No
 
 
 @respx.mock
-@pytest.mark.parametrize("sliced", [False, True])
-def test_a_library_file_takes_no_part_settings(client: TestClient, sliced: bool) -> None:
-    """#5571 review: a library file keeps its author's parts (#5628), and a sliced one
-    prints as it was sliced: either is refused before anything is uploaded or sliced."""
+def test_a_sliced_library_file_takes_no_part_settings(client: TestClient) -> None:
+    """#5571 review: a sliced file prints as it was sliced, so it is refused before
+    anything is queued."""
     configure(client)
     routes()
-    if sliced:
-        sliced_file(104)
-        file_id, request = 104, dict(SLICED_RUN)
-    else:
-        library_file(89)
-        plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
-        file_id, request = 89, {**body(), "filament_plan": plan}
-    request["part_settings"] = {"1": {"wall_loops": 3}}
+    sliced_file(104)
+    request = {**SLICED_RUN, "part_settings": {"1": {"wall_loops": 3}}}
 
-    response = run_library(client, file_id, json=request)
+    response = run_library(client, 104, json=request)
 
     assert response.status_code == 422, response.text
-    assert response.json()["detail"] == PART_SETTINGS_OUTPUT_ONLY
+    assert response.json()["detail"] == PART_SETTINGS_SLICED
+
+
+@respx.mock
+def test_a_library_files_parts_take_the_slots_settings(client: TestClient, tmp_path: Path) -> None:
+    """#5628: an author's file in Bambuddy's library is copied with the settings on its
+    parts of the slot, its layout kept, and the copy is what is sliced."""
+    configure(client)
+    upload = flow_copy_routes()
+    library_file(89, content=author_two_colours(tmp_path))
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+    request = {**body(), "filament_plan": plan, "part_settings": {"2": {"top_shell_layers": 8}}}
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+    response = run_library(client, 89, json=request)
+
+    assert check.status_code == 200, check.text
+    assert not any("part" in error for error in check.json()["errors"]), check.json()
+    assert response.status_code == 200, response.text
+    copy = _uploaded_3mf(upload)
+    assert layout_of(copy) == "author"
+    with zipfile.ZipFile(io.BytesIO(copy)) as archive:
+        settings = archive.read(MODEL_SETTINGS_NAME).decode()
+    assert settings.count('<metadata key="top_shell_layers" value="8"/>') == 1
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+
+
+@respx.mock
+def test_a_slot_the_library_file_lacks_is_refused(client: TestClient, tmp_path: Path) -> None:
+    """#5628: a slot no printed part of the file is made in is refused before anything
+    is uploaded, naming the slots its parts are."""
+    configure(client)
+    upload = flow_copy_routes()
+    library_file(89, content=author_two_colours(tmp_path))
+    run_routes()
+    plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+    request = {**body(), "filament_plan": plan, "part_settings": {"3": {"wall_loops": 3}}}
+
+    response = run_library(client, 89, json=request)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "part_settings names slot 3, but no printed part of this file is made in it"
+        " (its parts' slots: 1, 2)."
+    )
+    assert not upload.called
+
+
+@respx.mock
+def test_a_library_file_that_prints_as_it_is_refuses_part_settings(client: TestClient) -> None:
+    """#5628: a file with no ``project_settings.config`` (another slicer's) is ``as_is``:
+    its copy could not carry the settings, so it is refused before any upload."""
+    configure(client)
+    upload = flow_copy_routes()
+    library_file(89, content=without_project_settings(library_3mf()))
+    run_routes()
+    plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+    request = {**body(), "filament_plan": plan, "part_settings": {"1": {"wall_loops": 3}}}
+
+    response = run_library(client, 89, json=request)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == PART_SETTINGS_AS_IS
+    assert not upload.called
 
 
 def test_a_quote_takes_the_same_settings_as_the_print() -> None:
