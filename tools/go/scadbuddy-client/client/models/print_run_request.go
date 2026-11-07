@@ -27,6 +27,8 @@ type PrintRunRequest struct {
 	folder_id PrintRunRequest_PrintRunRequest_folder_idable
 	// A sparse overlay on “PrintQueueItemCreate“'s option fields. “extra="forbid"“ on purpose: a misspelled option must 422 rather than be remembered under a name nothing will ever read.
 	options PrintOptionsable
+	// The part_settings property
+	part_settings i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The path property
 	path PrintRunRequest_PrintRunRequest_pathable
 	// The plate_id property
@@ -1236,6 +1238,16 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPartSettings(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["path"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_pathFromDiscriminatorValue)
 		if err != nil {
@@ -1383,6 +1395,12 @@ func (m *PrintRunRequest) GetOptions() PrintOptionsable {
 	return m.options
 }
 
+// GetPartSettings gets the part_settings property value. The part_settings property
+// returns a UntypedNodeable when successful
+func (m *PrintRunRequest) GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.part_settings
+}
+
 // GetPath gets the path property value. The path property
 // returns a PrintRunRequest_PrintRunRequest_pathable when successful
 func (m *PrintRunRequest) GetPath() PrintRunRequest_PrintRunRequest_pathable {
@@ -1501,6 +1519,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("options", m.GetOptions())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("part_settings", m.GetPartSettings())
 		if err != nil {
 			return err
 		}
@@ -1631,6 +1655,11 @@ func (m *PrintRunRequest) SetOptions(value PrintOptionsable) {
 	m.options = value
 }
 
+// SetPartSettings sets the part_settings property value. The part_settings property
+func (m *PrintRunRequest) SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.part_settings = value
+}
+
 // SetPath sets the path property value. The path property
 func (m *PrintRunRequest) SetPath(value PrintRunRequest_PrintRunRequest_pathable) {
 	m.path = value
@@ -1702,6 +1731,7 @@ type PrintRunRequestable interface {
 	GetFilamentProfiles() []string
 	GetFolderId() PrintRunRequest_PrintRunRequest_folder_idable
 	GetOptions() PrintOptionsable
+	GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetPath() PrintRunRequest_PrintRunRequest_pathable
 	GetPlateId() *int32
 	GetPlateIds() PrintRunRequest_PrintRunRequest_plate_idsable
@@ -1722,6 +1752,7 @@ type PrintRunRequestable interface {
 	SetFilamentProfiles(value []string)
 	SetFolderId(value PrintRunRequest_PrintRunRequest_folder_idable)
 	SetOptions(value PrintOptionsable)
+	SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetPath(value PrintRunRequest_PrintRunRequest_pathable)
 	SetPlateId(value *int32)
 	SetPlateIds(value PrintRunRequest_PrintRunRequest_plate_idsable)
