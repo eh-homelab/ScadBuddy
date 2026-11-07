@@ -58,6 +58,20 @@ AGENT_MIGRATIONS = Path(__file__).resolve().parent.parent / "fixtures" / "agent-
 TEST_KEK = kek_from_base64(base64.b64encode(b"\x5a" * 32).decode())
 
 
+class FakeClock:
+    """A `CrudClient` clock that moves only by the client's own waits, so a test's count
+    of tries does not depend on how long a round trip takes."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class _Noted:
     def note(self, *args: object) -> None: ...
 

@@ -25,6 +25,7 @@ from scadbuddy.crud.client import (
     CrudUnavailableError,
     activity_key,
 )
+from tests.crud.crud_support import FakeClock
 
 HEADER = {"X-ScadBuddy-Crud": "1"}
 PATH = "/api/v1/internal/crud/render/jobs/abc"
@@ -249,17 +250,6 @@ def test_the_sync_retry_after_a_missing_route_uses_a_new_connection() -> None:
         client.close()
         server.stop()
     assert server.ports[0] != server.ports[1]
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    async def sleep(self, seconds: float) -> None:
-        self.now += seconds
 
 
 def exchange_and_api(clock: FakeClock, scopes_ok_after: int) -> tuple[Any, list[str]]:
