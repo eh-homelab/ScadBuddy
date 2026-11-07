@@ -497,6 +497,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
+- Postgres pools (#5226): every one is made by `core/pg_pool.py` (`row_pool`,
+  `async_pool`: `min_size` 0, idle connections closed after a minute, the pool's name
+  as `application_name`), never a `ConnectionPool(...)` of a feature's own. A feature's
+  short statements on the API's role go on the shared `scadbuddy-rows` pool
+  (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
+  and fails on any new or bigger one; change it, and README "Running it", on purpose.
 - Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
   table is one row per piece of background work, written by the sources (render, operation,
   print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
@@ -535,8 +541,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
   customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
-  (`OrdersComponent`: `store` over a pool of its own opened on first use, `lifecycle` over the
-  core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
+  (`OrdersComponent`: `store` over the shared `scadbuddy-rows` pool (`rows/component.py`),
+  opened on first use, `lifecycle` over the core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
   units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and
   `lock_order`; a customer's contacts and addresses replaced whole but kept by id, so an open
   order's address pointer survives an edit), `numbers.py` (`ORD-<yyyy>-<n>` from the

@@ -23,9 +23,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
-from psycopg_pool import ConnectionPool
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -67,6 +64,7 @@ from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.core.tracing import configure_tracing
@@ -253,14 +251,11 @@ def build_worker_deps(
     # job rows, their events and activity rows (``jobs``), the blob refs (``refs``), the
     # piece geometry (``geometry``), the blob index (``index``) and the Bambuddy store's
     # folders (``folders``) already go through them.
-    pool: Pool = ConnectionPool(
+    pool: Pool = row_pool(
         settings.database_url,
+        name="scadbuddy-render",
         min_size=1,
         max_size=settings.database_pool_size,
-        open=False,
-        connection_class=Connection[DictRow],
-        kwargs={"autocommit": True, "row_factory": dict_row},
-        name="scadbuddy-render",
     )
     # Never migrated here (#601): the worker's own role may not, and in a rollout the
     # API, which does, may not have started yet. Wait for it instead.

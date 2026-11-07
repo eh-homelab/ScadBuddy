@@ -145,6 +145,8 @@ export function makePing(runQuery: () => CancellableQuery): (timeoutMs?: number)
 export type ConnectOptions = {
   /** Postgres `search_path`; tests give each run a schema of its own. */
   searchPath?: string
+  /** `IDLE_TIMEOUT_SECONDS` unless set; tests shorten it. */
+  idleTimeoutSeconds?: number
   /** Where to report a failed migration (the error, never the URL). */
   onMigrationError?: (err: unknown) => void
   /** lock_timeout / statement_timeout for migrations (db/migrations.ts). */
@@ -175,19 +177,42 @@ export function makeReady(attempt: () => Promise<unknown>, onError?: (err: unkno
   }
 }
 
+/** The stores' pool. Small on purpose: health pings hold at most one connection (makePing), and the credential and settings stores issue short single queries. */
+export const SQL_CONNECTIONS = 4
+
+/**
+ * Seconds a connection may sit unused before postgres.js closes it (#5226). Its default, 0,
+ * kept every connection open for good: each agent replica held its pool's 4 idle all day.
+ */
+export const IDLE_TIMEOUT_SECONDS = 60
+
+/** How the stores' and the lock client's connections show in `pg_stat_activity`. */
+export const APPLICATION_NAME = 'scadbuddy-agent'
+
+/**
+ * The most Postgres connections one agent process holds: the stores' pool, the lock client
+ * and the LISTEN connection (events/pgListener.ts, always one); briefly more while a lock
+ * client retired by an unhealthy lease still has leases out (`createLockClient`). The backend's
+ * `tests/test_pg_pools.py` sums the API process's the same way; README "Running it" gives both.
+ */
+export const AGENT_DB_CONNECTIONS = SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS + 1
+
+/** The postgres.js options of one of `connectDatabase`'s clients. */
+export function clientOptions(max: number, searchPath?: string, idleTimeout = IDLE_TIMEOUT_SECONDS): postgres.Options<Record<string, never>> {
+  return {
+    max,
+    idle_timeout: idleTimeout,
+    // Lazily connects on first query, so a database that is down at start-up
+    // shows as unreachable in /healthz instead of crashing the process.
+    connect_timeout: 5,
+    onnotice: () => {},
+    connection: { application_name: APPLICATION_NAME, ...(searchPath === undefined ? {} : { search_path: searchPath }) },
+  }
+}
+
 export function connectDatabase(url: string, options: ConnectOptions = {}): Database {
-  const client = (max: number): Sql =>
-    postgres(url, {
-      max,
-      // Lazily connects on first query, so a database that is down at start-up
-      // shows as unreachable in /healthz instead of crashing the process.
-      connect_timeout: 5,
-      onnotice: () => {},
-      ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
-    })
-  // Small on purpose: health pings hold at most one connection (makePing),
-  // and the credential and settings stores issue short single queries.
-  const sql = client(4)
+  const client = (max: number): Sql => postgres(url, clientOptions(max, options.searchPath, options.idleTimeoutSeconds))
+  const sql = client(SQL_CONNECTIONS)
   const locks = createLockClient(client)
   const ping = makePing(() => {
     const query = sql`select 1`

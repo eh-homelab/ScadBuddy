@@ -38,6 +38,8 @@ from dataclasses import dataclass
 
 from psycopg import AsyncConnection, sql
 
+from scadbuddy.core.pg_pool import record_connection
+
 logger = logging.getLogger(__name__)
 
 #: How the listening connection shows in `pg_stat_activity`.
@@ -61,6 +63,10 @@ class _Channel:
 class PgListener:
     """This process's LISTEN connection. See the module docstring."""
 
+    #: As a pool in `core/pg_pool.py`'s registry: one connection, under this name.
+    name = LISTENER_APPLICATION_NAME
+    max_size = 1
+
     def __init__(
         self,
         conninfo: str,
@@ -83,6 +89,10 @@ class PgListener:
         self._state_callbacks: list[Callable[[bool], None]] = []
         self._task: asyncio.Task[None] | None = None
         self._runners = 0
+        record_connection(self)
+
+    def open_connections(self) -> int:
+        return 0 if self.backend_pid is None else 1
 
     @property
     def channels(self) -> tuple[str, ...]:

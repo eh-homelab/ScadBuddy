@@ -21,7 +21,9 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from prometheus_client.core import GaugeMetricFamily, Metric
 from prometheus_client.metrics import MetricWrapperBase
+from prometheus_client.registry import Collector
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = [
@@ -598,6 +600,10 @@ class Metrics:
         for outcome in get_args(TraceRelayOutcome):
             self.trace_relay_batches.labels(outcome)
 
+        # Postgres connections (#5226): read from `core/pg_pool.py`'s registry per scrape,
+        # in every role (the loop below drops only the metric wrappers).
+        r.register(_PoolCollector())
+
         if role != "api":
             keep = ROLE_SERIES[role]
             for name, value in vars(self).items():
@@ -625,6 +631,58 @@ class Metrics:
 
     def exposition(self) -> bytes:
         return generate_latest(self.registry)
+
+
+class _PoolCollector(Collector):
+    """This process's Postgres pools and its ``LISTEN`` connection, by pool name: the
+    connections each holds now, the most it may, and the callers waiting for one.
+    ``sum by (pod)`` of the most is what a pod's pools may take of ``max_connections``;
+    the short-lived lock and claim connections opened outside any pool come on top
+    (README "Running it")."""
+
+    def describe(self) -> list[Metric]:
+        return list(self._families())
+
+    def collect(self) -> Iterator[Metric]:
+        from scadbuddy.core.pg_pool import pools
+
+        open_now, most, waiting = self._families()
+        totals: dict[str, list[int]] = {}
+        for use in pools():
+            total = totals.setdefault(use.name, [0, 0, 0])
+            total[0] += use.open
+            total[1] += use.max_size
+            total[2] += use.waiting
+        for name, (now, top, queued) in sorted(totals.items()):
+            open_now.add_metric([name], now)
+            most.add_metric([name], top)
+            waiting.add_metric([name], queued)
+        yield open_now
+        yield most
+        yield waiting
+
+    @staticmethod
+    def _families() -> tuple[GaugeMetricFamily, GaugeMetricFamily, GaugeMetricFamily]:
+        return (
+            GaugeMetricFamily(
+                "scadbuddy_db_pool_connections",
+                "Postgres connections this process's pool holds now (in use, idle or"
+                " connecting), by pool; the LISTEN connection is the pool"
+                " scadbuddy-listener.",
+                labels=["pool"],
+            ),
+            GaugeMetricFamily(
+                "scadbuddy_db_pool_max_connections",
+                "The most Postgres connections this process's pool may hold, by pool.",
+                labels=["pool"],
+            ),
+            GaugeMetricFamily(
+                "scadbuddy_db_pool_requests_waiting",
+                "Callers waiting for a connection from this process's pool now, by pool:"
+                " above 0 for long, the pool is too small for its load.",
+                labels=["pool"],
+            ),
+        )
 
 
 #: Requests that matched no API route: the SPA's static files and 404s. One label
