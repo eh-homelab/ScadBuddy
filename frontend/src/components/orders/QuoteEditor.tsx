@@ -65,7 +65,7 @@ export function QuoteEditor({
   /** Offer Accept on the newest quote while none is accepted, though `editable` is false. */
   acceptPending?: boolean
   onChanged: () => void
-  /** What a slice quote slices: the item's output and its colours' filaments. */
+  /** What a slice quote slices: the item's output or library file, and its colours' filaments. */
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> & Partial<Pick<OrderItem, 'library_file'>>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
   slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
