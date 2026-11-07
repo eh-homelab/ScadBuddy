@@ -11,8 +11,13 @@ from typing import Any
 import psycopg
 import pytest
 
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_run import PrintRunResult
+from scadbuddy.bambuddy.progress import PrintProgress
+from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.lifecycle import LifecycleError, ManualQuoteInput
+from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError, ManualQuoteInput
 from scadbuddy.orders.models import LibraryFileRef, Order, OrderItem
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.problems import PROBLEMS
@@ -250,9 +255,78 @@ def test_a_file_gone_refuses_the_quote_and_the_print(
     )
     assert check(Library(89)) == {
         "library_file_id": 89,
-        "slug": "library-89",
         "copies": 2,
         "quote_id": quote.id,
         "sliced_sha256": None,
         "sliced_blob_key": None,
     }
+
+
+def test_two_items_of_one_file_printing_at_once_settle_the_older_by_hand(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#5611: both items print on the run subject ``library:89``, and the follow reads and
+    records only that subject's newest run's print (``bambuddy/outcomes.py``). The newer
+    attempt settles by itself; the older stays `unknown` until a person settles it."""
+    order = shop.order()
+    older, newer = library_item(shop, order), library_item(shop, order)
+    shop.quoted(order, older)
+    shop.quoted(order, newer)
+    shop.lifecycle.accept_order(order.id, BY)
+    subject = PrintSubject.library(FILE.id)
+    runs = PrintRunStore(pool)
+
+    async def run(run_id: str, queue_item: int) -> None:
+        await runs.insert_accepted(
+            run_id,
+            subject=subject,
+            key=f"k-{run_id}",
+            slug=library_slug(subject),
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w1",
+            retention=None,
+        )
+        result = PrintRunResult(library_file_id=FILE.id, copies=2, queue_item_ids=[queue_item])
+        await runs.succeed(run_id, library_slug(subject), result)
+
+    def started(item: OrderItem, run_id: str, queue_item: int) -> str:
+        asyncio.run(run(run_id, queue_item))
+        claim = shop.lifecycle.claim_print(
+            order.id,
+            item.id,
+            BY,
+            request_id=f"req-{run_id}",
+            sliced_sha256=None,
+            sliced_blob_key=None,
+        )
+        return shop.lifecycle.attach_print(claim, run_id, None).id
+
+    first = started(older, "r-older", 51)
+    started(newer, "r-newer", 52)
+
+    def done(queue_item: int) -> PrintProgress:
+        return PrintProgress(
+            route="slice_queue",
+            stage="done",
+            settled=True,
+            queue_item_id=queue_item,
+            bambuddy_url="http://bambuddy.test/queue",
+        )
+
+    outcomes = PrintOutcomeStore(pool, None)
+    record = outcomes.record
+    # The older print's settled read is not the subject's newest run's: nothing recorded.
+    assert asyncio.run(record(subject.run_subject, library_slug(subject), done(51))) is None
+    recorded = asyncio.run(record(subject.run_subject, library_slug(subject), done(52)))
+    assert recorded is not None and recorded.run_id == "r-newer"
+    assert shop.lifecycle.follow_print("r-older") is None
+    settled = shop.lifecycle.follow_print("r-newer")
+    assert settled is not None and (settled.outcome, settled.quantity) == ("succeeded", 2)
+    assert shop.get_item(newer).status == "printed"
+    assert [f.outcome for f in shop.rows.fulfilments(older.id)] == ["unknown"]
+    assert shop.get_item(older).status == "queued"
+    # Settled by hand (§5.4: PATCH the attempt).
+    shop.lifecycle.update_fulfilment(
+        order.id, older.id, first, FulfilmentInput(quantity=2, outcome="succeeded"), BY
+    )
+    assert shop.get_item(older).status == "printed"

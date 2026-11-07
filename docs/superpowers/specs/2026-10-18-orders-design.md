@@ -220,6 +220,14 @@ refusals below cover it going away.
 - Printing starts the library print route's own run (`start_library_run`, run subject
   `library:<file id>`, the file's filament slots read as that route reads them), so the
   item follows its print as any other (`print_runs.output_id` is the run subject).
+  Every print of one file shares that subject, and the follow reads and records only the
+  subject's newest run's print (`bambuddy/follow.py`, `progress.py` `library_progress`,
+  `outcomes.py`). So of two items of one file printing at once (two items of one order,
+  the file on two orders, or a dialog print of it), only the newer attempt settles by
+  itself; the older one stays `unknown` and is settled by hand (`PATCH` the attempt,
+  #5611). An output item has the same limit, but two items rarely share an output. To
+  settle each attempt by its own run, the follow must follow each run, not each subject:
+  the follow workflow, the progress reads and the LAN reads all key on the subject today.
 - A file gone since it was added is 409 `library_file_gone` (naming the item) in the
   quote's check and run and in the print's check, before anything starts; the item can
   still be priced by hand, cancelled, or replaced by a new item. A revision, a reference
