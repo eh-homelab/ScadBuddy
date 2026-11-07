@@ -147,7 +147,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   render worker's own role `scadbuddy_render` may touch, granted by the API at start;
   a change to what the worker reads or writes changes it, and
   `tests/test_render_worker_role.py` renders as that role; the worker never migrates
-  and reads the store settings and writes its job rows, their events and activity rows, their blob refs, the piece geometry and the blob index only through the API's CRUD routes, `crud/render.py`; that role is today's state,
+  and reads the store settings and writes its job rows, their events and activity rows, their blob refs, the piece geometry and the blob index only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it; that role is today's state,
   superseded by #5295, which moves the worker's SQL behind CRUD routes, #5298). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`

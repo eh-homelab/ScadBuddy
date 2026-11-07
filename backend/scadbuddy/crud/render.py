@@ -20,6 +20,13 @@ use, `IndexesBlobs`) over the routes, with the same answers: a `put` the object 
 replaced, a delete the row it took, `ReuseLostError` and, once the API's own retries are
 spent, `DeadlockDetected` as over SQL. Its non-natural writes send an
 ``Idempotency-Key`` each (`WriteKeys`).
+
+`RemoteStoreFolders` is `store/bambuddy.py` `FolderFinder` (`KeepsFolders`) over the
+routes (plan D6): the API finds or makes a folder in Bambuddy itself, with its own render
+target and key, under the folder's advisory lock, and records it, all in one request. It
+does so only for the Bambuddy and inbox the worker names, which must be the API's own.
+Every call is natural: a find sent again answers the folder the first one recorded, and a
+forget of nothing is a success.
 """
 
 from __future__ import annotations
@@ -38,13 +45,15 @@ import httpx
 from psycopg.errors import DeadlockDetected
 from temporalio import activity
 
+from scadbuddy.bambuddy.client import DEFAULT_TIMEOUT as BAMBUDDY_TIMEOUT
+from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
-from scadbuddy.store.bambuddy import StoreSettingsSource
+from scadbuddy.store.bambuddy import FOLDER_LOCK_SECONDS, FolderRole, Inbox, StoreSettingsSource
 from scadbuddy.store.content_models import BlobRef, BlobStat, ReuseLostError
 from scadbuddy.store.geometry import GeometryRow
 
@@ -77,6 +86,13 @@ ACCEPT_BUDGET = 1.0
 #: the SQL store's pool wait (30 s). The hold comes after the template ran, so a hold
 #: that fails reruns the template.
 HOLD_BUDGET = 30.0
+#: A folder find's wait for its answer: the API finds the template's folder and then its
+#: `Work/`, each under a lock it may wait `FOLDER_LOCK_SECONDS` for, then a listing and a
+#: create at Bambuddy's own timeout. A slow but healthy find is answered inside it.
+FIND_TIMEOUT = 2 * (FOLDER_LOCK_SECONDS + 2 * BAMBUDDY_TIMEOUT)
+#: How long a find tries again after a failure that passes: a lock the API waited
+#: `FOLDER_LOCK_SECONDS` for in vain (a 503 ``database-unavailable``), an API pod away.
+FIND_BUDGET = FIND_TIMEOUT
 
 
 class RemoteRenderSettingsSource(StoreSettingsSource):
@@ -427,6 +443,65 @@ class RemoteBlobIndex:
     def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
         body = self._read("/usage", backend=backend)
         return int(body["count"]), int(body["bytes"]), dict(body["by_kind"])
+
+
+class RemoteStoreFolders:
+    """`KeepsFolders` over the routes, on the worker's event loop. ``budget`` and
+    ``timeout`` bound a find (`FIND_BUDGET`, `FIND_TIMEOUT`); a forget and a listing
+    have the client's own."""
+
+    def __init__(
+        self, client: CrudClient, *, budget: float = FIND_BUDGET, timeout: float = FIND_TIMEOUT
+    ) -> None:
+        self._client = client
+        self._budget = budget
+        self._timeout = timeout
+
+    async def find(
+        self, client: object, inbox: Inbox, slug: str, role: FolderRole, title: str
+    ) -> int:
+        """``client``, the worker's Bambuddy client, is not used: the API calls Bambuddy
+        with its own. A refusal (the API's Bambuddy is not the worker's, Bambuddy's own
+        404) is the `ApiError` the SQL find raised, so an upload still forgets a folder
+        Bambuddy lost and makes it again."""
+        body = {
+            "slug": slug,
+            "role": role,
+            "title": title,
+            "instance": inbox.instance,
+            "inbox_id": inbox.id,
+        }
+        try:
+            response = await self._client.request(
+                "POST",
+                f"{BASE}/store-folders/find",
+                json=body,
+                timeout=self._timeout,
+                budget=self._budget,
+            )
+        except CrudRefusedError as error:
+            problem = error.problem
+            raise ApiError(
+                error.status,
+                str(problem.get("detail", "")),
+                type_=str(problem.get("type", "about:blank")),
+            ) from error
+        return int(response.json()["folder_id"])
+
+    async def forget(self, inbox: Inbox, slug: str) -> None:
+        await self._client.request(
+            "DELETE", _with(f"{BASE}/store-folders", _where(inbox, slug=slug))
+        )
+
+    async def work_folders(self, inbox: Inbox) -> set[int]:
+        response = await self._client.request(
+            "GET", _with(f"{BASE}/store-folders/work", _where(inbox))
+        )
+        return {int(folder_id) for folder_id in response.json()}
+
+
+def _where(inbox: Inbox, **query: Any) -> dict[str, Any]:
+    return {"instance": inbox.instance, "inbox_id": inbox.id, **query}
 
 
 def _part(value: str) -> str:
