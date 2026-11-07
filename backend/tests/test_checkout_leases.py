@@ -49,6 +49,20 @@ async def test_a_lease_the_worker_holds_is_seen_by_the_apis_removal(
         assert api.leased(checkout) == []
 
 
+async def test_a_lease_on_two_libraries_holds_both(pg_pool: PgPool, tmp_path: Path) -> None:
+    """One render's lease names every checkout on its search path under one token (#5609:
+    the key was the token alone, so a second checkout failed the take)."""
+    worker, api = _gate(pg_pool, tmp_path), _gate(pg_pool, tmp_path)
+    bosl2, other = _checkout(tmp_path), _checkout(tmp_path, "NopSCADlib")
+
+    async with worker.rendering(JOB, [bosl2, other]), api.removing():
+        assert api.leased(bosl2) == [JOB]
+        assert api.leased(other) == [JOB]
+
+    async with api.removing():
+        assert api.leased(bosl2) == api.leased(other) == []
+
+
 async def test_a_lease_waits_out_a_removal_in_another_process(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
