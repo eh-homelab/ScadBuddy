@@ -9,10 +9,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.part_settings import PartSettings, by_colour, laid_under
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError, meta_from_raw
+from scadbuddy.library.outputs import PARAMS_NAME, OutputStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
 
 
@@ -124,6 +127,26 @@ def test_two_parameters_of_one_colour_share_its_slot_and_the_first_wins() -> Non
     assert by_colour(declared, params, ["#FFFFFF", "#800080"]) == {
         2: PartSettings(top_shell_layers=8, wall_loops=3)
     }
+
+
+async def test_an_arranged_output_takes_no_template_part_settings(tmp_path: Path) -> None:
+    """#5638 review: an arranged output's parts come from other outputs or library files,
+    and it may be filed under any template, so no colour of it is the template's."""
+    paths, job, _ = await finished_job(tmp_path)
+    store = OutputStore(paths)
+    plain = store.create(job, name="plain", index=0)
+    arranged = store.create(job, name="arranged", index=0, arranged_from=[plain.id])
+    meta = json.loads(paths.model_meta("demo").read_text(encoding="utf-8"))
+    meta["part_print_settings"] = {"label_color": {"top_shell_layers": 8}}
+    paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
+    for output in (plain, arranged):
+        params = store.directory(output.id) / PARAMS_NAME
+        params.write_text(json.dumps({"label_color": output.colors[0]}), encoding="utf-8")
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    reader = LocalOutputs(store, catalogue)
+
+    assert (await reader.naming(plain)).part_settings == {1: PartSettings(top_shell_layers=8)}
+    assert (await reader.naming(arranged)).part_settings is None
 
 
 def test_the_request_wins_per_key_over_the_template() -> None:

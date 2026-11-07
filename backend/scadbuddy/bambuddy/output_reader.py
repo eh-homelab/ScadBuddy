@@ -112,7 +112,11 @@ class LocalOutputs:
     ) -> PartSettingsMap | None:
         """``declared`` as this output's slots (#5626): each colour parameter's value is
         the output's, else the template's default from its cached schema (an output
-        from before #4774 left its defaults out)."""
+        from before #4774 left its defaults out). ``None`` for an arranged output: its
+        parts come from other outputs or library files, it has no params, and a default
+        colour's slot may be another file's part."""
+        if self.outputs.arranged_from(meta.id):
+            return None
         defaults = cached_defaults(self.outputs.paths, meta.slug)
         values: dict[str, object] = {k: v for k, v in defaults.items() if v is not None}
         values.update(self.outputs.params(meta.id))
