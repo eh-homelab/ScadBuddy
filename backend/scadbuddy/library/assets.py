@@ -38,11 +38,11 @@ import threading
 import time
 import unicodedata
 import zipfile
-from collections.abc import Collection, Iterable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import psycopg
 from lxml import etree
@@ -95,6 +95,15 @@ _SELECT_META = f"SELECT {_META_COLUMNS} FROM assets WHERE id = %s"
 STALE_ROWS = "SELECT id FROM assets WHERE last_used_at < %s"
 _ROWS_AMONG = "SELECT id FROM assets WHERE id = ANY(%s)"
 _MARK_USED = f"UPDATE assets SET last_used_at = %s WHERE id = %s RETURNING {_META_COLUMNS}"
+_ADOPT = (
+    f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at"
+)
+#: The most ids one `AssetStore.last_used` reads (the render worker's
+#: ``POST …/render/assets/last-used``, #5298): `RemoteAssetStore.prune_local` asks in
+#: batches of this many.
+LAST_USED_MAX = 500
 #: Anything in a reference source that could be an asset id. Deliberately looser than
 #: "the value of a `file` parameter": a sweep that keeps an asset it need not is
 #: harmless, one that misses a reference destroys an output's provenance. Matching
@@ -502,16 +511,7 @@ class AssetStore:
 
     def _blobs(self) -> dict[str, Path]:
         """Every stored blob by id, as the directory lists it now."""
-        try:
-            entries = list(self.root.iterdir())
-        except FileNotFoundError:
-            return {}
-        found: dict[str, Path] = {}
-        for entry in entries:
-            match = _BLOB_RE.fullmatch(entry.name)
-            if match:
-                found[match.group(1)] = entry
-        return found
+        return _blobs_in(self.root)
 
     def _usage(self, count: int, total: int) -> AssetUsage:
         return AssetUsage(
@@ -553,17 +553,48 @@ class AssetStore:
     def blob_path(self, meta: AssetMeta) -> Path:
         return self.root / f"{meta.id}.{meta.kind}"
 
-    def get(self, asset_id: str) -> AssetMeta:
+    def row(self, asset_id: str) -> AssetMeta:
+        """The asset's row, whether or not this root holds its file: a render worker's
+        ``GET …/render/assets/{id}`` (#5298), whose copy is on its own volume."""
         if not ASSET_ID_RE.fullmatch(asset_id):
             raise AssetNotFoundError(asset_id)
         with self._require().connection() as conn:
             found = conn.execute(_SELECT_META, (asset_id,)).fetchone()
         if found is None:
             raise AssetNotFoundError(asset_id)
-        meta = AssetMeta.model_validate(found)
+        return AssetMeta.model_validate(found)
+
+    def get(self, asset_id: str) -> AssetMeta:
+        meta = self.row(asset_id)
         if not self.blob_path(meta).is_file():
             raise AssetNotFoundError(asset_id)
         return meta
+
+    def use_row(self, asset_id: str) -> AssetMeta:
+        """`use` of a file this root does not hold: mark the row used and answer it. A
+        render worker's ``POST …/render/assets/{id}/use`` (#5298); the worker checks its
+        own copy, before and after, under its lock of the id (`RemoteAssetStore.use`).
+        Waits on the sweep's row lock, as `use` does."""
+        if not ASSET_ID_RE.fullmatch(asset_id):
+            raise AssetNotFoundError(asset_id)
+        with self._require().connection() as conn:
+            found = conn.execute(_MARK_USED, (datetime.now(UTC), asset_id)).fetchone()
+        if found is None:
+            raise AssetNotFoundError(asset_id)
+        return AssetMeta.model_validate(found)
+
+    def last_used(self, ids: Sequence[str]) -> dict[str, datetime | None]:
+        """Each id's last use; None for one with no row. At most `LAST_USED_MAX` ids."""
+        if len(ids) > LAST_USED_MAX:
+            raise ValueError(f"at most {LAST_USED_MAX} ids at once")
+        with self._require().connection() as conn:
+            found = {
+                row["id"]: row["last_used_at"]
+                for row in conn.execute(
+                    "SELECT id, last_used_at FROM assets WHERE id = ANY(%s)", (list(ids),)
+                )
+            }
+        return {asset_id: found.get(asset_id) for asset_id in ids}
 
     def use(self, asset_id: str) -> AssetMeta:
         """`get`, and mark the asset used now, so a sweep already under way skips it.
@@ -671,8 +702,7 @@ class AssetStore:
         No caps: the upload that created it was checked against them. The bytes must be
         the id, so a damaged or substituted download never becomes a render's input.
         """
-        if hashlib.sha256(data).hexdigest() != meta.id or len(data) != meta.size:
-            raise AssetRejectedError(f"the fetched file does not match asset {meta.id}")
+        _require_bytes(meta, data)
         with self._require().connection() as conn, conn.transaction():
             conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
             blob = self.blob_path(meta)
@@ -680,12 +710,19 @@ class AssetStore:
                 self.root.mkdir(parents=True, exist_ok=True)
                 _write_atomically(blob, data)
             now = datetime.now(UTC)
-            conn.execute(
-                f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at",
-                (*_meta_values(meta), now, now),
-            )
+            conn.execute(_ADOPT, (*_meta_values(meta), now, now))
+
+    def adopt_row(self, meta: AssetMeta) -> None:
+        """`adopt` of a file this root does not hold: the row only, under the asset's
+        lock, as `adopt` writes it. A render worker's ``POST …/render/assets/{id}/adopt``
+        (#5298), which writes its copy on its own volume first; the route passes the
+        meta of the API's own blob-store copy, never the worker's."""
+        if not ASSET_ID_RE.fullmatch(meta.id):
+            raise AssetRejectedError(f"not an asset id: {meta.id[:80]!r}")
+        with self._require().connection() as conn, conn.transaction():
+            conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
+            now = datetime.now(UTC)
+            conn.execute(_ADOPT, (*_meta_values(meta), now, now))
 
     def spend_fetch_grant(
         self, nonce: str, idempotency_key: str | None, expires_at: datetime
@@ -733,11 +770,7 @@ class AssetStore:
 
     def _orphan_last_used(self, asset_id: str) -> float | None:
         """A blob with no row has only its mtime to go by; None once it is gone."""
-        stamps: list[float] = []
-        for kind in MEDIA_TYPES:
-            with suppress(FileNotFoundError):
-                stamps.append((self.root / f"{asset_id}.{kind}").stat().st_mtime)
-        return max(stamps) if stamps else None
+        return _mtime_in(self.root, asset_id)
 
     def sweep(
         self,
@@ -811,9 +844,9 @@ class AssetStore:
         """Remove this root's copies of assets last used more than ``grace`` seconds
         before ``now``, and answer their ids; every row stays.
 
-        For a root that is a copy (a render worker on its own volume, #426): the rows
-        are the API's, shared through Postgres (#591), and only the API's `sweep`, which
-        knows the references, removes one. A copy with a row goes by the row's last use;
+        For a root that is a copy (#426): the rows are the API's (#591), and only the
+        API's `sweep`, which knows the references, removes one. A render worker on its
+        own volume prunes through `RemoteAssetStore.prune_local` (#5298). A copy with a row goes by the row's last use;
         one without a row by its mtime. Each copy is removed with its row locked, so a
         `use` either lands first and keeps it, or finds it gone and the store brings it
         back.
@@ -865,6 +898,210 @@ class AssetStore:
         for kind in MEDIA_TYPES:
             (self.root / f"{asset_id}.{kind}").unlink(missing_ok=True)
         return True
+
+
+class AssetRows(Protocol):
+    """The ``assets`` rows a render worker reads and writes through the API's CRUD routes
+    (#5298, `crud/render.py` `RemoteAssetRows`). Each raises what `AssetStore` raised:
+    `AssetNotFoundError` for no row, `AssetRejectedError` for an adopt refused."""
+
+    def get(self, asset_id: str) -> AssetMeta: ...
+
+    def use(self, asset_id: str) -> AssetMeta: ...
+
+    def adopt(self, meta: AssetMeta) -> None: ...
+
+    def last_used(self, ids: Sequence[str]) -> dict[str, datetime | None]: ...
+
+
+class UsesAssets(Protocol):
+    """What a render reads uploads through, and `RemoteAssets` brings them into:
+    `AssetStore` on the API (and its in-process worker), `RemoteAssetStore` on a render
+    worker (#5298)."""
+
+    def blob_path(self, meta: AssetMeta) -> Path: ...
+
+    def get(self, asset_id: str) -> AssetMeta: ...
+
+    def use(self, asset_id: str) -> AssetMeta: ...
+
+    def adopt(self, meta: AssetMeta, data: bytes) -> None: ...
+
+    def ids(self) -> list[str]: ...
+
+    def prune_local(self, *, grace: float, now: float | None = None) -> list[str]: ...
+
+
+class _IdLocks:
+    """A `threading.Lock` per asset id, made on first hold and forgotten once no thread
+    holds or waits for it."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, tuple[threading.Lock, int]] = {}
+
+    def held(self) -> int:
+        with self._guard:
+            return len(self._locks)
+
+    def _take(self, asset_id: str) -> threading.Lock:
+        with self._guard:
+            lock, users = self._locks.get(asset_id, (threading.Lock(), 0))
+            self._locks[asset_id] = (lock, users + 1)
+        lock.acquire()
+        return lock
+
+    def _give(self, asset_id: str) -> None:
+        with self._guard:
+            lock, users = self._locks[asset_id]
+            lock.release()
+            if users == 1:
+                del self._locks[asset_id]
+            else:
+                self._locks[asset_id] = (lock, users - 1)
+
+    @contextmanager
+    def hold(self, ids: Iterable[str]) -> Iterator[None]:
+        """Hold every id's lock, taken in sorted order, so two holders never deadlock."""
+        taken: list[str] = []
+        try:
+            for asset_id in sorted(set(ids)):
+                self._take(asset_id)
+                taken.append(asset_id)
+            yield
+        finally:
+            for asset_id in reversed(taken):
+                self._give(asset_id)
+
+
+class RemoteAssetStore:
+    """A render worker's uploads (#5298, inventory R19-R21): the files under its own
+    ``data/assets/``, the rows the API's, through ``rows`` (`crud/render.py`
+    `RemoteAssetRows`). The worker holds no database secret.
+
+    The SQL store's `prune_local` held the row's lock while it removed the file, so a
+    `use` on this worker either landed first and kept the file, or waited and found it
+    gone. A lock per asset id in this process, held by `use`, `adopt` and `prune_local`,
+    does that now: the copy is this process's own. The API's sweep, which removes the
+    row, still locks the row before its delete there, and the API's `use` waits on it.
+    """
+
+    def __init__(self, root: Path, rows: AssetRows) -> None:
+        self.root = root
+        self._rows = rows
+        self._locks = _IdLocks()
+
+    def blob_path(self, meta: AssetMeta) -> Path:
+        return self.root / f"{meta.id}.{meta.kind}"
+
+    def ids(self) -> list[str]:
+        """Every copy this root holds, by id."""
+        return sorted(_blobs_in(self.root))
+
+    def get(self, asset_id: str) -> AssetMeta:
+        if not ASSET_ID_RE.fullmatch(asset_id):
+            raise AssetNotFoundError(asset_id)
+        meta = self._rows.get(asset_id)
+        if not self.blob_path(meta).is_file():
+            raise AssetNotFoundError(asset_id)
+        return meta
+
+    def use(self, asset_id: str) -> AssetMeta:
+        """`AssetStore.use`: `get`, and mark the asset used now. With no copy here it is
+        not found and the row is not marked, as the SQL `use` rolled its mark back; a
+        prune of this id waits, and is waited for."""
+        if not ASSET_ID_RE.fullmatch(asset_id):
+            raise AssetNotFoundError(asset_id)
+        with self._locks.hold([asset_id]):
+            if _mtime_in(self.root, asset_id) is None:
+                raise AssetNotFoundError(asset_id)
+            meta = self._rows.use(asset_id)
+            if not self.blob_path(meta).is_file():
+                raise AssetNotFoundError(asset_id)
+            return meta
+
+    def adopt(self, meta: AssetMeta, data: bytes) -> None:
+        """`AssetStore.adopt`: the file first, then the row, so no row the API answers
+        this worker lacks the bytes of. The API writes the row from its own copy's meta."""
+        _require_bytes(meta, data)
+        with self._locks.hold([meta.id]):
+            blob = self.blob_path(meta)
+            if not blob.is_file():
+                self.root.mkdir(parents=True, exist_ok=True)
+                _write_atomically(blob, data)
+            self._rows.adopt(meta)
+
+    def prune_local(self, *, grace: float, now: float | None = None) -> list[str]:
+        """`AssetStore.prune_local`: remove the copies last used more than ``grace``
+        seconds before ``now`` (one with no row by its mtime), and answer their ids;
+        every row stays. The last uses come `LAST_USED_MAX` ids at a time, each batch
+        read and pruned with its ids locked. A batch that fails is logged and skipped."""
+        cutoff = (time.time() if now is None else now) - grace
+        cutoff_at = datetime.fromtimestamp(cutoff, UTC)
+        local = sorted(_blobs_in(self.root))
+        removed: list[str] = []
+        for start in range(0, len(local), LAST_USED_MAX):
+            batch = local[start : start + LAST_USED_MAX]
+            try:
+                with self._locks.hold(batch):
+                    stamps = self._rows.last_used(batch)
+                    for asset_id in batch:
+                        if self._prune_one(asset_id, stamps.get(asset_id), cutoff, cutoff_at):
+                            removed.append(asset_id)
+            except Exception:
+                logger.exception(
+                    "could not remove the local copies of a batch of assets",
+                    extra={"assets": len(batch)},
+                )
+        return removed
+
+    def _prune_one(
+        self, asset_id: str, used: datetime | None, cutoff: float, cutoff_at: datetime
+    ) -> bool:
+        if used is not None:
+            stale = used < cutoff_at
+        else:
+            last_used = _mtime_in(self.root, asset_id)
+            stale = last_used is not None and last_used < cutoff
+        if not stale:
+            return False
+        try:
+            for kind in MEDIA_TYPES:
+                (self.root / f"{asset_id}.{kind}").unlink(missing_ok=True)
+        except OSError:
+            logger.exception("could not remove a local copy of an asset", extra={"asset": asset_id})
+            return False
+        return True
+
+
+def _require_bytes(meta: AssetMeta, data: bytes) -> None:
+    """The bytes must be the id, so a damaged or substituted download never becomes a
+    render's input."""
+    if hashlib.sha256(data).hexdigest() != meta.id or len(data) != meta.size:
+        raise AssetRejectedError(f"the fetched file does not match asset {meta.id}")
+
+
+def _blobs_in(root: Path) -> dict[str, Path]:
+    """Every stored blob under ``root`` by id, as the directory lists it now."""
+    try:
+        entries = list(root.iterdir())
+    except FileNotFoundError:
+        return {}
+    found: dict[str, Path] = {}
+    for entry in entries:
+        match = _BLOB_RE.fullmatch(entry.name)
+        if match:
+            found[match.group(1)] = entry
+    return found
+
+
+def _mtime_in(root: Path, asset_id: str) -> float | None:
+    """The newest mtime of the asset's files under ``root``; None when there are none."""
+    stamps: list[float] = []
+    for kind in MEDIA_TYPES:
+        with suppress(FileNotFoundError):
+            stamps.append((root / f"{asset_id}.{kind}").stat().st_mtime)
+    return max(stamps) if stamps else None
 
 
 def _write_atomically(path: Path, payload: bytes) -> None:
@@ -1008,7 +1245,7 @@ def with_samples(schema: CustomizerSchema, model_dir: Path) -> CustomizerSchema:
 def file_assets(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
-    store: AssetStore,
+    store: UsesAssets,
     model_dir: Path,
 ) -> dict[str, AssetMeta]:
     """The uploaded asset behind each `file` parameter in ``params``.

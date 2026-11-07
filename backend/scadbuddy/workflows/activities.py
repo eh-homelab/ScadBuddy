@@ -27,7 +27,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
+from scadbuddy.library.assets import AssetUnavailableError, UsesAssets, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.bambu3mf import ArchiveTooLargeError, TooManyTrianglesError
@@ -97,7 +97,7 @@ PIECE_NAME = "piece.json"
 class WorkerDeps:
     config: Config
     paths: DataPaths
-    assets: AssetStore
+    assets: UsesAssets
     blobs: BlobStore
     #: The render worker's ``refs``, ``projection`` and ``geometry`` are the API's CRUD
     #: routes (#5298); the in-process worker's, SQL.

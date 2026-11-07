@@ -2,7 +2,8 @@
 R2), for `crud/render.py` `RemoteRenderSettingsSource`, its jobs' rows (R3-R10), for
 `RemoteJobProjection`, and its jobs' blob refs and the piece geometry (R11, R12), for
 `RemoteBlobRefs` and `RemoteGeometryIndex`, the blob index (R13-R16), for
-`RemoteBlobIndex`, and the Bambuddy store's folders (R17, R18), for `RemoteStoreFolders`.
+`RemoteBlobIndex`, the Bambuddy store's folders (R17, R18), for `RemoteStoreFolders`, and
+the uploads' ``assets`` rows (R19-R21), for `RemoteAssetRows`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.render`` (plan D8): the
 render key (or the full key while no render key is saved) and the S3 keys. The CRUD
@@ -22,7 +23,7 @@ from fastapi import Query, Request, status
 from psycopg import Connection
 from psycopg.errors import DeadlockDetected, LockNotAvailable
 from psycopg.rows import DictRow
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.auth.gate import caller_of
@@ -38,10 +39,18 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
+from scadbuddy.library.assets import (
+    ASSET_ID_PATTERN,
+    ASSET_ID_RE,
+    LAST_USED_MAX,
+    AssetMeta,
+    AssetNotFoundError,
+)
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
+from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import FolderFinder, FolderRole, Inbox, instance_key, render_target
 from scadbuddy.store.content_models import BlobRef as IndexedRef
 from scadbuddy.store.content_models import BlobStat, ReuseLostError
@@ -624,3 +633,69 @@ async def work_store_folders(
 ) -> list[int]:
     """R18: the `Work/` folders recorded under one inbox of one Bambuddy."""
     return sorted(await _folders(state).work_folders(Inbox(instance, inbox_id)))
+
+
+# -- the uploads' rows (inventory R19-R21) ---------------------------------------
+#
+# The files stay on the worker's volume; these are the API's `AssetStore` rows. A `use`
+# waits on the row lock the sweep takes before it re-checks and deletes, as the worker's
+# SQL did. An adopt takes the asset's advisory lock, as an upload and the sweep do, and is
+# natural (ON CONFLICT: adopted twice, one row). The worker sets no field of the row: the
+# API writes it from its own blob-store copy's meta (`RemoteAssets.mirror`), which must be
+# the file the worker names (id, kind, size), so a worker cannot record a name, source,
+# licence or shape the upload never had.
+
+
+class LastUsedAsk(BaseModel):
+    ids: list[Annotated[str, Field(pattern=ASSET_ID_PATTERN)]] = Field(max_length=LAST_USED_MAX)
+
+
+def _no_asset() -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, "No such upload.")
+
+
+@router.get("/assets/{asset_id}", name="crud_render_get_asset")
+async def get_asset(asset_id: str, state: StateDep) -> AssetMeta:
+    """R19: the upload's row; a 404 for none, or an id that is not one."""
+    try:
+        return await asyncio.to_thread(state.assets.row, asset_id)
+    except AssetNotFoundError:
+        raise _no_asset() from None
+
+
+@router.post("/assets/{asset_id}/use", name="crud_render_use_asset")
+async def use_asset(asset_id: str, state: StateDep) -> AssetMeta:
+    """R19: mark the upload used now and answer its row, so a sweep under way keeps it;
+    a 404 once the sweep has deleted it."""
+    try:
+        return await asyncio.to_thread(state.assets.use_row, asset_id)
+    except AssetNotFoundError:
+        raise _no_asset() from None
+
+
+@router.post("/assets/{asset_id}/adopt", name="crud_render_adopt_asset")
+async def adopt_asset(asset_id: str, body: AssetMeta, state: StateDep) -> None:
+    """R20: record an upload the worker fetched from the blob store, the row written from
+    the API's own copy's meta. A 422 for an id that is not one, a body of another id, or
+    a copy of another kind or size; a 404 when the blob store holds no copy of it."""
+    if not ASSET_ID_RE.fullmatch(asset_id) or body.id != asset_id:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not this route's upload id.")
+    stat = await asyncio.to_thread(_index(state).get, asset_key(asset_id))
+    try:
+        held = None if stat is None else AssetMeta.model_validate(stat.meta)
+    except ValidationError:
+        held = None
+    if held is None or held.id != asset_id:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "The blob store holds no copy of this upload.")
+    if (held.kind, held.size) != (body.kind, body.size):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "The blob store's copy of this upload is not the file named.",
+        )
+    await asyncio.to_thread(state.assets.adopt_row, held)
+
+
+@router.post("/assets/last-used", name="crud_render_assets_last_used")
+async def assets_last_used(body: LastUsedAsk, state: StateDep) -> dict[str, datetime | None]:
+    """R21: each id's last use, null for one with no row; at most `LAST_USED_MAX` ids."""
+    return await asyncio.to_thread(state.assets.last_used, body.ids)

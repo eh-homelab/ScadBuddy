@@ -33,6 +33,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.render import (
+    RemoteAssetRows,
     RemoteBlobIndex,
     RemoteBlobRefs,
     RemoteGeometryIndex,
@@ -40,7 +41,7 @@ from scadbuddy.crud.render import (
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
-from scadbuddy.library.assets import AssetMeta, AssetStore
+from scadbuddy.library.assets import AssetMeta, RemoteAssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutLeases, InstallPermits
 from scadbuddy.library.settings_store import (
@@ -61,14 +62,17 @@ from scadbuddy.render.worker_role import (
     pending_migrations,
     wait_until_ready,
 )
+from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
 from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.store.content_models import BlobRef as IndexedRef
+from scadbuddy.store.index import BlobIndex
 from scadbuddy.worker import build_worker_deps, run_worker
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PrepareResult, piece_key
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
-from tests.crud.crud_support import served_render_crud
+from tests.crud.crud_support import served_render_crud, threaded_render_crud
 from tests.support.renders import render_to_end
 from tests.support.temporal import temporal_client
 
@@ -167,7 +171,8 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
         # The job rows, their events and activity rows, the blob refs, the piece
-        # geometry, the blob index and the store's folders go through the API too (#5298).
+        # geometry, the blob index, the store's folders and the uploads' rows go through
+        # the API too (#5298).
         for table in (
             "render_jobs",
             "events",
@@ -176,6 +181,7 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
             "piece_geometry",
             "store_blobs",
             "store_folders",
+            "assets",
             "operations",
             "print_runs",
             "saved_presets",
@@ -386,6 +392,7 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
             geometry=RemoteGeometryIndex(remote),
             index=RemoteBlobIndex(remote),
             folders=RemoteStoreFolders(crud),
+            assets=RemoteAssetRows(remote),
         )
         try:
             await _the_slots_follow_the_settings(owner, deps)
@@ -470,7 +477,7 @@ def test_the_worker_waits_for_migrations_then_grants(
             )
         with pool.connection() as conn:
             assert pending_migrations(conn) == []
-            assert "assets: INSERT" in missing_privileges(conn)
+            assert "library_leases: INSERT" in missing_privileges(conn)
         with pytest.raises(WorkerStoppedError):
             wait_until_ready(pool, stopping=lambda: True, poll=0.01)
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
@@ -496,14 +503,22 @@ def test_leases_pins_and_install_slots_work_as_the_role(granted: Pool, tmp_path:
     assert claimed is not None
 
 
-def test_uploads_are_adopted_used_and_pruned_as_the_role(granted: Pool, tmp_path: Path) -> None:
+def test_uploads_are_adopted_used_and_pruned_through_the_api(
+    owner: Pool, granted: Pool, tmp_path: Path
+) -> None:
+    """The role holds nothing on `assets` (#5298): the worker's uploads keep their files
+    on its volume and their rows through the API's CRUD routes."""
     data = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
     meta = AssetMeta(id=hashlib.sha256(data).hexdigest(), name="x.svg", kind="svg", size=len(data))
-    store = AssetStore(tmp_path / "assets", granted)
-    store.adopt(meta, data)
-    store.adopt(meta, data)  # again: the conflict path
-    assert store.use(meta.id).id == meta.id
-    assert store.prune_local(grace=3600) == []
+    # The API's copy in the blob store, whose meta the API adopts the row from.
+    ref = IndexedRef(sha256=meta.id, kind="asset", backend="local", backend_id=meta.id, size=1)
+    BlobIndex(owner).put(asset_key(meta.id), ref, slug=None, meta=meta.model_dump())
+    with threaded_render_crud(owner) as client:
+        store = RemoteAssetStore(tmp_path / "assets", RemoteAssetRows(client))
+        store.adopt(meta, data)
+        store.adopt(meta, data)  # again: the conflict path
+        assert store.use(meta.id).id == meta.id
+        assert store.prune_local(grace=3600) == []
 
 
 INBOX = 1

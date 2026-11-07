@@ -34,7 +34,7 @@ from scadbuddy.core.paths import (
     model_path,
 )
 from scadbuddy.core.tracing import failure_class, span
-from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.assets import UsesAssets, file_assets
 from scadbuddy.library.fonts import (
     GLYPH_CHECK_TIMEOUT,
     font_coverage,
@@ -857,7 +857,7 @@ async def staged_assets(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
     model_dir: Path,
-    store: AssetStore,
+    store: UsesAssets,
 ) -> AsyncIterator[dict[str, ParamValue]]:
     """``params`` with each uploaded file copied beside the model (#204).
 
@@ -1285,7 +1285,7 @@ async def render_main(
     work: Path,
     *,
     config: Config,
-    assets: AssetStore,
+    assets: UsesAssets,
     checkouts: CheckoutGate | None,
     holder: str,
     stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
@@ -1307,7 +1307,7 @@ async def render_solids_stage(
     output: ProcessOutput,
     *,
     config: Config,
-    assets: AssetStore,
+    assets: UsesAssets,
     checkouts: CheckoutGate | None,
     holder: str,
     stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
@@ -1408,7 +1408,7 @@ async def render_job(
     *,
     config: Config,
     paths: DataPaths,
-    assets: AssetStore,
+    assets: UsesAssets,
     history: ModelHistory | None = None,
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,

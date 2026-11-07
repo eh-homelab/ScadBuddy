@@ -30,7 +30,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.tracing import span
-from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.assets import UsesAssets
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
@@ -106,7 +106,7 @@ async def render_preview(
     config: Config,
     paths: DataPaths,
     history: ModelHistory | None,
-    assets: AssetStore,
+    assets: UsesAssets,
     executor: Executor | None = None,
     checkouts: CheckoutGate | None = None,
     revision: str | None = None,
