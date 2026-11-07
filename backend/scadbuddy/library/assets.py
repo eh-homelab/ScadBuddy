@@ -846,10 +846,10 @@ class AssetStore:
 
         For a root that is a copy (#426): the rows are the API's (#591), and only the
         API's `sweep`, which knows the references, removes one. A render worker on its
-        own volume prunes through `RemoteAssetStore.prune_local` (#5298). A copy with a row goes by the row's last use;
-        one without a row by its mtime. Each copy is removed with its row locked, so a
-        `use` either lands first and keeps it, or finds it gone and the store brings it
-        back.
+        own volume prunes through `RemoteAssetStore.prune_local` (#5298). A copy with a
+        row goes by the row's last use; one without a row by its mtime. Each copy is
+        removed with its row locked, so a `use` either lands first and keeps it, or finds
+        it gone and the store brings it back.
         """
         pool = self._require()
         cutoff = (time.time() if now is None else now) - grace
@@ -981,15 +981,24 @@ class RemoteAssetStore:
 
     The SQL store's `prune_local` held the row's lock while it removed the file, so a
     `use` on this worker either landed first and kept the file, or waited and found it
-    gone. A lock per asset id in this process, held by `use`, `adopt` and `prune_local`,
-    does that now: the copy is this process's own. The API's sweep, which removes the
-    row, still locks the row before its delete there, and the API's `use` waits on it.
+    gone. Now the prune reads the last uses with no lock held, then removes each stale
+    copy under a lock per asset id that `use` and `adopt` also hold, and skips a copy
+    this process used or adopted since the prune started: each records when it ended
+    (`time.monotonic`) before it lets the id go. So a `use` is never held up by the
+    prune's round trip, and never answers a file the prune then removes. The API's sweep,
+    which removes the row, still locks the row before its delete there, and the API's
+    `use` waits on it.
     """
 
     def __init__(self, root: Path, rows: AssetRows) -> None:
         self.root = root
         self._rows = rows
         self._locks = _IdLocks()
+        #: When `use` or `adopt` last let each id go, by `time.monotonic`.
+        self._touched: dict[str, float] = {}
+        self._touched_guard = threading.Lock()
+        #: One prune at a time: each forgets the stamps older than its own start.
+        self._pruning = threading.Lock()
 
     def blob_path(self, meta: AssetMeta) -> Path:
         return self.root / f"{meta.id}.{meta.kind}"
@@ -1006,13 +1015,23 @@ class RemoteAssetStore:
             raise AssetNotFoundError(asset_id)
         return meta
 
+    @contextmanager
+    def _touching(self, asset_id: str) -> Iterator[None]:
+        """Hold the id's lock, and record when it is let go, so a prune that started
+        before then keeps the copy."""
+        with self._locks.hold([asset_id]):
+            try:
+                yield
+            finally:
+                with self._touched_guard:
+                    self._touched[asset_id] = time.monotonic()
+
     def use(self, asset_id: str) -> AssetMeta:
         """`AssetStore.use`: `get`, and mark the asset used now. With no copy here it is
-        not found and the row is not marked, as the SQL `use` rolled its mark back; a
-        prune of this id waits, and is waited for."""
+        not found and the row is not marked, as the SQL `use` rolled its mark back."""
         if not ASSET_ID_RE.fullmatch(asset_id):
             raise AssetNotFoundError(asset_id)
-        with self._locks.hold([asset_id]):
+        with self._touching(asset_id):
             if _mtime_in(self.root, asset_id) is None:
                 raise AssetNotFoundError(asset_id)
             meta = self._rows.use(asset_id)
@@ -1024,7 +1043,7 @@ class RemoteAssetStore:
         """`AssetStore.adopt`: the file first, then the row, so no row the API answers
         this worker lacks the bytes of. The API writes the row from its own copy's meta."""
         _require_bytes(meta, data)
-        with self._locks.hold([meta.id]):
+        with self._touching(meta.id):
             blob = self.blob_path(meta)
             if not blob.is_file():
                 self.root.mkdir(parents=True, exist_ok=True)
@@ -1034,44 +1053,61 @@ class RemoteAssetStore:
     def prune_local(self, *, grace: float, now: float | None = None) -> list[str]:
         """`AssetStore.prune_local`: remove the copies last used more than ``grace``
         seconds before ``now`` (one with no row by its mtime), and answer their ids;
-        every row stays. The last uses come `LAST_USED_MAX` ids at a time, each batch
-        read and pruned with its ids locked. A batch that fails is logged and skipped."""
-        cutoff = (time.time() if now is None else now) - grace
-        cutoff_at = datetime.fromtimestamp(cutoff, UTC)
-        local = sorted(_blobs_in(self.root))
-        removed: list[str] = []
-        for start in range(0, len(local), LAST_USED_MAX):
-            batch = local[start : start + LAST_USED_MAX]
-            try:
-                with self._locks.hold(batch):
+        every row stays. The last uses come `LAST_USED_MAX` ids at a time, read with no
+        lock held; each stale copy then goes under its id's lock, unless this process
+        used or adopted it since the prune started. A batch that fails is logged and
+        skipped."""
+        with self._pruning:
+            started = time.monotonic()
+            cutoff = (time.time() if now is None else now) - grace
+            cutoff_at = datetime.fromtimestamp(cutoff, UTC)
+            local = sorted(_blobs_in(self.root))
+            removed: list[str] = []
+            for start in range(0, len(local), LAST_USED_MAX):
+                batch = local[start : start + LAST_USED_MAX]
+                try:
                     stamps = self._rows.last_used(batch)
-                    for asset_id in batch:
-                        if self._prune_one(asset_id, stamps.get(asset_id), cutoff, cutoff_at):
-                            removed.append(asset_id)
-            except Exception:
-                logger.exception(
-                    "could not remove the local copies of a batch of assets",
-                    extra={"assets": len(batch)},
-                )
-        return removed
+                except Exception:
+                    logger.exception(
+                        "could not read the last uses of a batch of assets",
+                        extra={"assets": len(batch)},
+                    )
+                    continue
+                for asset_id in batch:
+                    used = stamps.get(asset_id)
+                    if used is not None and used >= cutoff_at:
+                        continue
+                    if self._prune_one(
+                        asset_id, row=used is not None, since=started, cutoff=cutoff
+                    ):
+                        removed.append(asset_id)
+            with self._touched_guard:
+                for asset_id, at in list(self._touched.items()):
+                    if at < started:
+                        del self._touched[asset_id]
+            return removed
 
-    def _prune_one(
-        self, asset_id: str, used: datetime | None, cutoff: float, cutoff_at: datetime
-    ) -> bool:
-        if used is not None:
-            stale = used < cutoff_at
-        else:
-            last_used = _mtime_in(self.root, asset_id)
-            stale = last_used is not None and last_used < cutoff
-        if not stale:
-            return False
-        try:
-            for kind in MEDIA_TYPES:
-                (self.root / f"{asset_id}.{kind}").unlink(missing_ok=True)
-        except OSError:
-            logger.exception("could not remove a local copy of an asset", extra={"asset": asset_id})
-            return False
-        return True
+    def _prune_one(self, asset_id: str, *, row: bool, since: float, cutoff: float) -> bool:
+        """Remove one stale copy under its id's lock; whether it went. ``row``: its row
+        said stale; without one, its mtime decides, read under the lock."""
+        with self._locks.hold([asset_id]):
+            with self._touched_guard:
+                touched = self._touched.get(asset_id)
+            if touched is not None and touched >= since:
+                return False
+            if not row:
+                last_used = _mtime_in(self.root, asset_id)
+                if last_used is None or last_used >= cutoff:
+                    return False
+            try:
+                for kind in MEDIA_TYPES:
+                    (self.root / f"{asset_id}.{kind}").unlink(missing_ok=True)
+            except OSError:
+                logger.exception(
+                    "could not remove a local copy of an asset", extra={"asset": asset_id}
+                )
+                return False
+            return True
 
 
 def _require_bytes(meta: AssetMeta, data: bytes) -> None:

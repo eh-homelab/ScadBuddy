@@ -71,6 +71,14 @@ REUSE_LOST = "reuse-lost"
 #: An index write Postgres picked as a deadlock's victim on every try:
 #: `crud/render.py` `DEADLOCK`.
 DEADLOCK = "deadlock"
+#: A blob-index put, swap or mark of a key only the API writes: a 403.
+API_OWNED_KEY = "api-owned-key"
+#: The index keys only the API writes: an upload's copy (`store/assets.py` `asset_key`,
+#: whose meta an adopt writes the upload's row from), a font family's
+#: (`store/fonts.py` `font_key`) and a template revision's snapshot
+#: (`store/snapshots.py` `snapshot_key`). The render worker reads them, and deletes or
+#: forgets a copy it cannot read, but never stores one.
+API_OWNED_PREFIXES = ("asset-", "font-", "src-")
 #: A folder find for a Bambuddy or inbox that is not the API's render target:
 #: `crud/render.py` `RemoteStoreFolders`.
 TARGET_MOVED = "target-moved"
@@ -306,7 +314,8 @@ async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Q
 # and both deletes are not natural (a `put` answers the object it replaced, a delete the
 # row it took), so each takes an ``Idempotency-Key`` (a 428 without one) and writes its
 # ledger row in the index write's transaction, inside the deadlock retry, so a victim
-# rolls back whole and is tried again whole. A key or object id may hold slashes.
+# rolls back whole and is tried again whole. A key or object id may hold slashes. A put,
+# swap or mark of a key only the API writes (`API_OWNED_PREFIXES`) is a 403.
 
 
 class IndexPut(BaseModel):
@@ -380,6 +389,19 @@ def _indexed(
         raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=DEADLOCK) from None
 
 
+def _worker_writable(*keys: str) -> None:
+    """Refuse a write of a key only the API writes (`API_OWNED_PREFIXES`): a render
+    credential could otherwise forge an upload's metadata for an adopt, or a font's or
+    snapshot's object for another render."""
+    owned = sorted(key for key in keys if key.startswith(API_OWNED_PREFIXES))
+    if owned:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            f"The render worker does not store {owned[0]!r}: only the API writes that key.",
+            reason=API_OWNED_KEY,
+        )
+
+
 def _json(model: BaseModel | None) -> dict[str, Any] | None:
     return None if model is None else model.model_dump(mode="json")
 
@@ -432,7 +454,8 @@ async def index_mark(
     body: IndexMark, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> None:
     """R15: merge ``meta`` into the rows of ``keys`` on ``backend`` untouched since
-    ``cutoff``."""
+    ``cutoff``. A key only the API writes is a 403 ``api-owned-key``."""
+    _worker_writable(*body.keys)
     await asyncio.to_thread(
         _indexed,
         state,
@@ -457,7 +480,9 @@ async def index_put(
     key: str, body: IndexPut, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> Previous:
     """R14: point ``key`` at ``ref``; ``previous``, what it named before. A reuse of an
-    object freed first is a 409 ``reuse-lost`` with nothing written."""
+    object freed first is a 409 ``reuse-lost`` with nothing written; a key only the API
+    writes, a 403 ``api-owned-key``."""
+    _worker_writable(key)
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -478,7 +503,9 @@ async def index_put(
 async def index_swap(
     key: str, body: IndexSwap, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> Swapped:
-    """R14: point ``key`` at ``ref`` only if it still names ``expected`` (null: no row)."""
+    """R14: point ``key`` at ``ref`` only if it still names ``expected`` (null: no row).
+    A key only the API writes is a 403 ``api-owned-key``."""
+    _worker_writable(key)
     answer = await asyncio.to_thread(
         _indexed,
         state,
