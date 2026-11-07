@@ -324,7 +324,7 @@ ORD-2026-3).
   accepted quote.
 - Past `quoted`, the item lock is now per item (`item_open`). An item with no accepted
   quote takes a revision, a quantity, a quote and a quote's acceptance. An item with an
-  accepted quote stays pinned.
+  accepted quote stays pinned, until it is revised after acceptance (#5350, below).
 - A cancelled item with no accepted quote comes back as `draft` or `quoted` on such an
   order, alone (`reopen_item`) or with its cancelled order (`reopen_order`). Only a
   `shipped` order refuses it (`item_not_priced`).
@@ -369,6 +369,45 @@ only while the order was `draft` or `quoted` (seen on ORD-2026-3).
 - The order page saves the charges of such an order on the new route. It asks the
   person to confirm first, and the confirm names the order's status
   (`components/orders/afterAcceptance.ts` `chargesWarning`, in `ChargesEditor`).
+
+**As built: an accepted item's new design (#5350).** Before #5350, an accepted item's
+design was pinned: a revision was 409 `item_locked`. The only way out was to cancel the
+item and add a new one, and reopening the cancelled item brought back its old design and
+its old price (seen on ORD-2026-3).
+- `POST /orders/{id}/items/{item}/revisions/after-acceptance` takes the body of
+  `POST …/revisions` (`note`, `reference` or `output_id`, `filaments`). It records the
+  item's next revision. It works on an item with an accepted quote, on an `accepted`,
+  `in_production` or `ready` order (`TAKES_ITEMS`).
+- It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use the
+  plain route), once it is `shipped` (`item_locked`; every item of a shipped order is
+  settled, so `item_not_open` answers first), once it has ended
+  (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). It is refused for a
+  fulfilled or cancelled item (`item_not_open`), a custom item (`item_custom`), an item
+  with no accepted quote (`item_not_priced`: use the plain route, #5349), and while a
+  print of the item is queued or running (`print_in_flight`).
+- The accepted quote stays accepted. The order's totals keep the price the customer
+  agreed. The item is marked `revised_after_acceptance` (a new column on `order_items`).
+  An item in `quoted`, `approved`, `printed` or `failed` goes back to `draft`, so it is
+  not printed or fulfilled at the old quote.
+- While the mark stands, the lock is `requote_open` (`orders/lifecycle.py`), not
+  `item_open`. The item takes a quote (manual or slice), a quote's acceptance, a
+  customer's answer, and more revisions on either route. Its quantity stays pinned.
+  The old quote prices an earlier revision, so its acceptance is `quote_stale`.
+- Accepting a quote of the new design replaces the price and clears the mark. To keep
+  the old price, the shop records a quote at the same price and accepts it.
+- A cancelled item with the mark reopens as `quoted` (with a quote of the new design) or
+  `draft`, not `approved`.
+- The audit row is `revision.added_after_acceptance`. It holds the revision, the order's
+  status and the id of the accepted quote that was kept. The bus hears the order and the
+  item after the commit.
+- The change changes what the customer gets, so it is a route of its own. The agent's
+  tool for it, `order_item_revision_add_after_acceptance`, is `outward`.
+  `order_item_revision_add` stays `write`; its refusal names the new route.
+- The item drawer's Revisions panel offers "New revision" on such an item. Both "Add
+  revision (same design)" and "Change the design…" ask the person to confirm first, and
+  the confirm names the order's status (`afterAcceptance.ts` `reviseMode`,
+  `reviseWarning`). A failed save clears the confirm. The quote editor follows
+  `priceOpen`.
 
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed
@@ -419,6 +458,7 @@ agent's follow a 202.
 | `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive`, `POST …/{filament}/unarchive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record in the book (an archived record frees its identity, so the same filament can be added again; an unarchive, #4977, brings the same record back with its id, and is 409 `filament_exists` when its identity was taken since) |
 | `GET /orders/estimate?output_id=&filament_id=` | §5.3: the rough estimate of every plate of an output, never recorded; 422 `filament_density` for a filament with no density |
 | `POST /orders/{id}/items/after-acceptance`, `PUT /orders/{id}/charges/after-acceptance` | §3.5 "As built" (#5349, #5351): an item added, or the charges changed, on an `accepted`, `in_production` or `ready` order |
+| `POST /orders/{id}/items/{item}/revisions/after-acceptance` | §3.5 "As built" (#5350): an accepted item's new design; its accepted price stays until a quote of the new design is accepted |
 | `GET /orders/{id}/events` | the audit line |
 
 Every body has `extra="forbid"`; no body carries an author, a principal or a status

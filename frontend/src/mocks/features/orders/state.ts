@@ -212,6 +212,7 @@ export function item(id: string, orderId: string, status: OrderItem['status'], e
     ],
     output_id: OUTPUT_REAGAN,
     approval: 'together',
+    revised_after_acceptance: false,
     current_revision_id: firstRevisionId(id),
     created_at: '2026-10-19T09:00:00Z',
     updated_at: '2026-10-19T09:00:00Z',

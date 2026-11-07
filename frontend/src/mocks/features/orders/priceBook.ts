@@ -3,7 +3,7 @@ import type { Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdat
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
-import { FilamentsRefused, event, itemOf, lock, notEnded, OPEN_FOR_EDITS, quotesOf, rederive, TAKES_ITEMS, refused, SETTLED, withFilaments } from './orders'
+import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
 import { pushRevision } from './revisions'
 import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
 
@@ -260,8 +260,9 @@ export const handlers = [
       const order = lock(String(params.id))
       const found = itemOf(order, String(params.item))
       // The check (Ruling 8): the rows alone, nothing written.
-      // `lifecycle.py` `item_open` (#5349): past `quoted`, an item with no accepted quote is quoted too.
-      if (!OPEN_FOR_EDITS.has(order.status) && !(TAKES_ITEMS.has(order.status) && !quotesOf(found.id).some((q) => q.accepted))) {
+      // `lifecycle.py` `requote_open` (#5349, #5350): past `quoted`, an item with no accepted
+      // quote, or one revised after acceptance, is quoted too.
+      if (!requoteOpen(order, found)) {
         throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is quoted while it is draft or quoted`)
       }
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { OrderStatus } from '../../api/types'
-import { addMode, afterAcceptanceWarning, chargesWarning, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
+import { addMode, afterAcceptanceWarning, chargesWarning, itemOpen, OPEN_FOR_EDITS, priceOpen, reviseMode, reviseWarning, TAKES_ITEMS } from './afterAcceptance'
 
 type Extension = 'x-open-for-edits' | 'x-takes-items'
 
@@ -62,6 +62,40 @@ describe('afterAcceptance', () => {
   ])('names a %s order in the charges confirm (#5351)', (status, text) => {
     expect(chargesWarning({ number: 'ORD-2026-2', status })).toMatch(
       new RegExp(`^ORD-2026-2 is ${text}\\. Changing the charges changes what the customer pays\\.`),
+    )
+  })
+
+  it('revises an accepted item on its own route, never on hold or mid-print (#5350)', () => {
+    const accepted = [{ accepted: true }]
+    const item = { status: 'approved' as const, revised_after_acceptance: false }
+    expect(reviseMode({ status: 'draft', on_hold: false }, item, accepted)).toBe('open')
+    expect(reviseMode({ status: 'accepted', on_hold: false }, item, [])).toBe('open')
+    expect(reviseMode({ status: 'accepted', on_hold: false }, item, accepted)).toBe('after_acceptance')
+    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'failed' }, accepted)).toBe('after_acceptance')
+    expect(reviseMode({ status: 'accepted', on_hold: true }, item, accepted)).toBeNull()
+    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'printing' }, accepted)).toBeNull()
+    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'queued' }, accepted)).toBeNull()
+    expect(reviseMode({ status: 'shipped', on_hold: false }, item, accepted)).toBeNull()
+    // Once revised, the item is open again for its design, on hold too, as the backend's plain route is.
+    expect(reviseMode({ status: 'accepted', on_hold: true }, { status: 'draft', revised_after_acceptance: true }, accepted)).toBe('open')
+  })
+
+  it('takes a quote of a revised accepted item until it is accepted (#5350)', () => {
+    const accepted = [{ accepted: true }]
+    expect(priceOpen({ status: 'accepted' }, { revised_after_acceptance: false }, accepted)).toBe(false)
+    expect(priceOpen({ status: 'in_production' }, { revised_after_acceptance: true }, accepted)).toBe(true)
+    expect(priceOpen({ status: 'shipped' }, { revised_after_acceptance: true }, accepted)).toBe(false)
+    expect(priceOpen({ status: 'quoted' }, { revised_after_acceptance: false }, accepted)).toBe(true)
+    // The quantity stays pinned: `itemOpen` still says no.
+    expect(itemOpen({ status: 'accepted' }, accepted)).toBe(false)
+  })
+
+  it.each<[OrderStatus, string]>([
+    ['accepted', 'accepted'],
+    ['in_production', 'in production'],
+  ])('names a %s order in the revision confirm (#5350)', (status, text) => {
+    expect(reviseWarning({ number: 'ORD-2026-2', status })).toMatch(
+      new RegExp(`^ORD-2026-2 is ${text}\\. A new design changes what the customer gets\\.`),
     )
   })
 

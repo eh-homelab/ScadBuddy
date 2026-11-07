@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import { addItem, afterAcceptanceWarning, type AddMode } from './afterAcceptance'
+import { addItem, addRevision, afterAcceptanceWarning, reviseWarning, type AddMode } from './afterAcceptance'
 import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
@@ -73,7 +73,8 @@ function revisionBody(current: Pinned | null, choice: string, note: string): Rev
  * `mode` `after_acceptance` (#5349), `accepted`, `in_production` or `ready`, where the add
  * asks the person to confirm that it changes an accepted order first. It also takes a "Design request" (#5280): a title and the
  * customer's words, whose design a revision supplies later. With `revise` it is the
- * design picker of an item's new revision instead (`slug`: the item's template, if any).
+ * design picker of an item's new revision instead (`slug`: the item's template, if any); with
+ * `mode` `after_acceptance` that revision changes an accepted item (#5350), after a confirm.
  */
 export function AddItemDialog({
   open,
@@ -89,7 +90,7 @@ export function AddItemDialog({
   onAdded: () => void
   onClose: () => void
   revise?: { itemId: string; slug: string | null }
-  /** #5349 — `after_acceptance` adds on that route, after a confirm. */
+  /** #5349 — `after_acceptance` adds (or, with `revise`, revises, #5350) on that route, after a confirm. */
   mode?: AddMode
   /** The order the add changes: its number and status, for the confirm's text. */
   order?: Pick<Order, 'number' | 'status'>
@@ -107,9 +108,9 @@ export function AddItemDialog({
   const [title, setTitle] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // #5349: the add to an accepted order waits for a second click on the confirm.
+  // #5349, #5350: a change to an accepted order waits for a second click on the confirm.
   const [confirming, setConfirming] = useState(false)
-  const confirm = mode === 'after_acceptance' && !revise
+  const confirm = mode === 'after_acceptance'
 
   const found = useMemo(() => (models.data ?? []).filter((m) => matches(m, query)), [models.data, query])
   const saved = useMemo(() => [...(outputs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)), [outputs.data])
@@ -187,12 +188,14 @@ export function AddItemDialog({
     setBusy(true)
     setError(null)
     try {
-      if (revise) await api.addOrderItemRevision(orderId, revise.itemId, revisionBody(pinned, choice, note))
+      if (revise) await addRevision(orderId, revise.itemId, revisionBody(pinned, choice, note), mode)
       else await addItem(orderId, itemBody(pinned, choice, count, title), mode)
       onAdded()
       onClose()
     } catch (err) {
       setError(refusalText(err))
+      // A failed save asks again before the next try.
+      setConfirming(false)
       setBusy(false)
     }
   }
@@ -336,7 +339,7 @@ export function AddItemDialog({
 
           {confirm && confirming && (
             <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
-              {afterAcceptanceWarning(order ?? { number: 'This order', status: 'accepted' })}
+              {(revise ? reviseWarning : afterAcceptanceWarning)(order ?? { number: 'This order', status: 'accepted' })}
             </p>
           )}
           {(error ?? models.error?.message) && (
@@ -350,7 +353,7 @@ export function AddItemDialog({
             {confirming ? 'Back' : 'Cancel'}
           </Button>
           <Button type="button" disabled={busy || (request ? !title.trim() : !model || !choice)} onClick={() => void add()}>
-            {revise ? 'Add revision' : confirming ? 'Change the accepted order' : 'Add item'}
+            {confirming ? 'Change the accepted order' : revise ? 'Add revision' : 'Add item'}
           </Button>
         </DialogFooter>
       </DialogContent>

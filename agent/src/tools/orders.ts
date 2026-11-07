@@ -18,7 +18,9 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 // An item added to an order past `quoted` (#5349) changes what the customer gets, so it is
 // its own route and its own `outward` tool (order_item_add_after_acceptance); order_item_add
 // stays `write` for a draft or quoted order. The charges past `quoted` (#5351) change what
-// the customer pays, so they are order_charges_update_after_acceptance, `outward`, too.
+// the customer pays, so they are order_charges_update_after_acceptance, `outward`, too. A new
+// design of an accepted item (#5350) changes what the customer gets, so it is
+// order_item_revision_add_after_acceptance, `outward`; order_item_revision_add stays `write`.
 //
 // Phase 2 (#4250, plan Ruling 11): the price book is `read` to look at and `write` to keep
 // (the policy, a filament's record); order_item_quote takes both modes, a typed price or a
@@ -725,7 +727,9 @@ export const orderTools: Tool[] = [
       "Record a new design revision of a line item (storefront spec §4): a `reference` (slug, commit, inputs) or an " +
       "`output_id`, with the `filaments` per slot and a `note` for the customer. A request item's first revision gives " +
       'it its design. A new revision supersedes a sent, unanswered one and drops the item\'s quotes. It is a draft ' +
-      'until order_item_revision_send sends it to the customer.',
+      'until order_item_revision_send sends it to the customer. Past `quoted` an item with an accepted quote answers ' +
+      '409 `item_locked`: use order_item_revision_add_after_acceptance (an item already revised after acceptance ' +
+      'takes this one too, and keeps its old accepted quote).',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -750,6 +754,46 @@ export const orderTools: Tool[] = [
             },
           }),
           `add a revision to item ${item_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_revision_add_after_acceptance',
+    label: 'Revise the design of an accepted order line item',
+    description:
+      'Record a new design revision of a line item that has an accepted quote, on an order that is accepted, in ' +
+      'production or ready (#5350). The body is order_item_revision_add\'s. It changes what the customer gets. The ' +
+      'old accepted quote stays accepted, so the order total keeps the agreed price, until a quote of the new ' +
+      'design is accepted: quote it with order_item_quote, then accept with order_item_accept_quote. To keep the ' +
+      'old price, quote the same price. The item is `draft` until then and is not printed or fulfilled. Refused: ' +
+      '`order_not_accepted` on a draft or quoted order (use order_item_revision_add), `item_locked` once shipped, ' +
+      '`order_closed`/`order_cancelled`, `order_on_hold`, `item_not_open` for a fulfilled or cancelled item, ' +
+      '`item_not_priced` for an item with no accepted quote (use order_item_revision_add), `item_custom`, and ' +
+      '`print_in_flight` while a print of it runs.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      reference: reference.optional(),
+      output_id: ID.optional(),
+      filaments: z.record(z.string(), ID.nullable()).optional().describe('A filament id (or null) per slot'),
+      note: z.string().max(4000).optional(),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/after-acceptance'],
+    summarize: ({ order_id, item_id }) => `Revise the design of accepted item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, reference, output_id, filaments, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions/after-acceptance', {
+            params: { path: { order_id, item_id } },
+            body: {
+              note: note ?? '',
+              ...(reference === undefined ? {} : { reference }),
+              ...(output_id === undefined ? {} : { output_id }),
+              ...(filaments === undefined ? {} : { filaments }),
+            },
+          }),
+          `revise accepted item ${item_id}`,
         ),
       ),
   }),

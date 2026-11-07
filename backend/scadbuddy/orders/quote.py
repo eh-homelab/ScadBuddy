@@ -48,7 +48,7 @@ from scadbuddy.orders.lifecycle import (
     SETTLED,
     Lifecycle,
     LifecycleError,
-    item_open,
+    requote_open,
 )
 from scadbuddy.orders.models import (
     Actor,
@@ -179,7 +179,8 @@ def quote_check(
 ) -> dict[int, str | None]:
     """Ruling 8's refusals, from the rows: 404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
-    accepted quote on an order that takes items after acceptance, #5349), 409 ``item_not_open``
+    accepted quote on an order that takes items after acceptance, #5349, or was revised after
+    acceptance, #5350), 409 ``item_not_open``
     for a settled item, 422 ``filaments`` for a slot the item lacks, a slot with no
     filament once the body's are applied, or one unknown or archived, and 422
     ``price_book`` when nothing would price the item. Blocking; writes nothing. The
@@ -190,11 +191,12 @@ def quote_check(
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
-    if not item_open(order, store.quotes(item.id)):
+    if not requote_open(order, item, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"order {order.number} is {order.status}: an item is quoted while the order is"
-            " draft or quoted, or, past that, while the item has no accepted quote",
+            " draft or quoted, or, past that, while the item has no accepted quote or was"
+            " revised after acceptance",
             type_=PROBLEMS + "order_not_open",
         )
     if item.status in SETTLED:

@@ -356,6 +356,10 @@ class OrderItem(BaseModel):
     #: The design revision the reference and colours are a copy of; None before the first.
     current_revision_id: str | None = None
     approval: Approval = "together"
+    #: True while an accepted item's newest revision, added after acceptance (#5350),
+    #: waits for its own quote to be accepted. The old accepted quote stays accepted (the
+    #: price the customer agreed) until then; accepting a quote clears it.
+    revised_after_acceptance: bool = False
     created_at: datetime
     updated_at: datetime
 

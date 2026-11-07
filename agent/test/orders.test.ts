@@ -53,6 +53,7 @@ describe('order tools (#4249)', () => {
       'order_item_add',
       'order_item_add_after_acceptance',
       'order_charges_update_after_acceptance',
+      'order_item_revision_add_after_acceptance',
       'order_item_update',
       'order_item_quote',
       'order_item_accept_quote',
@@ -77,6 +78,7 @@ describe('order tools (#4249)', () => {
       order_item_add: 'write',
       order_item_add_after_acceptance: 'outward',
       order_charges_update_after_acceptance: 'outward',
+      order_item_revision_add_after_acceptance: 'outward',
       order_item_update: 'write',
       order_item_quote: 'write',
       order_item_accept_quote: 'outward',
@@ -980,6 +982,30 @@ describe('design revisions (#5280)', () => {
       ctx(),
     )
     expect(body).toEqual({ reference: { slug: 'demo', commit: C, inputs: {} }, note: 'v2' })
+  })
+
+  it('revises an accepted item on its own route, as an outward step (#5350)', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/after-acceptance`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: REVISION, number: 2 }, { status: 201 })
+      }),
+    )
+    const revise = tool('order_item_revision_add_after_acceptance')
+    expect(revise.risk).toBe('outward')
+    expect(revise.routes).toEqual(['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/after-acceptance'])
+    // order_item_revision_add keeps the plain route and stays `write`.
+    expect(tool('order_item_revision_add').routes).toEqual(['POST /api/v1/orders/{order_id}/items/{item_id}/revisions'])
+    const result = await revise.execute(
+      { order_id: ORDER, item_id: ITEM, output_id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', filaments: { '0': null }, note: 'v3' },
+      ctx(),
+    )
+    expect(body).toEqual({ note: 'v3', output_id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', filaments: { '0': null } })
+    expect(firstText(result)).toEqual({ id: REVISION, number: 2 })
+    expect(revise.summarize?.({ order_id: ORDER, item_id: ITEM } as never)).toBe(
+      `Revise the design of accepted item ${ITEM} of order ${ORDER}`,
+    )
   })
 
   it('tiers the revision tools', () => {

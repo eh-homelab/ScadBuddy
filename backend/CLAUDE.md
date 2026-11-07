@@ -579,7 +579,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   true` 422), its audit row is `item.added_after_acceptance`, and `derive` sets the status
   (`ready` goes back to `in_production`). Past `quoted` the lock is per item (`item_open`,
   `_open_for_item`, `quote.py` `quote_check`): an item with no accepted quote takes
-  revisions, edits, quotes and an accept; an accepted one stays pinned. A cancelled
+  revisions, edits, quotes and an accept; an accepted one stays pinned (until #5350's
+  revision after acceptance, below). A cancelled
   unpriced item reopens (alone, or with its cancelled order) as `draft` or `quoted` on
   such an order too; only a `shipped` one refuses it (`item_not_priced`). The two state
   sets are in `orders/models.py` and the spec (`Order.status`'s `x-open-for-edits`,
@@ -596,6 +597,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   charges past `quoted` names the route. Agent `order_charges_update_after_acceptance`
   (outward); frontend `ChargesEditor` with `addMode` and `chargesWarning`. A no-charge
   item is #5349's custom item at price 0; job cost shows its cost as a `loss`.
+  An accepted item's new design (#5350, spec §3.5 "As built"): `POST
+  …/items/{item}/revisions/after-acceptance` (`Lifecycle.add_revision` with
+  `after_acceptance`, checked by `_revisable_after_acceptance`), the plain revision body,
+  for an item with an accepted quote on a `TAKES_ITEMS` order not on hold; refused
+  `order_not_accepted`, `item_locked`, `item_not_open`, `item_not_priced`, `item_custom`
+  and `print_in_flight`. `_revise` keeps the accepted quote (the old price stands in the
+  totals), sets `order_items.revised_after_acceptance`, puts a `REQUOTED` item back to
+  `draft` (no print or fulfilment at the old quote) and writes
+  `revision.added_after_acceptance` (with `accepted_quote_id`). While the mark stands the
+  lock is `requote_open` (`_open_for_requote`, and `quote_check`): quotes, a quote's
+  acceptance, a customer's answer and more revisions, never the quantity. `_accept_quote`
+  clears the mark; `_reopened_status` gives such an item `quoted` or `draft`. Agent
+  `order_item_revision_add_after_acceptance` (outward; `order_item_revision_add` stays
+  write); frontend `afterAcceptance.ts` `reviseMode`, `priceOpen`, `reviseWarning` in
+  `RevisionsPanel` and `AddItemDialog` (`revise` with `mode`).
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`

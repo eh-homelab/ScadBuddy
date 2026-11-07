@@ -220,3 +220,58 @@ describe('revisions mock (#5280)', () => {
     expect((await revisionsOf(ORDER_DRAFT, ITEM_DRAFT)).at(-1)).toMatchObject({ answer: null, answered_at: null })
   })
 })
+
+describe('revisions after acceptance mock (#5350)', () => {
+  beforeEach(() => resetMockState())
+
+  const itemOf = async () => (await api.order(ORDER_ACCEPTED)).items.find((i) => i.id === ITEM_APPROVED)!
+
+  it('keeps the accepted price until a quote of the new design is accepted', async () => {
+    const plain = await failure(api.addOrderItemRevision(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' }))
+    expect(plain?.problem.type).toBe(type('item_locked'))
+    expect(plain?.problem.detail).toMatch(/\/revisions\/after-acceptance$/)
+    const before = (await api.order(ORDER_ACCEPTED)).totals.subtotal_minor
+    const old = (await itemOf()).quotes.find((q) => q.accepted)!
+
+    const revision = await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' })
+    expect(revision).toMatchObject({ number: 2, note: 'loop' })
+    const item = await itemOf()
+    expect(item).toMatchObject({ status: 'draft', revised_after_acceptance: true, current_revision_id: revision.id })
+    expect(item.quotes.find((q) => q.accepted)?.id).toBe(old.id)
+    expect((await api.order(ORDER_ACCEPTED)).totals.subtotal_minor).toBe(before)
+    const events = await api.orderEvents(ORDER_ACCEPTED)
+    expect(events.filter((e) => e.kind === 'revision.added_after_acceptance').map((e) => e.detail)).toMatchObject([
+      { revision_id: revision.id, order_status: 'accepted', accepted_quote_id: old.id },
+    ])
+    // The quantity stays pinned; the old quote is stale.
+    expect((await failure(api.updateOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 5 })))?.problem.type).toBe(type('item_locked'))
+    expect((await failure(api.acceptOrderQuote(ORDER_ACCEPTED, ITEM_APPROVED, old.id)))?.problem.type).toBe(type('quote_stale'))
+
+    const quote = await api.quoteOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1300 })
+    expect((await itemOf()).status).toBe('quoted')
+    expect((await api.order(ORDER_ACCEPTED)).totals.subtotal_minor).toBe(before)
+    const accepted = await api.acceptOrderQuote(ORDER_ACCEPTED, ITEM_APPROVED, quote.id)
+    expect(accepted).toMatchObject({ status: 'approved', revised_after_acceptance: false })
+    expect((await api.order(ORDER_ACCEPTED)).totals.subtotal_minor).toBe(1300 * accepted.quantity)
+  })
+
+  it('refuses as the backend does', async () => {
+    const draft = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_DRAFT, ITEM_DRAFT, {}))
+    expect(draft?.problem.type).toBe(type('order_not_accepted'))
+    const extra = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { price: 1 } as never))
+    expect(extra?.status).toBe(422)
+    const long = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'x'.repeat(4001) }))
+    expect(long?.status).toBe(422)
+    await api.holdOrder(ORDER_ACCEPTED)
+    const held = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, {}))
+    expect(held?.problem.type).toBe(type('order_on_hold'))
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = false
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
+    const fulfilled = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, {}))
+    expect(fulfilled?.problem.type).toBe(type('item_not_open'))
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'approved'
+    await api.cancelOrder(ORDER_ACCEPTED)
+    const cancelled = await failure(api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, {}))
+    expect(cancelled?.problem.type).toBe(type('order_cancelled'))
+  })
+})
