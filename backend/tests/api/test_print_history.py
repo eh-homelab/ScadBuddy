@@ -27,11 +27,14 @@ from scadbuddy.api.print_history import FINISHED_STATUSES, UNFINISHED_STATUSES
 from scadbuddy.bambuddy import linking
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
+from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import MODEL_NAME
+from tests.api.test_print_part_settings import UNSET
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -977,6 +980,59 @@ def test_the_detail_of_a_deleted_archive_keeps_scadbuddys_half(
     assert {file["kind"] for file in body["files"]} == {"output_3mf", "preview_glb"}
     assert body["media"]["photos"] == [] and body["media"]["timelapse"] is None
     assert not runs.called
+
+
+@respx.mock
+def test_the_detail_lists_the_part_settings_its_run_set(client: TestClient, model: str) -> None:
+    """#5627: the run that queued the print (its send names it) recorded its settings
+    per slot, so a reprint can send them again."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1, queue_item_id=7)
+    subject = PrintSubject.output(output_id)
+    runs = state(client).print_runs.store
+    asyncio.run(
+        runs.insert_accepted(
+            "run-5627",
+            subject=subject,
+            key="key-5627",
+            slug=model,
+            workflow_id="print-key-5627",
+            workflow_run_id="wf-run",
+            retention=None,
+        )
+    )
+    result = PrintRunResult(
+        library_file_id=1,
+        copies=1,
+        queue_item_ids=[7],
+        part_settings={2: PartSettings(top_shell_layers=8)},
+    )
+    asyncio.run(runs.succeed("run-5627", model, result))
+    asyncio.run(
+        state(client).print_links.record_sends(
+            subject, [PrintSend(queue_item_id=7, plate_id=1, printer_id=1, run_id="run-5627")]
+        )
+    )
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
+    respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
+    mock_bambuddy_lists()
+
+    body = client.get("/api/v1/prints/35").json()
+
+    assert body["part_settings"] == {"2": {**UNSET, "top_shell_layers": 8}}
+
+
+@respx.mock
+def test_a_print_no_run_names_has_no_part_settings(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1, queue_item_id=7)
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
+    respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
+    mock_bambuddy_lists()
+
+    assert client.get("/api/v1/prints/35").json()["part_settings"] is None
 
 
 @respx.mock

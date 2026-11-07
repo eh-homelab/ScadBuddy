@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOption } from '../api/types'
 import { normalizeHex } from '../lib/format'
 import {
@@ -229,6 +229,8 @@ interface Props {
   offeredTrays?: ReadonlySet<number>
   /** #2365 — the grams are the last slice's, and a slice for these choices is on its way. */
   gramsStale?: boolean
+  /** #5627 — more of a slot's row, under its spool: its "Settings for this colour". */
+  slotExtra?: (slotId: number) => ReactNode
 }
 
 export function FilamentPicker({
@@ -238,6 +240,7 @@ export function FilamentPicker({
   copies,
   offeredTrays,
   gramsStale = false,
+  slotExtra,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
   // Slots whose list is open although a spool is chosen. A slot with a spool shows only
@@ -530,6 +533,7 @@ export function FilamentPicker({
               )}
 
               <WarningList warnings={warningsFor(warnings, slot.slot_id)} testId={`filament-warnings-${slot.slot_id}`} />
+              {slotExtra?.(slot.slot_id)}
             </Card>
           )
         })}

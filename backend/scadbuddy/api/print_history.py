@@ -38,6 +38,7 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
     PrintLinksDep,
+    PrintRunsDep,
     SettingsStoreDep,
     UploadsDep,
 )
@@ -64,8 +65,10 @@ from scadbuddy.bambuddy.models import (
     PrinterMedia,
     TimelapseInfo,
 )
-from scadbuddy.bambuddy.print_links import LinkedPrint
+from scadbuddy.bambuddy.part_settings import PartSettingsMap
+from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLinkStore
 from scadbuddy.bambuddy.print_source import is_sliced, printable
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -476,6 +479,33 @@ class PrintDetail(PrintSummary):
     slicing: PrintSlicing | None = None
     #: Bambuddy's bookkeeping of the print (#1860); None once it no longer has it.
     record: PrintRecord | None = None
+    #: The slicer settings per filament slot the print was laid out with (#5627), from
+    #: the ScadBuddy run that queued it (``PrintRunResult.part_settings``): a reprint
+    #: sends them again. None for none, or for a print no recorded run queued.
+    part_settings: PartSettingsMap | None = None
+
+
+async def _part_settings(
+    links: PrintLinkStore, runs: PrintRunStore, link: LinkedPrint
+) -> PartSettingsMap | None:
+    """``link``'s print's settings per slot (#5627): its queue item's send names the run
+    that queued it, and that run's result holds them. None when no send names a run (one
+    recorded before #1751, or a print queued outside ScadBuddy) or the run is pruned."""
+    if link.queue_item_id is None:
+        return None
+    sends = await links.sends_for(PrintSubject.parse(link.subject))
+    run_id = next(
+        (
+            send.run_id
+            for send in sends
+            if send.queue_item_id == link.queue_item_id and send.run_id is not None
+        ),
+        None,
+    )
+    if run_id is None:
+        return None
+    run = await runs.get(run_id)
+    return run.result.part_settings if run is not None and run.result is not None else None
 
 
 def _prints_url(archive_id: int, path: str) -> str:
@@ -1161,8 +1191,9 @@ def _outcome(
         "The print's summary, with the output it came from (template, revision, "
         "parameters; none for a library file's print), every file (ScadBuddy's 3MF and "
         "preview mesh, the sliced file and slicer project Bambuddy kept), its photos, "
-        "timelapse and plate image, and its outcome and runs. `printer_media=1` also "
-        "lists what the printer holds for it, which asks the printer."
+        "timelapse and plate image, its outcome and runs, and the slicer settings per "
+        "filament slot (`part_settings`) the ScadBuddy run that queued it set. "
+        "`printer_media=1` also lists what the printer holds for it, which asks the printer."
     ),
 )
 async def get_print(
@@ -1176,9 +1207,11 @@ async def get_print(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    print_runs: PrintRunsDep,
     printer_media: bool = False,
 ) -> PrintDetail:
     link = await _require_print(links, archive_id)
+    part_settings = await _part_settings(links, print_runs.store, link)
     output = None
     if link.output_id is not None:
         output = await asyncio.to_thread(_read_output, outputs, link.output_id)
@@ -1239,6 +1272,7 @@ async def get_print(
         printer_media=on_printer,
         slicing=_slicing(archive) if archive is not None else None,
         record=_record(archive) if archive is not None else None,
+        part_settings=part_settings,
         links=PrintLinks(
             bambuddy_url=bambuddy_url,
             customize_url=f"/m/{output.meta.slug}" if output is not None else None,

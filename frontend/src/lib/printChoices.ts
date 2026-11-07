@@ -1,6 +1,7 @@
 import type {
   ChoicesView,
   NozzleChoice,
+  PartSettingsMap,
   PresetRef,
   PrimeTowerChoice,
   PrintChoices,
@@ -53,20 +54,23 @@ export function printChoicesOf(selection: PrintSelection): PrintChoices | null {
 /**
  * The request fields, beside the plan and the choices, that change what a run slices
  * (#2825): the print sequence, the supports (#1899), the filament profiles left on
- * (#717) and the prime tower (#3628), which the backend folds into the process overrides. The check, the background
+ * (#717) and the prime tower (#3628), which the backend folds into the process overrides,
+ * and the settings per slot (#5627), which go into the laid-out copy. The check, the background
  * slice and the run all send these, from here, so the slice the dialog reuses is the one
- * the run would make.
+ * the run would make. `partSettings` is what `sentPartSettings` gives: `null` sends none.
  */
 export function sliceOverrides(
   printSequence: PrintSequence | null,
   supports: SupportsChoice | null = null,
   filamentProfiles: readonly string[] = [],
   primeTower: PrimeTowerChoice | null = null,
-): Pick<PrintRunRequest, 'print_sequence' | 'supports' | 'filament_profiles' | 'prime_tower'> {
+  partSettings: PartSettingsMap | null = null,
+): Pick<PrintRunRequest, 'print_sequence' | 'supports' | 'filament_profiles' | 'prime_tower' | 'part_settings'> {
   return {
     ...(printSequence === null ? {} : { print_sequence: printSequence }),
     ...(supports === null ? {} : { supports }),
     ...(filamentProfiles.length === 0 ? {} : { filament_profiles: [...filamentProfiles] }),
     ...(primeTower === null ? {} : { prime_tower: primeTower }),
+    ...(partSettings === null ? {} : { part_settings: partSettings }),
   }
 }
