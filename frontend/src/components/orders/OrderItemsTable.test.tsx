@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -269,16 +269,27 @@ describe('OrderItemsTable · unit price', () => {
     ])
     const followed = vi.spyOn(api, 'followQuote')
     const running = vi.spyOn(api, 'runningQuotes')
+    const reads = vi.spyOn(api, 'order')
     render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     expect(await within(row(ITEM_DRAFT)).findByText('Quoting…')).toBeInTheDocument()
-    const reload = vi.spyOn(api, 'order')
+    // #5599 — the page reads the order at mount and again on its realtime subscription's
+    // resync (`useAsync`, the socket not yet open). Each read of the items looks for
+    // running quotes, so the looks before the landing are one or two, as the two reads'
+    // answers render apart or together. Count from once both have landed.
+    await waitFor(() => expect(reads).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await Promise.allSettled(reads.mock.results.map((r) => r.value))
+    })
+    const looks = running.mock.calls.length
+    reads.mockClear()
+    const reload = reads
     const landed = manual('q-landed', 900, at)
     state.quotes.push({ ...landed, source: 'slice' })
     seedOperation({ id: 'op-landing', kind: 'order_item_quote', subject, status: 'succeeded', created_at: at, finished_at: at, result: { ...landed } })
     await waitFor(() => expect(within(row(ITEM_DRAFT)).queryByText('Quoting…')).not.toBeInTheDocument(), { timeout: 5000 })
     // The reload it brought looks again, lists the stale row, and does not follow it.
-    await waitFor(() => expect(running).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(looks + 1))
     expect(reload).toHaveBeenCalledTimes(1)
     expect(followed).toHaveBeenCalledTimes(1)
   })
