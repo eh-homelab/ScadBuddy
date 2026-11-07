@@ -17,7 +17,7 @@ import {
 import type { Credential } from '../credentials.js'
 import { credentialGateway, type GatewayLease } from '../gateway/server.js'
 import type { Resolver } from '../http/egress.js'
-import { buildQueryOptions, type HarnessPaths } from './options.js'
+import { buildQueryOptions, claudeConfigDir, type HarnessPaths } from './options.js'
 import {
   type ApprovalGate,
   type ApprovalPreparer,
@@ -498,7 +498,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const browser = run.browser
   // The native file tools' paths first: a call outside the session directory is refused whatever else says.
   // With no working directory the file tools are not offered (`builtins` below), and refused if called.
-  const confine = run.nativeTools?.length ? confineGuard(run.cwd) : undefined
+  // Read and Grep may also reach this session's tool-results directory, where Claude Code saves
+  // a tool result too large to return inline (#5542); the session id is the one Claude Code gets.
+  const sdkSessionId = run.sessionId ?? run.resume
+  const confine = run.nativeTools?.length
+    ? confineGuard(run.cwd, sdkSessionId === undefined ? undefined : { configDir: claudeConfigDir(run.paths), sessionId: sdkSessionId })
+    : undefined
   const guard: InputGuard | undefined =
     confine || browser
       ? async (name, input) => (await confine?.(name, input)) ?? (browser ? browser.check(name, input) : undefined)

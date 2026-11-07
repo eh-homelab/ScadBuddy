@@ -4,9 +4,11 @@ over a real `FlowStore` and `OperationStore`, or `api/crud_render.py` over a set
 behind the real `auth_check` and gate and the CRUD listener on a local port, and a client
 that reaches them with an in-process credential, as the worker does. `api_payload_keys`
 gives the routes the API's payload keys on a store's schema, and `served_projects` serves a
-projects worker's store and payload keys as the worker's. `static_render_crud` is a render
-worker's client of a stand-in API that answers fixed store settings and serves no job route,
-for a test of the worker that renders nothing."""
+projects worker's store and payload keys as the worker's. With a bootstrap verifier the app
+also takes the service-token exchange, so a worker can get its own credential as it does
+with no database. `static_render_crud` is a render worker's client of a stand-in API that
+answers fixed store settings and serves no job route, for a test of the worker that renders
+nothing."""
 
 from __future__ import annotations
 
@@ -23,15 +25,17 @@ import psycopg
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
-from scadbuddy.api import crud_areas, crud_projects, crud_render
+from scadbuddy.api import crud_areas, crud_projects, crud_render, service_token
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.exchange import BootstrapVerifier
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.service_credentials import (
     InProcessProvider,
     ServiceAuth,
     ServiceCredentialStore,
 )
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64, seal_bytes
 from scadbuddy.core.settings import Settings
@@ -56,6 +60,20 @@ from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_ke
 AGENT_MIGRATIONS = Path(__file__).resolve().parent.parent / "fixtures" / "agent-migrations"
 #: The KEK of the API and the worker in a test.
 TEST_KEK = kek_from_base64(base64.b64encode(b"\x5a" * 32).decode())
+
+
+class FakeClock:
+    """A `CrudClient` clock that moves only by the client's own waits, so a test's count
+    of tries does not depend on how long a round trip takes."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class _Noted:
@@ -120,13 +138,19 @@ def crud_app(
     operations: OperationStore | None = None,
     kinds: Mapping[str, OperationKind] | None = None,
     settings_store: SettingsStore | None = None,
+    bootstrap: BootstrapVerifier | None = None,
 ) -> FastAPI:
     """The routes with the flows component's `store`, Temporal `client` (a Reset's) and
     payload `keys`, the operations component's store and `kinds`, and the API's
-    `settings_store`."""
+    `settings_store`; the exchange too, of the proofs `bootstrap` takes, when given."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
-        AUTH: SimpleNamespace(would_refuse=_Noted()),
+        AUTH: SimpleNamespace(
+            would_refuse=_Noted(),
+            verifiers={} if bootstrap is None else {"bootstrap": bootstrap},
+            credentials=credentials,
+            core=SimpleNamespace(metrics=Metrics()),
+        ),
         FLOWS: SimpleNamespace(store=store, client=client, keys=keys),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
     }
@@ -137,6 +161,8 @@ def crud_app(
     )
     app.include_router(crud_projects.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
+    if bootstrap is not None:
+        app.include_router(service_token.router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
     return app

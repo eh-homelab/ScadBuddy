@@ -34,7 +34,7 @@ from scadbuddy.flows.models import Decision
 from scadbuddy.flows.operations import FLOW_RESET, flow_kinds
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
-from tests.crud.crud_support import served_flow_store
+from tests.crud.crud_support import FakeClock, served_flow_store
 from tests.test_flow_store import Events, _history, started
 from tests.test_flow_trigger_store import approved, make, seed
 
@@ -56,19 +56,6 @@ class _Service:
         if self.error is not None:
             raise self.error
         return SimpleNamespace(run_id="wr2")
-
-
-class _WaitClock:
-    """A client clock that moves only by the client's own waits."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    async def sleep(self, seconds: float) -> None:
-        self.now += seconds
 
 
 def _temporal(service: _Service) -> Any:
@@ -358,7 +345,7 @@ async def test_a_transient_temporal_failure_is_retried(store: FlowStore, service
     # The client's clock moves only when it waits (#5547), so the count of tries does not
     # depend on how long each round trip takes under load: waits of 0.25 s and 0.25 s
     # spend the 0.5 s budget, so the reset is tried three times.
-    clock = _WaitClock()
+    clock = FakeClock()
     async with served_flow_store(
         store,
         client=_temporal(service),

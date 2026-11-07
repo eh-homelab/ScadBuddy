@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -9,6 +10,8 @@ import type { Credential } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { startCredentialGateway, stopCredentialGateway } from '../src/gateway/server.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { projectDirName } from '../src/harness/confine.js'
+import { claudeConfigDir } from '../src/harness/options.js'
 import type { ApprovalRequest, RiskTier, ToolDecision } from '../src/harness/permissions.js'
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs, linkTaskList } from '../src/harness/stateDirs.js'
@@ -35,7 +38,8 @@ const DEFAULTS = NATIVE_BUILTINS.filter((b) => b.access !== 'off').map((b) => ({
 
 describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a session", () => {
   let fake: FakeAnthropic
-  let steps: Reply[]
+  /** The model's next replies; a function is called when its turn comes, to read what came before. */
+  let steps: (Reply | (() => Reply))[]
   let requests: RecordedRequest[]
   beforeAll(async () => {
     await startCredentialGateway()
@@ -48,7 +52,8 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
     fake = await startFakeAnthropic((r) => {
       requests.push(r)
       if (!(r.body?.tools ?? []).length) return { text: 'ok' }
-      return steps.shift() ?? { text: 'done' }
+      const step = steps.shift()
+      return (typeof step === 'function' ? step() : step) ?? { text: 'done' }
     })
   })
   afterEach(async () => {
@@ -149,6 +154,50 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
     expect(existsSync(path.join(outside, 'new.txt'))).toBe(false)
     expect(JSON.stringify(toolResults())).not.toContain('the key')
   }, 60_000)
+
+  // #5542: Claude Code saves a Grep result over 20,000 characters to
+  // `<config dir>/projects/<encoded cwd>/<session id>/tool-results/` and tells the model to read
+  // it there. The guard lets Read and Grep reach that file, on the first turn (`sessionId`) and
+  // on a resumed one (`resume`, the same id), and still refuses a write there.
+  it('reads back a tool result too large to return inline, on a new and a resumed turn', async () => {
+    const { paths, cwd } = await session()
+    await writeFile(path.join(cwd, 'big.txt'), Array.from({ length: 400 }, (_, i) => `MARK line ${i} ${'y'.repeat(200)}`).join('\n'))
+    const sessionId = randomUUID()
+    const saved: string[] = []
+    /** The file the last tool result says the output was saved to. */
+    const savedPath = (): string => {
+      const text = JSON.stringify(toolResults().at(-1)?.content ?? '')
+      const found = /Full output saved to: (\S+?\.(?:txt|json))/.exec(text)?.[1]
+      if (found === undefined) throw new Error(`no saved output in ${text.slice(0, 300)}`)
+      saved.push(found)
+      return found
+    }
+    const bigGrep: Reply = { toolUse: { name: 'Grep', input: { pattern: 'MARK', path: 'big.txt', output_mode: 'content', head_limit: 0 } } }
+    const readBack = (): Reply => ({ toolUse: { name: 'Read', input: { file_path: savedPath(), limit: 5 } } })
+    const grepDir = (): Reply => ({ toolUse: { name: 'Grep', input: { pattern: 'line 399', path: path.dirname(saved[0]!), output_mode: 'files_with_matches' } } })
+    const write = (): Reply => ({ toolUse: { name: 'Write', input: { file_path: path.join(path.dirname(saved[0]!), 'mine.txt'), content: 'x' } } })
+
+    steps = [bigGrep, readBack, grepDir, write]
+    const first = await turn({ paths, cwd, sessionId })
+    const results = toolResults()
+    expect(results).toHaveLength(4)
+    expect(JSON.stringify(results[1]?.content)).toContain('MARK line 0')
+    expect(results[1]?.is_error).toBeFalsy()
+    expect(JSON.stringify(results[2]?.content)).toContain(path.basename(saved[0]!))
+    expect(first.decisions.map(([n, d]) => `${n}:${d.decision}`)).toEqual(['Write:deny'])
+    expect(existsSync(path.join(path.dirname(saved[0]!), 'mine.txt'))).toBe(false)
+    // The directory Claude Code chose is the one the guard derives: the real cwd's name, this session's id.
+    expect(path.dirname(saved[0]!)).toBe(
+      path.join(claudeConfigDir(paths), 'projects', projectDirName(await realpath(cwd)), sessionId, 'tool-results'),
+    )
+
+    requests = []
+    steps = [bigGrep, readBack]
+    const second = await turn({ paths, cwd, resume: sessionId })
+    expect(second.decisions).toEqual([])
+    expect(path.dirname(saved[1]!)).toBe(path.dirname(saved[0]!))
+    expect(JSON.stringify(toolResults().at(-1)?.content)).toContain('MARK line 0')
+  }, 90_000)
 
   it('refuses a Glob pattern that climbs out through a brace alternative', async () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), 'native-brace-'))

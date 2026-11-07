@@ -311,7 +311,9 @@ opens every one and seals it again byte for byte).
     `InputGuard` in both canUseTool and the PreToolUse hook: `..`, absolute paths and links
     out are refused, and so is any path, Glob pattern or Grep glob starting with `~`, which
     Claude Code expands to HOME after the seam for Glob and Grep, measured on 2.1.310; with
-    no working directory the file tools are not offered). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
+    no working directory the file tools are not offered). `Read` and `Grep` may also reach the
+    session's own `tool-results` directory in the Claude Code config dir, where Claude Code
+    saves an oversized tool result (#5542, `projectDirName`). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
     2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
     only switch on one that is `off` by default, at its package tier (`outward` by default),

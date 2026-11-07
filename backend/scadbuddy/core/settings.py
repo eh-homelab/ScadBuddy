@@ -666,6 +666,16 @@ class Settings(BaseSettings):
         return _first_directory(REPO_ROOT / "frontend" / "dist", CONTAINER_FRONTEND_DIR)
 
 
+class NoDatabaseSettings(Settings):
+    """The settings of a worker that holds no SQL (#5298): the projects worker. It
+    starts with ``SCADBUDDY_DATABASE_URL`` unset, and ignores it when set."""
+
+    @field_validator("database_url")
+    @classmethod
+    def _database_required(cls, value: str) -> str:
+        return value
+
+
 #: What ``log_level`` takes: the standard library's own level names.
 LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 

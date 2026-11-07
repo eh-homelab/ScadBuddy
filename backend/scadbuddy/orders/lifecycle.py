@@ -2240,6 +2240,15 @@ class Lifecycle:
             )
         return attempt
 
+    def _before_priced_design(self, conn: Conn, item: OrderItem, attempt: Fulfilment) -> bool:
+        """Whether the attempt was made before the revision the accepted quote prices: it
+        printed an earlier design (#5350). A quote that names no revision says nothing."""
+        accepted = next((q for q in self.store.quotes(item.id, conn=conn) if q.accepted), None)
+        if accepted is None or accepted.revision_id is None:
+            return False
+        priced = self.store.revision(accepted.revision_id, conn=conn)
+        return priced is not None and attempt.created_at < priced.created_at
+
     def update_fulfilment(
         self, order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, by: Actor
     ) -> Fulfilment:
@@ -2309,7 +2318,9 @@ class Lifecycle:
         self, order_id: str, item_id: str, fulfilment_id: str, by: Actor
     ) -> Fulfilment:
         """§6.1: the attempt's quantity counts as made; the item is `fulfilled` once its
-        accepted attempts reach its quantity."""
+        accepted attempts reach its quantity. An attempt made before the accepted quote's
+        revision printed an earlier design (an item revised after acceptance, #5350): it is
+        refused (`fulfilment_stale`)."""
         with self.store.transaction() as conn:
             order, item = self._in_production(conn, order_id, item_id)
             attempt = self._attempt_of(conn, item, fulfilment_id)
@@ -2322,6 +2333,13 @@ class Lifecycle:
             if attempt.outcome == "failed":
                 raise LifecycleError(
                     "fulfilment_failed", f"attempt {attempt.attempt} failed; nothing was made"
+                )
+            if self._before_priced_design(conn, item, attempt):
+                raise LifecycleError(
+                    "fulfilment_stale",
+                    f"attempt {attempt.attempt} printed an earlier design than the accepted"
+                    " quote's",
+                    items=[item.id],
                 )
             attempt = self.store.accept_fulfilment(conn, attempt.id, datetime.now(UTC))
             made = sum(
