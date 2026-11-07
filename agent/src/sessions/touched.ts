@@ -327,7 +327,6 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_cancel: () => [],
   order_reopen: () => [],
   order_request_payment: () => [],
-  order_payment_requests: () => [],
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],

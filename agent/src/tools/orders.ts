@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { command } from './command.js'
 import {
@@ -440,7 +441,8 @@ export const orderTools: Tool[] = [
     description:
       'Ask the customer to pay (#4957): a `deposit` or a `balance` request, for `amount_minor` (the balance now when ' +
       "left out), through `provider` (the default provider when left out; null collects by hand). This sends the " +
-      'customer something to pay, so it is outward. The reply has the request with its `hosted_url` and `link_error`. ' +
+      'customer something to pay, so it is outward: a person must approve it first (it returns a pending action). ' +
+      'The reply has the request with its `hosted_url` and `link_error`. ' +
       'The link is for the shop to pass on: the tool does not send it. A failed link leaves the request open with ' +
       '`link_error` set.',
     input: z.object({
@@ -453,10 +455,12 @@ export const orderTools: Tool[] = [
     routes: ['POST /api/v1/orders/{order_id}/payment-requests'],
     title: ({ order_id, kind }) => `Request a ${kind ?? 'balance'} payment on order ${order_id}`,
     handler: async ({ order_id, ...fields }, { backend }) => {
-      const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      const body = Object.fromEntries(
+        Object.entries(fields).filter(([, v]) => v !== undefined),
+      ) as Partial<components['schemas']['PaymentRequestCreate']> as components['schemas']['PaymentRequestCreate']
       return json(
         await ok(
-          backend.POST('/api/v1/orders/{order_id}/payment-requests', { params: { path: { order_id } }, body: body as never }),
+          backend.POST('/api/v1/orders/{order_id}/payment-requests', { params: { path: { order_id } }, body }),
           `request a payment on order ${order_id}`,
         ),
       )
