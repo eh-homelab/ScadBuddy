@@ -86,6 +86,25 @@ A template that prints best with a process setting changed says so in `model.jso
 - Set only what the geometry needs (a prime tower for thin two-colour layers, supports
   off for a flat part). This last point is ScadBuddy's judgement, not a source's rule.
 
+### Settings per colour part: `part_print_settings`
+
+A template can set a few process settings on the parts of one colour (issue #5626;
+print-flow spec `docs/superpowers/specs/2026-09-24-print-flow-design.md` §4, "Settings
+per part"). Each key is a `// color` parameter of `model.scad`, never a slot number:
+
+```json
+"part_print_settings": {"letter_color": {"top_shell_layers": 8}}
+```
+
+- The keys and limits are `PartSettings` in `backend/scadbuddy/bambuddy/part_settings.py`:
+  `top_shell_layers`, `bottom_shell_layers` and `wall_loops` (0-1000),
+  `sparse_infill_density` (0-100), `sparse_infill_pattern` and `ironing_type`. Values
+  are JSON numbers and strings, not Bambu's strings. An unknown key or a value out of
+  range fails the load, as in `print_settings`.
+- Each print reads the parameter's value in the output and gives the settings to the
+  slot of that colour. A colour the output does not print sets nothing. A print's own
+  `part_settings` win per key.
+
 Through ScadBuddy's tools (issue #252; AI spec
 `docs/superpowers/specs/2026-09-27-ai-integration-design.md` §8.6, "As built for
 #252's guardrails"):

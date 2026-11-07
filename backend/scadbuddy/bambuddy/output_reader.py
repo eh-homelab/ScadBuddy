@@ -20,7 +20,8 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
-from scadbuddy.bambuddy.project_file import output_stem
+from scadbuddy.bambuddy.part_settings import PartSettings, PartSettingsMap, by_colour
+from scadbuddy.bambuddy.project_file import cached_defaults, output_stem
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
@@ -48,6 +49,9 @@ class OutputNaming(BaseModel):
 
     stem: str
     print_settings: dict[str, str] = Field(default_factory=dict)
+    #: The template's ``part_print_settings`` as its model.json has them now (#5626),
+    #: as this output's slots (``part_settings.by_colour``); ``None`` for none.
+    part_settings: PartSettingsMap | None = None
     #: The model.json's refusal of its print settings, when it has one: a print refuses
     #: on it (409 "Invalid Model Metadata"), a project file only names.
     invalid_meta: str | None = None
@@ -97,9 +101,22 @@ class LocalOutputs:
         )
         try:
             settings = await asyncio.to_thread(self.catalogue.print_settings, meta.slug)
+            declared = await asyncio.to_thread(self.catalogue.part_print_settings, meta.slug)
         except InvalidModelMetaError as error:
             return OutputNaming(stem=stem, invalid_meta=str(error), title=title)
-        return OutputNaming(stem=stem, print_settings=settings, title=title)
+        parts = await asyncio.to_thread(self._part_settings, meta, declared) if declared else None
+        return OutputNaming(stem=stem, print_settings=settings, part_settings=parts, title=title)
+
+    def _part_settings(
+        self, meta: OutputMeta, declared: dict[str, PartSettings]
+    ) -> PartSettingsMap | None:
+        """``declared`` as this output's slots (#5626): each colour parameter's value is
+        the output's, else the template's default from its cached schema (an output
+        from before #4774 left its defaults out)."""
+        defaults = cached_defaults(self.outputs.paths, meta.slug)
+        values: dict[str, object] = {k: v for k, v in defaults.items() if v is not None}
+        values.update(self.outputs.params(meta.id))
+        return by_colour(declared, values, meta.colors)
 
 
 def _problem(response: httpx.Response) -> ApiError:

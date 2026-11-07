@@ -319,8 +319,38 @@ prime tower). Without the setting the block's top shell was a `Bridge` layer at 
 solid layers (z 4 and below) were 6 in both slices. Bambuddy's slicer runs the same
 02.08.02.61 CLI on the uploaded copy, but it was not measured with part settings.
 
-Not yet: a template's own settings per part (#5626), the print dialog's controls for
-them (#5627) and settings per part for a library file (#5628).
+A template declares its own (#5626) in `model.json` as `part_print_settings`, beside
+`print_settings`, with the same keys and limits (`PartSettings`). An unknown key or a
+value out of range fails the load (`InvalidModelMetaError`), as `PRINT_SETTING_VALUES`
+does, and a print of the template is then refused (409), as for a bad `print_settings`.
+A template names the part by its `// color` parameter, never by slot:
+`{"letter_color": {"top_shell_layers": 8}}`. The decision: a slot is a position in the
+colours a render used (`layout.colours`, slot N is colour N-1). It moves when two colour
+parameters take one value (they become one slot) or when a colour's parts are not drawn.
+A colour parameter keeps naming the same parts whatever colours are chosen. The key must
+be an OpenSCAD identifier (`COLOUR_PARAMETER_PATTERN`).
+
+They are read as `model.json` has them now, as `print_settings` are (#770):
+`Catalogue.part_print_settings`, from `LocalOutputs.naming`, which the print worker
+reaches through the internal naming route. The naming turns them into the output's slots
+(`OutputNaming.part_settings`, `part_settings.by_colour`): each parameter's value in the
+output's `params.json` (else the template's default from its cached schema, for an
+output from before #4774) is matched, by `colour_hex`, to the slot of that colour in the
+output's `colors`. A parameter with no value, or whose colour no slot is, sets nothing.
+Two parameters of one colour share its slot; for a key both set, the first declared
+wins. The run (`SourceSpec.part_settings`, from the check activity), the background
+slice and the quote (`OutputSource.part_settings`) all reach `plan_run`, where
+`run_part_settings` lays the request's `part_settings` over them, per key
+(`part_settings.laid_under`). The template's go only where a copy can carry them: not on
+an `as_is` 3MF, and only on slots a printed part is made in. So a template's settings
+never refuse a run; only the request's are refused (`part_settings_refusal`). They are
+not in `run_key`, as `print_settings` are not; the copy's `Target.key` digests what the
+copy carries, so a change to them makes a new copy. A slice quote records only the
+request's settings (`order_item_quotes.part_settings`); a print reads the template's as
+they are at that time, as with `print_settings`.
+
+Not yet: the print dialog's controls for them (#5627) and settings per part for a
+library file (#5628).
 
 ### The two warnings
 

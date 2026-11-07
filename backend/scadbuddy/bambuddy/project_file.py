@@ -248,7 +248,7 @@ async def file_into_project(
     )
 
 
-def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+def cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
     """The model's param defaults from its cached schema, or ``{}`` when the renderer
     would not use that cache entry (:func:`load_cached_schema`: another source, cache
     version, schema format or set of library pins).
@@ -277,7 +277,7 @@ def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -
         template = catalogue.record(meta.slug).name
     except ModelNotFoundError:
         return project_stem(meta.slug, params, {}, name=meta.name)
-    defaults = _cached_defaults(outputs.paths, meta.slug)
+    defaults = cached_defaults(outputs.paths, meta.slug)
     return project_stem(template, params, defaults, name=meta.name)
 
 

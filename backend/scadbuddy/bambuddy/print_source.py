@@ -41,6 +41,7 @@ from scadbuddy.bambuddy.filaments3mf import (
 from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
+from scadbuddy.bambuddy.part_settings import PartSettingsMap
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
@@ -763,6 +764,9 @@ class OutputSource(PrintPipeline):
     meta: OutputMeta
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
     print_settings: dict[str, str] = field(default_factory=dict)
+    #: The template's settings per slot as they are now (#5626, ``OutputNaming``), under
+    #: the request's ``part_settings`` (``print_run.run_part_settings``).
+    part_settings: PartSettingsMap | None = None
     #: The 3MF's filament slots, once :meth:`read_local` has read them (#2720).
     local: LocalFilaments | None = None
     _local_unreadable: bool = field(default=False, repr=False)

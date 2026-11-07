@@ -393,6 +393,7 @@ def bambuddy_kinds_over(
                     # The preview's copy goes to the inbox, never a project's folder.
                     stem=None,
                     print_settings=naming.print_settings,
+                    part_settings=naming.part_settings,
                     native=copies,
                 )
             return _json(
