@@ -292,15 +292,19 @@ async def test_a_sigterm_ends_the_wait_for_the_areas(edge_env: None) -> None:
     """Before the API answers, a SIGTERM must not wait for the kill. uvicorn's own handler
     (here `seen`) still runs."""
     seen: list[int] = []
+    served: list[bool] = []
     previous = signal.signal(signal.SIGTERM, lambda signum, _frame: seen.append(signum))
     crud = _Waiting()
     app = create_app(load(), crud=crud)  # type: ignore[arg-type]
     try:
         asyncio.get_running_loop().call_later(0.2, os.kill, os.getpid(), signal.SIGTERM)
         async with asyncio.timeout(5):
-            async with app.router.lifespan_context(app):
-                pass
+            # A stop before the areas ends the start: the app never serves.
+            with pytest.raises(RuntimeError):
+                async with app.router.lifespan_context(app):
+                    served.append(True)
     finally:
         signal.signal(signal.SIGTERM, previous)
     assert seen == [signal.SIGTERM]
+    assert served == []
     assert crud.closed

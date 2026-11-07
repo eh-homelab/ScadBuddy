@@ -1,7 +1,8 @@
 """The edge's FastAPI app (#5282). It mounts no `/api/v1` route and never proxies one.
 
 Its lifespan waits until the CRUD service serves every area the edge calls
-(`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait. A CRUD route's refusal
+(`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait, and the edge then
+closes its client and never serves. A CRUD route's refusal
 with a public storefront problem (`wire.py` `public_problem`, a render limit's 429 among
 them) is answered with its status, problem and ``Retry-After``; any other refusal is
 logged and answered 502 with no detail, since it names the edge's own fault (a
@@ -74,11 +75,13 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             # During a roll the API pod may be older than the edge: serve only once it
-            # serves every area the edge calls. A stop signal ends the wait, and the
-            # server, told by its own handler, then shuts down at once.
+            # serves every area the edge calls. A stop signal ends the wait; the edge
+            # then closes its client and never serves.
             stop = asyncio.Event()
             with _stopped_by_signals(stop):
-                await client.wait_for_areas(stop)
+                if not await client.wait_for_areas(stop):
+                    logger.info("stopped before the CRUD service served the storefront's areas")
+                    return
             yield
         finally:
             await client.aclose()
