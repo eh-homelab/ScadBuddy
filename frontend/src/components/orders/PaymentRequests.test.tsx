@@ -46,6 +46,24 @@ describe('PaymentRequests (#4957)', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
+  it('shows a bank payment as pending until it settles, with no link and no cancel (#4958)', async () => {
+    await setup((id) => mockPaymentEvent(ORDER_ACCEPTED, id, 'pending'))
+    expect(await screen.findByText('Pending')).toBeInTheDocument()
+    expect(screen.getByText('The bank payment is on its way')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('shows a bank payment that did not settle as failed (#4958)', async () => {
+    await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+    })
+    expect(await screen.findByText('Failed')).toBeInTheDocument()
+    expect(screen.queryByText('The bank payment is on its way')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
+  })
+
   it('says nothing is due as the backend says it', async () => {
     mockConnectProvider()
     await api.addPayment(ORDER_ACCEPTED, { amount_minor: 3500 })
