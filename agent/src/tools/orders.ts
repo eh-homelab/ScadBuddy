@@ -15,6 +15,10 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 // it, from the backend's lifecycle, not from each tool. The audit line (GET
 // /orders/{id}/events) is the page's; order_get carries the status (coverage.ts).
 //
+// An item added to an order past `quoted` (#5349) changes what the customer gets, so it is
+// its own route and its own `outward` tool (order_item_add_after_acceptance); order_item_add
+// stays `write` for a draft or quoted order.
+//
 // Phase 2 (#4250, plan Ruling 11): the price book is `read` to look at and `write` to keep
 // (the policy, a filament's record); order_item_quote takes both modes, a typed price or a
 // slice of the item through the print dialog's own choices (the `order_item_quote`
@@ -78,6 +82,29 @@ const reference = z
     inputs: z.record(z.string(), z.unknown()).optional().describe('The customizer inputs, `{params: {...}}`'),
   })
   .strict()
+
+// order_item_add and order_item_add_after_acceptance take one body (#5349).
+const itemAddInput = z.object({
+  order_id: orderId,
+  kind: z.enum(['model', 'custom', 'request']).optional().describe('`model` (the default), `custom` or `request`'),
+  output_id: ID.optional(),
+  ...reference.shape,
+  quantity: z.number().int().min(1).default(1),
+  title: z
+    .string()
+    .max(200)
+    .optional()
+    .describe("Defaults to the template's name; a custom or request item needs one"),
+  notes: z.string().default(''),
+  sku: z.string().max(100).optional(),
+  unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
+  requires_printing: z.boolean().optional().describe('A custom item\'s only'),
+})
+
+function itemAddTitle({ order_id, slug, output_id, kind, title }: { order_id: string; slug?: string; output_id?: string; kind?: string; title?: string }): string {
+  return `Add ${kind === 'custom' || kind === 'request' ? (title ?? `a ${kind} item`) : (slug ?? output_id ?? 'an item')} to order ${order_id}`
+}
+
 const attempt = z
   .object({
     quantity: z.number().int().min(0).describe('Made in this attempt'),
@@ -529,7 +556,7 @@ export const orderTools: Tool[] = [
     name: 'order_item_add',
     label: 'Add an order line item',
     description:
-      'Add a line item: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
+      'Add a line item to a draft or quoted order: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
       '`commit`, `inputs`). Beside `output_id`, leave the others out: one given must be the output\'s own (`inputs` ' +
       'whole, `v` included). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
       'that is not a revision of the template, or an input the template does not take, is refused naming the field. ' +
@@ -539,27 +566,12 @@ export const orderTools: Tool[] = [
       '`requires_printing` (default ' +
       'false) marks one that still has to be made. ' +
       '`kind: "request"` adds a design request: a `title` and `notes` only, no source and no price; its first ' +
-      'revision (order_item_revision_add) gives it its design. `sku` is the shop\'s stock code, on any kind.',
-    input: z.object({
-      order_id: orderId,
-      kind: z.enum(['model', 'custom', 'request']).optional().describe('`model` (the default), `custom` or `request`'),
-      output_id: ID.optional(),
-      ...reference.shape,
-      quantity: z.number().int().min(1).default(1),
-      title: z
-        .string()
-        .max(200)
-        .optional()
-        .describe("Defaults to the template's name; a custom or request item needs one"),
-      notes: z.string().default(''),
-      sku: z.string().max(100).optional(),
-      unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
-      requires_printing: z.boolean().optional().describe('A custom item\'s only'),
-    }),
+      'revision (order_item_revision_add) gives it its design. `sku` is the shop\'s stock code, on any kind. ' +
+      'An accepted, in-production or ready order answers 409 `item_locked`: use order_item_add_after_acceptance.',
+    input: itemAddInput,
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/items'],
-    title: ({ order_id, slug, output_id, kind, title }) =>
-      `Add ${kind === 'custom' || kind === 'request' ? (title ?? `a ${kind} item`) : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
+    title: itemAddTitle,
     handler: async ({ order_id, ...body }, { backend }) =>
       json(
         await ok(
@@ -569,6 +581,31 @@ export const orderTools: Tool[] = [
             body: (body.kind === 'custom' ? { ...body, accept: false } : body) as never,
           }),
           `add an item to order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_add_after_acceptance',
+    label: 'Add a line item to an accepted order',
+    description:
+      'Add a line item to an order that is accepted, in production or ready (#5349). It takes what order_item_add ' +
+      'takes. It changes what the customer gets. The item starts unpriced (a custom item quoted, its price not ' +
+      'accepted): it needs order_item_quote and order_item_accept_quote before it is printed or fulfilled. The ' +
+      'accepted prices and charges do not change. A ready order goes back to in production. Refused: ' +
+      '`order_not_accepted` on a draft or quoted order (use order_item_add), `item_locked` once shipped, ' +
+      '`order_closed`/`order_cancelled`, and `order_on_hold`.',
+    input: itemAddInput,
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/after-acceptance'],
+    summarize: (input) => `${itemAddTitle(input)}, after its acceptance`,
+    handler: async ({ order_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/after-acceptance', {
+            params: { path: { order_id } },
+            body: body as never,
+          }),
+          `add an item to accepted order ${order_id}`,
         ),
       ),
   }),
@@ -632,7 +669,8 @@ export const orderTools: Tool[] = [
     name: 'order_item_update',
     label: 'Edit an order line item',
     description:
-      'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted, each dropping ' +
+      'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted (or, past ' +
+      'that, while the item has no accepted quote: one added by order_item_add_after_acceptance), each dropping ' +
       'the accepted quote; `title`, `notes` and `sku` in any open state. A custom item takes `unit_price_minor` and ' +
       '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
       'order_item_accept_quote). A `reference` or ' +
@@ -1011,7 +1049,7 @@ export const orderTools: Tool[] = [
     description:
       'Undo a close or a cancel. A closed order takes the status its items and shipments give it (`shipped` as ' +
       'it closed); a cancelled order goes back to the status it was cancelled from, with the items that cancel took. ' +
-      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (an accepted order takes ' +
+      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (a shipped order takes ' +
       'back a priced item only, `item_not_priced`). Outward, as a cancel is: it changes what the shop told the customer.',
     input: z.object({ order_id: orderId, item_id: itemId.optional() }),
     risk: 'outward',

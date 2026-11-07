@@ -5,6 +5,7 @@ import type { Approval, Fulfilment, Order, OrderAttachment, OrderAttachmentRole,
 import { timeAgo } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
 import { AddItemDialog } from './AddItemDialog'
+import { itemOpen } from './afterAcceptance'
 import { EndAttempt } from './EndAttempt'
 import { AttachmentCard, FilePick } from './OrderAttachments'
 import { PrintItem } from './PrintItem'
@@ -16,8 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
 
-/** The order states in which an item's design can still change; its approval changes in any open one. */
-const OPEN_FOR_EDITS = new Set(['draft', 'quoted'])
+/** The order states a person's decision has ended: an item's approval no longer changes. */
 const ENDED = new Set(['closed', 'cancelled'])
 
 const APPROVALS: Record<Approval, string> = { design_first: 'Design first', together: 'Design and price together' }
@@ -67,7 +67,8 @@ export function RevisionsPanel({
   const newest = revisions[0]
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   const ended = ENDED.has(order.status)
-  const canRevise = OPEN_FOR_EDITS.has(order.status) && !settled
+  // #5349: an item added after acceptance has no accepted price, and still takes revisions.
+  const canRevise = itemOpen(order, item.quotes) && !settled
 
   async function run(action: () => Promise<unknown>, describe: (error: unknown) => string = refusalText): Promise<boolean> {
     setError(null)

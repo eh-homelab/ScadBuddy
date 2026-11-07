@@ -36,7 +36,8 @@ const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
  * A typed price for a line item (§3.4's `manual` quote, plan Ruling 1), a quote from a
  * slice of it (#4250: the print dialog in its quote mode, which slices every plate and
  * prices it with the price book), and the item's quotes with their lines and the accepted
- * one marked. `editable` while the order is draft or quoted. The slice quote runs on the
+ * one marked. `editable` while the order is draft or quoted, or past that while the item has
+ * no accepted quote (#5349, `afterAcceptance.ts` `itemOpen`). The slice quote runs on the
  * page (`slice`, #4693), so it outlives the dialog and this drawer.
  */
 export function QuoteEditor({

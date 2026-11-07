@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import type { OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
+import { addMode, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
@@ -35,7 +36,6 @@ import { dueAt, dueDay, timeAgo } from '../lib/format'
 import { formatMoney, toMajor, toMinor } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
 
-const OPEN_FOR_EDITS = new Set(['draft', 'quoted'])
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
@@ -153,6 +153,8 @@ export function OrderPage() {
   }
   const { order, items, totals, charges, payments, shipments, attachments } = detail
   const editable = OPEN_FOR_EDITS.has(order.status)
+  // #5349: `after_acceptance` on an accepted, in-production or ready order not on hold.
+  const adds = addMode(order)
   const ended = ENDED.has(order.status)
   const titles = new Map(items.map((i) => [i.id, i.title]))
   const current = items.find((i) => i.id === openItem)
@@ -190,7 +192,7 @@ export function OrderPage() {
                 Accept order
               </Button>
             )}
-            {editable && (
+            {adds && (
               <Button variant="outline" disabled={busy} onClick={() => setAdding(true)}>
                 Add item
               </Button>
@@ -258,7 +260,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
-          canAdd={editable}
+          canAdd={!!adds}
           selected={current?.id ?? null}
           quoting={slices.runs}
           onHold={order.on_hold}
@@ -449,7 +451,7 @@ export function OrderPage() {
           )}
         </section>
       </div>
-      {editable && <AddItemDialog open={adding} orderId={order.id} onAdded={reload} onClose={() => setAdding(false)} />}
+      {adds && <AddItemDialog open={adding} orderId={order.id} mode={adds} order={order} onAdded={reload} onClose={() => setAdding(false)} />}
       {current && (
         <ItemDrawer key={current.id} detail={detail} item={current} slices={slices} unfulfilAllowed={unfulfilAllowed} onClose={() => setOpenItem(null)} onChanged={reload} />
       )}
@@ -474,7 +476,8 @@ function ItemDrawer({
   onChanged: () => void
 }) {
   const { order } = detail
-  const editable = OPEN_FOR_EDITS.has(order.status)
+  // The item's own price decides past `quoted` (#5349): one added after acceptance is quoted here.
+  const editable = itemOpen(order, item.quotes)
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   const [error, setError] = useState<string | null>(null)
   const [unfulfilling, setUnfulfilling] = useState(false)
@@ -581,14 +584,14 @@ function ItemDrawer({
             <UnfulfilDialog orderId={order.id} item={item} open={unfulfilling} onOpenChange={setUnfulfilling} onChanged={onChanged} />
           </>
         ) : item.status === 'cancelled' && !ENDED.has(order.status) ? (
-          editable || item.quotes.some((q) => q.accepted) ? (
+          OPEN_FOR_EDITS.has(order.status) || TAKES_ITEMS.has(order.status) || item.quotes.some((q) => q.accepted) ? (
             <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
               Reopen item
             </Button>
           ) : (
-            // `item_not_priced`: an accepted order takes back a priced item only.
+            // `item_not_priced`: a shipped order takes back a priced item only (#5349).
             <p className="text-xs text-muted-foreground" data-testid="reopen-unpriced">
-              This item had no accepted price, so it can't come back into an accepted order.
+              This item had no accepted price, so it can't come back into a shipped order.
             </p>
           )
         ) : (

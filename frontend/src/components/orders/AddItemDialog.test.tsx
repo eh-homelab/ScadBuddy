@@ -92,6 +92,70 @@ describe('AddItemDialog (#4251)', () => {
     expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeEnabled()
   })
 
+  it('asks before it changes an accepted order, then adds on the after-acceptance route (#5349)', async () => {
+    const plain = vi.spyOn(api, 'addOrderItem')
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const onAdded = vi.fn()
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <AddItemDialog open orderId={ORDER_ACCEPTED} mode="after_acceptance" order={{ number: 'ORD-2026-2', status: 'accepted' }} onAdded={onAdded} onClose={onClose} />,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'maze')
+    await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
+    await waitFor(() => expect(within(dialog).getByRole('radio', { name: 'Current version, default settings' })).toBeChecked())
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    // The first click only asks.
+    const warning = within(dialog).getByRole('alert', { name: 'Confirm the change' })
+    expect(warning).toHaveTextContent(/ORD-2026-2 is accepted\. Adding an item changes what the customer gets/)
+    expect(after).not.toHaveBeenCalled()
+    // Back leaves the order alone.
+    await user.click(within(dialog).getByRole('button', { name: 'Back' }))
+    expect(within(dialog).queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Change the accepted order' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(onAdded).toHaveBeenCalled()
+    expect(plain).not.toHaveBeenCalled()
+    const model = await api.getModel(MAZE_SLUG)
+    expect(after).toHaveBeenCalledWith(ORDER_ACCEPTED, { slug: MAZE_SLUG, commit: model.version, inputs: { params: {}, v: 0 }, quantity: 1 })
+    const order = await api.order(ORDER_ACCEPTED)
+    expect(order.order.status).toBe('accepted')
+    const added = order.items.find((i) => i.reference?.slug === MAZE_SLUG)
+    expect(added?.status).toBe('draft')
+    expect(order.totals.unpriced_items).toContain(added?.id)
+    const events = await api.orderEvents(ORDER_ACCEPTED)
+    expect(events.filter((e) => e.kind === 'item.added_after_acceptance')).toMatchObject([{ detail: { item_id: added?.id, order_status: 'accepted' } }])
+  })
+
+  it('asks again once the template, the pick or the quantity changes after the confirm (#5349)', async () => {
+    const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
+    const { user } = renderPage(
+      <AddItemDialog open orderId={ORDER_ACCEPTED} mode="after_acceptance" order={{ number: 'ORD-2026-2', status: 'ready' }} onAdded={() => {}} onClose={() => {}} />,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'keychain')
+    await user.click(await within(dialog).findByRole('button', { name: /Name Keychain/ }))
+    expect(await within(dialog).findByRole('radio', { name: 'Reagan' })).toBeChecked()
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    // A ready order is named as such, and goes back to production.
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toHaveTextContent(/ORD-2026-2 is ready\. .*goes back to in production/)
+    // Another output picked: the confirm is gone, and the next click asks again.
+    await user.click(within(dialog).getByRole('radio', { name: 'Nova' }))
+    expect(within(dialog).queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    expect(within(dialog).getByRole('alert', { name: 'Confirm the change' })).toBeInTheDocument()
+    // Another quantity: the same.
+    await user.type(within(dialog).getByLabelText('Quantity'), '2')
+    expect(within(dialog).queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeEnabled()
+    // Another template: the same.
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Change' }))
+    expect(within(dialog).queryByRole('alert', { name: 'Confirm the change' })).not.toBeInTheDocument()
+    expect(after).not.toHaveBeenCalled()
+  })
+
   it.each(['0', '1e9', '2.5'])('refuses the quantity %s before sending anything (#4727)', async (typed) => {
     const add = vi.spyOn(api, 'addOrderItem')
     const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)

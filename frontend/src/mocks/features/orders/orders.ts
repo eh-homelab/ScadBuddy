@@ -41,6 +41,8 @@ export const SCAN_PAGE_SIZE = 100
 export const MAX_SCAN_PAGES = 10
 const STATUSES = new Set<OrderStatus>(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled'])
 export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
+/** `lifecycle.py` `TAKES_ITEMS` (#5349): past acceptance, the states that still take an item. */
+export const TAKES_ITEMS = new Set<OrderStatus>(['accepted', 'in_production', 'ready'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
 const DERIVED = new Set<OrderStatus>(['accepted', 'in_production', 'ready', 'shipped'])
 export const SETTLED = new Set(['fulfilled', 'cancelled'])
@@ -110,6 +112,39 @@ export function notOnHold(order: Order) {
 export function openForItems(order: Order, what: string) {
   if (!OPEN_FOR_EDITS.has(order.status)) {
     throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted`)
+  }
+}
+/** `Lifecycle._open_for_item` (#5349): past `quoted`, an item with no accepted quote stays open. */
+export function openForItem(order: Order, item: OrderItem, what: string) {
+  if (OPEN_FOR_EDITS.has(order.status)) return
+  if (TAKES_ITEMS.has(order.status) && !quotesOf(item.id).some((q) => q.accepted)) return
+  throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted`, [item.id])
+}
+/** `Lifecycle._takes_item` (#5349): the plain add, or the add after acceptance. */
+export function takesItem(order: Order, afterAcceptance: boolean) {
+  notEnded(order)
+  if (!afterAcceptance) {
+    if (TAKES_ITEMS.has(order.status)) {
+      throw new Refused(
+        'item_locked',
+        `order ${order.number} is ${order.status}: the list of items is pinned once accepted; add an item with POST /orders/${order.id}/items/after-acceptance`,
+      )
+    }
+    openForItems(order, 'the list of items')
+    return
+  }
+  if (OPEN_FOR_EDITS.has(order.status)) {
+    throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted: add the item with POST /orders/${order.id}/items`)
+  }
+  if (!TAKES_ITEMS.has(order.status)) throw new Refused('item_locked', `order ${order.number} is ${order.status}: it takes no new item once shipped`)
+  notOnHold(order)
+}
+/** `Lifecycle._added`: the add's audit row. */
+function added(order: Order, item: OrderItem, afterAcceptance: boolean, detail: Record<string, unknown> = {}) {
+  if (afterAcceptance) {
+    event(order, 'item.added_after_acceptance', { item_id: item.id, title: item.title, quantity: item.quantity, order_status: order.status, ...detail })
+  } else {
+    event(order, 'item.added', { item_id: item.id, ...detail })
   }
 }
 export function event(order: Order, kind: string, detail: Record<string, unknown> = {}) {
@@ -340,6 +375,130 @@ function unknownKeys(request: Request, body: Record<string, unknown>, allowed: s
 export function sameDesign(a: OrderItem['reference'], b: OrderItem['reference']): boolean {
   if (a === null || b === null) return a === b
   return a.slug === b.slug && a.commit === b.commit && JSON.stringify(a.inputs) === JSON.stringify(b.inputs)
+}
+
+/** `POST /orders/:id/items` and, with `afterAcceptance`, `…/items/after-acceptance` (#5349). */
+function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
+  return async ({ request, params }) => {
+    const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
+    if (extra) return extra
+    if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
+    const order = state.orders.find((o) => o.id === params.id)
+    if (!order) return problem(request, 404, `no order '${String(params.id)}'`)
+    if (body.kind === 'custom') {
+      // `ItemCreate._shape` and `Lifecycle.add_custom_item` (#4954).
+      const named = (['slug', 'commit', 'inputs', 'output_id'] as const).filter((name) => body[name] != null)
+      if (named.length) return fieldProblem(request, 'body', `a custom item names no source: drop ${named.join(', ')}`)
+      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a custom item needs a title')
+      const price = body.unit_price_minor
+      // After acceptance an unset accept means false, and a true one is refused (#5349).
+      const accept = afterAcceptance ? body.accept === true : body.accept !== false
+      if (afterAcceptance && accept) return fieldProblem(request, 'accept', 'accept: an item added after acceptance needs its quote accepted on its own')
+      if (price == null || !Number.isInteger(price) || price < 0) return fieldProblem(request, 'body', 'a custom item needs a unit_price_minor')
+      try {
+        takesItem(order, afterAcceptance)
+        if (accept) notOnHold(order)
+        const at = now()
+        const created: OrderItem = {
+          id: newId('i'),
+          order_id: order.id,
+          position: itemsOf(order.id).length,
+          status: 'draft',
+          quantity: body.quantity as number,
+          title: body.title.trim(),
+          notes: body.notes ?? '',
+          kind: 'custom',
+          requires_printing: body.requires_printing ?? false,
+          sku: body.sku ?? null,
+          reference: null,
+          colours: [],
+          output_id: null,
+          approval: 'together',
+          current_revision_id: null,
+          created_at: at,
+          updated_at: at,
+        }
+        state.items.push(created)
+        added(order, created, afterAcceptance, { item_kind: 'custom' })
+        customPrice(order, created, price, accept)
+        rederive(order)
+        return HttpResponse.json(created, { status: 201 })
+      } catch (error) {
+        return refused(request, error)
+      }
+    }
+    if (body.kind === 'request') {
+      // `ItemCreate._shape` and `Lifecycle.add_request_item` (#5280): a title, no source.
+      const named = (['slug', 'commit', 'inputs', 'output_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
+      if (named.length) return fieldProblem(request, 'body', `a request item takes no ${named.join(', ')}`)
+      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a request item needs a title')
+      try {
+        takesItem(order, afterAcceptance)
+        const at = now()
+        const created: OrderItem = {
+          id: newId('i'),
+          order_id: order.id,
+          position: itemsOf(order.id).length,
+          status: 'draft',
+          quantity: body.quantity as number,
+          title: body.title.trim(),
+          notes: body.notes ?? '',
+          kind: 'request',
+          requires_printing: true,
+          sku: body.sku ?? null,
+          reference: null,
+          colours: [],
+          output_id: null,
+          approval: 'design_first',
+          current_revision_id: null,
+          created_at: at,
+          updated_at: at,
+        }
+        state.items.push(created)
+        added(order, created, afterAcceptance, { item_kind: 'request' })
+        rederive(order)
+        return HttpResponse.json(created, { status: 201 })
+      } catch (error) {
+        return refused(request, error)
+      }
+    }
+    if (body.unit_price_minor != null || body.requires_printing != null || body.accept != null) return fieldProblem(request, 'body', 'only a custom item takes unit_price_minor, requires_printing or accept')
+    const resolved = resolveReference(body)
+    if (Array.isArray(resolved)) return fieldProblem(request, resolved[0], resolved[1])
+    try {
+      takesItem(order, afterAcceptance)
+      const at = now()
+      const position = itemsOf(order.id).length
+      const created: OrderItem = {
+        id: newId('i'),
+        order_id: order.id,
+        position,
+        status: 'draft',
+        quantity: body.quantity as number,
+        title: body.title ?? resolved.reference.template_name,
+        notes: body.notes ?? '',
+        kind: 'model',
+        requires_printing: true,
+        sku: body.sku ?? null,
+        reference: resolved.reference,
+        colours: resolved.colours,
+        output_id: body.output_id ?? null,
+        approval: 'together',
+        current_revision_id: null,
+        created_at: at,
+        updated_at: at,
+      }
+      state.items.push(created)
+      added(order, created, afterAcceptance)
+      // `Lifecycle.add_item`: the design it is made with is its revision 1.
+      pushRevision(order, created, resolved.reference, resolved.colours, '')
+      rederive(order)
+      return HttpResponse.json(created, { status: 201 })
+    } catch (error) {
+      return refused(request, error)
+    }
+  }
 }
 
 export const handlers = [
@@ -586,7 +745,7 @@ export const handlers = [
         // Nothing would come back priced: reopened open for edits, with every item taken.
         if (DERIVED.has(base) && !othersOpen && !taken.some(([, , priced]) => priced)) base = 'draft'
         for (const [found, status, priced] of taken) {
-          if (DERIVED.has(base) && !priced) continue
+          if (!priced && !OPEN_FOR_EDITS.has(base) && !TAKES_ITEMS.has(base)) continue
           found.status = status
           restored.push(found.id)
         }
@@ -644,126 +803,8 @@ export const handlers = [
     }
   }),
 
-  http.post('/api/v1/orders/:id/items', async ({ request, params }) => {
-    const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
-    if (extra) return extra
-    if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
-    const order = state.orders.find((o) => o.id === params.id)
-    if (!order) return problem(request, 404, `no order '${String(params.id)}'`)
-    if (body.kind === 'custom') {
-      // `ItemCreate._shape` and `Lifecycle.add_custom_item` (#4954).
-      const named = (['slug', 'commit', 'inputs', 'output_id'] as const).filter((name) => body[name] != null)
-      if (named.length) return fieldProblem(request, 'body', `a custom item names no source: drop ${named.join(', ')}`)
-      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a custom item needs a title')
-      const price = body.unit_price_minor
-      if (price == null || !Number.isInteger(price) || price < 0) return fieldProblem(request, 'body', 'a custom item needs a unit_price_minor')
-      try {
-        notEnded(order)
-        openForItems(order, 'the list of items')
-        if (body.accept !== false) notOnHold(order)
-        const at = now()
-        const created: OrderItem = {
-          id: newId('i'),
-          order_id: order.id,
-          position: itemsOf(order.id).length,
-          status: 'draft',
-          quantity: body.quantity as number,
-          title: body.title.trim(),
-          notes: body.notes ?? '',
-          kind: 'custom',
-          requires_printing: body.requires_printing ?? false,
-          sku: body.sku ?? null,
-          reference: null,
-          colours: [],
-          output_id: null,
-          approval: 'together',
-          current_revision_id: null,
-          created_at: at,
-          updated_at: at,
-        }
-        state.items.push(created)
-        event(order, 'item.added', { item_id: created.id, item_kind: 'custom' })
-        customPrice(order, created, price, body.accept !== false)
-        rederive(order)
-        return HttpResponse.json(created, { status: 201 })
-      } catch (error) {
-        return refused(request, error)
-      }
-    }
-    if (body.kind === 'request') {
-      // `ItemCreate._shape` and `Lifecycle.add_request_item` (#5280): a title, no source.
-      const named = (['slug', 'commit', 'inputs', 'output_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
-      if (named.length) return fieldProblem(request, 'body', `a request item takes no ${named.join(', ')}`)
-      if (!body.title?.trim()) return fieldProblem(request, 'body', 'a request item needs a title')
-      try {
-        notEnded(order)
-        openForItems(order, 'the list of items')
-        const at = now()
-        const created: OrderItem = {
-          id: newId('i'),
-          order_id: order.id,
-          position: itemsOf(order.id).length,
-          status: 'draft',
-          quantity: body.quantity as number,
-          title: body.title.trim(),
-          notes: body.notes ?? '',
-          kind: 'request',
-          requires_printing: true,
-          sku: body.sku ?? null,
-          reference: null,
-          colours: [],
-          output_id: null,
-          approval: 'design_first',
-          current_revision_id: null,
-          created_at: at,
-          updated_at: at,
-        }
-        state.items.push(created)
-        event(order, 'item.added', { item_id: created.id, item_kind: 'request' })
-        rederive(order)
-        return HttpResponse.json(created, { status: 201 })
-      } catch (error) {
-        return refused(request, error)
-      }
-    }
-    if (body.unit_price_minor != null || body.requires_printing != null || body.accept != null) return fieldProblem(request, 'body', 'only a custom item takes unit_price_minor, requires_printing or accept')
-    const resolved = resolveReference(body)
-    if (Array.isArray(resolved)) return fieldProblem(request, resolved[0], resolved[1])
-    try {
-      notEnded(order)
-      openForItems(order, 'the list of items')
-      const at = now()
-      const position = itemsOf(order.id).length
-      const created: OrderItem = {
-        id: newId('i'),
-        order_id: order.id,
-        position,
-        status: 'draft',
-        quantity: body.quantity as number,
-        title: body.title ?? resolved.reference.template_name,
-        notes: body.notes ?? '',
-        kind: 'model',
-        requires_printing: true,
-        sku: body.sku ?? null,
-        reference: resolved.reference,
-        colours: resolved.colours,
-        output_id: body.output_id ?? null,
-        approval: 'together',
-        current_revision_id: null,
-        created_at: at,
-        updated_at: at,
-      }
-      state.items.push(created)
-      event(order, 'item.added', { item_id: created.id })
-      // `Lifecycle.add_item`: the design it is made with is its revision 1.
-      pushRevision(order, created, resolved.reference, resolved.colours, '')
-      rederive(order)
-      return HttpResponse.json(created, { status: 201 })
-    } catch (error) {
-      return refused(request, error)
-    }
-  }),
+  http.post('/api/v1/orders/:id/items', addItem(false)),
+  http.post('/api/v1/orders/:id/items/after-acceptance', addItem(true)),
   http.patch('/api/v1/orders/:id/items/:item', async ({ request, params }) => {
     const body = (await request.json()) as OrderItemPatch & Record<string, unknown>
     const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments', 'sku', 'unit_price_minor', 'requires_printing', 'accept', 'approval'])
@@ -807,7 +848,7 @@ export const handlers = [
       const moved = resolved !== undefined && !filled && (found.kind === 'custom' || !sameDesign(resolved.reference, found.reference) || (resolved.colours.length > 0 && JSON.stringify(resolved.colours) !== JSON.stringify(found.colours)))
       const revised = moved || refiled?.changed === true
       const repins = revised || body.quantity != null || price !== null
-      if (repins) openForItems(order, "an item's reference, quantity and filaments")
+      if (repins) openForItem(order, found, "an item's reference, quantity and filaments")
       if (price !== null && accept) notOnHold(order)
       if (revised) {
         const reference = resolved?.reference ?? found.reference!
@@ -882,8 +923,9 @@ export const handlers = [
       const found = itemOf(order, String(params.item))
       if (found.status !== 'cancelled') throw new Refused('item_not_cancelled', `item ${found.id} is ${found.status}: only a cancelled item reopens`, [found.id])
       const [status, priced] = reopenedStatus(found)
-      if (!OPEN_FOR_EDITS.has(order.status) && !priced) {
-        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: an accepted order holds priced items only`, [found.id])
+      // #5349: an order that takes a new item takes back an unpriced one; a shipped one does not.
+      if (!priced && !OPEN_FOR_EDITS.has(order.status) && !TAKES_ITEMS.has(order.status)) {
+        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: a shipped order takes back a priced item only`, [found.id])
       }
       found.status = status
       found.updated_at = now()
@@ -914,8 +956,8 @@ export const handlers = [
     try {
       const order = lock(String(params.id))
       notEnded(order)
-      openForItems(order, "an item's price")
       const found = itemOf(order, String(params.item))
+      openForItem(order, found, "an item's price")
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       if (found.kind === 'custom') {
         throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field (PATCH the item's unit_price_minor)`, [found.id])
@@ -951,9 +993,9 @@ export const handlers = [
     transition(request, () => {
       const order = lock(String(params.id))
       notEnded(order)
-      openForItems(order, "an item's price")
-      notOnHold(order)
       const found = itemOf(order, String(params.item))
+      openForItem(order, found, "an item's price")
+      notOnHold(order)
       const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === found.id)
       if (!quote) throw new Refused('quote_not_found', `no quote ${String(params.quote)} of item ${found.id}`, [], true)
       return acceptQuote(order, found, quote)

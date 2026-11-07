@@ -54,7 +54,8 @@ export function OrderItemsTable({
   onOpen: (item: OrderItemDetail) => void
   /** After a price is recorded: the page reloads the order. */
   onChanged: () => void
-  /** The page offers Add item (a draft or quoted order): the empty table points at it. */
+  /** The page offers Add item (`afterAcceptance.ts` `addMode`): the empty table points at it.
+   * The custom item row is offered only while the order is draft or quoted. */
   canAdd?: boolean
   /** The item open in the page's drawer (#4693). */
   selected?: string | null
@@ -68,6 +69,8 @@ export function OrderItemsTable({
   unfulfilAllowed?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
+  // The custom item row adds on the plain route, which takes an item while draft or quoted only.
+  const custom = canAdd && pricing
   const columns: Column<OrderItemDetail>[] = [
     {
       key: 'picture',
@@ -179,8 +182,8 @@ export function OrderItemsTable({
       rowId={(item) => itemAnchor(item.id)}
       selected={selected}
       onOpen={onOpen}
-      empty={canAdd ? 'No items yet. Add one with Add item above, or type a custom item below.' : 'No items.'}
-      footer={canAdd ? <CustomItemRow orderId={orderId} currency={currency} exponent={exponent} actions={columns.some((column) => column.key === 'actions')} onChanged={onChanged} /> : undefined}
+      empty={canAdd ? (custom ? 'No items yet. Add one with Add item above, or type a custom item below.' : 'No items yet. Add one with Add item above.') : 'No items.'}
+      footer={custom ? <CustomItemRow orderId={orderId} currency={currency} exponent={exponent} actions={columns.some((column) => column.key === 'actions')} onChanged={onChanged} /> : undefined}
     />
   )
 }

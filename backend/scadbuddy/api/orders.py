@@ -55,7 +55,7 @@ from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives
-from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
     CostRates,
     MarginState,
@@ -235,7 +235,15 @@ class ItemCreate(ReferenceBody):
     #: Whether that price is accepted as it is saved: true (the browser's) leaves the item
     #: `approved`; false (the agent's `write` tools) leaves it `quoted`, for an `outward`
     #: accept. A custom item's only.
-    accept: bool | None = None
+    accept: bool | None = Field(
+        default=None,
+        description=(
+            "A custom item's only: whether its price is accepted as it is saved. Unset or"
+            " true leaves the item `approved`; false leaves it `quoted`. On"
+            " `POST /orders/{id}/items/after-acceptance` unset means false, and true is"
+            " 422: an item added after acceptance needs its quote accepted on its own."
+        ),
+    )
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
@@ -281,8 +289,9 @@ class ItemCreate(ReferenceBody):
 
 
 class ItemPatch(BaseModel):
-    """The reference, replaced whole, and the quantity while `draft` or `quoted` (each
-    drops the accepted quote); title and notes in any open state."""
+    """The reference, replaced whole, and the quantity while `draft` or `quoted`, or past
+    that while the item has no accepted quote (#5349; each drops the accepted quote);
+    title and notes in any open state."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1277,7 +1286,75 @@ async def add_item(
     saved, so the item is `approved` (409 ``order_on_hold`` on hold), unless ``accept`` is
     false (the agent's), which leaves it `quoted`. A ``request`` item (#5280) is a title,
     a quantity, notes and a sku, approved design first: it has no design until its first
-    revision."""
+    revision. Only while the order is `draft` or `quoted`: past that, 409
+    ``item_locked`` names `POST /orders/{id}/items/after-acceptance`."""
+    return await _add_item(
+        order_id,
+        body,
+        orders,
+        after_acceptance=False,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+
+
+@router.post(
+    "/{order_id}/items/after-acceptance",
+    response_model=OrderItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a line item to an accepted order",
+)
+async def add_item_after_acceptance(
+    order_id: str,
+    body: ItemCreate,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> OrderItem:
+    """#5349: the same body as `POST /orders/{id}/items`, on an order that is
+    `accepted`, `in_production` or `ready`. It changes what the customer gets. The item
+    starts unpriced (a custom item `quoted`, its price not accepted; ``accept: true`` is
+    422), and needs its own quote and that quote's acceptance before it is printed or
+    fulfilled. The order's accepted prices and charges do not change; its status follows
+    `derive` (a `ready` order goes back to `in_production`). The audit row is
+    ``item.added_after_acceptance``. 409 ``order_not_accepted`` while the order is
+    `draft` or `quoted` (use `POST /orders/{id}/items`), ``item_locked`` once it is
+    `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
+    return await _add_item(
+        order_id,
+        body,
+        orders,
+        after_acceptance=True,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+
+
+async def _add_item(
+    order_id: str,
+    body: ItemCreate,
+    orders: OrdersComponent,
+    *,
+    after_acceptance: bool,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> OrderItem:
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
@@ -1285,6 +1362,8 @@ async def add_item(
     if body.kind == "custom":
         assert body.title is not None and body.unit_price_minor is not None
         title, price = body.title.strip(), body.unit_price_minor
+        # After acceptance an unset accept means false: the price waits for its own accept.
+        accept = body.accept is True if after_acceptance else body.accept is not False
         return await _run(
             lambda: orders.lifecycle.add_custom_item(
                 order_id,
@@ -1295,7 +1374,8 @@ async def add_item(
                 notes=body.notes,
                 sku=body.sku,
                 requires_printing=bool(body.requires_printing),
-                accept=body.accept is not False,
+                accept=accept,
+                after_acceptance=after_acceptance,
             )
         )
     if body.kind == "request":
@@ -1309,6 +1389,7 @@ async def add_item(
                 quantity=body.quantity,
                 notes=body.notes,
                 sku=body.sku,
+                after_acceptance=after_acceptance,
             )
         )
     resolved = await _resolved(
@@ -1331,6 +1412,7 @@ async def add_item(
             title=body.title,
             notes=body.notes,
             sku=body.sku,
+            after_acceptance=after_acceptance,
         )
     )
 
@@ -1406,7 +1488,7 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     description=(
         "Undoes a cancel: the item takes the state its quotes and attempts give it "
         "(`approved`, `failed`, `quoted` or `draft`). 409 `item_not_cancelled`, "
-        "`item_not_priced` (an order past `quoted` takes back a priced item only), and "
+        "`item_not_priced` (a `shipped` order takes back a priced item only), and "
         "`order_closed`/`order_cancelled`."
     ),
 )
@@ -1438,7 +1520,8 @@ async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
         "`output_id` to change it, or neither to repeat the current one (new photos, a "
         "new note). 404 `item_not_found`; 409 `item_custom` (a custom item has no "
         "design), `item_has_no_design` (a request's first revision must name one), "
-        "`item_not_open`, `item_locked` (the order is accepted) and "
+        "`item_not_open`, `item_locked` (the order is accepted and the item's price with "
+        "it; an item added after acceptance with no accepted quote still takes one) and "
         "`order_closed`/`order_cancelled`. Allowed on hold: a revision advances nothing."
     ),
 )

@@ -2370,6 +2370,9 @@ export const api = {
     request<Payment>(`/orders/${seg(id)}/payments`, { method: 'POST', body: JSON.stringify(body) }),
   addOrderItem: (orderId: string, body: OrderItemCreate) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #5349 — an item added to an accepted, in-production or ready order: it starts unpriced. */
+  addOrderItemAfterAcceptance: (orderId: string, body: OrderItemCreate) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/after-acceptance`, { method: 'POST', body: JSON.stringify(body) }),
   updateOrderItem: (orderId: string, itemId: string, body: OrderItemPatch) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderItem: (orderId: string, itemId: string) =>

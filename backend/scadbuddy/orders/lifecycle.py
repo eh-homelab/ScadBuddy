@@ -16,9 +16,10 @@ and the offending ids, with no HTTP shape: ``api/orders.py`` maps each to a 409 
 On hold (§7.2 as plan Ruling 14 narrows it): every transition that advances the order
 (``accept_order``, ``accept_quote``, ``record_fulfilment``, ``claim_print``,
 ``update_fulfilment``, ``accept_fulfilment``, ``unfulfil_item``, ``add_shipment``,
-``update_shipment``, ``close_order``) is refused with ``order_on_hold``; ``release``, the
-cancels, a payment and the plain edits go through, so a person can fix what the hold was
-for. The print follow (``follow_print``) records what a printer did, on hold too.
+``update_shipment``, ``close_order``, and an item added after acceptance, #5349) is refused
+with ``order_on_hold``; ``release``, the cancels, a payment and the plain edits go through,
+so a person can fix what the hold was for. The print follow (``follow_print``) records
+what a printer did, on hold too.
 """
 
 from __future__ import annotations
@@ -34,8 +35,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
+    OPEN_FOR_EDITS,
     REVISION_ROLES,
     SHOWN_IMAGES,
+    TAKES_ITEMS,
     Actor,
     AddressSnapshot,
     Approval,
@@ -84,8 +87,6 @@ from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
-#: The states an order's items and price may still change in (§4's `PATCH` rows).
-OPEN_FOR_EDITS: frozenset[OrderStatus] = frozenset({"draft", "quoted"})
 #: The states a person's decision has ended (nothing else may move).
 ENDED: frozenset[OrderStatus] = frozenset({"closed", "cancelled"})
 #: The states past a person's acceptance, which `derive` writes.
@@ -312,6 +313,15 @@ def derive(
     if any(item.id in attempted or item.status in PRINTING for item in items):
         return "in_production"
     return "accepted"
+
+
+def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
+    """Whether an item's design, quantity and price may still change: while the order is
+    `draft` or `quoted`, and past it while the item has no accepted quote, which only an
+    item added after acceptance can lack (#5349). An accepted price stays pinned."""
+    if order.status in OPEN_FOR_EDITS:
+        return True
+    return order.status in TAKES_ITEMS and not any(quote.accepted for quote in quotes)
 
 
 def _settle_open(items: Sequence[OrderItem]) -> OrderStatus:
@@ -816,8 +826,9 @@ class Lifecycle:
         A closed order takes the status its rows give it again (`shipped`, as it
         closed, unless a row changed since). A cancelled one goes back to the status it
         was cancelled from, and the items that cancel took with it come back as
-        `reopen_item` brings one back (an accepted order's item with no accepted quote
-        stays cancelled); then its status follows from its rows. Either way `closed_at`
+        `reopen_item` brings one back (an item with no accepted quote too, as `draft` or
+        `quoted`: an order cancelled from `accepted`, `in_production` or `ready` takes
+        such an item, #5349); then its status follows from its rows. Either way `closed_at`
         and `cancelled_at` are cleared and the quotes' sliced files are held again."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -848,7 +859,10 @@ class Lifecycle:
                     # with every item the cancel took.
                     base = "draft"
                 for item, status, priced in taken:
-                    if base in DERIVED and not priced:
+                    # Past `quoted` an unpriced item comes back where the order takes one
+                    # (`TAKES_ITEMS`, #5349); a cancel is refused once shipped, so every
+                    # base here takes one.
+                    if not priced and base not in OPEN_FOR_EDITS | TAKES_ITEMS:
                         continue
                     restored.append((self.store.update_item(conn, item.id, status=status), None))
             # The status its rows give it now, written once, on one audit row.
@@ -891,8 +905,10 @@ class Lifecycle:
     def reopen_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
         """Undo a cancel: the item takes the state its quotes and attempts give it
         (`_reopened_status`), and its quotes' sliced files are held again. Refused once
-        the order ended (reopen the order instead), and on an order past `quoted` for
-        an item with no accepted quote: an accepted order only holds priced items."""
+        the order ended (reopen the order instead). An item with no accepted quote comes
+        back as `draft` or `quoted` while the order takes a new item (`draft`, `quoted`,
+        and `TAKES_ITEMS`, #5349), on hold too, as every reopen; on a `shipped` order it
+        is refused (`item_not_priced`), since a shipped order takes no unpriced item."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -904,11 +920,11 @@ class Lifecycle:
                     items=[item.id],
                 )
             status, priced = self._reopened_status(conn, item)
-            if order.status not in OPEN_FOR_EDITS and not priced:
+            if not priced and order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
                 raise LifecycleError(
                     "item_not_priced",
                     f"item {item_id} has no accepted quote, and order {order.number} is"
-                    f" {order.status}: an accepted order holds priced items only",
+                    f" {order.status}: a shipped order takes back a priced item only",
                     items=[item.id],
                 )
             item = self.store.update_item(conn, item.id, status=status)
@@ -926,6 +942,69 @@ class Lifecycle:
                 "item_locked",
                 f"order {order.number} is {order.status}: {what} is pinned once accepted",
             )
+
+    def _open_for_item(self, conn: Conn, order: Order, item: OrderItem, what: str) -> None:
+        """As :meth:`_open_for_items`, but an item with no accepted quote on an order
+        past `quoted` stays open (:func:`item_open`, #5349)."""
+        if not item_open(order, self.store.quotes(item.id, conn=conn)):
+            raise LifecycleError(
+                "item_locked",
+                f"order {order.number} is {order.status}: {what} is pinned once accepted",
+                items=[item.id],
+            )
+
+    def _takes_item(self, order: Order, after_acceptance: bool) -> None:
+        """The checks before an item is added. A plain add needs a `draft` or `quoted`
+        order. An add after acceptance (#5349) needs an `accepted`, `in_production` or
+        `ready` order that is not on hold: it changes what the customer gets."""
+        self._not_ended(order)
+        if not after_acceptance:
+            if order.status in TAKES_ITEMS:
+                raise LifecycleError(
+                    "item_locked",
+                    f"order {order.number} is {order.status}: the list of items is pinned once"
+                    f" accepted; add an item with POST /orders/{order.id}/items/after-acceptance",
+                )
+            self._open_for_items(order, "the list of items")
+            return
+        if order.status in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "order_not_accepted",
+                f"order {order.number} is {order.status}, not accepted: add the item with"
+                f" POST /orders/{order.id}/items",
+            )
+        if order.status not in TAKES_ITEMS:
+            raise LifecycleError(
+                "item_locked",
+                f"order {order.number} is {order.status}: it takes no new item once shipped",
+            )
+        self._not_on_hold(order)
+
+    def _added(
+        self,
+        conn: Conn,
+        order: Order,
+        item: OrderItem,
+        by: Actor,
+        after_acceptance: bool,
+        **detail: Any,
+    ) -> None:
+        """The add's audit row. After acceptance it is ``item.added_after_acceptance``,
+        naming the item and the status the order had (#5349)."""
+        if after_acceptance:
+            self._event(
+                conn,
+                order,
+                by,
+                "item.added_after_acceptance",
+                item_id=item.id,
+                title=item.title,
+                quantity=item.quantity,
+                order_status=order.status,
+                **detail,
+            )
+        else:
+            self._event(conn, order, by, "item.added", item_id=item.id, **detail)
 
     def _revise(
         self,
@@ -1061,7 +1140,7 @@ class Lifecycle:
                 raise LifecycleError("item_custom", f"item {item_id} is a custom item")
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
-            self._open_for_items(order, "an item's design")
+            self._open_for_item(conn, order, item, "an item's design")
             if resolved is not None:
                 reference, colours = resolved.reference, list(resolved.colours)
             elif item.reference is not None:
@@ -1095,11 +1174,14 @@ class Lifecycle:
         title: str | None = None,
         notes: str = "",
         sku: str | None = None,
+        after_acceptance: bool = False,
     ) -> OrderItem:
+        """A model item. With ``after_acceptance`` (#5349) the order must be past
+        `quoted` (:meth:`_takes_item`); the item starts `draft` with no quote either way,
+        and the order's accepted prices and charges stay as they are."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            self._open_for_items(order, "the list of items")
+            self._takes_item(order, after_acceptance)
             item = self.store.insert_item(
                 conn,
                 order.id,
@@ -1111,7 +1193,7 @@ class Lifecycle:
                 notes=notes,
                 sku=sku,
             )
-            self._event(conn, order, by, "item.added", item_id=item.id)
+            self._added(conn, order, item, by, after_acceptance)
             item, _ = self._revise(
                 conn,
                 order,
@@ -1134,14 +1216,14 @@ class Lifecycle:
         quantity: int,
         notes: str = "",
         sku: str | None = None,
+        after_acceptance: bool = False,
     ) -> OrderItem:
         """A request: what a customer wants made, before any design exists. It has no
         reference, and is approved design first; its first revision (`add_revision`
-        with a resolved reference) gives it one."""
+        with a resolved reference) gives it one. ``after_acceptance`` as `add_item`'s."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            self._open_for_items(order, "the list of items")
+            self._takes_item(order, after_acceptance)
             item = self.store.insert_item(
                 conn,
                 order.id,
@@ -1155,7 +1237,7 @@ class Lifecycle:
                 sku=sku,
                 approval="design_first",
             )
-            self._event(conn, order, by, "item.added", item_id=item.id, item_kind="request")
+            self._added(conn, order, item, by, after_acceptance, item_kind="request")
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -1172,16 +1254,24 @@ class Lifecycle:
         sku: str | None = None,
         requires_printing: bool = False,
         accept: bool = True,
+        after_acceptance: bool = False,
     ) -> OrderItem:
         """A custom item (#4954): a title, a quantity and a typed price, with no template
         behind it. Its price is a `manual` quote. With ``accept`` (the browser's) it is
         accepted as it is saved, so the item is `approved` at once, and a hold refuses it
         (accepting a quote advances the order). Without (the agent's, whose `write` tier
-        accepts nothing) the item is `quoted`, for `accept_quote` to pin."""
+        accepts nothing) the item is `quoted`, for `accept_quote` to pin. With
+        ``after_acceptance`` (#5349) the price is never accepted as it is saved: the item
+        is `quoted`, and ``accept`` is refused (422)."""
+        if after_acceptance and accept:
+            raise LifecycleError(
+                "accept",
+                "accept: an item added after acceptance needs its quote accepted on its own",
+                unprocessable=True,
+            )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            self._open_for_items(order, "the list of items")
+            self._takes_item(order, after_acceptance)
             if accept:
                 self._not_on_hold(order)
             item = self.store.insert_custom_item(
@@ -1193,7 +1283,7 @@ class Lifecycle:
                 sku=sku,
                 requires_printing=requires_printing,
             )
-            self._event(conn, order, by, "item.added", item_id=item.id, item_kind="custom")
+            self._added(conn, order, item, by, after_acceptance, item_kind="custom")
             item = self._custom_price(conn, order, item, unit_price_minor, by, accept=accept)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
@@ -1256,7 +1346,8 @@ class Lifecycle:
         expected_revision_id: str | None = None,
     ) -> OrderItem:
         """The reference (replaced whole), the quantity and the slots' filaments while
-        `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
+        `draft` or `quoted`, or past that while the item has no accepted quote
+        (:func:`item_open`, #5349), each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
         §5.2's "changing the colours makes the next quote a new row"); title, notes and
         ``approval`` in any open state. A design change (a different reference or a
         slot's filament) is the item's next revision (spec 2026-11-02 §4.1, `_revise`);
@@ -1351,7 +1442,9 @@ class Lifecycle:
             design = revised or amend
             repins = revised or quantity is not None or price is not None
             if repins:
-                self._open_for_items(order, "an item's reference, quantity and filaments")
+                self._open_for_item(
+                    conn, order, item, "an item's reference, quantity and filaments"
+                )
             if price is not None and accept:
                 self._not_on_hold(order)
             if design and designed is None:
@@ -1520,8 +1613,8 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
-            self._open_for_items(order, "an item's price")
             item = self._item_of(conn, order, item_id)
+            self._open_for_item(conn, order, item, "an item's price")
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             if item.kind == "custom":
@@ -1613,8 +1706,8 @@ class Lifecycle:
                     )
                     return recorded
             self._not_ended(order)
-            self._open_for_items(order, "an item's price")
             item = self._item_of(conn, order, item_id)
+            self._open_for_item(conn, order, item, "an item's price")
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             if revision_id != item.current_revision_id:
@@ -1667,9 +1760,9 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
-            self._open_for_items(order, "an item's price")
-            self._not_on_hold(order)
             item = self._item_of(conn, order, item_id)
+            self._open_for_item(conn, order, item, "an item's price")
+            self._not_on_hold(order)
             quote = self.store.quote(quote_id, conn=conn)
             if quote is None or quote.order_item_id != item.id:
                 raise LifecycleError(
@@ -1808,7 +1901,7 @@ class Lifecycle:
                         "revision_not_quoted",
                         f"revision {revision.number} has no quote: this item is approved together",
                     )
-                self._open_for_items(order, "an item's price")
+                self._open_for_item(conn, order, item, "an item's price")
                 self._not_on_hold(order)
             revision = self.store.stamp_revision(
                 conn,

@@ -273,14 +273,16 @@ the body.
   - A cancelled order goes back to the status it was cancelled from, which the cancel's
     audit row records with the items it took. Those items come back as an item's reopen
     brings one back; an item cancelled on its own before stays cancelled. Then the
-    order's status follows from its rows. On an accepted order, an item with no
-    accepted quote stays cancelled.
+    order's status follows from its rows. An item with no accepted quote comes back
+    as `draft` or `quoted`, also on an order cancelled from `accepted`,
+    `in_production` or `ready`: such an order takes an unpriced item (#5349).
 - `POST /orders/{id}/items/{item}/reopen` takes a cancelled item back to the state its
   quotes and attempts give it: `approved` with an accepted quote (`failed` when its
   latest attempt failed), `quoted` with a quote not accepted, else `draft`. The order's
-  status follows. It is refused once the order has ended, and on an order past `quoted`
-  for an item with no accepted quote (`item_not_priced`), since an accepted order holds
-  priced items only.
+  status follows. It is refused once the order has ended. An item with no accepted
+  quote comes back while the order takes a new item: `draft`, `quoted`, `accepted`,
+  `in_production` or `ready` (#5349). On a `shipped` order it is refused
+  (`item_not_priced`), since a shipped order takes no unpriced item.
 - Both reopens are allowed while the order is on hold, as a cancel is: undoing a
   mistake does not advance the order.
 - `POST /orders/{id}/items/{item}/unfulfil` (#4952) undoes a fulfilment. The item's
@@ -300,6 +302,40 @@ the body.
   so a reopen racing it keeps the holds it took.
 - A file the sweep took while a quote was released stays gone. The hold taken again
   keeps nothing, and the item needs a new quote before it prints.
+
+**As built: an item added after acceptance (#5349).** Before #5349, an order took no new
+item once accepted. Adding one missing name then needed a second order (ORD-2026-9 beside
+ORD-2026-3).
+- `POST /orders/{id}/items/after-acceptance` takes the body of `POST /orders/{id}/items`
+  (a model, custom or request item). It works on an `accepted`, `in_production` or
+  `ready` order only (`orders/lifecycle.py` `TAKES_ITEMS`).
+- It is refused while the order is `draft` or `quoted` (`order_not_accepted`: use the
+  plain route), once it is `shipped` (`item_locked`), once it has ended
+  (`order_closed`/`order_cancelled`), and on hold (`order_on_hold`). The plain route on
+  an accepted order answers `item_locked` and names the new route.
+- The add changes what the customer gets, so it is a route of its own. The agent's tool
+  for it, `order_item_add_after_acceptance`, is `outward`. `order_item_add` stays
+  `write` for a `draft` or `quoted` order.
+- The new item starts as on a draft order: `draft` with no quote. A custom item is
+  `quoted`: its price is recorded and not accepted (`accept: true` is 422). The item
+  needs its own quote and that quote's acceptance before it is printed or fulfilled.
+- The accepted prices and the charges do not change. `OrderTotals` counts the new item
+  as pending (`pending_minor`) or unpriced (`unpriced_items`), as any item without an
+  accepted quote.
+- Past `quoted`, the item lock is now per item (`item_open`). An item with no accepted
+  quote takes a revision, a quantity, a quote and a quote's acceptance. An item with an
+  accepted quote stays pinned.
+- A cancelled item with no accepted quote comes back as `draft` or `quoted` on such an
+  order, alone (`reopen_item`) or with its cancelled order (`reopen_order`). Only a
+  `shipped` order refuses it (`item_not_priced`).
+- The order's status follows `derive`. An `accepted` order stays `accepted`, and
+  `in_production` stays `in_production`. A `ready` order goes back to `in_production`,
+  since its fulfilled item has an attempt and the new item is not settled.
+- One `item.added_after_acceptance` audit row, in the add's transaction, names the item,
+  its title, its quantity and the order's status. The bus hears the item and the order
+  after the commit, as for every item write.
+- The order page offers "Add item" on such an order, and "Add to order…" lists it. Both
+  ask the person to confirm first that the add changes an accepted order.
 
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed

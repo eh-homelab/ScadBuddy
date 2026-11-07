@@ -51,6 +51,7 @@ describe('order tools (#4249)', () => {
       'order_create',
       'order_update',
       'order_item_add',
+      'order_item_add_after_acceptance',
       'order_item_update',
       'order_item_quote',
       'order_item_accept_quote',
@@ -73,6 +74,7 @@ describe('order tools (#4249)', () => {
       order_create: 'write',
       order_update: 'write',
       order_item_add: 'write',
+      order_item_add_after_acceptance: 'outward',
       order_item_update: 'write',
       order_item_quote: 'write',
       order_item_accept_quote: 'outward',
@@ -268,6 +270,31 @@ describe('order tools (#4249)', () => {
       'Rush fee',
     )
     expect(firstText(gone)).toEqual({ deleted: ITEM })
+  })
+
+  it('adds an item after acceptance on its own route, as an outward step (#5349)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, status: 'quoted' }, { status: 201 })
+      }),
+    )
+    const added = tool('order_item_add_after_acceptance')
+    expect(added.risk).toBe('outward')
+    expect(added.routes).toEqual(['POST /api/v1/orders/{order_id}/items/after-acceptance'])
+    // The plain add keeps its own route and stays `write`.
+    expect(tool('order_item_add').routes).toEqual(['POST /api/v1/orders/{order_id}/items'])
+    const result = await added.execute(
+      { order_id: ORDER, kind: 'custom', title: 'Tag 49', unit_price_minor: 300, quantity: 2 },
+      ctx(),
+    )
+    // No accept: the route leaves the price for order_item_accept_quote.
+    expect(sent).toEqual([{ kind: 'custom', title: 'Tag 49', unit_price_minor: 300, quantity: 2, notes: '' }])
+    expect(firstText(result)).toEqual({ id: ITEM, status: 'quoted' })
+    expect(added.summarize({ order_id: ORDER, kind: 'custom', title: 'Tag 49' })).toBe(
+      `Add Tag 49 to order ${ORDER}, after its acceptance`,
+    )
   })
 
   it('cancels the order or one item, each through its own route', async () => {
