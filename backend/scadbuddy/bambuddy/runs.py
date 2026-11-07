@@ -162,8 +162,8 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
 
     ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm``,
     ``filament_profiles``, ``supports`` (#1899), ``prime_tower`` (#3628), ``plate_ids``
-    (#3652), ``folder_id`` (#3651), ``printer`` (#3823) and ``path`` (#5352) are part
-    of it when sent; without them the key is what it was before the fields existed.
+    (#3652), ``folder_id`` (#3651), ``printer`` (#3823), ``path`` (#5352) and ``part_settings``
+    (#5571) are part of it when sent; without them the key is what it was before the fields existed.
     ``printer`` counts only without ``printer_id``, which decides when both are sent
     (#4442 I1, M1): the dialog sent it, ignored, before the backend read it, so its keys
     stay as they were across the deploy, and a retry that straddles it joins its run.
@@ -179,6 +179,7 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "folder_id",
         "printer",
         "path",
+        "part_settings",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
     if request.printer_id is not None:

@@ -263,6 +263,8 @@ def test_a_file_gone_refuses_the_quote_and_the_print(
         "quote_id": quote.id,
         "sliced_sha256": None,
         "sliced_blob_key": None,
+        # #5571: the quote's settings per slot; a manual quote has none.
+        "part_settings": None,
     }
 
 

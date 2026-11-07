@@ -67,7 +67,13 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, ensure_native_copy
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies, reads_of
-from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
+from scadbuddy.render.bambu3mf import (
+    MAX_UNCOMPRESSED_BYTES,
+    FilamentMap,
+    PartOverrides,
+    plates_of,
+    stl_3mf,
+)
 from scadbuddy.render.objects3mf import check_stl
 from scadbuddy.render.read_budget import ReadBudget
 
@@ -196,12 +202,14 @@ class PrintSource(Protocol):
         native_copy: bool = False,
         printer_model: str | None = None,
         attempt_since: datetime | None = None,
+        part_settings: PartOverrides | None = None,
     ) -> PrintFile:
         """The library file the run slices: laid out for the printer and copied into
         Bambuddy's library, or with ``native_copy`` into ScadBuddy's own (#3818 tier A
         Task 4), which needs no ``client`` and lays out for ``printer_model``.
         ``attempt_since`` is when the run's first attempt was scheduled: only a native
-        upload made since then is an earlier attempt's (#4312 re-review N-a)."""
+        upload made since then is an earlier attempt's (#4312 re-review N-a).
+        ``part_settings`` are written into the copy as per-part overrides (#5571)."""
         ...
 
     async def record(
@@ -548,6 +556,7 @@ class PrintPipeline:
         native_copy: bool = False,
         printer_model: str | None = None,
         attempt_since: datetime | None = None,
+        part_settings: PartOverrides | None = None,
     ) -> PrintFile:
         uploads, settings = PrintPipeline._stores(self)
         if native_copy:
@@ -565,6 +574,7 @@ class PrintPipeline:
                 tray_colours=tray_colours,
                 printer_model=printer_model,
                 attempt_since=attempt_since,
+                part_settings=part_settings,
             )
         if client is None:
             raise _misuse("a copy in Bambuddy's library needs a Bambuddy client")
@@ -580,8 +590,10 @@ class PrintPipeline:
             # A native file (#3827): Bambuddy has no file to take as it is, so the file's
             # bytes go to it unchanged.
             return PrintFile(await self.raw_copy(client, folder_id), folder_id)
-        if self.origin_id is not None and (
-            fetched.payload is None or (not fetched.stated and folder_id is None)
+        if (
+            self.origin_id is not None
+            and part_settings is None
+            and (fetched.payload is None or (not fetched.stated and folder_id is None))
         ):
             # Nothing to lay out, or nothing that would change it: the file in Bambuddy
             # already is what a copy in the inbox would be, and the run judges it as
@@ -597,6 +609,7 @@ class PrintPipeline:
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
             filament_map=filament_map,
+            part_settings=part_settings,
         )
         file_id = await ensure_uploaded(
             client,
@@ -624,6 +637,7 @@ class PrintPipeline:
         tray_colours: Mapping[int, str] | None,
         printer_model: str | None,
         attempt_since: datetime | None,
+        part_settings: PartOverrides | None = None,
     ) -> PrintFile:
         """:meth:`file_to_print` on a native run (#3818 tier A Task 4): the copy is laid
         out as Bambuddy's is, for ``printer_model`` with no printer list read, and goes
@@ -657,6 +671,7 @@ class PrintPipeline:
             nozzle_volume_type=nozzle_volume_type,
             filament_map=filament_map,
             model=printer_model,
+            part_settings=part_settings,
         )
         file_id = await ensure_native_copy(
             native,

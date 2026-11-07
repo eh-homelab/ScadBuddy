@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from array import array
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -1426,6 +1426,127 @@ def _pin_plates(model_settings: str, filament_map: FilamentMap) -> str:
     return _PLATE_OPEN.sub(
         lambda _: "<plate>\n" + lines, _PLATE_MAP_METADATA.sub("", model_settings)
     )
+
+
+#: Process settings for the parts of one filament slot (#5571), by slot from 1: each
+#: slot's ``(key, value)`` pairs as Bambu Studio's config stores them, sorted by key.
+PartOverrides = tuple[tuple[int, tuple[tuple[str, str], ...]], ...]
+
+_OBJECT_BLOCK = re.compile(r"(<object\b[^>]*>)(.*?)(</object>)", re.DOTALL)
+#: A ``<part>``: self-closing (``self`` only), or its open tag, body and close tag.
+_PART_BLOCK = re.compile(
+    r"(?P<self><part\b[^>]*/>)"
+    r"|(?P<open><part\b[^>]*?(?<!/)>)(?P<inner>.*?)(?P<close>[ \t]*</part>)",
+    re.DOTALL,
+)
+_EXTRUDER_METADATA = re.compile(r'<metadata key="extruder" value="(\d+)"\s*/>')
+
+
+def _part_extruder(text: str) -> int | None:
+    found = _EXTRUDER_METADATA.search(text)
+    return int(found.group(1)) if found is not None else None
+
+
+def _each_part(model_settings: str, part: Callable[[re.Match[str], int | None, bool], str]) -> str:
+    """``model_settings`` with every ``<part>`` replaced by ``part(match, slot, printed)``:
+    its slot is its ``extruder`` metadata, else its object's; ``printed`` is false for a
+    negative part or a modifier."""
+
+    def object_block(match: re.Match[str]) -> str:
+        head, body, tail = match.groups()
+        # The object's own extruder is its metadata before its first part.
+        own = _part_extruder(body.split("<part", 1)[0])
+
+        def part_block(found: re.Match[str]) -> str:
+            tag = found.group("self") or found.group("open")
+            subtype = re.search(r'subtype="([^"]*)"', tag)
+            printed = subtype is None or subtype.group(1) == "normal_part"
+            inner = found.group("inner") or ""
+            slot = _part_extruder(inner)
+            return part(found, slot if slot is not None else own, printed)
+
+        return head + _PART_BLOCK.sub(part_block, body) + tail
+
+    return _OBJECT_BLOCK.sub(object_block, model_settings)
+
+
+def printed_part_slots(model_settings: str) -> set[int]:
+    """The slots (filaments, from 1) a printed ``<part>`` of ``model_settings`` is made
+    in (#5571). A slot only painted on another part's faces is not among them."""
+    slots: set[int] = set()
+
+    def note(found: re.Match[str], slot: int | None, printed: bool) -> str:
+        if printed and slot is not None:
+            slots.add(slot)
+        return found.group(0)
+
+    _each_part(model_settings, note)
+    return slots
+
+
+def set_part_settings(model_settings: str, overrides: PartOverrides) -> str:
+    """``model_settings`` (``Metadata/model_settings.config``) with each printed part of
+    a slot in ``overrides`` carrying that slot's settings as ``<metadata key= value=/>``
+    (#5571), each replacing a value the part stated for the key.
+
+    A part's slot is its ``extruder`` metadata, else its object's: the 1-based filament
+    the file's writer gave it (§6 of spec 2026-09-22), the dialog's ``slot_id``. A
+    negative part or a modifier prints nothing, so it gets none. A self-closing part
+    becomes an open and a close tag around its settings.
+
+    Bambu Studio v02.08.02.61 reads every key of a ``<part>`` that is not one of its own
+    (name, subtype, source, matrix …) into the volume's config
+    (``src/libslic3r/Format/bbs_3mf.cpp`` lines 5464-5471 in ``_generate_volumes_new``),
+    and slices each volume's region with that config over the process
+    (``src/libslic3r/PrintApply.cpp`` ``region_config_from_model_volume``). Measured with
+    the native slicer image: print-flow spec 2026-09-24 §4 "Settings per part (#5571)"."""
+    wanted = dict(overrides)
+
+    def part(found: re.Match[str], slot: int | None, printed: bool) -> str:
+        settings = wanted.get(slot or 0) if printed else None
+        if not settings:
+            return found.group(0)
+        closed = found.group("self")
+        if closed is not None:
+            # `<part …/>` as `<part …>` and `</part>`, indented as the writer's parts are.
+            open_tag, inner, close = closed[:-2].rstrip() + ">", "\n", "  </part>"
+        else:
+            open_tag, inner, close = found.group("open", "inner", "close")
+        keys = "|".join(re.escape(key) for key, _ in settings)
+        inner = re.sub(
+            rf'[ \t]*<metadata key="(?:{keys})" value="[^"]*"\s*/>[ \t]*\r?\n?', "", inner
+        )
+        indent = re.search(r"\n([ \t]*)<metadata", inner)
+        pad = indent.group(1) if indent is not None else "   "
+        lines = "".join(
+            f"{pad}<metadata key={quoteattr(key)} value={quoteattr(value)}/>\n"
+            for key, value in settings
+        )
+        if not inner.endswith("\n"):
+            inner += "\n"
+        return f"{open_tag}{inner}{lines}{close}"
+
+    return _each_part(model_settings, part)
+
+
+def model_settings_text(payload: bytes) -> str | None:
+    """``payload``'s ``model_settings.config``, or None when it has none."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        if MODEL_SETTINGS_NAME not in archive.namelist():
+            return None
+        return archive.read(MODEL_SETTINGS_NAME).decode("utf-8")
+
+
+def with_part_settings(payload: bytes, overrides: PartOverrides | None) -> bytes:
+    """``payload`` with :func:`set_part_settings` applied to its
+    ``model_settings.config``; unchanged with no overrides or no such file."""
+    if not overrides:
+        return payload
+    text = model_settings_text(payload)
+    if text is None:
+        return payload
+    changed = set_part_settings(text, overrides).encode("utf-8")
+    return rezipped(payload, {MODEL_SETTINGS_NAME: changed})
 
 
 #: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.

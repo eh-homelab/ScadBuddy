@@ -606,6 +606,10 @@ describe('pricing tools (#4250)', () => {
     // #5352: the quote slices on the route its print will take.
     await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, path: 'bambuddy' } }, ctx())
     expect(body).toMatchObject({ path: 'bambuddy' })
+    // #5571: the quote slices with the settings per slot its print will send.
+    const part_settings = { '2': { top_shell_layers: 8 } }
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, part_settings } }, ctx())
+    expect(body).toMatchObject({ part_settings })
   })
 
   it('answers a slice quote still running past the follow window', async () => {
@@ -650,6 +654,13 @@ describe('pricing tools (#4250)', () => {
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
       'on Bambuddy printer 1',
     )
+    // #5571: the quote's settings per slot go to the print, and its approval line names them.
+    const part_settings = { '1': { wall_loops: 4 } }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings }, ctx())
+    expect(body).toMatchObject({ part_settings })
+    expect(
+      tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings } as never),
+    ).toContain("slot 1's parts at wall_loops 4")
   })
 
   it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {

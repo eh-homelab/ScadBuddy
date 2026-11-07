@@ -1,7 +1,16 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { nozzles, presetRef, printOptionFields, printPath, slotChoice, tier } from './print.js'
+import {
+  nozzles,
+  partSettings,
+  partSettingsPhrase,
+  presetRef,
+  printOptionFields,
+  printPath,
+  slotChoice,
+  tier,
+} from './print.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
@@ -212,6 +221,8 @@ const sliceQuote = z
       ),
     // #5352: the quote slices on the route its print will take, so that print queues the quote's slice.
     path: printPath,
+    // #5571: recorded with the quote; order_item_print prints with them when it sends none.
+    part_settings: partSettings,
   })
   .strict()
 
@@ -1082,6 +1093,10 @@ export const orderTools: Tool[] = [
           "vibration_cali, timelapse and the rest. Its project_id and quantity are the item's, never these",
       ),
       path: printPath,
+      part_settings: partSettings.describe(
+        "Omit to print with the accepted quote's own (order_item_quote's `slice.part_settings`), so the print slices " +
+          'what was priced. Settings that differ from the quote\'s are refused `requote_needed`: quote with them first',
+      ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
           'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
@@ -1092,10 +1107,11 @@ export const orderTools: Tool[] = [
       'POST /api/v1/orders/{order_id}/items/{item_id}/print',
       'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
     ],
-    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path }) =>
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings }) =>
       `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
       (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
-      (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : ''),
+      (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : '') +
+      partSettingsPhrase(part_settings),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined

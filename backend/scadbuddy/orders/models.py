@@ -434,6 +434,10 @@ class Quote(BaseModel):
     quantity: int
     total_minor: Money
     created_by: Actor
+    #: A slice quote's settings per filament slot (#5571), as it sliced with them:
+    #: `{"<slot>": {"<key>": value}}`. Null for none. An item's print that sends none
+    #: prints with these (`orders/operations.py` `print_body`).
+    part_settings: dict[str, dict[str, Any]] | None = None
 
 
 # -- fulfilment (§6.1 by hand) and shipments (§6.3) ------------------------------------

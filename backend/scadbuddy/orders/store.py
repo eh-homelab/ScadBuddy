@@ -151,7 +151,8 @@ _REVISION = (
 )
 _QUOTE = (
     "id, order_item_id, created_at, source, accepted, sliced_sha256, sliced_blob_key, plates,"
-    " lines, unit_cost_minor, unit_price_minor, quantity, total_minor, created_by, revision_id"
+    " lines, unit_cost_minor, unit_price_minor, quantity, total_minor, created_by, revision_id,"
+    " part_settings"
 )
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
@@ -1320,14 +1321,17 @@ class OrderStore:
         sliced_blob_key: str | None = None,
         quote_id: str | None = None,
         revision_id: str | None = None,
+        part_settings: dict[str, dict[str, Any]] | None = None,
     ) -> Quote:
         """``quote_id`` when the caller made it first: a slice quote's ref is taken
-        under it before the row exists (#4250 Ruling 3)."""
+        under it before the row exists (#4250 Ruling 3). ``part_settings`` are a slice
+        quote's settings per slot (#5571), as ``part_settings.dumped`` gives them."""
         row = conn.execute(
             "INSERT INTO order_item_quotes (id, order_item_id, source, sliced_sha256,"
             " sliced_blob_key, plates, lines, unit_cost_minor, unit_price_minor, quantity,"
-            " total_minor, created_by, revision_id) VALUES (COALESCE(%s, gen_random_uuid()::text),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
+            " total_minor, created_by, revision_id, part_settings)"
+            " VALUES (COALESCE(%s, gen_random_uuid()::text),"
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
             (
                 quote_id,
                 item_id,
@@ -1342,6 +1346,7 @@ class OrderStore:
                 unit_price_minor * quantity,
                 Jsonb(created_by.model_dump(mode="json")),
                 revision_id,
+                None if part_settings is None else Jsonb(part_settings),
             ),
         ).fetchone()
         assert row is not None
