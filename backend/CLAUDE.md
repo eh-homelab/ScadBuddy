@@ -484,7 +484,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `attribute_request(activity.index, "<source>:<id>")` (author headers, else `browser`), as
   `render_model`, `post_run` and `arrange_outputs` do. `api/activity.py` serves
   `/activity`, `/activity/facets` and `/activity/{id}`, and the realtime `activity` topic;
-  both read everything, as the browser does. The `housekeeping_activity` sweep (last in
+  both read everything, as the browser does. `/activity` with `subject` repeated (at most
+  `MAX_SUBJECTS`, 200) reads each subject's newest `limit` rows in one query
+  (`ActivityIndex.list_per_subject`, a keyset walk per subject of the expression index
+  `activity_subject_key`), with `subject_cursors` to page one subject (#5596). The `housekeeping_activity` sweep (last in
   `SWEEPS`, behind `workflow.patched("housekeeping-activity")`) repairs, then prunes, on the
   prune Schedule (settings `activity_ttl_seconds`, `activity_repair_window_seconds`,
   `activity_follow`). The agent: `src/activity/kinds.ts` (its kinds) and `tools/activity.ts`
