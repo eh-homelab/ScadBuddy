@@ -40,7 +40,9 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
 - New data that crosses services goes through a CRUD route that requires a service
   credential from its first PR.
 
-Today's code still breaks the rule: seven processes hold a Postgres secret, the agent
+Today's code still breaks the rule: seven processes hold a Postgres secret (six once
+eh-homelab/clusters drops the projects worker's, which it no longer uses; the API and
+the agent revoke its role `scadbuddy_projects` at every start, #5298), the agent
 and the API share tables through grants, and template Python runs in the render worker's
 pod. Do the work in this order: #5298 (the workers), #5299 (the agent), #5297 (authenticate
 `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of pods with a database

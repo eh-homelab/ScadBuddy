@@ -67,6 +67,7 @@ from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
+from scadbuddy.auth.revoke import revoke_retired
 from scadbuddy.auth.service_credentials import grant_caller_views
 from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
@@ -1090,8 +1091,19 @@ async def _maintain_models_git_logged(state: AppState) -> None:
 def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
-    none can be sealed, so none are issued."""
+    none can be sealed, so none are issued. First, a sealed credential of a caller that
+    reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
+    try:
+        retired = auth.credentials.revoke_retired_legacy()
+    except Exception:
+        # Never in the way of the rotation: the next start or sweep tries again.
+        logger.warning("could not revoke the retired callers' sealed credentials", exc_info=True)
+    else:
+        if retired:
+            logger.info(
+                "revoked the retired callers' sealed credentials", extra={"credentials": retired}
+            )
     kek = auth.kek
     if kek is None:
         return
@@ -1102,16 +1114,25 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
-    """At start, after the migrations: each caller's role its own view, and the
-    credentials due. A failure is logged, never fatal, as `grant_at_start`."""
+    """At start, after the migrations: each caller's role its own view, a retired
+    caller's role nothing (#5298 Task 11), and the credentials due. A failure is logged,
+    never fatal, as `grant_at_start`."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
             tables = grant_callers(conn)
+            revoked: list[str] = []
+            try:
+                revoked = revoke_retired(conn)
+            except Exception:
+                # A revoke that fails must not cost the start its credentials' rotation.
+                logger.exception("could not revoke the retired callers' roles")
         if granted:
             logger.info("granted the callers' credential views", extra={"roles": granted})
         if tables:
             logger.info("granted the callers' tables", extra={"roles": tables})
+        if revoked:
+            logger.info("revoked the retired callers' roles", extra={"roles": revoked})
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")
