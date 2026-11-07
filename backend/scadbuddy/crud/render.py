@@ -34,12 +34,16 @@ BASE = f"/api/v1{PREFIX}/render"
 QUEUE_FULL = "queue-full"
 #: How long a `project` write tries again after a failed try, inside its 10 s attempt
 #: (`pipelines.PROJECT_TIMEOUT`). Each wait of a try (connect, send, read) lasts at most
-#: `PROJECT_POOL_TIMEOUT` (5 s), as the SQL store's pool wait does, and so does an
-#: accept's; a credential exchange is outside these bounds.
+#: `PROJECT_POOL_TIMEOUT` (5 s), as the SQL store's pool wait does; a credential exchange
+#: is outside these bounds.
 PROJECT_BUDGET = 4.0
-#: How long an accept tries again: a failing route fails each of `ACCEPT_RETRY`'s three
-#: attempts within about a second, so with their backoff (1 s, 2 s) the request is
-#: answered within the route's 10 s deadline, as a failing SQL accept was.
+#: An accept's bounds. Each wait of a try lasts at most `ACCEPT_TIMEOUT` (accepts took
+#: 0.03-0.4 s on prod) and no try starts past `ACCEPT_BUDGET`, so each of `ACCEPT_RETRY`'s
+#: three attempts ends within 2 s (3 s when a quick failure is retried once first), and
+#: with their backoff (1 s, 2 s) the request is answered within the route's 10 s deadline,
+#: as a failing SQL accept was. An API that stays slower than that fails the three
+#: attempts, and the request is answered render-unstartable.
+ACCEPT_TIMEOUT = 2.0
 ACCEPT_BUDGET = 1.0
 
 
@@ -73,16 +77,17 @@ class RemoteJobProjection:
         *,
         json: Any = None,
         budget: float | None = None,
+        timeout: float = PROJECT_POOL_TIMEOUT,
         key: str | None = None,
     ) -> httpx.Response:
         """``budget``: an accept's or a `project` write's call, ended inside its attempt,
-        each of its waits bounded by `PROJECT_POOL_TIMEOUT`."""
+        each of its waits bounded by ``timeout``."""
         return self._client.request(
             method,
             f"{BASE}{path}",
             json=json,
             idempotency_key=key,
-            timeout=None if budget is None else PROJECT_POOL_TIMEOUT,
+            timeout=None if budget is None else timeout,
             budget=budget,
         )
 
@@ -105,7 +110,9 @@ class RemoteJobProjection:
             "supersedes": supersedes,
         }
         try:
-            response = self._send("POST", "/jobs/accept", json=body, budget=ACCEPT_BUDGET)
+            response = self._send(
+                "POST", "/jobs/accept", json=body, budget=ACCEPT_BUDGET, timeout=ACCEPT_TIMEOUT
+            )
         except CrudRefusedError as error:
             if error.status == 409 and error.problem.get("reason") == QUEUE_FULL:
                 raise QueueFullError(int(error.problem["depth"])) from error

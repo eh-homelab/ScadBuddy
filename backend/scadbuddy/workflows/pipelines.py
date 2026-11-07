@@ -140,8 +140,13 @@ LOOKUP_RETRY = RetryPolicy(
 #: 10 s deadline. On the API's in-process worker a slow one is not cut short (each has
 #: `SHORT`), so a loaded database delays a render, as `command-still-accepting`, rather
 #: than refusing it. On the render worker the accept is a CRUD call bounded inside that
-#: deadline (`crud/render.py`): an API out of reach, or one too slow to answer, is
-#: transient (`command-still-accepting`), and a 5xx of its route spends these attempts.
+#: deadline (`crud/render.py`). A state that passes is transient
+#: (`command-still-accepting`, and the client sends the request again): the API out of
+#: reach, its database out of reach (503 `database-unavailable`), or the worker's
+#: credential refused, as inside the exchange's hold-off; a suspended render caller is
+#: answered so until it is resumed, by design. A 5xx of the route or a read timeout
+#: spends these attempts in the run, so an API too slow to answer within the bound is
+#: answered render-unstartable.
 ACCEPT_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )

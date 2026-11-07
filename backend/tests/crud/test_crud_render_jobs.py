@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 
+import psycopg
 import pytest
 
 from scadbuddy.activity.index import ActivityIndex
@@ -182,11 +183,11 @@ async def test_a_finish_to_an_unfinished_state_is_a_422(
     assert projection.read(job.id).state == "pending"
 
 
-async def test_a_500_from_the_accept_route_is_not_unreachable(
+async def test_a_500_from_the_accept_route_does_not_pass(
     jobs: RemoteJobProjection, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An error the route does not expect fails the accept fast, as a 5xx, which the
-    worker does not take for an API out of reach (`render_accept`)."""
+    worker does not take for a state that passes (`render_accept`)."""
 
     def broken(*_: object, **__: object) -> Job:
         raise RuntimeError("relation render_jobs has no column x")
@@ -196,7 +197,7 @@ async def test_a_500_from_the_accept_route_is_not_unreachable(
     with pytest.raises(CrudUnavailableError) as failed:
         await _accept(jobs, _job())
     assert time.monotonic() - started < 3
-    assert failed.value.outcome == "unavailable" and not failed.value.unreachable
+    assert failed.value.failure == "unavailable" and not failed.value.passes
 
 
 async def test_claims_steps_and_reads_reach_the_row(
@@ -228,3 +229,15 @@ async def test_a_slow_route_makes_a_project_write_raise_inside_its_attempt(
     with pytest.raises(CrudUnavailableError):
         await asyncio.to_thread(jobs.set_claims, job.id, 2)
     assert time.monotonic() - started < PROJECT_TIMEOUT.total_seconds()
+
+
+async def test_a_database_out_of_reach_at_the_accept_route_passes(
+    jobs: RemoteJobProjection, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreachable(*_: object, **__: object) -> Job:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(projection, "accept", unreachable)
+    with pytest.raises(CrudUnavailableError) as failed:
+        await _accept(jobs, _job())
+    assert failed.value.failure == "database_unavailable" and failed.value.passes

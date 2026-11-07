@@ -45,6 +45,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import use_traceparent
 from scadbuddy.crud.client import CrudSyncClient
+from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.render import RemoteJobProjection
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import submit as submit_module
@@ -1788,31 +1789,69 @@ async def test_an_older_builds_start_renders_its_row_on_this_worker(
     assert described.status == WorkflowExecutionStatus.COMPLETED
 
 
-async def test_an_api_out_of_reach_at_the_accept_is_still_accepting_not_a_500(
-    make_service: ServiceFactory, deps: WorkerDeps
-) -> None:
-    """The API out of reach (its route missing, as on an old pod) past the accept's
-    retries is transient: the request is still accepting, not a 500 render-unstartable
-    that tells clients not to send it again (review #1066 (11))."""
-    missing = CrudSyncClient(
-        "http://api",
-        "render",
-        ServiceAuth(FixedToken()),
-        transport=httpx.MockTransport(lambda _: httpx.Response(404)),
-        backoff=0.01,
-    )
-    unreachable = replace(deps, projection=RemoteJobProjection(missing))
+async def _still_accepting(make_service: ServiceFactory, deps: WorkerDeps) -> int:
+    """Submits once on ``deps`` and expects the request still accepting; how many accepts
+    the worker made."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        acts = ProjectingActivities(unreachable)
+        acts = ProjectingActivities(deps)
         async with _worker(client, queue, acts):
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
         await service.aclose()
-    missing.close()
+    return acts.accepts
 
-    assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
+
+def _answering(deps: WorkerDeps, answer: httpx.Response) -> tuple[WorkerDeps, CrudSyncClient]:
+    """``deps`` on an API that answers every request with ``answer``."""
+    crud = CrudSyncClient(
+        "http://api",
+        "render",
+        ServiceAuth(FixedToken()),
+        transport=httpx.MockTransport(lambda _: answer),
+        backoff=0.01,
+    )
+    return replace(deps, projection=RemoteJobProjection(crud)), crud
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # The route missing, as on an old API pod: the API out of reach.
+        httpx.Response(404),
+        # The worker's credential refused, as inside the exchange's hold-off.
+        httpx.Response(401, json={"reason": "no_credential"}, headers=CRUD_HEADERS),
+    ],
+    ids=["route-missing", "credential-refused"],
+)
+async def test_a_state_that_passes_at_the_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory, deps: WorkerDeps, answer: httpx.Response
+) -> None:
+    """Past the accept's retries it is transient: the request is still accepting, not a
+    500 render-unstartable that tells clients not to send it again (review #1066 (11))."""
+    passing, crud = _answering(deps, answer)
+    try:
+        accepts = await _still_accepting(make_service, passing)
+    finally:
+        crud.close()
+    assert accepts >= ACCEPT_RETRY.maximum_attempts
+
+
+async def test_a_database_outage_at_the_accept_route_is_still_accepting_not_a_500(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Postgres out of reach at the API is the route's 503 `database-unavailable`, a
+    state that passes (review #1066 (11))."""
+
+    def unreachable(*_: object, **__: object) -> Job:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(projection, "accept", unreachable)
+    assert await _still_accepting(make_service, deps) >= ACCEPT_RETRY.maximum_attempts
 
 
 async def test_a_500_from_the_accept_route_is_answered_unstartable(

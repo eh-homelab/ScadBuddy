@@ -43,7 +43,7 @@ from temporalio import activity
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.crud.guard import CRUD_HEADER, PREFIX, CrudCaller
+from scadbuddy.crud.guard import CRUD_HEADER, DATABASE_UNAVAILABLE, PREFIX, CrudCaller
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +59,38 @@ OUT_OF_SCOPE = "out_of_scope"
 Outcome = Literal["ok", "refused", "route_missing", "unavailable", "transport", "reexchange"]
 
 
+#: Why a call's last try failed. ``unreached``: no connection was made (refused, a connect
+#: or pool timeout), so the request never reached an API pod. ``transport``: any other
+#: transport failure, a read timeout among them, after which the write may have run.
+Failure = Literal[
+    "unreached",
+    "transport",
+    "route_missing",
+    "unavailable",
+    "database_unavailable",
+    "reexchange",
+]
+#: The failures that pass and that a caller may answer as "try again later": the request
+#: never ran (`unreached`, `route_missing`, a refused credential inside the exchange's
+#: hold-off) or the API's database is out of reach (`database_unavailable`). A suspended
+#: caller's credential is refused until it is resumed, and so passes too.
+PASSING: frozenset[Failure] = frozenset(
+    {"unreached", "route_missing", "reexchange", "database_unavailable"}
+)
+
+
 class CrudUnavailableError(Exception):
     """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
-    ``outcome`` is the last try's: ``transport`` or ``route_missing`` (the API is out of
-    reach, `unreachable`), ``unavailable`` (a 5xx of the route) or ``reexchange``."""
+    ``failure`` is the last try's (`Failure`); `passes` says whether it is one that
+    passes (`PASSING`), unlike a route's 5xx or a read timeout."""
 
-    def __init__(self, message: str, outcome: Outcome) -> None:
+    def __init__(self, message: str, failure: Failure) -> None:
         super().__init__(message)
-        self.outcome = outcome
+        self.failure = failure
 
     @property
-    def unreachable(self) -> bool:
-        """No API pod with the route answered: a state that passes, unlike a route's 5xx."""
-        return self.outcome in ("transport", "route_missing")
+    def passes(self) -> bool:
+        return self.failure in PASSING
 
 
 class CrudRefusedError(Exception):
@@ -116,7 +135,7 @@ class _Call:
         self.refresh = False
         self.fresh_connection = False
         self.last = "no attempt"
-        self.outcome: Outcome = "transport"
+        self.failure: Failure = "unreached"
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -130,7 +149,7 @@ class _Call:
         status = response.status_code
         if CRUD_HEADER not in response.headers:
             self.last = f"{status} without {CRUD_HEADER}: the route is missing"
-            self.outcome = "route_missing"
+            self.failure = "route_missing"
             self.fresh_connection = True
             self.observe("route_missing", started)
             return "retry"
@@ -139,14 +158,15 @@ class _Call:
             return "done"
         if status >= 500:
             self.last = f"{status} from the API"
-            self.outcome = "unavailable"
+            database = _problem(response).get("reason") == DATABASE_UNAVAILABLE
+            self.failure = "database_unavailable" if database else "unavailable"
             self.observe("unavailable", started)
             return "retry"
         problem = _problem(response)
         stale = status == 401 or (status == 403 and problem.get("reason") == OUT_OF_SCOPE)
         if stale:
             self.last = f"{status} for a stale credential"
-            self.outcome = "reexchange"
+            self.failure = "reexchange"
             self.refresh = status == 403 and "Authorization" in response.request.headers
             self.observe("reexchange", started)
             return "retry"
@@ -160,14 +180,15 @@ class _Call:
 
     def failed(self, error: Exception, started: float) -> None:
         self.last = f"{type(error).__name__}: {error}"
-        self.outcome = "transport"
+        unreached = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+        self.failure = "unreached" if unreached else "transport"
         self.observe("transport", started)
 
     def delay(self) -> float:
         """The wait before the next try; raises once the budget is spent."""
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
-            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}", self.outcome)
+            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}", self.failure)
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1
         return wait

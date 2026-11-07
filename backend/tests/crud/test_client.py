@@ -429,7 +429,7 @@ def test_a_calls_budget_replaces_the_clients() -> None:
     with pytest.raises(CrudUnavailableError) as failed:
         client.request("GET", PATH, budget=1.0)
     assert clock.now == pytest.approx(1.0)
-    assert failed.value.outcome == "unavailable" and not failed.value.unreachable
+    assert failed.value.failure == "unavailable" and not failed.value.passes
     clock.now = 0.0
     with pytest.raises(CrudUnavailableError):
         client.request("GET", PATH)
@@ -437,19 +437,25 @@ def test_a_calls_budget_replaces_the_clients() -> None:
 
 
 @pytest.mark.parametrize(
-    ("answer", "outcome"),
+    ("answer", "failure", "passes"),
     [
-        (httpx.ConnectError("refused"), "transport"),
-        (httpx.Response(404), "route_missing"),
+        (httpx.ConnectError("refused"), "unreached", True),
+        (httpx.ConnectTimeout("slow"), "unreached", True),
+        (httpx.Response(404), "route_missing", True),
+        (problem(401), "reexchange", True),
+        (problem(503, reason="database-unavailable"), "database_unavailable", True),
+        # The request may have run: not a state that passes.
+        (httpx.ReadTimeout("slow"), "transport", False),
+        (problem(500), "unavailable", False),
     ],
 )
-def test_an_api_out_of_reach_is_unreachable(
-    answer: httpx.Response | Exception, outcome: str
+def test_only_a_request_that_never_ran_or_a_database_out_of_reach_passes(
+    answer: httpx.Response | Exception, failure: str, passes: bool
 ) -> None:
     client = _clocked(Script(answer), FakeClock(), budget=1.0)
     with pytest.raises(CrudUnavailableError) as failed:
         client.request("GET", PATH)
-    assert failed.value.outcome == outcome and failed.value.unreachable
+    assert (failed.value.failure, failed.value.passes) == (failure, passes)
 
 
 async def test_blocking_shares_the_api_credential_and_options() -> None:

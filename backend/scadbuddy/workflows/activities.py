@@ -903,9 +903,12 @@ class RenderActivities:
             # (review #1066 (11)).
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
         except CrudUnavailableError as error:
-            # The API out of reach passes too. A 5xx of its route (an unexpected SQL error
-            # there) is a failure no retry fixes: it fails the attempt, as it did here.
-            if not error.unreachable:
+            # A state that passes passes here too: the API out of reach, its database out
+            # of reach, a credential refused until the exchange's hold-off ends (or the
+            # caller is resumed). A 5xx of the route (an unexpected SQL error there) or a
+            # read timeout (the write may have run) fails the attempt: `ACCEPT_RETRY`
+            # retries it in this run, where the row is found by its workflow ids.
+            if not error.passes:
                 raise
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
