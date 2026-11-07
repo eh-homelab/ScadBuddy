@@ -6,7 +6,11 @@ export function useNow(active: boolean, ms = 1000): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!active) return
-    const timer = setInterval(() => setNow(Date.now()), ms)
+    // #5585 — read at once: a run that starts long after mount would read its mount time
+    // until the first tick.
+    const tick = () => setNow(Date.now())
+    tick()
+    const timer = setInterval(tick, ms)
     return () => clearInterval(timer)
   }, [active, ms])
   return now
