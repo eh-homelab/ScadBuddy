@@ -1640,7 +1640,9 @@ def _check_written(
     part of a slot in ``wanted`` carries each of that slot's settings once, and every
     other key a slot sets keeps the values it had. So a part the patterns read as
     another slot than ElementTree does is refused, whether it lacks its settings or
-    took another slot's (#5646)."""
+    took another slot's (#5646). A file with a part that is not in exactly one object
+    (a nested object, or a part outside any object) is refused too, because the parts
+    of ``after`` and ``before`` could not be paired (#5656)."""
     keys = {key for settings in wanted.values() for key, _ in settings}
 
     def values(element: ET.Element, key: str) -> list[str | None]:
