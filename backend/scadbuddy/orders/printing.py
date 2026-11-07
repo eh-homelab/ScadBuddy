@@ -39,6 +39,13 @@ A library file item (#5544) prints its file as ``POST /print/library/{file_id}/r
 does (``api/library_print.py`` ``start_library_run``), on the run subject
 ``library:<file id>``. The check reads the file from the library that serves, as that
 route does: one deleted, or of the other library, is 409 ``library_file_gone``.
+Every print of one file shares that subject, and the follow reads and records only the
+subject's newest run's print (``bambuddy/follow.py``, ``bambuddy/progress.py``
+``library_progress``, ``bambuddy/outcomes.py``). So of two items of one file printing at
+once (two items of one order, the file on two orders, or a dialog print of it), only the
+newer attempt settles by itself; the older one stays `unknown` and is settled by hand
+(#5611). Making the outcome reach each attempt by its own run needs a follow per run,
+not per subject, through the follow workflow, the progress reads and the LAN reads.
 """
 
 from __future__ import annotations
@@ -333,7 +340,6 @@ async def _library_stands(
     await _quoted_file_stands(blobs, item, quote)
     return {
         "library_file_id": file.id,
-        "slug": f"library-{file.id}",
         "copies": copies,
         "quote_id": quote.id,
         "sliced_sha256": quote.sliced_sha256,
