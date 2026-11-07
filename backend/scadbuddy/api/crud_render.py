@@ -1,8 +1,8 @@
 """The render worker's CRUD routes (#5298): the store settings it renders with (inventory
 R2), for `crud/render.py` `RemoteRenderSettingsSource`, its jobs' rows (R3-R10), for
 `RemoteJobProjection`, and its jobs' blob refs and the piece geometry (R11, R12), for
-`RemoteBlobRefs` and `RemoteGeometryIndex`, and the blob index (R13-R16), for
-`RemoteBlobIndex`.
+`RemoteBlobRefs` and `RemoteGeometryIndex`, the blob index (R13-R16), for
+`RemoteBlobIndex`, and the Bambuddy store's folders (R17, R18), for `RemoteStoreFolders`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.render`` (plan D8): the
 render key (or the full key while no render key is saved) and the S3 keys. The CRUD
@@ -20,13 +20,15 @@ from typing import Annotated, Any
 
 from fastapi import Query, Request, status
 from psycopg import Connection
-from psycopg.errors import DeadlockDetected
+from psycopg.errors import DeadlockDetected, LockNotAvailable
 from psycopg.rows import DictRow
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
+from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
@@ -40,6 +42,7 @@ from scadbuddy.library.settings_store import RenderStoreSettings, load_render_st
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
+from scadbuddy.store.bambuddy import FolderFinder, FolderRole, Inbox, instance_key, render_target
 from scadbuddy.store.content_models import BlobRef as IndexedRef
 from scadbuddy.store.content_models import BlobStat, ReuseLostError
 from scadbuddy.store.geometry import GeometryIndex
@@ -59,6 +62,17 @@ REUSE_LOST = "reuse-lost"
 #: An index write Postgres picked as a deadlock's victim on every try:
 #: `crud/render.py` `DEADLOCK`.
 DEADLOCK = "deadlock"
+#: A folder find for a Bambuddy or inbox that is not the API's render target:
+#: `crud/render.py` `RemoteStoreFolders`.
+TARGET_MOVED = "target-moved"
+#: A folder find Bambuddy did not answer (unreachable, a timeout, a 5xx): a 424, which
+#: the CRUD client does not retry, so the call fails at once as the SQL find did and
+#: the activity's own retry takes over. `crud/render.py` `BAMBUDDY_UNAVAILABLE`.
+BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
+#: A folder find whose lock the API waited `FOLDER_LOCK_SECONDS` for in vain: a 423, which
+#: the client does not retry, so the call fails after one wait as the SQL find did.
+#: `crud/render.py` `FOLDER_LOCKED`.
+FOLDER_LOCKED = "folder-locked"
 
 
 def released(current: RenderStoreSettings) -> list[str]:
@@ -523,3 +537,90 @@ async def index_delete(
         lambda index, conn: _json(BlobIndex.delete_in(conn, key, backend=backend)),
     )
     return None if answer is None else BlobStat.model_validate(answer)
+
+
+# -- the Bambuddy store's folders (inventory R17, R18) ----------------------------
+#
+# Plan D6: a find holds the folder's advisory lock across its Bambuddy calls, so the
+# whole find runs here, in one request, with the API's own client on its render target
+# (the render key, as the worker's was), and no lock outlives the request. It takes the
+# lock an older worker still finding over SQL takes (`folder_lock_key`, the same 30 s
+# `lock_timeout`), so the two exclude each other during a roll. A lock waited for in vain
+# (`LockNotAvailable`) and Bambuddy not answering are 4xx answers the worker's client does
+# not send again (a 423 ``folder-locked``, a 424 ``bambuddy-unavailable``): the call fails
+# after the one wait, with the error the SQL find raised, and Temporal's retry takes
+# over. Every route is natural; a forget of nothing is a success.
+
+
+class FolderFind(BaseModel):
+    slug: str
+    role: FolderRole
+    #: The template's title, which names its folder (`folder_name`).
+    title: str
+    #: The worker's Bambuddy (`instance_key`) and inbox, which must be the API's.
+    instance: str
+    inbox_id: int
+
+
+class FolderFound(BaseModel):
+    folder_id: int
+
+
+def _folders(state: AppState) -> FolderFinder:
+    return FolderFinder(state.settings_store.pool)
+
+
+@router.post("/store-folders/find", name="crud_render_find_store_folder")
+async def find_store_folder(body: FolderFind, state: StateDep) -> FolderFound:
+    """R17: the folder of ``slug`` in ``role``, found in Bambuddy or made there, and
+    recorded. A worker whose Bambuddy or inbox is not the API's (its settings older than
+    a change in Settings) is a 409 ``target-moved``: a folder id of one Bambuddy is
+    another folder on the other. Bambuddy not answering is a 424
+    ``bambuddy-unavailable`` carrying the status and title its client raised
+    (``upstream_status``), and a lock waited for in vain a 423 ``folder-locked``: never a
+    5xx the worker's client would send again."""
+    pool = state.settings_store.pool
+    target = render_target(
+        await asyncio.to_thread(load_render_store_settings, pool, state.settings)
+    )
+    inbox = Inbox(target.instance, target.inbox_id)
+    if Inbox(instance_key(body.instance), body.inbox_id) != inbox:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "The Bambuddy store's URL or library folder has changed in Settings.",
+            reason=TARGET_MOVED,
+        )
+    try:
+        async with BambuddyClient(target.config) as client:
+            found = await _folders(state).find(client, inbox, body.slug, body.role, body.title)
+    except LockNotAvailable as error:
+        raise ApiError(status.HTTP_423_LOCKED, str(error).strip(), reason=FOLDER_LOCKED) from error
+    except ApiError as error:
+        if error.type != UNAVAILABLE_PROBLEM:
+            raise
+        raise ApiError(
+            status.HTTP_424_FAILED_DEPENDENCY,
+            error.detail,
+            title=error.title,
+            type_=error.type,
+            reason=BAMBUDDY_UNAVAILABLE,
+            upstream_status=error.status,
+            **error.extensions,
+        ) from error
+    return FolderFound(folder_id=found)
+
+
+@router.delete("/store-folders", name="crud_render_forget_store_folders")
+async def forget_store_folders(
+    state: StateDep, slug: str = Query(), instance: str = Query(), inbox_id: int = Query()
+) -> None:
+    """R18: drop a template's recorded folders (an empty ``slug``: the fonts')."""
+    await _folders(state).forget(Inbox(instance, inbox_id), slug)
+
+
+@router.get("/store-folders/work", name="crud_render_work_store_folders")
+async def work_store_folders(
+    state: StateDep, instance: str = Query(), inbox_id: int = Query()
+) -> list[int]:
+    """R18: the `Work/` folders recorded under one inbox of one Bambuddy."""
+    return sorted(await _folders(state).work_folders(Inbox(instance, inbox_id)))

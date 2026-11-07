@@ -222,8 +222,8 @@ async def test_a_file_moved_out_while_the_folders_load_is_not_deleted(
     backend = BambuddyContentBackend(target(), pool)
     load = backend._work_folders
 
-    def load_then_move(inbox: Any) -> set[int]:
-        work = load(inbox)
+    async def load_then_move(inbox: Any) -> set[int]:
+        work = await load(inbox)
         folder["id"] = 99  # the user moves the file in Bambuddy meanwhile
         return work
 
