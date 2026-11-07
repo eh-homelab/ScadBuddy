@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NoReturn
 from unittest import mock
 
+import httpx
 import psycopg
 import pytest
 from opentelemetry import trace
@@ -35,6 +36,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
+from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.config import load_config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
@@ -42,6 +44,10 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import use_traceparent
+from scadbuddy.crud import render as crud_render_module
+from scadbuddy.crud.client import CrudSyncClient
+from scadbuddy.crud.guard import CRUD_HEADERS
+from scadbuddy.crud.render import RemoteJobProjection
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import submit as submit_module
 from scadbuddy.render.job_models import (
@@ -104,6 +110,7 @@ from scadbuddy.workflows.pipelines import (
     RenderPreview,
     TemplatePipeline,
 )
+from tests.crud.crud_support import FixedToken, served_render_jobs
 from tests.support.pipelines import FakeWorld
 from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
@@ -237,16 +244,19 @@ async def projection(pg_conninfo: str) -> AsyncIterator[JobProjection]:
 
 
 @pytest.fixture
-def deps(projection: JobProjection, paths: DataPaths) -> WorkerDeps:
+async def deps(projection: JobProjection, paths: DataPaths) -> AsyncIterator[WorkerDeps]:
+    """The render worker's: its job rows through the API's CRUD routes on ``projection``
+    (#5298), whose outage it gives up on after a second."""
     config = replace(load_config({}), data_dir=paths.root)
-    return WorkerDeps(
-        config=config,
-        paths=paths,
-        assets=AssetStore(paths.assets),
-        blobs=LocalBlobStore(paths.blobs),
-        refs=BlobRefs(projection.pool),
-        projection=projection,
-    )
+    async with served_render_jobs(projection, unavailable_budget=1.0) as jobs:
+        yield WorkerDeps(
+            config=config,
+            paths=paths,
+            assets=AssetStore(paths.assets),
+            blobs=LocalBlobStore(paths.blobs),
+            refs=BlobRefs(projection.pool),
+            projection=jobs,
+        )
 
 
 ServiceFactory = Callable[..., RenderService]
@@ -1780,20 +1790,9 @@ async def test_an_older_builds_start_renders_its_row_on_this_worker(
     assert described.status == WorkflowExecutionStatus.COMPLETED
 
 
-async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
-    make_service: ServiceFactory,
-    deps: WorkerDeps,
-    projection: JobProjection,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Postgres out of reach past the accept's retries is transient: the request is
-    still accepting, not a 500 render-unstartable that tells clients not to send it
-    again (review #1066 (11))."""
-
-    def unreachable(*_: object, **__: object) -> Job:
-        raise psycopg.OperationalError("connection refused")
-
-    monkeypatch.setattr(projection, "accept", unreachable)
+async def _still_accepting(make_service: ServiceFactory, deps: WorkerDeps) -> int:
+    """Submits once on ``deps`` and expects the request still accepting; how many accepts
+    the worker made."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
@@ -1802,8 +1801,149 @@ async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
             with pytest.raises(CommandStillAcceptingError):
                 await service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
         await service.aclose()
+    return acts.accepts
 
-    assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
+
+def _answering(deps: WorkerDeps, answer: httpx.Response) -> tuple[WorkerDeps, CrudSyncClient]:
+    """``deps`` on an API that answers every request with ``answer``."""
+    crud = CrudSyncClient(
+        "http://api",
+        "render",
+        ServiceAuth(FixedToken()),
+        transport=httpx.MockTransport(lambda _: answer),
+        backoff=0.01,
+    )
+    return replace(deps, projection=RemoteJobProjection(crud)), crud
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # The route missing, as on an old API pod: the API out of reach.
+        httpx.Response(404),
+        # The worker's credential refused, as inside the exchange's hold-off.
+        httpx.Response(401, json={"reason": "no_credential"}, headers=CRUD_HEADERS),
+    ],
+    ids=["route-missing", "credential-refused"],
+)
+async def test_a_state_that_passes_at_the_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory, deps: WorkerDeps, answer: httpx.Response
+) -> None:
+    """Past the accept's retries it is transient: the request is still accepting, not a
+    500 render-unstartable that tells clients not to send it again (review #1066 (11))."""
+    passing, crud = _answering(deps, answer)
+    try:
+        accepts = await _still_accepting(make_service, passing)
+    finally:
+        crud.close()
+    assert accepts >= ACCEPT_RETRY.maximum_attempts
+
+
+async def test_a_database_outage_at_the_accept_route_is_still_accepting_not_a_500(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Postgres out of reach at the API is the route's 503 `database-unavailable`, a
+    state that passes (review #1066 (11))."""
+
+    def unreachable(*_: object, **__: object) -> Job:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(projection, "accept", unreachable)
+    assert await _still_accepting(make_service, deps) >= ACCEPT_RETRY.maximum_attempts
+
+
+def _slow_accepts(
+    projection: JobProjection, monkeypatch: pytest.MonkeyPatch, slow: int
+) -> list[float]:
+    """The API's accept answers past the worker's wait (`ACCEPT_TIMEOUT`, and with it
+    `ACCEPT_BUDGET`, scaled down: no try follows a timed-out one in the same call) its
+    first ``slow`` times, then at once; each still writes. The calls' times."""
+    monkeypatch.setattr(crud_render_module, "ACCEPT_TIMEOUT", 0.5)
+    monkeypatch.setattr(crud_render_module, "ACCEPT_BUDGET", 0.25)
+    accept = projection.accept
+    calls: list[float] = []
+
+    def slowly(*args: Any, **kwargs: Any) -> Job:
+        calls.append(time.monotonic())
+        if len(calls) <= slow:
+            time.sleep(1.0)
+        return accept(*args, **kwargs)
+
+    monkeypatch.setattr(projection, "accept", slowly)
+    return calls
+
+
+async def test_an_api_slow_on_every_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read timeout fails the first attempts but passes on the last: a persistently
+    slow API is a state that passes (`pipelines.ACCEPT_RETRY`)."""
+    calls = _slow_accepts(projection, monkeypatch, slow=ACCEPT_RETRY.maximum_attempts)
+    assert await _still_accepting(make_service, deps) == ACCEPT_RETRY.maximum_attempts
+    assert len(calls) == ACCEPT_RETRY.maximum_attempts
+
+
+async def test_a_slow_first_accept_is_retried_in_the_same_run(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry finds the row the slow attempt committed, by its workflow ids."""
+    _slow_accepts(projection, monkeypatch, slow=1)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            job = await service.submit(SLUG, {"width": _w()})
+            await _settled(projection, job.id)
+        await service.aclose()
+
+    assert acts.accepts == 2
+    with projection.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id, workflow_run_id FROM render_jobs WHERE workflow_id = %s",
+            (job.workflow_id,),
+        ).fetchall()
+    assert [(r["id"], r["workflow_run_id"]) for r in rows] == [(job.id, job.workflow_run_id)]
+
+
+async def test_a_500_from_the_accept_route_is_answered_unstartable(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error the API's accept does not expect is a failure no retry fixes, as it was
+    over SQL: past the accept's retries the request is answered render-unstartable."""
+
+    def broken(*_: object, **__: object) -> Job:
+        raise psycopg.errors.UndefinedColumn("column x does not exist")
+
+    monkeypatch.setattr(projection, "accept", broken)
+    params: dict[str, ParamValue] = {"width": _w()}
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            began = time.monotonic()
+            with pytest.raises(WorkflowUpdateFailedError) as refused:
+                await service.submit(SLUG, params)
+            took = time.monotonic() - began
+        await service.aclose()
+
+    assert took < submit_module.SUBMIT_DEADLINE
+    cause = refused.value.cause
+    assert isinstance(cause, ApplicationError) and cause.type == RENDER_UNSTARTABLE
+    assert acts.accepts == ACCEPT_RETRY.maximum_attempts
 
 
 async def test_rows_nothing_will_settle_are_failed_without_a_restart(

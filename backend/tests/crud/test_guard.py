@@ -6,8 +6,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import psycopg
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -35,6 +37,10 @@ class Body(BaseModel):
     n: int
 
 
+class _KnownError(LookupError):
+    """An error the app has a handler of its own for."""
+
+
 class _Noted:
     def note(self, *args: object) -> None: ...
 
@@ -57,8 +63,25 @@ def _client(mode: str = "off") -> TestClient:
     def body(item: Body) -> dict[str, int]:
         return {"n": item.n}
 
+    @router.get("/broken")
+    def broken() -> None:
+        raise RuntimeError("relation runs has no column x")
+
+    @router.get("/database")
+    def database() -> None:
+        raise psycopg.OperationalError("connection refused")
+
+    @router.get("/known")
+    def known() -> None:
+        raise _KnownError("not installed")
+
     app.include_router(router, prefix="/api/v1")
     install_problem_handlers(app)
+
+    @app.exception_handler(_KnownError)
+    async def _known(request: Request, error: _KnownError) -> JSONResponse:
+        return JSONResponse({"detail": str(error)}, status_code=409)
+
     app.add_middleware(AuthGate, sessions=lambda: None, credentials=lambda: Credentials())  # type: ignore[arg-type,return-value]
     return TestClient(app)
 
@@ -123,3 +146,36 @@ def test_a_service_class_refusal_asks_for_a_bearer(route_cls: str) -> None:
     error = refusal(route_cls, "no_credential", bearer=False)  # type: ignore[arg-type]
     assert error.status == 401
     assert error.headers == {"WWW-Authenticate": 'Bearer realm="scadbuddy"'}
+
+
+def test_an_unexpected_error_is_a_500_with_the_crud_headers() -> None:
+    """Without them the client would take it for a missing route (`crud/client.py`)."""
+    client = TestClient(_client("enforce").app, raise_server_exceptions=False)
+    answer = client.get(
+        "/api/v1/internal/crud/projects/broken", headers={"authorization": "Bearer sbsvc_projects"}
+    )
+    assert answer.status_code == 500
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"
+    assert answer.json()["detail"] == "RuntimeError"
+
+
+def _as_projects(path: str) -> Any:
+    client = TestClient(_client("enforce").app, raise_server_exceptions=False)
+    return client.get(
+        f"/api/v1/internal/crud/projects/{path}",
+        headers={"authorization": "Bearer sbsvc_projects"},
+    )
+
+
+def test_a_database_out_of_reach_is_a_503_that_says_so() -> None:
+    answer = _as_projects("database")
+    assert answer.status_code == 503
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"
+    assert answer.json()["reason"] == "database-unavailable"
+
+
+def test_an_error_the_app_handles_gets_the_apps_answer_with_the_crud_headers() -> None:
+    answer = _as_projects("known")
+    assert answer.status_code == 409
+    assert answer.json() == {"detail": "not installed"}
+    assert answer.headers["X-ScadBuddy-Crud"] == "1"

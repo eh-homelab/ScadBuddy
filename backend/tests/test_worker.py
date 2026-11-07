@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast, get_args
+from typing import Any, ClassVar, NoReturn, cast, get_args
 
 import httpx
 import psycopg
@@ -61,9 +61,12 @@ from scadbuddy.auth.service_credentials import (
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import ROLE_SERIES, Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.guard import CRUD_HEADERS
+from scadbuddy.crud.render import RemoteJobProjection
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
@@ -116,7 +119,7 @@ from tests.conftest import (
     PgPool,
     fake_3mf_openscad,
 )
-from tests.crud.crud_support import FixedToken, static_render_crud
+from tests.crud.crud_support import FixedToken, served_render_crud, static_render_crud
 from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
@@ -190,19 +193,21 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
         model_version=revision,
         created_at=datetime.now(UTC),
     )
-    projection = JobProjection(pg_conninfo, pool_size=2)
+    # The API's: the worker writes its job rows through the CRUD routes on it (#5298).
+    projection = JobProjection(
+        pg_conninfo,
+        pool_size=2,
+        events=PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo)),
+    )
     projection.open()
     try:
-        async with temporal_client() as client:
+        async with (
+            temporal_client() as client,
+            served_render_crud(projection.pool, cfg, projection=projection) as crud,
+        ):
             stop = asyncio.Event()
             worker = asyncio.create_task(
-                run_worker(
-                    cfg,
-                    stop=stop,
-                    health_port=health_socket,
-                    client=client,
-                    crud=static_render_crud(),
-                )
+                run_worker(cfg, stop=stop, health_port=health_socket, client=client, crud=crud)
             )
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
@@ -234,7 +239,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     assert stored.result is not None
     key = piece_key(model, revision, "model.scad", params)
     assert (cfg.data_dir / "blobs" / key).is_dir()
-    # The worker's own bus published the job's events.
+    # The API published the job's events, written for the worker.
     with psycopg.connect(pg_conninfo) as conn:
         kinds = {
             row[0]
@@ -457,19 +462,20 @@ async def test_the_render_workers_credential_has_no_view_to_fall_back_to(
         await crud.aclose()
 
 
-async def test_the_render_worker_waits_for_the_settings_area(
+async def test_the_render_worker_waits_for_its_areas(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """During a roll the API may be older than the worker (#5298): it reads no settings
-    and opens nothing until the API serves the `settings` area; a stop ends the wait."""
+    and opens nothing until the API serves the `settings` and `jobs` areas; a stop ends
+    the wait. This API serves the settings only."""
     asked: list[str] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
-        return httpx.Response(200, json={"areas": []}, headers=CRUD_HEADERS)
+        return httpx.Response(200, json={"areas": ["settings"]}, headers=CRUD_HEADERS)
 
     def build(*_: object, **__: object) -> NoReturn:
-        raise AssertionError("built before the API served the settings area")
+        raise AssertionError("built before the API served the jobs area")
 
     monkeypatch.setattr(worker_module, "build_worker_deps", build)
     crud = CrudClient(
@@ -501,7 +507,7 @@ async def test_a_stop_ends_the_render_workers_first_settings_read(
     async def answer(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
         if request.url.path.endswith("/areas"):
-            return httpx.Response(200, json={"areas": ["settings"]}, headers=CRUD_HEADERS)
+            return httpx.Response(200, json={"areas": ["settings", "jobs"]}, headers=CRUD_HEADERS)
         await asyncio.Event().wait()  # the settings never come
         raise AssertionError("unreachable")
 
@@ -2393,28 +2399,32 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     """`build_worker_deps` on the default store settings (the local store), read once."""
     source, current = StoreSettingsSource(), RenderStoreSettings()
     source.seed(current)
-    return worker_module.build_worker_deps(settings, source, current)
+    jobs = RemoteJobProjection(static_render_crud().blocking())
+    return worker_module.build_worker_deps(settings, source, current, jobs=jobs)
 
 
-def test_a_refused_store_closes_the_projection_the_worker_opened(
+class _RecordingPool(PgPool):
+    """Records each pool the worker opens."""
+
+    opened: ClassVar[list[PgPool]] = []
+
+    def open(self, *args: Any, **kwargs: Any) -> None:
+        super().open(*args, **kwargs)
+        self.opened.append(self)
+
+
+def test_a_refused_store_closes_the_pool_the_worker_opened(
     settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    opened: list[JobProjection] = []
-
-    class Recording(JobProjection):
-        def open(self, *, migrate_schema: bool = True) -> None:
-            assert not migrate_schema  # the worker never migrates (#601)
-            super().open(migrate_schema=migrate_schema)
-            opened.append(self)
-
     def refuse(**_: object) -> NoReturn:
         raise StoreNotReadyError("refused")
 
-    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    monkeypatch.setattr(_RecordingPool, "opened", [])
+    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
     monkeypatch.setattr(worker_module, "build_store", refuse)
     with pytest.raises(StoreNotReadyError):
         _built(settings)
-    assert len(opened) == 1 and opened[0].pool.closed
+    assert len(_RecordingPool.opened) == 1 and _RecordingPool.opened[0].closed
 
 
 async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
@@ -2422,14 +2432,9 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
 ) -> None:
     """#601: on an unmigrated schema the worker waits for the API rather than
     migrating; a stop ends the wait, and what it opened is closed."""
-    opened: list[JobProjection] = []
-
-    class Recording(JobProjection):
-        def open(self, *, migrate_schema: bool = True) -> None:
-            super().open(migrate_schema=migrate_schema)
-            opened.append(self)
-
-    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    opened: list[PgPool] = []
+    monkeypatch.setattr(_RecordingPool, "opened", opened)
+    monkeypatch.setattr(worker_module, "ConnectionPool", _RecordingPool)
     stop = asyncio.Event()
     worker = asyncio.create_task(
         worker_module.run_worker(settings, stop=stop, health_port=None, crud=static_render_crud())
@@ -2441,7 +2446,7 @@ async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
     assert not worker.done()
     stop.set()
     await asyncio.wait_for(worker, timeout=30)
-    assert len(opened) == 1 and opened[0].pool.closed
+    assert len(opened) == 1 and opened[0].closed
     with psycopg.connect(settings.database_url) as conn:
         ledger = conn.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
     assert ledger == (None,)
@@ -2482,22 +2487,22 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
         assert checkout.read_text() == "// std\n"
     finally:
         await store.aclose()
-        deps.projection.close()
+        deps.refs.pool.close()
 
 
 @pytest.mark.requires_postgres
-async def test_the_render_workers_projection_writes_activity(
+async def test_the_render_workers_job_rows_go_through_the_api(
     settings: Settings, pg_pool: PgPool, tmp_path: Path
 ) -> None:
-    """Without it a render's state changes on a worker are missing from activity until
-    the repair sweep."""
+    """#5298: the worker writes no job row, event or activity row over SQL; the API's
+    projection writes them, activity included (`tests/crud/test_crud_render_jobs.py`)."""
     cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
     deps, store = _built(cfg)
     try:
-        assert deps.projection.activity is not None
+        assert isinstance(deps.projection, RemoteJobProjection)
     finally:
         await store.aclose()
-        deps.projection.close()
+        deps.refs.pool.close()
 
 
 @pytest.mark.parametrize(

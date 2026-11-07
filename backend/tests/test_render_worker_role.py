@@ -25,11 +25,14 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.config import available_cpus, default_solid_concurrency
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
-from scadbuddy.crud.render import RemoteRenderSettingsSource
+from scadbuddy.crud.render import RemoteJobProjection, RemoteRenderSettingsSource
 from scadbuddy.library.assets import AssetMeta, AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutLeases, InstallPermits
@@ -59,7 +62,7 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PrepareResult, piece_key
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
-from tests.crud.crud_support import served_render_crud, static_render_crud
+from tests.crud.crud_support import served_render_crud
 from tests.support.renders import render_to_end
 from tests.support.temporal import temporal_client
 
@@ -157,12 +160,31 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
         for relation in ("settings", "render_settings"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
-        for table in ("operations", "print_runs", "saved_presets", "model_print_choices"):
+        # The job rows, their events and activity rows go through the API too (#5298).
+        for table in (
+            "render_jobs",
+            "events",
+            "activity",
+            "operations",
+            "print_runs",
+            "saved_presets",
+            "model_print_choices",
+        ):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
 
 
-def test_the_role_reaches_only_render_activity_rows(owner: Pool, granted: Pool) -> None:
+def _granted_activity_before(owner: Pool, role: str) -> None:
+    """`activity` as a role granted before #5298 moved the job rows to the API holds it,
+    until Task 22 revokes it: `RENDER_ROWS` still holds it to its renders' rows."""
+    with owner.connection() as conn:
+        conn.execute(
+            sql.SQL("GRANT SELECT, INSERT, UPDATE ON activity TO {}").format(sql.Identifier(role))
+        )
+
+
+def test_the_role_reaches_only_render_activity_rows(owner: Pool, granted: Pool, role: str) -> None:
+    _granted_activity_before(owner, role)
     with owner.connection() as conn:
         conn.execute(
             "INSERT INTO activity (id, kind, status, title, source, source_id, principal)"
@@ -204,6 +226,8 @@ def test_a_changed_row_predicate_replaces_the_old_policy(
             ).format(sql.Identifier(f"only_{role}"), sql.Identifier(role))
         )
         assert grant_render_role(conn, role)
+    _granted_activity_before(owner, role)
+    with owner.connection() as conn:
         conn.execute(
             "INSERT INTO activity (id, kind, status, title, source, source_id) VALUES"
             " ('render:a1', 'render', 'running', 'A', 'render_jobs', 'a1'),"
@@ -340,12 +364,16 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
         # Re-read on every call, not on the 30 s TTL.
         source = RemoteRenderSettingsSource(crud, ttl=0)
         current = await source.current()
-        deps, store = await asyncio.to_thread(build_worker_deps, settings, source, current)
+        jobs = RemoteJobProjection(crud.blocking())
+        deps, store = await asyncio.to_thread(
+            build_worker_deps, settings, source, current, jobs=jobs
+        )
         try:
             await _the_slots_follow_the_settings(owner, deps)
         finally:
             await store.aclose()
-            deps.projection.close()
+            deps.refs.pool.close()
+            jobs.close()
 
 
 async def _the_slots_follow_the_settings(owner: Pool, deps: WorkerDeps) -> None:
@@ -422,7 +450,7 @@ def test_the_worker_waits_for_migrations_then_grants(
             )
         with pool.connection() as conn:
             assert pending_migrations(conn) == []
-            assert "render_jobs: INSERT" in missing_privileges(conn)
+            assert "piece_geometry: INSERT" in missing_privileges(conn)
         with pytest.raises(WorkerStoppedError):
             wait_until_ready(pool, stopping=lambda: True, poll=0.01)
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
@@ -552,26 +580,25 @@ async def test_the_worker_renders_as_its_own_role(
         model_version=revision,
         created_at=datetime.now(UTC),
     )
-    async with temporal_client() as client:
-        stop = asyncio.Event()
-        worker = asyncio.create_task(
-            run_worker(
-                cfg,
-                stop=stop,
-                health_port=health_socket,
-                client=client,
-                crud=static_render_crud(),
-            )
-        )
-        try:
-            job = await render_to_end(client, queue, job)
-        finally:
-            stop.set()
-            await asyncio.wait_for(worker, timeout=60)
-
-    projection = JobProjection(pg_conninfo, pool_size=1)
+    # The API's: the worker writes its job rows through the CRUD routes on it (#5298).
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
+    projection = JobProjection(pg_conninfo, pool_size=2, events=bus)
     projection.open()
+    projection.activity = ActivityIndex(projection.pool, events=bus)
     try:
+        async with (
+            temporal_client() as client,
+            served_render_crud(owner, settings, projection=projection) as crud,
+        ):
+            stop = asyncio.Event()
+            worker = asyncio.create_task(
+                run_worker(cfg, stop=stop, health_port=health_socket, client=client, crud=crud)
+            )
+            try:
+                job = await render_to_end(client, queue, job)
+            finally:
+                stop.set()
+                await asyncio.wait_for(worker, timeout=60)
         stored = projection.read(job.id)
     finally:
         projection.close()
@@ -587,7 +614,7 @@ async def test_the_worker_renders_as_its_own_role(
         refs = conn.execute(
             "SELECT count(*) AS n FROM blob_refs WHERE holder_id = %s", (job.id,)
         ).fetchone()
-        # Written by the worker as the role, not left to the repair pass.
+        # Written by the API in the row's transaction, not left to the repair pass.
         activity = conn.execute(
             "SELECT status FROM activity WHERE id = %s", (f"render:{job.id}",)
         ).fetchone()

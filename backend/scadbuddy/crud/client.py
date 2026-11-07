@@ -22,6 +22,9 @@ A render, print or projects worker holds no database secret: it calls
   the same on every attempt of one Temporal activity.
 - ``timeout`` on a request replaces the client's per-request timeout for a route that
   answers later by design (a flow Reset waits on Temporal under the run's lock).
+  ``budget`` replaces ``unavailable_budget`` for a call that must end inside a bound of
+  its own (a render `project` write's 10 s attempt).
+- `CrudClient.blocking` is a `CrudSyncClient` on the same API, credential and options.
 - `wait_for_areas` is a worker's start gate (plan "Rolling deploy"): it polls
   ``GET …/<caller>/areas`` until the API lists every area the worker needs.
 """
@@ -40,7 +43,7 @@ from temporalio import activity
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.crud.guard import CRUD_HEADER, PREFIX, CrudCaller
+from scadbuddy.crud.guard import CRUD_HEADER, DATABASE_UNAVAILABLE, PREFIX, CrudCaller
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +59,38 @@ OUT_OF_SCOPE = "out_of_scope"
 Outcome = Literal["ok", "refused", "route_missing", "unavailable", "transport", "reexchange"]
 
 
+#: Why a call's last try failed. ``unreached``: no connection was made (refused, a connect
+#: or pool timeout), so the request never reached an API pod. ``transport``: any other
+#: transport failure, a read timeout among them, after which the write may have run.
+Failure = Literal[
+    "unreached",
+    "transport",
+    "route_missing",
+    "unavailable",
+    "database_unavailable",
+    "reexchange",
+]
+#: The failures that pass and that a caller may answer as "try again later": the request
+#: never ran (`unreached`, `route_missing`, a refused credential inside the exchange's
+#: hold-off) or the API's database is out of reach (`database_unavailable`). A suspended
+#: caller's credential is refused until it is resumed, and so passes too.
+PASSING: frozenset[Failure] = frozenset(
+    {"unreached", "route_missing", "reexchange", "database_unavailable"}
+)
+
+
 class CrudUnavailableError(Exception):
-    """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable."""
+    """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
+    ``failure`` is the last try's (`Failure`); `passes` says whether it is one that
+    passes (`PASSING`), unlike a route's 5xx or a read timeout."""
+
+    def __init__(self, message: str, failure: Failure) -> None:
+        super().__init__(message)
+        self.failure = failure
+
+    @property
+    def passes(self) -> bool:
+        return self.failure in PASSING
 
 
 class CrudRefusedError(Exception):
@@ -94,14 +127,15 @@ def _problem(response: httpx.Response) -> dict[str, Any]:
 class _Call:
     """One request's retry state, shared by the async and the sync client."""
 
-    def __init__(self, owner: _Base, path: str) -> None:
+    def __init__(self, owner: _Base, path: str, budget: float | None) -> None:
         self._owner = owner
         self._area = _area(path)
-        self._deadline = owner._clock() + owner._budget
+        self._deadline = owner._clock() + (owner._budget if budget is None else budget)
         self._attempt = 0
         self.refresh = False
         self.fresh_connection = False
         self.last = "no attempt"
+        self.failure: Failure = "unreached"
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -115,6 +149,7 @@ class _Call:
         status = response.status_code
         if CRUD_HEADER not in response.headers:
             self.last = f"{status} without {CRUD_HEADER}: the route is missing"
+            self.failure = "route_missing"
             self.fresh_connection = True
             self.observe("route_missing", started)
             return "retry"
@@ -123,12 +158,15 @@ class _Call:
             return "done"
         if status >= 500:
             self.last = f"{status} from the API"
+            database = _problem(response).get("reason") == DATABASE_UNAVAILABLE
+            self.failure = "database_unavailable" if database else "unavailable"
             self.observe("unavailable", started)
             return "retry"
         problem = _problem(response)
         stale = status == 401 or (status == 403 and problem.get("reason") == OUT_OF_SCOPE)
         if stale:
             self.last = f"{status} for a stale credential"
+            self.failure = "reexchange"
             self.refresh = status == 403 and "Authorization" in response.request.headers
             self.observe("reexchange", started)
             return "retry"
@@ -142,13 +180,15 @@ class _Call:
 
     def failed(self, error: Exception, started: float) -> None:
         self.last = f"{type(error).__name__}: {error}"
+        unreached = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+        self.failure = "unreached" if unreached else "transport"
         self.observe("transport", started)
 
     def delay(self) -> float:
         """The wait before the next try; raises once the budget is spent."""
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
-            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}")
+            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}", self.failure)
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1
         return wait
@@ -215,6 +255,25 @@ class CrudClient(_Base):
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    def blocking(self) -> CrudSyncClient:
+        """A `CrudSyncClient` with this client's API, credential and options. A test's
+        transport must also serve blocking requests (`httpx.MockTransport` does), or this
+        raises `TypeError` rather than reach the network."""
+        transport = self._transport
+        if transport is not None and not isinstance(transport, httpx.BaseTransport):
+            raise TypeError(f"{type(transport).__name__} serves no blocking requests")
+        return CrudSyncClient(
+            self._base_url,
+            self._caller,
+            self._auth,
+            transport=transport,
+            timeout=self._timeout,
+            metrics=self._metrics,
+            unavailable_budget=self._budget,
+            backoff=self._backoff,
+            clock=self._clock,
+        )
+
     async def request(
         self,
         method: str,
@@ -223,8 +282,9 @@ class CrudClient(_Base):
         json: Any = None,
         idempotency_key: str | None = None,
         timeout: float | None = None,
+        budget: float | None = None,
     ) -> httpx.Response:
-        call = _Call(self, path)
+        call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
             fresh = self._build() if call.take_fresh_connection() else None
@@ -285,8 +345,9 @@ class CrudSyncClient(_Base):
         json: Any = None,
         idempotency_key: str | None = None,
         timeout: float | None = None,
+        budget: float | None = None,
     ) -> httpx.Response:
-        call = _Call(self, path)
+        call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
             fresh = self._build() if call.take_fresh_connection() else None

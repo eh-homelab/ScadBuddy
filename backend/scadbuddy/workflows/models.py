@@ -355,6 +355,8 @@ LEGACY_PENDING = "LegacyPending"
 #: retries the run closes with no row, and `accepted` answers `closing`, so the request
 #: is still accepting and is sent again (review #1066 (11)).
 ACCEPT_TRANSIENT = "AcceptTransient"
+#: `render_accept`'s attempts (`pipelines.ACCEPT_RETRY`); the activity tells its last.
+ACCEPT_ATTEMPTS = 3
 
 
 class RenderStart(BaseModel):

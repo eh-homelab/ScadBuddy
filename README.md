@@ -723,12 +723,13 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
   the jobs.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
-  role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
+  role, below), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
   id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
-  (`http://scadbuddy:8082`; the worker reads the store settings through its CRUD
-  route, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
+  (`http://scadbuddy:8082`; the worker reads the store settings and writes its jobs'
+  `render_jobs` rows, their `job.*` events and activity rows through its CRUD routes,
+  #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
   `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
   credential. The proof is required: without one the worker refuses to start, since
   it has no other source of a credential. It needs no KEK
@@ -745,8 +746,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (`CREATE ROLE scadbuddy_render LOGIN PASSWORD '…'`; on CNPG a `managed.roles`
   entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
   up by hand. At every start the API grants that role exactly
-  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `render_jobs`,
-  `events`, `blob_refs`, the blob index `store_blobs` and `store_folders`, `assets`,
+  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `blob_refs`,
+  `piece_geometry`, the blob index `store_blobs` and `store_folders`, `assets`,
   the library leases (`library_leases`, `library_pin_holds`,
   `library_install_slots`) and the migrations ledger (read only). It gets nothing
   on `settings`: it reads the store's settings (backend, Bambuddy URL, library
@@ -754,11 +755,13 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `/api/v1/internal/crud/render/settings` (#5298), which answers the full Bambuddy
   key **only while no render key is saved** in Settings, the fallback `/healthz`
   reports as `render_key_fallback`. Save a render key and the worker cannot read the
-  full key at all. A role granted the older `render_settings` view keeps it until
-  #5298 revokes the role. A role created after the API started is granted
+  full key at all. It gets nothing on `render_jobs`, `events` or `activity` either:
+  the API writes a job's row, its events and its activity row for it, through the
+  routes under `/api/v1/internal/crud/render/jobs`. A role granted the older
+  `render_settings` view or those tables keeps them until #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
-  until the API serves its CRUD areas (`settings`) and answers its first read of
+  until the API serves its CRUD areas (`settings`, `jobs`) and answers its first read of
   the store settings, then until the API has applied every migration its build has
   and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
   worker comes up first, it starts once the API has. On the API's own role (the

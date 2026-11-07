@@ -18,7 +18,7 @@ from concurrent.futures import Executor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Concatenate
+from typing import TYPE_CHECKING, Any, Concatenate
 
 import psycopg
 from temporalio import activity
@@ -69,6 +69,7 @@ from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
+    ACCEPT_ATTEMPTS,
     ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
     QUEUE_FULL,
@@ -80,6 +81,9 @@ from scadbuddy.workflows.models import (
     Projection,
     RenderMainResult,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.crud.render import RemoteJobProjection
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +98,8 @@ class WorkerDeps:
     assets: AssetStore
     blobs: BlobStore
     refs: BlobRefs
-    projection: JobProjection
+    #: The render worker's is the API's CRUD routes (#5298); the in-process worker's, SQL.
+    projection: JobProjection | RemoteJobProjection
     history: ModelHistory | None = None
     checkouts: CheckoutGate | None = None
     fetcher: CheckoutFetcher | None = None
@@ -877,6 +882,9 @@ class RenderActivities:
             created_at=now(),
             traceparent=start.traceparent,
         )
+        # Here, not at the top: `crud.client` imports the API, which imports this module.
+        from scadbuddy.crud.client import CrudUnavailableError
+
         try:
             return await asyncio.to_thread(
                 self.deps.projection.accept,
@@ -894,6 +902,17 @@ class RenderActivities:
         except psycopg.OperationalError as error:
             # Postgres out of reach (a pool timeout is one too): a state that passes
             # (review #1066 (11)).
+            raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
+        except CrudUnavailableError as error:
+            # A state that passes passes here too: the API out of reach, its database out
+            # of reach, a credential refused until the exchange's hold-off ends (or the
+            # caller is resumed). A 5xx of the route (an unexpected SQL error there) fails
+            # the attempt. So does a read timeout (the write may have run) but on the last
+            # attempt, where a slow API passes too (`pipelines.ACCEPT_RETRY`): the others
+            # retry in this run, where the row is found by its workflow ids.
+            slow = error.failure == "transport" and activity.info().attempt >= ACCEPT_ATTEMPTS
+            if not (error.passes or slow):
+                raise
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)

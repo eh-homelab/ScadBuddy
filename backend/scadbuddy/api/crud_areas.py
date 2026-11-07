@@ -13,7 +13,7 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: Each caller's complete areas.
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
-    "render": ["settings"],
+    "render": ["settings", "jobs"],
     "print": [],
 }
 
