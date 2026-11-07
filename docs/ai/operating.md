@@ -1059,6 +1059,13 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   unexpanded and the tool expands them after (measured on Claude Code 2.1.310,
   `agent/test/nativeBuiltins.sdk.test.ts`; `$HOME` and `~user` were not expanded). A turn
   with no working directory is offered none of the file tools, and the seam refuses them.
+  One directory outside it is open, to `Read` and `Grep` only (#5542): the session's own
+  `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<session id>/tool-results/`. Claude Code saves a
+  tool result too large to return inline there and tells the model to read it. The encoded
+  cwd is the real cwd with each character outside `[a-zA-Z0-9]` made `-` (read from the
+  bundled Claude Code 2.1.314; `confine.ts` `projectDirName`). The target's real path must be
+  in that directory under the config dir's real path, so a link out, `..` and other sessions'
+  results are refused, and so are the config, the transcripts and the credentials.
   A link swapped in between the check and the
   tool's own open is still followed; only a process the session runs (a Monitor command, an
   allowed package's `Bash`) can make one.

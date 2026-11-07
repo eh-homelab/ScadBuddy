@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import type { AccessRow } from '../src/access/model.js'
 import { NATIVE_BUILTINS, nativeBuiltinTools } from '../src/access/nativeBuiltins.js'
 import { AccessResolver } from '../src/access/resolver.js'
-import { confineGuard } from '../src/harness/confine.js'
+import { confineGuard, projectDirName } from '../src/harness/confine.js'
 import { claudeConfigDir } from '../src/harness/options.js'
 import { TASK_LIST_DIR, ensureStateDirs, linkTaskList } from '../src/harness/stateDirs.js'
 
@@ -201,6 +201,117 @@ describe('the file tools are confined to the session directory', () => {
   it('says nothing about a tool that takes no path', async () => {
     const { guard } = await setup()
     expect(await guard('mcp__scadbuddy__list_models', { path: '/etc' })).toBeUndefined()
+  })
+})
+
+describe("this session's tool-results directory (#5542)", () => {
+  const SESSION = '1a2b3c4d-0000-4000-8000-00000000abcd'
+  const OTHER = '9f8e7d6c-0000-4000-8000-00000000dcba'
+  const setup = async () => {
+    const paths = { stateDir: await mkdtemp(path.join(os.tmpdir(), 'results-state-')) }
+    await ensureStateDirs(paths)
+    const config = claudeConfigDir(paths)
+    const root = await mkdtemp(path.join(os.tmpdir(), 'results.cwd_'))
+    const project = path.join(config, 'projects', projectDirName(root))
+    const dir = path.join(project, SESSION, 'tool-results')
+    await mkdir(dir, { recursive: true })
+    await writeFile(path.join(dir, 'toolu_1.json'), '{"big":true}')
+    const other = path.join(project, OTHER, 'tool-results')
+    await mkdir(other, { recursive: true })
+    await writeFile(path.join(other, 'toolu_2.json'), '{"theirs":true}')
+    await writeFile(path.join(project, `${SESSION}.jsonl`), '{"transcript":true}')
+    await writeFile(path.join(config, '.credentials.json'), '{}')
+    await writeFile(path.join(paths.stateDir, 'secret'), 'kek')
+    return { paths, config, root, project, dir, other, guard: confineGuard(root, { configDir: config, sessionId: SESSION }) }
+  }
+
+  it('names the directory as Claude Code 2.1.314 does', () => {
+    expect(projectDirName('/var/lib/scadbuddy-sessions/b1efa8b4-dd39-4462-ae9d-48097d63d68b')).toBe(
+      '-var-lib-scadbuddy-sessions-b1efa8b4-dd39-4462-ae9d-48097d63d68b',
+    )
+    expect(projectDirName('/a.b/c_d/e f')).toBe('-a-b-c-d-e-f')
+    // Over 200 characters: cut, then `-` and the base-36 hash of the whole path.
+    const long = `/${'x'.repeat(250)}`
+    expect(projectDirName(long)).toMatch(/^-x{199}-[0-9a-z]+$/)
+    expect(projectDirName(long)).not.toBe(projectDirName(`/${'x'.repeat(251)}`))
+  })
+
+  it('lets Read and Grep reach a file in it, and Grep the directory itself', async () => {
+    const { dir, guard } = await setup()
+    expect(await guard('Read', { file_path: path.join(dir, 'toolu_1.json') })).toBeUndefined()
+    expect(await guard('Grep', { pattern: 'big', path: path.join(dir, 'toolu_1.json') })).toBeUndefined()
+    expect(await guard('Grep', { pattern: 'big', path: dir })).toBeUndefined()
+    expect(await guard('Grep', { pattern: 'big', path: `${dir}/` })).toBeUndefined()
+  })
+
+  it('refuses every tool that writes there, and Glob', async () => {
+    const { dir, guard } = await setup()
+    const file = path.join(dir, 'toolu_1.json')
+    for (const [tool, input] of [
+      ['Write', { file_path: file, content: 'x' }],
+      ['Write', { file_path: path.join(dir, 'new.json'), content: 'x' }],
+      ['Edit', { file_path: file, old_string: 'big', new_string: 'small' }],
+      ['NotebookEdit', { notebook_path: path.join(dir, 'n.ipynb'), new_source: 'x' }],
+      ['Glob', { pattern: '*.json', path: dir }],
+      ['Glob', { pattern: `${dir}/*.json` }],
+    ] as const) {
+      expect(await guard(tool, input), `${tool} ${JSON.stringify(input)}`).toMatchObject({ deny: expect.stringContaining('outside it') })
+    }
+  })
+
+  it("refuses another session's results, the transcripts, the config and the rest of the state dir", async () => {
+    const { paths, config, project, other, guard } = await setup()
+    for (const target of [
+      path.join(other, 'toolu_2.json'),
+      other,
+      path.join(project, `${SESSION}.jsonl`),
+      project,
+      path.join(project, SESSION),
+      path.join(config, '.credentials.json'),
+      config,
+      path.join(paths.stateDir, 'secret'),
+      paths.stateDir,
+    ]) {
+      expect(await guard('Read', { file_path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+      expect(await guard('Grep', { pattern: 'x', path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+    }
+  })
+
+  it('refuses a climb with `..` and a link that points out', async () => {
+    const { paths, project, dir, guard } = await setup()
+    await symlink(path.join(paths.stateDir, 'secret'), path.join(dir, 'link.json'))
+    await symlink(path.join(project, OTHER, 'tool-results'), path.join(dir, 'dirlink'))
+    for (const target of [
+      path.join(dir, 'link.json'),
+      path.join(dir, 'dirlink', 'toolu_2.json'),
+      path.join(dir, 'dirlink'),
+      `${dir}/../../${OTHER}/tool-results/toolu_2.json`,
+      `${dir}/../tool-results/toolu_1.json`,
+      `${dir}/../../${SESSION}.jsonl`,
+    ]) {
+      expect(await guard('Read', { file_path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+      expect(await guard('Grep', { pattern: 'x', path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+    }
+  })
+
+  it('refuses it when tool-results itself is a link out', async () => {
+    const { paths, config, root } = await setup()
+    const session = '2b3c4d5e-0000-4000-8000-00000000abcd'
+    const sessionDir = path.join(config, 'projects', projectDirName(root), session)
+    await mkdir(sessionDir, { recursive: true })
+    await symlink(paths.stateDir, path.join(sessionDir, 'tool-results'))
+    const guard = confineGuard(root, { configDir: config, sessionId: session })
+    expect(await guard('Read', { file_path: path.join(sessionDir, 'tool-results', 'secret') })).toMatchObject({
+      deny: expect.stringContaining('outside it'),
+    })
+  })
+
+  it('opens nothing without a session id, or with one that is not a UUID', async () => {
+    const { config, root, project, dir } = await setup()
+    expect(await confineGuard(root)('Read', { file_path: path.join(dir, 'toolu_1.json') })).toMatchObject({ deny: expect.stringContaining('outside it') })
+    await mkdir(path.join(project, 'tool-results'), { recursive: true })
+    const dot = confineGuard(root, { configDir: config, sessionId: '.' })
+    expect(await dot('Read', { file_path: path.join(project, 'tool-results', 'x') })).toMatchObject({ deny: expect.stringContaining('outside it') })
   })
 })
 
