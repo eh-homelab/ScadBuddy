@@ -52,6 +52,8 @@ from scadbuddy.api.jobs import (
     submit_problems,
 )
 from scadbuddy.api.models import (
+    MAX_PAGE_LIMIT,
+    MAX_TAG_FILTER_CHARS,
     PAGED_RESPONSES,
     PNG_MAGIC,
     TOTAL_COUNT_HEADER,
@@ -60,6 +62,7 @@ from scadbuddy.api.models import (
     page_window,
     require_model,
     require_model_exists,
+    select_models,
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -94,6 +97,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
+from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
@@ -945,6 +949,119 @@ async def list_outputs(
     response.headers[TOTAL_COUNT_HEADER] = str(len(metas))
     metas = metas[page_window([meta.id for meta in metas], after, limit, "output")]
     return await _details(outputs, uploads, state.print_runs.store, metas)
+
+
+#: How many models `GET /outputs` takes in `slug`: a bound on the request only.
+MAX_SLUG_FILTERS = 100
+
+
+def _utc(moment: datetime | None) -> datetime | None:
+    """A time with no zone is read as UTC."""
+    if moment is None or moment.tzinfo is not None:
+        return moment
+    return moment.replace(tzinfo=UTC)
+
+
+@router.get(
+    "/outputs",
+    response_model=list[OutputDetail],
+    summary="Recent outputs of every model",
+    responses=PAGED_RESPONSES,
+)
+async def list_recent_outputs(
+    catalogue: CatalogueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    state: StateDep,
+    response: Response,
+    since: Annotated[
+        datetime | None,
+        Query(alias="from", description="Only outputs saved at or after this time (ISO 8601)"),
+    ] = None,
+    to: Annotated[
+        datetime | None, Query(description="Only outputs saved before this time (ISO 8601)")
+    ] = None,
+    slug: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=256)]] | None,
+        Query(max_length=MAX_SLUG_FILTERS, description="Only these models' outputs"),
+    ] = None,
+    tag: Annotated[
+        str | None,
+        Query(
+            min_length=1,
+            max_length=MAX_TAG_FILTER_CHARS,
+            description="Only the outputs of models carrying this catalogue tag",
+        ),
+    ] = None,
+    q: Annotated[
+        str | None,
+        Query(
+            min_length=1,
+            max_length=256,
+            description=(
+                "Text found in the output's name or in its parameters that differ from the"
+                " template's defaults (`name=value`), case folded"
+            ),
+        ),
+    ] = None,
+    ordered: Annotated[
+        Literal["yes", "no"] | None,
+        Query(description="`yes`: only outputs an order item names; `no`: only the others"),
+    ] = None,
+    limit: Annotated[
+        int, Query(ge=1, le=MAX_PAGE_LIMIT, description="At most this many outputs")
+    ] = DEFAULT_LIMIT,
+    after: PageAfter = None,
+) -> list[OutputDetail]:
+    """Recent renders (#4777, order operations spec 2026-11-07 §3.1): the saved outputs of
+    every model, newest first, as `OutputDetail`s like the per-model list's. `after` is
+    an output id; a page is `limit` outputs (50 when omitted) and `X-Total-Count` counts
+    what the filters select. Outputs carry no tags: `tag` matches the model's catalogue
+    tags, case and accents folded."""
+    index = outputs.index
+    if index is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
+    slugs: list[str] | None = list(slug) if slug else None
+    if tag is not None:
+        records = await asyncio.to_thread(catalogue.list_models)
+        tagged = [record.slug for record in select_models(records, None, [tag], None)]
+        slugs = tagged if slugs is None else [s for s in slugs if s in tagged]
+    query = OutputQuery(
+        since=_utc(since),
+        until=_utc(to),
+        slugs=slugs,
+        q=q,
+        ordered=None if ordered is None else ordered == "yes",
+        after=after,
+        limit=limit,
+    )
+    try:
+        ids, total = await asyncio.to_thread(index.query, query)
+    except AfterNotListedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"no output {after!r} is listed any more to page after; list again without `after`",
+        ) from None
+    response.headers[TOTAL_COUNT_HEADER] = str(total)
+    metas = await asyncio.to_thread(_metas_or_forget, outputs, ids)
+    return await _details(outputs, uploads, state.print_runs.store, metas)
+
+
+def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
+    """The outputs ``ids`` name, in order; a row whose output is gone (its model deleted
+    with its directory) is dropped from the index and from the page."""
+    metas: list[OutputMeta] = []
+    gone: list[str] = []
+    for output_id in ids:
+        try:
+            metas.append(outputs.get(output_id))
+        except OutputNotFoundError:
+            gone.append(output_id)
+        except (OSError, ValueError):
+            logger.warning("outputs: %s is unreadable; left out of the list", output_id)
+    if gone and outputs.index is not None:
+        outputs.index.forget(*gone)
+    return metas
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")

@@ -774,6 +774,22 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`components/orders/LibraryFilePicker.tsx` over `GET /print/library/search`), the items
   grid's file line, and `QuoteEditor` and `PrintItem` on a `library` print source; mock
   `mocks/features/orders/orders.ts` `addLibraryItem`.
+  Recent renders (#4777, order operations spec 2026-11-07 §3.1): `GET /outputs` lists every
+  model's saved outputs, newest first, as `OutputDetail`s, filtered by `from`/`to`, `slug`,
+  `tag` (the model's catalogue tags), `q` (name, or the params that differ from the cached
+  schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
+  `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
+  writes on save (a failure is logged), rename and delete; the API's start runs
+  `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
+  whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
+  gone is dropped as it is read. `POST /orders/{id}/items/batch` and
+  `…/items/after-acceptance/batch` (`ItemBatch`, at most `MAX_BATCH_ITEMS` 50) add
+  `ItemCreate`s through `Lifecycle.add_items`, the one transaction every single add now
+  uses (`NewModelItem`, `NewLibraryItem`, `NewCustomItem`, `NewRequestItem`); a body
+  refused before the add names its place, `item_index`. Agent `list_recent_outputs`
+  and `order_item_add`'s `items`; frontend `components/orders/RecentRendersPicker.tsx`
+  ("Recent renders" in `AddItemDialog`), mocks `mocks/features/recentOutputs.ts` and
+  `orders/orders.ts` `addItems`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for

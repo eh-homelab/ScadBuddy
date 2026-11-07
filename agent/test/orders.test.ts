@@ -346,6 +346,56 @@ describe('order tools (#4249)', () => {
     expect(() => z.object(add.shape).parse({ order_id: ORDER, library_file_id: 0 })).toThrow()
   })
 
+  it('adds several items in one request, all or none (#4777)', async () => {
+    const sent: [string, unknown][] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/batch`, async ({ request }) => {
+        sent.push(['batch', await request.json()])
+        return HttpResponse.json([{ id: ITEM }, { id: 'second' }], { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/after-acceptance/batch`, async ({ request }) => {
+        sent.push(['after', await request.json()])
+        return HttpResponse.json([{ id: ITEM }], { status: 201 })
+      }),
+    )
+    const add = tool('order_item_add')
+    expect(add.routes).toEqual(['POST /api/v1/orders/{order_id}/items', 'POST /api/v1/orders/{order_id}/items/batch'])
+    const added = await add.execute(
+      {
+        order_id: ORDER,
+        items: [
+          { output_id: 'out1', quantity: 2 },
+          { kind: 'custom', title: 'Box', unit_price_minor: 200 },
+        ],
+      },
+      ctx(),
+    )
+    expect(firstText(added)).toEqual([{ id: ITEM }, { id: 'second' }])
+    await tool('order_item_add_after_acceptance').execute({ order_id: ORDER, items: [{ output_id: 'out1' }] }, ctx())
+    expect(sent).toEqual([
+      [
+        'batch',
+        {
+          items: [
+            { output_id: 'out1', quantity: 2, notes: '' },
+            // As a single add: the write tool records a custom price, never accepts it.
+            { kind: 'custom', title: 'Box', unit_price_minor: 200, quantity: 1, notes: '', accept: false },
+          ],
+        },
+      ],
+      ['after', { items: [{ output_id: 'out1', quantity: 1, notes: '' }] }],
+    ])
+    expect(add.title({ order_id: ORDER, items: [{ output_id: 'a' }, { output_id: 'b' }] })).toContain('2 items')
+    const shape = z.object(add.shape)
+    // A batch names its items only, and at most 50.
+    expect(() =>
+      add.execute({ order_id: ORDER, output_id: 'out1', items: [{ output_id: 'out2' }] }, ctx()),
+    ).toThrow(/items/)
+    expect(sent).toHaveLength(2)
+    expect(() => shape.parse({ order_id: ORDER, items: [] })).toThrow()
+    expect(() => shape.parse({ order_id: ORDER, items: Array(51).fill({ output_id: 'a' }) })).toThrow()
+  })
+
   it('adds an item after acceptance on its own route, as an outward step (#5349)', async () => {
     const sent: unknown[] = []
     server.use(
@@ -356,9 +406,15 @@ describe('order tools (#4249)', () => {
     )
     const added = tool('order_item_add_after_acceptance')
     expect(added.risk).toBe('outward')
-    expect(added.routes).toEqual(['POST /api/v1/orders/{order_id}/items/after-acceptance'])
-    // The plain add keeps its own route and stays `write`.
-    expect(tool('order_item_add').routes).toEqual(['POST /api/v1/orders/{order_id}/items'])
+    expect(added.routes).toEqual([
+      'POST /api/v1/orders/{order_id}/items/after-acceptance',
+      'POST /api/v1/orders/{order_id}/items/after-acceptance/batch',
+    ])
+    // The plain add keeps its own routes and stays `write`.
+    expect(tool('order_item_add').routes).toEqual([
+      'POST /api/v1/orders/{order_id}/items',
+      'POST /api/v1/orders/{order_id}/items/batch',
+    ])
     const result = await added.execute(
       { order_id: ORDER, kind: 'custom', title: 'Tag 49', unit_price_minor: 300, quantity: 2 },
       ctx(),
