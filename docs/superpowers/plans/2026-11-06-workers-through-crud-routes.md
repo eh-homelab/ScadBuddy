@@ -87,7 +87,7 @@ Each decision takes the more secure option. The reason follows it.
   tokens (lease tokens, install-slot tokens, event ids). Every other write takes an
   `Idempotency-Key` header, and the API keeps `(caller, key) → status, body` in a new table
   `crud_requests` written **in the same transaction** as the write, kept 24 h. The key is
-  `sha256(workflow_id, activity_id, call ordinal)` inside an activity and a UUID per
+  `sha256(workflow_id, workflow_run_id, activity_id, call ordinal)` (the run id because a render's workflow id repeats per render key, Task 16) inside an activity and a UUID per
   logical write elsewhere; the client reuses it on every retry. Reason: a blob-index `put`
   answers the object it replaced (`store/index.py:151-188`); a retry that answered the new
   object would make the caller delete what it just stored.

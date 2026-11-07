@@ -52,7 +52,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.store.content_models import BlobData, BlobKind, BlobMissingError, BlobScope
 from scadbuddy.store.content_models import RefusedDeleteError as RefusedDeleteError
-from scadbuddy.store.index import Pool
+from scadbuddy.store.index import BlobIndex, IndexesBlobs, Pool
 
 logger = logging.getLogger(__name__)
 
@@ -211,9 +211,13 @@ class BambuddyContentBackend:
         pool: Pool,
         *,
         http: httpx.AsyncClient | None = None,
+        index: IndexesBlobs | None = None,
     ) -> None:
+        """``index`` says whether a row names an uploaded file (`sweep_unrecorded`); the
+        SQL index on ``pool`` unless given (the render worker's is its CRUD routes')."""
         self._target = target
         self._pool = pool
+        self._index: IndexesBlobs = index if index is not None else BlobIndex(pool)
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._folders: dict[tuple[str, int, str, str], int] = {}
@@ -341,13 +345,7 @@ class BambuddyContentBackend:
         return removed
 
     def _recorded_id(self, backend_id: str) -> bool:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
-                " AS recorded",
-                (self.backend, backend_id),
-            ).fetchone()
-        return bool(row and row["recorded"])
+        return self._index.recorded(self.backend, backend_id)
 
     # --- folders -------------------------------------------------------------
 

@@ -104,9 +104,11 @@ class CrudRefusedError(Exception):
 
 def activity_key(ordinal: int) -> str:
     """The key of the ``ordinal``-th write of the running activity: the same on every
-    retry of the activity (D5), so the API answers a repeated write once."""
+    retry of the activity (D5), so the API answers a repeated write once. The run is
+    part of it: a workflow's next run (a render key's next render, a continue-as-new)
+    numbers its activities from 1 again, and its writes are new ones."""
     info = activity.info()
-    material = f"{info.workflow_id}\0{info.activity_id}\0{ordinal}"
+    material = f"{info.workflow_id}\0{info.workflow_run_id}\0{info.activity_id}\0{ordinal}"
     return hashlib.sha256(material.encode()).hexdigest()
 
 
