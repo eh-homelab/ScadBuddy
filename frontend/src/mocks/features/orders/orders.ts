@@ -54,15 +54,26 @@ const PRINTING = new Set(['queued', 'printing', 'printed'])
 const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax'])
 const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor'])
 
-/** The backend's `ChargeInput` 422: known kind, label 1..200, integer amount, no other keys. */
+/** Pydantic's lax `int`: an integral number, or a string of one integer. */
+function laxInt(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : null
+  if (typeof value === 'string' && /^\s*[+-]?\d+\s*$/.test(value)) return Number(value)
+  return null
+}
+
+/**
+ * The backend's `ChargeInput` 422: known kind, label 1..200 code points (as Pydantic counts),
+ * integer amount, no other keys. Pydantic's lax `int` also takes an integer string such as "4".
+ */
 function chargeProblem(c: unknown): string | null {
   if (typeof c !== 'object' || c === null) return 'Input should be an object'
   const row = c as Record<string, unknown>
   const extra = Object.keys(row).find((k) => !CHARGE_KEYS.has(k))
   if (extra) return `${extra}: Extra inputs are not permitted`
   if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee' or 'tax'"
-  if (typeof row.label !== 'string' || row.label.length < 1 || row.label.length > 200) return 'label: String should have 1 to 200 characters'
-  if (typeof row.amount_minor !== 'number' || !Number.isInteger(row.amount_minor)) return 'amount_minor: Input should be a valid integer'
+  const points = typeof row.label === 'string' ? [...row.label].length : 0
+  if (points < 1 || points > 200) return 'label: String should have 1 to 200 characters'
+  if (laxInt(row.amount_minor) === null) return 'amount_minor: Input should be a valid integer'
   return null
 }
 
@@ -681,6 +692,7 @@ export const handlers = [
       const bad = chargeProblem(c)
       if (bad) return fieldProblem(request, `charges.${i}`, bad)
     }
+    const parsed = charges.map((c) => ({ ...c, amount_minor: laxInt(c.amount_minor) as number }))
     try {
       const order = lock(String(params.id))
       notEnded(order)
@@ -692,8 +704,8 @@ export const handlers = [
       const line = (c: { kind: string; label: string; amount_minor: number }) => ({ kind: c.kind, label: c.label, amount_minor: c.amount_minor })
       const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
       state.charges = state.charges.filter((c) => c.order_id !== order.id)
-      charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
-      event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after: charges.map(line) })
+      parsed.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
+      event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after: parsed.map(line) })
       order.updated_at = now()
       return HttpResponse.json(order)
     } catch (error) {

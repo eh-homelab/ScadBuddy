@@ -43,6 +43,16 @@ describe('orders mock (#4249)', () => {
     expect(held?.problem.type).toBe(`${PROBLEMS}order_on_hold`)
   })
 
+  it('checks charges after acceptance with Pydantic\'s lax int and code-point length (#5568)', async () => {
+    const post = { kind: 'shipping' as const, label: 'Post', amount_minor: 500 }
+    // As Pydantic does: a label of 200 code points (emoji are two UTF-16 units each) and an
+    // integer string pass; 201 code points do not.
+    const long = await failure(api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [{ ...post, label: '\u{1F4E6}'.repeat(201) }]))
+    expect(long?.status).toBe(422)
+    await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [{ ...post, label: '\u{1F4E6}'.repeat(200), amount_minor: '500' as unknown as number }])
+    expect((await api.order(ORDER_ACCEPTED)).charges.map((c) => c.amount_minor)).toEqual([500])
+  })
+
   it('changes the charges after acceptance as the backend does (#5351)', async () => {
     const post = { kind: 'shipping' as const, label: 'Post', amount_minor: 500 }
     const cap = { kind: 'discount' as const, label: 'Agreed cap', amount_minor: -300 }
