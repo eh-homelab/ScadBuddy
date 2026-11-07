@@ -18,7 +18,12 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.part_settings import PartSettings, overrides_of, unknown_slots
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import run_key
-from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, Target, _laid_out_for
+from scadbuddy.bambuddy.send import (
+    PART_SETTINGS_AS_IS,
+    PART_SETTINGS_UNWRITABLE,
+    Target,
+    _laid_out_for,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import (
     MAX_MODEL_SETTINGS_BYTES,
@@ -481,23 +486,27 @@ def test_unclosed_tags_that_are_not_xml_are_refused_at_once() -> None:
 
 
 def test_a_config_past_its_cap_or_with_a_doctype_takes_no_settings(tmp_path: Path) -> None:
-    """Past :data:`MAX_MODEL_SETTINGS_BYTES` (read in chunks, never whole) or with a
-    DOCTYPE (an entity bomb): no slots, the run's 422, and ``_laid_out_for`` refuses."""
+    """Past :data:`MAX_MODEL_SETTINGS_BYTES` (read in chunks, never whole), with a
+    DOCTYPE (an entity bomb), not UTF-8 or not XML: the slots are refused, so the run
+    says why (#5646), and ``_laid_out_for`` refuses with the same 422."""
     padded = SETTINGS.replace("<config>", "<config>" + " " * MAX_MODEL_SETTINGS_BYTES)
     bomb = '<?xml version="1.0"?>\n<!DOCTYPE c [<!ENTITY a "aaaa">]>\n' + SETTINGS.split("\n", 1)[1]
     plate = plate_for("H2C")
-    for config in (padded, bomb):
+    payloads = [author_two_colours(tmp_path, config) for config in (padded, bomb, "<config>")]
+    not_utf8 = rezipped(author_two_colours(tmp_path), {MODEL_SETTINGS_NAME: b"<config>\xff"})
+    for payload in [*payloads, not_utf8]:
         with pytest.raises(PartSettingsUnwritableError):
-            printed_part_slots(config)
-        payload = author_two_colours(tmp_path, config)
-        assert part_settings_slots(payload) is None
+            part_settings_slots(payload)
         with pytest.raises(PartSettingsUnwritableError):
             with_part_settings(payload, ((2, (("wall_loops", "3"),)),))
         with pytest.raises(ApiError) as refused:
             _laid_out_for(
                 payload, Target(plate, "0.4", part_settings=((2, (("wall_loops", "3"),)),))
             )
-        assert (refused.value.status, refused.value.detail) == (422, PART_SETTINGS_AS_IS)
+        assert (refused.value.status, refused.value.detail) == (422, PART_SETTINGS_UNWRITABLE)
+    for config in (padded, bomb):
+        with pytest.raises(PartSettingsUnwritableError):
+            printed_part_slots(config)
 
 
 def test_a_part_the_writer_cannot_read_is_refused_not_left_without_its_settings() -> None:
@@ -508,5 +517,36 @@ def test_a_part_the_writer_cannot_read_is_refused_not_left_without_its_settings(
         "   <metadata key='extruder' value='2'/>\n  </part>\n </object>\n</config>\n"
     )
     assert printed_part_slots(text) == {2}
+    with pytest.raises(PartSettingsUnwritableError):
+        set_part_settings(text, ((2, (("wall_loops", "3"),)),))
+
+
+def test_an_objects_extruder_after_its_parts_is_its_slot() -> None:
+    """#5646: ElementTree takes an object's ``extruder`` from any of its own
+    ``<metadata>`` children, before its parts or after, and so does the writer."""
+    text = (
+        '<config>\n <object id="1">\n  <part id="1" subtype="normal_part">\n'
+        '   <metadata key="name" value="a"/>\n  </part>\n'
+        '  <metadata key="extruder" value="2"/>\n </object>\n</config>\n'
+    )
+    assert printed_part_slots(text) == {2}
+    written = set_part_settings(text, ((2, (("wall_loops", "3"),)),))
+    assert _part_values(written, "wall_loops") == [(2, ["3"])]
+
+
+def test_a_part_the_writer_reads_as_another_slot_is_refused() -> None:
+    """#5646: the writer reads the first ``extruder`` tag in the text, a comment's too;
+    ElementTree skips the comment. The first object's part is slot 1's, but the writer
+    reads it as slot 2's, so the check after the write refuses the part that took slot
+    2's settings, rather than slicing it with them."""
+    text = (
+        '<config>\n <object id="1">\n  <!-- <metadata key="extruder" value="2"/> -->\n'
+        '  <metadata key="extruder" value="1"/>\n'
+        '  <part id="1" subtype="normal_part">\n   <metadata key="name" value="a"/>\n'
+        '  </part>\n </object>\n <object id="2">\n  <metadata key="extruder" value="2"/>\n'
+        '  <part id="2" subtype="normal_part">\n   <metadata key="name" value="b"/>\n'
+        "  </part>\n </object>\n</config>\n"
+    )
+    assert printed_part_slots(text) == {1, 2}
     with pytest.raises(PartSettingsUnwritableError):
         set_part_settings(text, ((2, (("wall_loops", "3"),)),))

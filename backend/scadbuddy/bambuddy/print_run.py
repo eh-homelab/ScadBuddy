@@ -134,7 +134,12 @@ from scadbuddy.bambuddy.resolver import (
     process_preset_for,
     resolve,
 )
-from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, request_scope, resolve_print_options
+from scadbuddy.bambuddy.send import (
+    PART_SETTINGS_AS_IS,
+    PART_SETTINGS_UNWRITABLE,
+    request_scope,
+    resolve_print_options,
+)
 from scadbuddy.bambuddy.slot_presets import SlotPresets
 from scadbuddy.bambuddy.supports import (
     SUPPORT_KEYS,
@@ -187,7 +192,11 @@ from scadbuddy.rack.usage import (
     record_seen,
     save_picks,
 )
-from scadbuddy.render.bambu3mf import FilamentMap, part_settings_slots
+from scadbuddy.render.bambu3mf import (
+    FilamentMap,
+    PartSettingsUnwritableError,
+    part_settings_slots,
+)
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 from scadbuddy.slicing.values import values_for
@@ -756,9 +765,11 @@ async def part_settings_refusal(
     sliced (:data:`PART_SETTINGS_SLICED`); its 3MF is one nothing can be written into
     (``layout_of`` ``as_is``: past the caps, sliced, or with no
     ``project_settings.config``; or a library file with no 3MF to lay out), which prints
-    as it is, so its copy could never carry them (:data:`PART_SETTINGS_AS_IS`); or it
-    names a slot no printed part of the file is made in (one only painted on another
-    part's faces among them). ``None`` when they can.
+    as it is, so its copy could never carry them (:data:`PART_SETTINGS_AS_IS`); its
+    ``model_settings.config`` cannot be read (past its cap, not UTF-8, not well-formed,
+    or with a DOCTYPE: :data:`PART_SETTINGS_UNWRITABLE`, #5646); or it names a slot no
+    printed part of the file is made in (one only painted on another part's faces among
+    them). ``None`` when they can.
 
     An output and a library file alike (#5628): a library file's slot is the filament
     its author gave the part (its ``extruder``, else its object's), and a request's
@@ -771,7 +782,10 @@ async def part_settings_refusal(
     if source.is_sliced:
         return PART_SETTINGS_SLICED
     payload = await source.fetched_3mf(client)
-    slots = None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
+    try:
+        slots = None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
+    except PartSettingsUnwritableError:
+        return PART_SETTINGS_UNWRITABLE
     if slots is None:
         return PART_SETTINGS_AS_IS
     unknown = unknown_slots(request.part_settings, slots)
