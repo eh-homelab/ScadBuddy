@@ -385,6 +385,9 @@ export type OrderRow = Schemas['OrderRow']
 export type MarginState = NonNullable<OrderRow['margin_state']>
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
+/** An attempt as `GET /orders/{id}` lists it: `stale` when it printed a design older than the
+ * accepted quote's, so its accept is refused (#5592, `lifecycle.py` `stale_attempt`). */
+export type ItemAttempt = Schemas['ItemAttempt']
 /** Storefront phase 1 (#5280, spec 2026-11-02 §4): one design of an item, and how it is approved. */
 export type Revision = Schemas['Revision']
 export type RevisionAnswer = Revision['answer']

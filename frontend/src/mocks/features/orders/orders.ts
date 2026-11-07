@@ -106,6 +106,15 @@ function decodeCursor(cursor: string): [string, string] | null {
 const itemsOf = (orderId: string) => state.items.filter((i) => i.order_id === orderId).sort((a, b) => a.position - b.position)
 export const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_item_id === itemId)
 const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_item_id === itemId).sort((a, b) => a.attempt - b.attempt)
+/** `lifecycle.py` `stale_attempt` (#5582, #5592): a production attempt older than the revision
+ * the accepted quote prices printed an earlier design. Its accept is refused, and the detail
+ * marks it `stale`. */
+function staleAttempt(attempt: Fulfilment): boolean {
+  if (attempt.purpose !== 'production') return false
+  const pricedId = quotesOf(attempt.order_item_id).find((q) => q.accepted)?.revision_id
+  const priced = pricedId == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === pricedId)
+  return priced !== undefined && Date.parse(attempt.created_at) < Date.parse(priced.created_at)
+}
 /** The attempts that count (#5280): a test print is never one of the item's production. */
 const productionOf = (itemId: string) => attemptsOf(itemId).filter((f) => f.purpose !== 'test')
 /** `OrderStore.print_starting`: the items whose `order_item_print` operation is still
@@ -228,7 +237,7 @@ export function rederive(order: Order) {
 }
 
 function detail(order: Order): OrderDetail {
-  const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id), revisions: revisionsOf(i.id) }))
+  const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
   const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position)
   const payments = state.payments.filter((p) => p.order_id === order.id)
   // `api/orders.py` `_totals`: an accepted quote's total, else the newest quote's unit
@@ -1168,9 +1177,7 @@ export const handlers = [
       if (attempt.outcome === 'failed') throw new Refused('fulfilment_failed', `attempt ${attempt.attempt} failed; nothing was made`)
       if (!FULFILLABLE.has(found.status) && found.status !== 'printed') throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       // #5582 — `_before_priced_design`: an attempt older than the accepted quote's revision printed an earlier design.
-      const pricedId = quotesOf(found.id).find((q) => q.accepted)?.revision_id
-      const priced = pricedId == null ? undefined : revisionsOf(found.id).find((r) => r.id === pricedId)
-      if (priced && Date.parse(attempt.created_at) < Date.parse(priced.created_at)) {
+      if (staleAttempt(attempt)) {
         throw new Refused('fulfilment_stale', `attempt ${attempt.attempt} printed an earlier design than the accepted quote's`, [found.id])
       }
       attempt.accepted_at = now()

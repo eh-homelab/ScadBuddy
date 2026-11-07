@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { Fulfilment, FulfilmentInput } from '../../api/types'
+import type { FulfilmentInput, ItemAttempt } from '../../api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -12,7 +12,8 @@ import { refusalText } from './refusal'
 
 /**
  * Fulfilment attempts by hand (§6.1, plan Ruling 3): the attempts so far, each accepted
- * once its quantity counts as made, and a form for the next one. `enabled` once the
+ * once its quantity counts as made, and a form for the next one. A `stale` attempt (#5592)
+ * printed an earlier design: it says "Old design" and offers no Accept. `enabled` once the
  * order is accepted and the item open. With `markDone` (a custom item that needs no
  * printing, #4954), "Mark done" accepts the open attempt, or records one for what is left
  * and accepts it.
@@ -29,7 +30,7 @@ export function FulfilmentForm({
   orderId: string
   itemId: string
   quantity: number
-  attempts: Fulfilment[]
+  attempts: ItemAttempt[]
   enabled: boolean
   onChanged: () => void
   markDone?: boolean
@@ -72,6 +73,11 @@ export function FulfilmentForm({
               </span>
               {attempt.accepted_at ? (
                 <span className="text-xs text-primary">Accepted</span>
+              ) : attempt.stale ? (
+                // #5592 — `stale_attempt`: it printed a design older than the accepted quote's, so its accept is refused.
+                <span className="text-xs text-muted-foreground" title="It printed an earlier design than the accepted quote prices. It cannot be accepted.">
+                  Old design
+                </span>
               ) : (
                 enabled &&
                 attempt.outcome !== 'failed' && (
@@ -97,7 +103,7 @@ export function FulfilmentForm({
                 // retry after a refused accept never records a second one. A partial attempt
                 // recorded by hand is left for its own Accept.
                 const left = quantity - made
-                const open = attempts.find((a) => !a.accepted_at && a.outcome !== 'failed' && (a.quantity === left || a.notes === 'Marked done'))
+                const open = attempts.find((a) => !a.accepted_at && !a.stale && a.outcome !== 'failed' && (a.quantity === left || a.notes === 'Marked done'))
                 const attempt = open ?? (await api.recordFulfilment(orderId, itemId, { quantity: left, outcome: 'succeeded', notes: 'Marked done' }))
                 await api.acceptFulfilment(orderId, itemId, attempt.id)
               })

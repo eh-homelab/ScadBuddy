@@ -5,7 +5,7 @@ import type { Approval, Fulfilment, Order, OrderAttachment, OrderAttachmentRole,
 import { timeAgo } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
 import { AddItemDialog } from './AddItemDialog'
-import { addRevision, reviseMode, reviseWarning } from './afterAcceptance'
+import { addRevision, PARTLY_FULFILLED_TEXT, partlyFulfilled, reviseMode, reviseWarning } from './afterAcceptance'
 import { EndAttempt } from './EndAttempt'
 import { AttachmentCard, FilePick } from './OrderAttachments'
 import { PrintItem } from './PrintItem'
@@ -71,7 +71,8 @@ export function RevisionsPanel({
   const ended = ENDED.has(order.status)
   // #5349: an item added after acceptance has no accepted price, and still takes revisions.
   // #5350: an accepted item takes one on its own route, after a confirm.
-  const mode = settled ? null : reviseMode(order, item, item.quotes)
+  // #5592: not once an attempt is accepted (`item_partly_fulfilled`).
+  const mode = settled ? null : reviseMode(order, item, item.quotes, item.fulfilments)
   const canRevise = mode !== null
 
   /** The same design again, as a new revision: on an accepted item, after a confirm. */
@@ -155,6 +156,11 @@ export function RevisionsPanel({
       {item.revised_after_acceptance && !settled && (
         <p className="text-[13px] text-muted-foreground" data-testid="revised-after-acceptance">
           New design after acceptance: quote it, then accept the new quote. Until then the accepted price stays.
+        </p>
+      )}
+      {!settled && !ended && !canRevise && partlyFulfilled(item.fulfilments) && (
+        <p className="text-[13px] text-muted-foreground" data-testid="partly-fulfilled">
+          {PARTLY_FULFILLED_TEXT}
         </p>
       )}
       {adding && canRevise && (

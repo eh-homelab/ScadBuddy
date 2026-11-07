@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { OrderStatus } from '../../api/types'
-import { addMode, afterAcceptanceWarning, chargesWarning, itemOpen, OPEN_FOR_EDITS, priceOpen, reviseMode, reviseWarning, TAKES_ITEMS } from './afterAcceptance'
+import { addMode, afterAcceptanceWarning, chargesWarning, itemOpen, OPEN_FOR_EDITS, partlyFulfilled, priceOpen, reviseMode, reviseWarning, TAKES_ITEMS } from './afterAcceptance'
 
 type Extension = 'x-open-for-edits' | 'x-takes-items'
 
@@ -68,16 +68,28 @@ describe('afterAcceptance', () => {
   it('revises an accepted item on its own route, never on hold or mid-print (#5350)', () => {
     const accepted = [{ accepted: true }]
     const item = { status: 'approved' as const, revised_after_acceptance: false }
-    expect(reviseMode({ status: 'draft', on_hold: false }, item, accepted)).toBe('open')
-    expect(reviseMode({ status: 'accepted', on_hold: false }, item, [])).toBe('open')
-    expect(reviseMode({ status: 'accepted', on_hold: false }, item, accepted)).toBe('after_acceptance')
-    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'failed' }, accepted)).toBe('after_acceptance')
-    expect(reviseMode({ status: 'accepted', on_hold: true }, item, accepted)).toBeNull()
-    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'printing' }, accepted)).toBeNull()
-    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'queued' }, accepted)).toBeNull()
-    expect(reviseMode({ status: 'shipped', on_hold: false }, item, accepted)).toBeNull()
+    expect(reviseMode({ status: 'draft', on_hold: false }, item, accepted, [])).toBe('open')
+    expect(reviseMode({ status: 'accepted', on_hold: false }, item, [], [])).toBe('open')
+    expect(reviseMode({ status: 'accepted', on_hold: false }, item, accepted, [])).toBe('after_acceptance')
+    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'failed' }, accepted, [])).toBe('after_acceptance')
+    expect(reviseMode({ status: 'accepted', on_hold: true }, item, accepted, [])).toBeNull()
+    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'printing' }, accepted, [])).toBeNull()
+    expect(reviseMode({ status: 'in_production', on_hold: false }, { ...item, status: 'queued' }, accepted, [])).toBeNull()
+    expect(reviseMode({ status: 'shipped', on_hold: false }, item, accepted, [])).toBeNull()
     // Once revised, the item is open again for its design, on hold too, as the backend's plain route is.
-    expect(reviseMode({ status: 'accepted', on_hold: true }, { status: 'draft', revised_after_acceptance: true }, accepted)).toBe('open')
+    expect(reviseMode({ status: 'accepted', on_hold: true }, { status: 'draft', revised_after_acceptance: true }, accepted, [])).toBe('open')
+  })
+
+  it('never revises an accepted item once an attempt is accepted (#5592)', () => {
+    const accepted = [{ accepted: true }]
+    const item = { status: 'approved' as const, revised_after_acceptance: false }
+    const order = { status: 'in_production' as const, on_hold: false }
+    const made = { purpose: 'production' as const, accepted_at: '2026-11-07T10:00:00Z' }
+    expect(partlyFulfilled([made])).toBe(true)
+    expect(reviseMode(order, item, accepted, [made])).toBeNull()
+    // An attempt not accepted, or a test print, does not stop it.
+    expect(reviseMode(order, item, accepted, [{ ...made, accepted_at: null }])).toBe('after_acceptance')
+    expect(reviseMode(order, item, accepted, [{ ...made, purpose: 'test' as const }])).toBe('after_acceptance')
   })
 
   it('takes a quote of a revised accepted item until it is accepted (#5350)', () => {

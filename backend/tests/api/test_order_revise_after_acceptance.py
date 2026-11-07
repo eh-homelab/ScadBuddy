@@ -5,8 +5,10 @@ hold, on an ended order and on a fulfilled item; the plain route names this one.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -122,6 +124,45 @@ def test_a_cancelled_order_is_refused(client: TestClient) -> None:
     cancelled = client.post(f"/api/v1/orders/{order_id}/cancel", json={})
     assert cancelled.status_code == 200, cancelled.text
     problem(revise(client, order_id, item_id), "order_cancelled")
+
+
+def test_an_item_with_an_accepted_attempt_is_refused(client: TestClient) -> None:
+    """#5592: one of two accepted is a real unit of the agreed design."""
+    order_id, item_id = model_order(client)
+    fulfil(client, order_id, item_id, 1)
+    body = problem(revise(client, order_id, item_id), "item_partly_fulfilled")
+    assert "1 of 2" in body["detail"]
+    item = item_of(client, order_id, item_id)
+    assert (item["status"], item["revised_after_acceptance"]) == ("approved", False)
+
+
+def test_the_detail_marks_the_old_designs_attempt_stale(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#5592: the order detail marks an attempt older than the accepted quote's revision
+    `stale`, by the rule its accept answers `fulfilment_stale` by."""
+    order_id, item_id = model_order(client)
+    base = f"/api/v1/orders/{order_id}/items/{item_id}"
+    old = client.post(f"{base}/fulfilments", json={"quantity": 1, "outcome": "succeeded"})
+    assert old.status_code == 201, old.text
+    # Pinned an hour back: before the revision below, whatever the clock does between.
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET created_at = %s WHERE id = %s",
+            (datetime.now(UTC) - timedelta(hours=1), old.json()["id"]),
+        )
+    assert revise(client, order_id, item_id).status_code == 201
+    quote = client.post(f"{base}/quotes", json={"unit_price_minor": 1300, "label": "new"})
+    assert quote.status_code == 201, quote.text
+    assert client.post(f"{base}/quotes/{quote.json()['id']}/accept").status_code == 200
+    new = client.post(f"{base}/fulfilments", json={"quantity": 1, "outcome": "succeeded"})
+    assert new.status_code == 201, new.text
+
+    stale = {a["id"]: a["stale"] for a in item_of(client, order_id, item_id)["fulfilments"]}
+    assert stale == {old.json()["id"]: True, new.json()["id"]: False}
+    problem(client.post(f"{base}/fulfilments/{old.json()['id']}/accept"), "fulfilment_stale")
+    accepted = client.post(f"{base}/fulfilments/{new.json()['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
 
 
 def test_the_body_is_the_plain_routes(client: TestClient) -> None:
