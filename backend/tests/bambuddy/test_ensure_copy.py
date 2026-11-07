@@ -334,9 +334,10 @@ async def test_a_copy_from_before_the_bed_was_stated_is_not_reused(
 async def test_a_copy_from_before_the_tower_brim_is_not_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#5566: a copy laid out before #5545 has its tower 3 mm from the edge, which a tall
-    plate's brim passes, and reusing it kept the quote failing after the fix. It is
-    uploaded again, and the new copy is the one reused."""
+    """#5566: a copy laid out before #5545 can have its tower at ``wipe_tower_y`` 5 (3 mm
+    reserved for its brim), which a tall plate's brim passes, and reusing it kept the
+    quote failing after the fix. It is uploaded again, and the new copy is the one
+    reused."""
     monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()

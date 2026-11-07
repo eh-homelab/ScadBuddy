@@ -168,9 +168,9 @@ _SLOT_HINTS = ";slots"
 _BED_STATED = "#bed"
 #: Follows :data:`_BED_STATED` in every :attr:`Target.key` of a copy laid out since the
 #: prime tower's place reserves the brim the slicer draws for the plate's height
-#: (:func:`~scadbuddy.render.plate.tower_brim`, #5545). A copy recorded before has its
-#: tower 3 mm from the edge, which a tall plate's brim passes, and reusing it kept every
-#: quote failing after the fix (#5566).
+#: (:func:`~scadbuddy.render.plate.tower_brim`, #5545). A copy recorded before can have
+#: its tower at ``wipe_tower_y`` 5 (3 mm reserved for its brim), which a tall plate's
+#: brim passes, and reusing it kept every quote failing after the fix (#5566).
 _TOWER_BRIM = "#brim"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
