@@ -94,6 +94,33 @@ async def test_a_lan_only_printer_asked_through_bambuddys_queue_names_the_refusa
     )
 
 
+async def test_a_call_asking_for_the_lan_on_a_bambuddy_printer_names_the_refusal() -> None:
+    """#5602: the run refuses it (`LAN_PATH_REFUSAL`), so the line says so."""
+    call = {**CALL, "path": "native"}
+    bound = await bind_call("print_output", call, holding(row(2)), native(False))
+    assert bound.args == {**call, "printer_id": 2}
+    assert bound.summary == (
+        "Refused: Garage prints through Bambuddy (Bambuddy printer 2), so it cannot print"
+        " over the LAN as the call asks"
+    )
+
+
+@pytest.mark.parametrize(
+    ("check", "line"),
+    [
+        (native(True), "Prints on Garage over the LAN"),
+        # Not read: the line names no path and no refusal it could not check.
+        (None, "Prints on Garage"),
+        (broken_native, "Prints on Garage"),
+    ],
+)
+async def test_a_call_asking_for_the_lan_is_refused_only_when_the_run_goes_through_bambuddy(
+    check: Any, line: str
+) -> None:
+    bound = await bind_call("print_output", {**CALL, "path": "native"}, holding(row(2)), check)
+    assert bound.summary == line
+
+
 async def test_a_printer_only_the_lan_reaches_is_not_checked_for_its_path() -> None:
     bound = await bind_call("print_output", CALL, holding(row(None)), nothing_native)
     assert bound.summary == "Prints on Garage over the LAN"

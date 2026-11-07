@@ -15,6 +15,9 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import library_print
+from scadbuddy.core.problems import ApiError
+from tests.api.conftest import follow_operation
 from tests.api.test_customers import create as create_customer
 from tests.api.test_order_print import Projects, answered
 from tests.api.test_order_quote import price_book
@@ -156,7 +159,10 @@ def test_a_library_file_item_prints_its_file(bambuddy: TestClient) -> None:
     assert run["subject"] == f"library:{FILE_ID}"
     assert json.loads(queued.calls.last.request.content)["quantity"] == 2
     detail = bambuddy.get(f"/api/v1/orders/{order['id']}").json()
-    assert detail["items"][0]["status"] == "queued"
+    # Queued, or already printing: the run's follow announces the print as it starts
+    # (`bambuddy/progress.py`, `print.progress`), and `Lifecycle.follow_print` then moves
+    # a queued item to printing, at a time this test does not control.
+    assert detail["items"][0]["status"] in ("queued", "printing")
 
 
 def test_a_file_gone_since_is_refused_on_quote_and_print(bambuddy: TestClient) -> None:
@@ -185,3 +191,30 @@ def test_a_file_gone_since_is_refused_on_quote_and_print(bambuddy: TestClient) -
     quote_and_accept(bambuddy, other["id"], unpriced["id"])
     shown = bambuddy.get(f"/api/v1/orders/{other['id']}").json()["items"][0]
     assert shown["library_file"]["filename"] == "file-89.3mf"
+
+
+def test_a_library_file_items_print_is_worded_for_a_caller_of_the_api(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5602 review: the library file's run gets the operation's `api` as the output's
+    does, so its refusal names `path` for a caller that is not the page."""
+    asked: list[bool | None] = []
+
+    async def refused(*args: Any, api: bool | None = None, **kwargs: Any) -> Any:
+        asked.append(api)
+        raise ApiError(422, "refused for the test")
+
+    monkeypatch.setattr(library_print, "start_library_run", refused)
+    for headers in (press(), {**press(), "X-ScadBuddy-Request": "1"}):
+        order = an_order(bambuddy)
+        item = add_item(bambuddy, order["id"], library_file_id=FILE_ID, quantity=1)
+        quote_and_accept(bambuddy, order["id"], item["id"])
+        assert bambuddy.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+        path = f"/api/v1/orders/{order['id']}/items/{item['id']}"
+        started = bambuddy.post(f"{path}/print", json=body(), headers=headers)
+        if started.status_code == 202:
+            op = follow_operation(bambuddy, started.json(), timeout=60)
+            assert op["status"] == "failed", op
+        else:
+            assert started.status_code == 422, started.text
+    assert asked == [True, None]

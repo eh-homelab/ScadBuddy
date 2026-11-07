@@ -63,6 +63,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
+from scadbuddy.auth.routes import REQUEST_HEADER
 from scadbuddy.bambuddy.catalogue import (
     catalogue_name_key,
     catalogue_refresh_claim,
@@ -80,6 +81,7 @@ from scadbuddy.bambuddy.destinations import DefaultDestination, default_destinat
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
+from scadbuddy.bambuddy.options import LAN_CALIBRATION_API_HINT, LAN_CALIBRATION_PROBLEM
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
     PreviewStarted,
@@ -128,6 +130,7 @@ from scadbuddy.bambuddy.runs import (
     run_key,
 )
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import (
     DATABASE_ERRORS,
     DATABASE_UNAVAILABLE_PROBLEM,
@@ -956,6 +959,7 @@ async def accept_run(
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
     http: Request | None = None,
     amend: Amend | None = None,
+    api: bool | None = None,
 ) -> PrintRun | JSONResponse:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
@@ -975,7 +979,10 @@ async def accept_run(
     ``amend`` lays the accepted analyzer fixes the request names over it (#284,
     ``api/accepted_fixes.py``) for a run that is not a repeat; the key stays the
     request's as sent, so a retry finds its run whatever the fixes do since.
+    ``api`` says the caller is the API or the agent, not the print dialog (#5602), which
+    words a refusal for it; ``None`` tells it from ``http`` (:func:`asked_by_api`).
     """
+    by_api = asked_by_api(http) if api is None else api
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
     repeated = await runs.store.find(key, has_request_id=has_request_id)
@@ -1096,7 +1103,7 @@ async def accept_run(
         ) from None
     except (TemporalRefusedError, TemporalUnavailableError) as error:
         raise _temporal_problem(error) from None
-    run = _answered(answer)
+    run = _answered(answer, api=by_api)
     await attribute_request(activity.index, f"print_run:{run.id}")
     if answer.repeated:
         response.status_code = status.HTTP_200_OK
@@ -1122,13 +1129,35 @@ def _temporal_problem(error: TemporalRefusedError | TemporalUnavailableError) ->
     )
 
 
-def _answered(answer: AcceptAnswer) -> PrintRun:
-    """The run the `accepted` Update answered, or its refusal raised as its problem."""
+def asked_by_api(http: Request | None) -> bool:
+    """Whether a print request comes from a caller of the API or the agent, not the
+    print dialog (#5602): an agent's call names its author (`core/authorship.py`), and
+    every request the page makes carries ``X-ScadBuddy-Request: 1`` (frontend
+    `lib/requestHeader.ts`), which other callers do not send. With no request at hand,
+    only the author tells. It only words a refusal."""
+    if current_author() is not None:
+        return True
+    return http is not None and http.headers.get(REQUEST_HEADER) != "1"
+
+
+def _answered(answer: AcceptAnswer, *, api: bool) -> PrintRun:
+    """The run the `accepted` Update answered, or its refusal raised as its problem.
+    For a caller of the API or the agent (``api``), a LAN calibration refusal on a row
+    that links a Bambuddy printer (``bambuddy_linked``) also names the request's ``path``
+    (#5602, `LAN_CALIBRATION_API_HINT`); the dialog's text stays, and a row Bambuddy does
+    not reach would refuse that path too."""
     if answer.refusal is not None:
         refusal = answer.refusal
+        detail = refusal.detail
+        if (
+            api
+            and refusal.type == LAN_CALIBRATION_PROBLEM
+            and refusal.extensions.get("bambuddy_linked") is True
+        ):
+            detail += LAN_CALIBRATION_API_HINT
         raise ApiError(
             refusal.status,
-            refusal.detail,
+            detail,
             title=refusal.title,
             type_=refusal.type,
             **refusal.extensions,
@@ -1137,15 +1166,18 @@ def _answered(answer: AcceptAnswer) -> PrintRun:
     return answer.run.model_copy(update={"repeated": answer.repeated})
 
 
-async def follow_run(runs: PrintCommands, workflow_id: str, update_id: str) -> PrintRun:
+async def follow_run(
+    runs: PrintCommands, workflow_id: str, update_id: str, *, api: bool
+) -> PrintRun:
     """The run a print-run route answered 202 for (spec 2026-10-13 §5.3, #2793): its
     `accepted` Update's outcome, answered as `accept_run` answers it. Still not answered,
-    `CommandStillAcceptingError`; not known, `CommandResendError`."""
+    `CommandStillAcceptingError`; not known, `CommandResendError`. ``api`` is
+    `accept_run`'s (:func:`asked_by_api` of the follow)."""
     try:
         answer = await follow_update(runs.client, workflow_id, update_id, result_type=AcceptAnswer)
     except (TemporalRefusedError, TemporalUnavailableError) as error:
         raise _temporal_problem(error) from None
-    return _answered(answer)
+    return _answered(answer, api=api)
 
 
 @router.get(

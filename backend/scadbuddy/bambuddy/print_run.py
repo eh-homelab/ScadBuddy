@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -97,7 +97,11 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan_inputs
-from scadbuddy.bambuddy.options import PrintOptions, lan_calibration_refusal
+from scadbuddy.bambuddy.options import (
+    LAN_CALIBRATION_PROBLEM,
+    PrintOptions,
+    lan_calibration_refusal,
+)
 from scadbuddy.bambuddy.part_settings import (
     PartSettingsMap,
     normalised,
@@ -731,8 +735,8 @@ class RunRefusalError(ApiError):
     through as an :class:`ApiError` of the same status: the check says this one before
     Print, and lets that one fail the check as an outage."""
 
-    def __init__(self, detail: str) -> None:
-        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
+    def __init__(self, detail: str, *, type_: str = "about:blank", **extensions: Any) -> None:
+        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail, type_=type_, **extensions)
 
 
 #: Why a request's ``part_settings`` (#5571) are refused for a file that is not a
@@ -2049,13 +2053,33 @@ LAN_PATH_REFUSAL = (
 )
 
 
-def asked_path_refusal(request: PrintRunRequest, native: bool) -> str | None:
+def asked_path_problem(
+    request: PrintRunRequest, native: bool, *, linked: bool = False
+) -> RunRefusalError | None:
     """Why a run whose route is ``native`` (or not) refuses ``request`` (#5352): it asked
     for the LAN and would not go over it, or it goes over the LAN and its own options set
-    a calibration only Bambuddy's queue takes. ``None`` when neither."""
+    a calibration only Bambuddy's queue takes (:func:`lan_calibration_problem`, #5602).
+    ``linked`` is whether the route's row links a Bambuddy printer. ``None`` when
+    neither."""
     if request.path == "native" and not native:
-        return LAN_PATH_REFUSAL
-    return lan_calibration_refusal(request.options) if native else None
+        return RunRefusalError(LAN_PATH_REFUSAL)
+    refusal = lan_calibration_refusal(request.options) if native else None
+    return None if refusal is None else lan_calibration_problem(refusal, linked=linked)
+
+
+def lan_calibration_problem(refusal: str, *, linked: bool) -> RunRefusalError:
+    """The 422 of :func:`~scadbuddy.bambuddy.options.lan_calibration_refusal`, typed
+    ``LAN_CALIBRATION_PROBLEM`` (#5602). ``bambuddy_linked`` says whether the row links a
+    Bambuddy printer, so `path: "bambuddy"` could take the print: the print route names
+    that path to a caller of the API only then. A row Bambuddy does not reach refuses it
+    (`_not_on_bambuddy`)."""
+    return RunRefusalError(refusal, type_=LAN_CALIBRATION_PROBLEM, bambuddy_linked=linked)
+
+
+def asked_path_refusal(request: PrintRunRequest, native: bool) -> str | None:
+    """:func:`asked_path_problem`'s text, as the dialog's check lists it."""
+    problem = asked_path_problem(request, native)
+    return None if problem is None else problem.detail
 
 
 async def ensured_route(
@@ -2232,7 +2256,8 @@ async def prepare_run(
             raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
         refusal = lan_calibration_refusal(request.options)
         if refusal is not None:
-            raise RunRefusalError(refusal)
+            assert route is not None  # a native run is a registry row's (`RunRoute.printer`)
+            raise lan_calibration_problem(refusal, linked=route.printer_id is not None)
         if request.folder_id is not None:
             await require_native_folder(native, request.folder_id)
     elif request.folder_id is not None:
