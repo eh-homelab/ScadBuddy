@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
@@ -816,7 +817,8 @@ class Lifecycle:
         """The provider's answer to a request's link, under the request's order lock: its
         hosted page, or why it failed (the link it had stays). A request no longer open
         (cancelled or expired while the provider answered) keeps no new link, so no one
-        pays it. A paid request is returned as it is: it needs no link and no error. No
+        pays it. A paid request is returned as it is: it needs no link and no error. A
+        reference another request holds is kept as ``link_error``, not as the link. No
         audit row: the link is the provider's, not a person's decision."""
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
@@ -830,13 +832,26 @@ class Lifecycle:
                 return found
             if found.status != "open":
                 hosted, error = None, f"the payment request is {found.status}"
-            linked = payments.set_request_link(
-                conn,
-                request_id,
-                provider_ref=found.provider_ref if hosted is None else hosted.provider_ref,
-                hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
-                link_error=error,
-            )
+            try:
+                # A savepoint: a refused write leaves the transaction usable.
+                with conn.transaction():
+                    linked = payments.set_request_link(
+                        conn,
+                        request_id,
+                        provider_ref=found.provider_ref if hosted is None else hosted.provider_ref,
+                        hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
+                        link_error=error,
+                    )
+            except errors.UniqueViolation:
+                # ``payment_requests_ref``: the provider answered with another request's
+                # reference. The request keeps no link, so no one pays the wrong page.
+                linked = payments.set_request_link(
+                    conn,
+                    request_id,
+                    provider_ref=found.provider_ref,
+                    hosted_url=found.hosted_url,
+                    link_error="the provider's reference is held by another payment request",
+                )
         self._told(_Change(order))
         return linked
 

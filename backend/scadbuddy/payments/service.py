@@ -1,21 +1,22 @@
 """The payments service (#4957): what the routes call. It opens a request through the
 lifecycle, then asks the provider for its hosted page after the commit (plan gap 9), so
-a slow or failed provider never holds the order's lock; it reads a provider's webhook;
-and it connects the shop's account at a provider. No exception, log line or answer here
-carries a secret."""
+a slow or failed provider never holds the order's lock. In the same way, once a cancel
+or a manual payment closes a request, it asks the provider to close the request's page.
+It reads a provider's webhook, and it connects the shop's account at a provider. No
+exception, log line or answer here carries a secret."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.orders.lifecycle import LifecycleError
-from scadbuddy.orders.models import Actor, Money
+from scadbuddy.orders.models import Actor, Money, Order, Payment
 from scadbuddy.orders.store import UNSET, UnsetType
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.credentials import (
@@ -189,9 +190,13 @@ class Payments:
             # Each message names the provider or the provider's own safe text only.
             error = str(failed)
             logger.warning("payment request %s was not linked: %s", found.id, error)
-        return await asyncio.to_thread(
+        linked = await asyncio.to_thread(
             lambda: self._orders.lifecycle.set_request_link(found.id, hosted=hosted, error=error)
         )
+        if hosted is not None and linked.status != "open" and linked.provider_ref is None:
+            # Closed while the provider answered: the new page must not stay payable.
+            await self._close_page(found.id, found.provider, hosted.provider_ref)
+        return linked
 
     async def link_pending(self, order_id: str) -> list[PaymentRequestView]:
         """Link every open request of the order that has a provider and no page yet."""
@@ -206,6 +211,59 @@ class Payments:
             ]
 
         return [await self.link(r.id) for r in await asyncio.to_thread(pending)]
+
+    # -- closed requests --------------------------------------------------------------
+    # Each call closes requests through the lifecycle, then, after the commit, closes the
+    # provider's page of each request that left ``open`` for ``cancelled`` or for
+    # ``paid`` by hand. A provider that fails is logged and undoes nothing: the request
+    # stays closed here, and a provider's paid event on it is still recorded.
+
+    async def cancel_request(self, order_id: str, request_id: str, by: Actor) -> PaymentRequestView:
+        cancelled = await asyncio.to_thread(
+            self._orders.lifecycle.cancel_payment_request, order_id, request_id, by
+        )
+        await self._close_pages([cancelled])
+        return cancelled
+
+    async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
+        """``cancel`` cancels the order and its open requests."""
+        before = {
+            r.id
+            for r in await asyncio.to_thread(self._requests, order_id)
+            if r.status == "cancelled"
+        }
+        cancelled = await asyncio.to_thread(cancel)
+        after = await asyncio.to_thread(self._requests, order_id)
+        await self._close_pages(r for r in after if r.status == "cancelled" and r.id not in before)
+        return cancelled
+
+    async def add_payment(self, order_id: str, add: Callable[[], Payment]) -> Payment:
+        """``add`` records a payment the shop received, which can pay open requests."""
+        payment = await asyncio.to_thread(add)
+        after = await asyncio.to_thread(self._requests, order_id)
+        await self._close_pages(r for r in after if r.payment_id == payment.id)
+        return payment
+
+    def _requests(self, order_id: str) -> list[PaymentRequestView]:
+        with self._orders.store.transaction() as conn:
+            return payments.requests_for_order(conn, order_id)
+
+    async def _close_pages(self, closed: Iterable[PaymentRequestView]) -> None:
+        for request in closed:
+            if request.provider is not None and request.provider_ref is not None:
+                await self._close_page(request.id, request.provider, request.provider_ref)
+
+    async def _close_page(self, request_id: str, provider: str, provider_ref: str) -> None:
+        try:
+            adapter, credential = await asyncio.to_thread(self._connected, provider)
+            await adapter.cancel_request(credential, provider_ref)
+        except (
+            ProviderNotFoundError,
+            ProviderError,
+            KekMissingError,
+            CredentialUnreadableError,
+        ) as failed:
+            logger.warning("the page of payment request %s was not closed: %s", request_id, failed)
 
     # -- webhooks ---------------------------------------------------------------------
 

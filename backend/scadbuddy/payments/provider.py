@@ -56,6 +56,11 @@ class PaymentProvider(Protocol):
         idempotency_key: str,
     ) -> HostedRequest: ...
 
+    async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
+        """Close the hosted page of a request ScadBuddy no longer collects, so no one
+        pays it. A page already closed is no error."""
+        ...
+
     def parse_webhook(
         self, credential: Credential, headers: Mapping[str, str], body: bytes
     ) -> ProviderEvent:

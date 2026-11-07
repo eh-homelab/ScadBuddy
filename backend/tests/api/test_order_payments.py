@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.payments.fake import FAKE
+from scadbuddy.payments.models import HostedRequest
 from scadbuddy.payments.provider import ProviderError
 from scadbuddy.payments.service import Payments
 from tests.api.test_customers import create as create_customer
@@ -221,3 +222,105 @@ def test_a_disconnect_between_the_check_and_the_open_is_422(
     assert refused.status_code == 422, refused.text
     assert refused.json()["errors"][0]["loc"] == ["body", "provider"]
     assert client.get(f"/api/v1/orders/{order['id']}/payment-requests").json() == []
+
+
+def _cancels(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The fake's own record, empty for this test."""
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    return FAKE.cancelled
+
+
+def test_cancelling_a_request_closes_its_hosted_page(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancels = _cancels(monkeypatch)
+    connect_fake(client)
+    order = payable_order(client)
+    req = request_payment(client, order["id"])
+    path = f"/api/v1/orders/{order['id']}/payment-requests/{req['id']}/cancel"
+    assert client.post(path).status_code == 200
+    assert cancels == [req["provider_ref"]]
+
+
+def test_cancelling_the_order_closes_each_open_hosted_page(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancels = _cancels(monkeypatch)
+    connect_fake(client)
+    order = payable_order(client)
+    first = request_payment(client, order["id"], kind="deposit", amount_minor=400)
+    second = request_payment(client, order["id"], amount_minor=600)
+    manual = request_payment(client, order["id"], provider=None, amount_minor=100)
+    done = client.post(f"/api/v1/orders/{order['id']}/payment-requests/{first['id']}/cancel")
+    assert done.status_code == 200
+    cancels.clear()
+    assert client.post(f"/api/v1/orders/{order['id']}/cancel").status_code == 200
+    # The request cancelled before is not sent again; one with no provider has no page.
+    assert cancels == [second["provider_ref"]]
+    statuses = {
+        r["id"]: r["status"]
+        for r in client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    }
+    assert statuses == {
+        first["id"]: "cancelled",
+        second["id"]: "cancelled",
+        manual["id"]: "cancelled",
+    }
+
+
+def test_a_manual_payment_closes_the_hosted_pages_it_pays(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancels = _cancels(monkeypatch)
+    connect_fake(client)
+    order = payable_order(client)
+    named = request_payment(client, order["id"], kind="deposit", amount_minor=400)
+    balance = request_payment(client, order["id"], amount_minor=600)
+    paid = client.post(
+        f"/api/v1/orders/{order['id']}/payments",
+        json={"amount_minor": 400, "method": "cash", "payment_request_id": named["id"]},
+    )
+    assert paid.status_code == 201, paid.text
+    assert cancels == [named["provider_ref"]]
+    # Cash that brings the balance to zero pays the open balance request too.
+    rest = client.post(f"/api/v1/orders/{order['id']}/payments", json={"amount_minor": 600})
+    assert rest.status_code == 201, rest.text
+    assert cancels == [named["provider_ref"], balance["provider_ref"]]
+
+
+def test_a_failed_page_cancel_leaves_the_request_cancelled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_fake(client)
+    order = payable_order(client)
+    req = request_payment(client, order["id"])
+
+    async def down(*args: Any, **kwargs: Any) -> None:
+        raise ProviderError("down")
+
+    monkeypatch.setattr(FAKE, "cancel_request", down)
+    path = f"/api/v1/orders/{order['id']}/payment-requests/{req['id']}/cancel"
+    cancelled = client.post(path)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    [kept] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert kept["status"] == "cancelled"
+
+
+def test_a_reference_another_request_holds_is_a_link_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_fake(client)
+    order = payable_order(client)
+
+    async def same_ref(*args: Any, **kwargs: Any) -> HostedRequest:
+        return HostedRequest.model_validate(
+            {"provider_ref": "fake_same", "hosted_url": "https://payments.fake.invalid/pay/same"}
+        )
+
+    monkeypatch.setattr(FAKE, "create_request", same_ref)
+    first = request_payment(client, order["id"], amount_minor=400)
+    assert first["provider_ref"] == "fake_same"
+    second = request_payment(client, order["id"], amount_minor=600)
+    assert (second["status"], second["provider_ref"], second["hosted_url"]) == ("open", None, None)
+    assert second["link_error"] == "the provider's reference is held by another payment request"

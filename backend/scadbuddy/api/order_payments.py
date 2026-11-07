@@ -1,7 +1,8 @@
 """`/api/v1/orders/{order_id}/payment-requests` (#4957): ask the customer for money,
 through a provider's hosted page or by hand. A request is opened through the lifecycle
 and linked after the commit (``payments/service.py``); a failed link stays as
-``link_error`` and ``…/link`` retries it. A refusal is the orders problem
+``link_error`` and ``…/link`` retries it. A cancel closes the provider's page after the
+commit. A refusal is the orders problem
 (``orders/problems.py`` ``refused``); a provider that is not offered or not connected is
 422 on ``provider``.
 
@@ -92,14 +93,12 @@ async def request_payment(
     summary="Cancel an open payment request",
 )
 async def cancel_payment_request(
-    order_id: str, request_id: str, orders: OrdersDep
+    order_id: str, request_id: str, service: PaymentsDep
 ) -> PaymentRequestView:
     check_path(order_id, request_id)
     by = current_actor()
     try:
-        return await asyncio.to_thread(
-            orders.lifecycle.cancel_payment_request, order_id, request_id, by
-        )
+        return await service.service.cancel_request(order_id, request_id, by)
     except LifecycleError as error:
         raise refused(error) from None
 

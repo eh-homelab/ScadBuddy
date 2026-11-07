@@ -47,6 +47,10 @@ class FakeProvider:
         ProviderField(name="signing_secret", label="Signing secret", secret=True),
     )
 
+    def __init__(self) -> None:
+        #: Each ``provider_ref`` whose page was closed, in order, for tests to read.
+        self.cancelled: list[str] = []
+
     async def verify(self, credential: Credential) -> str:
         return f"Fake account {credential.settings.get('account', '')}"
 
@@ -62,6 +66,9 @@ class FakeProvider:
         return HostedRequest.model_validate(
             {"provider_ref": ref, "hosted_url": f"https://payments.fake.invalid/pay/{ref}"}
         )
+
+    async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
+        self.cancelled.append(provider_ref)
 
     def parse_webhook(
         self, credential: Credential, headers: Mapping[str, str], body: bytes

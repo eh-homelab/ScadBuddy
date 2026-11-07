@@ -136,6 +136,7 @@ from scadbuddy.orders.store import (
     encode_cursor,
 )
 from scadbuddy.orders.totals import OrderTotals, order_totals
+from scadbuddy.payments.component import PaymentsDep
 from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
@@ -1201,11 +1202,19 @@ def _ensured(task: asyncio.Task[Any], number: str) -> None:
 
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")
-async def cancel_order(order_id: str, orders: OrdersDep, body: CancelBody | None = None) -> Order:
+async def cancel_order(
+    order_id: str, orders: OrdersDep, service: PaymentsDep, body: CancelBody | None = None
+) -> Order:
+    """The open payment requests end with the order; their pages close after the commit."""
     check_path(order_id)
     by = current_actor()
     reason = body.reason if body else None
-    return await _run(lambda: orders.lifecycle.cancel_order(order_id, by, reason))
+    try:
+        return await service.service.cancel_order(
+            order_id, lambda: orders.lifecycle.cancel_order(order_id, by, reason)
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
 
 
 @router.post("/{order_id}/hold", response_model=Order, summary="Put an order on hold")
@@ -1256,21 +1265,28 @@ async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
     status_code=status.HTTP_201_CREATED,
     summary="Record a payment",
 )
-async def add_payment(order_id: str, body: PaymentCreate, orders: OrdersDep) -> Payment:
+async def add_payment(
+    order_id: str, body: PaymentCreate, orders: OrdersDep, service: PaymentsDep
+) -> Payment:
+    """A payment that pays open requests closes their pages after the commit."""
     check_path(order_id)
     by = current_actor()
-    return await _run(
-        lambda: orders.lifecycle.add_payment(
+    try:
+        return await service.service.add_payment(
             order_id,
-            by,
-            amount_minor=body.amount_minor,
-            method=body.method,
-            reference=body.reference,
-            received_at=body.received_at,
-            notes=body.notes,
-            payment_request_id=body.payment_request_id,
+            lambda: orders.lifecycle.add_payment(
+                order_id,
+                by,
+                amount_minor=body.amount_minor,
+                method=body.method,
+                reference=body.reference,
+                received_at=body.received_at,
+                notes=body.notes,
+                payment_request_id=body.payment_request_id,
+            ),
         )
-    )
+    except LifecycleError as error:
+        raise refused(error) from None
 
 
 # -- items (§3.3) ------------------------------------------------------------------------------
