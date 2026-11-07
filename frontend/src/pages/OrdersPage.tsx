@@ -53,9 +53,12 @@ function reportFilterText(query: OrdersQuery): string {
   else if (query.product.startsWith('sku:')) parts.push(`SKU ${query.product.slice(4)}`)
   else if (query.product.startsWith('model:')) parts.push(`model ${query.product.slice(6)}`)
   else if (query.product) parts.push(query.product)
+  // The `total` row has no product: its link lists every order in the currency (#5546).
+  else parts.push('every order')
   if (query.accepted_from || query.accepted_to) {
-    const from = query.accepted_from ? formatDueDate(query.accepted_from) : 'any time'
-    const to = query.accepted_to ? formatDueDate(new Date(Date.parse(query.accepted_to) - 1).toISOString()) : 'now'
+    // The report's bounds are the browser's local midnights (#5546): its days are local ones.
+    const from = query.accepted_from ? new Date(query.accepted_from).toLocaleDateString() : 'any time'
+    const to = query.accepted_to ? new Date(Date.parse(query.accepted_to) - 1).toLocaleDateString() : 'now'
     parts.push(`accepted ${from} to ${to}`)
   }
   if (query.currency) parts.push(`in ${query.currency}`)

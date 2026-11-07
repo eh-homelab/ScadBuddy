@@ -3,12 +3,11 @@ import { api } from '../api/client'
 import type { ProfitRow } from '../api/types'
 import { marginTint } from '../components/orders/OrderCosts'
 import { OrdersTabs } from '../components/orders/OrdersTabs'
-import { lastDay, periodOf, rowLink } from '../components/orders/profit'
+import { periodOf, rowLink, rowLinkLabel, shownPeriod } from '../components/orders/profit'
 import { DataTable, type Column } from '../components/records/DataTable'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatDueDate } from '../lib/format'
 import { formatMoney } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
 
@@ -44,6 +43,8 @@ export function ProfitPage() {
   const [params, setParams] = useSearchParams()
   const from = params.get('from') ?? ''
   const to = params.get('to') ?? ''
+  // #5546: the inputs show the period the report covers as soon as the URL is read.
+  const shown = shownPeriod(from, to)
   const report = useAsync(() => api.profitReport(periodOf(from, to)), [from, to], ['orders'])
 
   function setPeriod(next: { from?: string; to?: string }) {
@@ -65,7 +66,7 @@ export function ProfitPage() {
       // The `order` row's orders are those with figures of their own: no list filter matches them.
       cell: (row) =>
         data && row.group !== 'order' ? (
-          <Link to={rowLink(data, row)} className="underline-offset-4 hover:underline" aria-label={`The ${row.orders} orders of this row`}>
+          <Link to={rowLink(data, row)} className="underline-offset-4 hover:underline" aria-label={rowLinkLabel(row)}>
             {row.orders}
           </Link>
         ) : (
@@ -136,13 +137,13 @@ export function ProfitPage() {
             <Label htmlFor="profit-from" className="text-xs font-normal text-muted-foreground">
               Accepted from
             </Label>
-            <Input id="profit-from" type="date" className="w-40" value={from || (data ? data.period_from.slice(0, 10) : '')} onChange={(e) => setPeriod({ from: e.target.value })} />
+            <Input id="profit-from" type="date" className="w-40" value={shown.from} onChange={(e) => setPeriod({ from: e.target.value })} />
           </div>
           <div className="flex flex-col gap-1">
             <Label htmlFor="profit-to" className="text-xs font-normal text-muted-foreground">
               to
             </Label>
-            <Input id="profit-to" type="date" className="w-40" value={to || (data ? lastDay(data.period_to) : '')} onChange={(e) => setPeriod({ to: e.target.value })} />
+            <Input id="profit-to" type="date" className="w-40" value={shown.to} onChange={(e) => setPeriod({ to: e.target.value })} />
           </div>
         </div>
         {report.error ? (
@@ -159,7 +160,7 @@ export function ProfitPage() {
           <>
             {!data.complete && data.read_from && (
               <p role="alert" className="text-[13px] text-warn">
-                The report reads at most {data.max_orders} orders. It covers only the orders accepted from {formatDueDate(data.read_from)}. Make the period shorter to see all of it.
+                The report reads at most {data.max_orders} orders. It covers only the orders accepted from {new Date(data.read_from).toLocaleDateString()}. Make the period shorter to see all of it.
               </p>
             )}
             <DataTable

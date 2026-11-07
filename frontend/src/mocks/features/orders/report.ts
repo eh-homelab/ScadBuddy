@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import type { ItemCost, OrderCosts, OrderItem, ProfitReport, ProfitRow } from '../../../api/types'
 import { mockSettings } from '../../handlers'
+import { DEFAULT_DAYS } from '../../../components/orders/profit'
 import { costsOf } from './costs'
 import { fieldProblem, minorExponent, problem, state, UNKNOWN_PARAMETER } from './state'
 
@@ -139,7 +140,7 @@ export const handlers = [
     const group = sp.get('group') ?? 'model'
     if (group !== 'model') return fieldProblem(request, 'group', "Input should be 'model'")
     const to = sp.get('to') ?? new Date().toISOString()
-    const from = sp.get('from') ?? new Date(Date.parse(to) - 90 * DAY).toISOString()
+    const from = sp.get('from') ?? new Date(Date.parse(to) - DEFAULT_DAYS * DAY).toISOString()
     if (Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) return problem(request, 422, 'from and to are date-times')
     if (Date.parse(from) >= Date.parse(to)) return problem(request, 422, 'from must be before to')
     const orders = state.orders
@@ -166,6 +167,7 @@ export const handlers = [
       complete,
       read_from: complete ? null : (read.at(-1)?.accepted_at ?? null),
       max_orders: MAX_REPORT_ORDERS,
+      default_days: DEFAULT_DAYS,
     }
     return HttpResponse.json(answer)
   }),
