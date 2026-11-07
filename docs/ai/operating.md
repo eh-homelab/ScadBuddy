@@ -1063,8 +1063,8 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<session id>/tool-results/`. Claude Code saves a
   tool result too large to return inline there and tells the model to read it. The encoded
   cwd is the real cwd with each character outside `[a-zA-Z0-9]` made `-`. A name over 200
-  characters is cut to 200, then gets `-` and the base-36 form of a 32-bit hash of the whole
-  cwd (read from the bundled Claude Code 2.1.314; `confine.ts` `projectDirName`). The
+  characters is cut to 200, then gets `-` and the base-36 form of the absolute value of a
+  signed 32-bit hash of the whole cwd (read from the bundled Claude Code 2.1.314; `confine.ts` `projectDirName`). The
   long-name value is measured on that binary and pinned in `agent/test/nativeBuiltins.test.ts`
   (#5588). The target's real path must be
   in that directory under the config dir's real path, so a link out, `..` and other sessions'
