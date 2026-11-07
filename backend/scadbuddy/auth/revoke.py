@@ -14,6 +14,7 @@ belongs to granted, and leaves the rest.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from psycopg import Connection, sql
@@ -32,17 +33,31 @@ def revoke_retired(conn: Connection[Any]) -> list[str]:
     return [role for role in RETIRED_ROLES if revoke_role(conn, role)]
 
 
+#: Whether the role named is ``current_user`` or one it is a member of, through
+#: ``pg_auth_members`` (``pg_has_role`` would count every role for a superuser); no row
+#: for a missing role. The agent's `revokeRole` (`agent/src/db/grants.ts`) asks the same.
+MINE = (
+    "WITH RECURSIVE mine(oid) AS (SELECT oid FROM pg_roles WHERE rolname = current_user"
+    " UNION SELECT m.roleid FROM pg_auth_members m JOIN mine ON m.member = mine.oid)"
+    " SELECT r.oid IN (SELECT oid FROM mine) FROM pg_roles r WHERE r.rolname = %s"
+)
+
+
 def revoke_role(conn: Connection[Any], role: str) -> list[str]:
     """Revoke what this connection's roles granted ``role`` in the current schema and
     drop its ``only_<role>`` row policies on the tables this connection's roles own (only
     a table's owner may drop one), under `GRANT_LOCK` (so it waits for, never
     interleaves with, an older API's `grant_role`); the relations, schema and policies
-    it took back. Idempotent; a missing role is a no-op."""
+    it took back. Idempotent; a missing role, or one this connection's role is a member
+    of, is a no-op."""
     revoked: list[str] = []
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
         cur = conn.cursor(row_factory=tuple_row)
-        if cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
+        found = cur.execute(MINE, (role,)).fetchone()
+        # A role this connection is a member of is its own: never revoked here, as the
+        # agent's `revokeRole` skips it too.
+        if found is None or found[0]:
             return revoked
         relations = cur.execute(
             "SELECT DISTINCT c.relname, c.relkind = 'S' FROM pg_class c, aclexplode(c.relacl) a"
@@ -64,9 +79,11 @@ def revoke_role(conn: Connection[Any], role: str) -> list[str]:
             "SELECT p.polname, c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid"
             " WHERE c.relnamespace = current_schema()::regnamespace"
             " AND pg_has_role(current_user, c.relowner, 'MEMBER')"
-            " AND (p.polname = %(bare)s OR starts_with(p.polname, %(prefix)s))"
+            " AND (p.polname = %(bare)s OR p.polname ~ %(hashed)s)"
             " ORDER BY c.relname, p.polname",
-            {"bare": f"only_{role}", "prefix": f"only_{role}_"},
+            # `render/worker_role.py` `_hold_to_rows` names one ``only_<role>_<8 hex>``, so
+            # a role whose name only starts with this one keeps its policies.
+            {"bare": f"only_{role}", "hashed": f"^only_{re.escape(role)}_[0-9a-f]{{8}}$"},
         ).fetchall()
         for policy, table in policies:
             conn.execute(

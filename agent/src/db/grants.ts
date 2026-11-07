@@ -78,8 +78,13 @@ export async function revokeRole(sql: Sql, role: string): Promise<string[]> {
   if (!NAME.test(role)) throw new Error(`refusing to revoke a role named ${JSON.stringify(role)}`)
   return sql.begin(async tx => {
     await tx`SELECT pg_advisory_xact_lock(${GRANT_LOCK.toString()}::bigint)`
+    // Its own role or one it is a member of, through pg_auth_members (pg_has_role counts every
+    // role for a superuser); the backend's `auth/revoke.py` MINE asks the same.
     const [found] = await tx<{ mine: boolean }[]>`
-      SELECT pg_has_role(current_user, rolname, 'MEMBER') AS mine FROM pg_roles WHERE rolname = ${role}`
+      WITH RECURSIVE mine(oid) AS (
+        SELECT oid FROM pg_roles WHERE rolname = current_user
+        UNION SELECT m.roleid FROM pg_auth_members m JOIN mine ON m.member = mine.oid)
+      SELECT r.oid IN (SELECT oid FROM mine) AS mine FROM pg_roles r WHERE r.rolname = ${role}`
     if (!found || found.mine) return []
     const relations = await tx<{ name: string; sequence: boolean }[]>`
       SELECT DISTINCT c.relname AS name, c.relkind = 'S' AS sequence FROM pg_class c, aclexplode(c.relacl) a

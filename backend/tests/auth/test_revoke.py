@@ -193,3 +193,31 @@ def test_the_api_start_revokes_the_retired_roles(
     assert revoke_retired(conn) == [role]
     assert revoke_retired(conn) == []
     assert _held(conn, role) == {"relations": set(), "schema": set(), "policies": set()}
+
+
+def test_a_role_this_connection_is_a_member_of_is_kept(conn: Conn, role: str) -> None:
+    _grant_like_the_api(conn, role)
+    conn.execute(sql.SQL("GRANT {} TO current_user").format(sql.Identifier(role)))
+    try:
+        assert revoke_role(conn, role) == []
+        assert _held(conn, role)["relations"]
+    finally:
+        conn.execute(sql.SQL("REVOKE {} FROM current_user").format(sql.Identifier(role)))
+
+
+def test_a_role_whose_name_extends_this_one_keeps_its_policies(
+    pg_conninfo: str, conn: Conn, role: str
+) -> None:
+    longer = f"{role}_extra"
+    with psycopg.connect(pg_conninfo, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(longer)))
+    try:
+        assert grant_role(conn, longer, {"activity": ("SELECT",)}, rows={"activity": "true"})
+        kept = _held(conn, longer)["policies"]
+        assert kept
+        revoke_role(conn, role)
+        assert _held(conn, longer)["policies"] == kept
+    finally:
+        with psycopg.connect(pg_conninfo, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(longer)))
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(longer)))

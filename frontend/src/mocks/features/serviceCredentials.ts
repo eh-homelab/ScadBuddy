@@ -14,6 +14,9 @@ const SCOPES: Record<ServiceCaller, string[]> = {
   storefront: ['crud.storefront'],
 }
 
+/** The callers that read a sealed credential; the rest exchange a proof (#5298). */
+const SEALED: ServiceCaller[] = ['agent', 'print']
+
 function credential(caller: ServiceCaller): ServiceCredentialView {
   counter += 1
   return {
@@ -24,9 +27,9 @@ function credential(caller: ServiceCaller): ServiceCredentialView {
     expires_at: '2026-12-01T12:00:00Z',
     revoked_at: null,
     last_used_at: caller === 'agent' ? '2026-11-01T12:30:00Z' : null,
-    proof: 'legacy',
-    pod_name: null,
-    pod_uid: null,
+    proof: SEALED.includes(caller) ? 'legacy' : 'k8s',
+    pod_name: SEALED.includes(caller) ? null : `scadbuddy-${caller}-0`,
+    pod_uid: SEALED.includes(caller) ? null : `0000000${counter}-0000-4000-8000-000000000000`,
     live: true,
   }
 }
@@ -35,7 +38,7 @@ let rows: ServiceCredentialView[] = []
 
 export function reset(): void {
   counter = 0
-  rows = (['agent', 'print'] as const).map(credential)
+  rows = (['agent', 'print', 'projects'] as const).map(credential)
 }
 reset()
 
@@ -50,7 +53,10 @@ export const handlers = [
     const row = rows.find((r) => r.id === params.id && r.live)
     if (!row) return HttpResponse.json({ detail: 'No live credential has that id' }, { status: 404 })
     rows = rows.map((r) => (r === row ? { ...r, live: false, revoked_at: '2026-11-02T00:00:00Z' } : r))
-    if (!rows.some((r) => r.caller === row.caller && r.live)) rows = [credential(row.caller), ...rows]
+    // An exchanging caller gets its next one at its next exchange, not here.
+    if (SEALED.includes(row.caller) && !rows.some((r) => r.caller === row.caller && r.live)) {
+      rows = [credential(row.caller), ...rows]
+    }
     return HttpResponse.json(rows)
   }),
 ]
