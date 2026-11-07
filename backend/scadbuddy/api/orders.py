@@ -1642,8 +1642,9 @@ async def add_revision_after_acceptance(
     ``order_on_hold``, ``item_not_open`` for a fulfilled or cancelled item (every item of
     a `ready` or `shipped` order is one, so the route never works there and its
     ``item_locked`` for `shipped` is not reached), ``item_not_priced`` for an item with
-    no accepted quote (use the plain route), ``item_custom``, and ``print_in_flight``
-    while a print of it runs."""
+    no accepted quote (use the plain route), ``item_custom``, ``print_in_flight``
+    while a print of it runs, and ``item_partly_fulfilled`` once an attempt of it is
+    accepted (#5592)."""
     return await _add_revision(
         order_id,
         item_id,

@@ -1,5 +1,5 @@
 import { api } from '../../api/client'
-import type { Order, OrderItem, OrderItemCreate, OrderPatch, Quote, Revision, RevisionCreate } from '../../api/types'
+import type { Fulfilment, Order, OrderItem, OrderItemCreate, OrderPatch, Quote, Revision, RevisionCreate } from '../../api/types'
 
 /**
  * #5349 — the backend's rules for adding an item (`orders/lifecycle.py` `_takes_item`,
@@ -45,17 +45,30 @@ export function priceOpen(
   return TAKES_ITEMS.has(order.status) && item.revised_after_acceptance
 }
 
+/** Whether a production attempt of the item is accepted (#5592): its units are real goods of
+ * the agreed design, so `_revisable_after_acceptance` refuses a new design
+ * (`item_partly_fulfilled`). */
+export function partlyFulfilled(attempts: readonly Pick<Fulfilment, 'purpose' | 'accepted_at'>[]): boolean {
+  return attempts.some((attempt) => attempt.purpose === 'production' && attempt.accepted_at != null)
+}
+
+/** What the drawer says in place of "New revision" on a partly fulfilled item (#5592). */
+export const PARTLY_FULFILLED_TEXT = 'Some units of this design are accepted as made. To change the design, cancel the item and add one with the new design.'
+
 /** How the item takes a new revision now (#5350): on its plain route, after acceptance (an
  * accepted item on an accepted, in-production or ready order not on hold, with no print
- * running), or not at all. The caller checks that the item is not settled. */
+ * running and no attempt accepted, #5592), or not at all. The caller checks that the item is
+ * not settled. */
 export function reviseMode(
   order: Pick<Order, 'status' | 'on_hold'>,
   item: Pick<OrderItem, 'status' | 'revised_after_acceptance'>,
   quotes: readonly Pick<Quote, 'accepted'>[],
+  attempts: readonly Pick<Fulfilment, 'purpose' | 'accepted_at'>[],
 ): AddMode | null {
   if (priceOpen(order, item, quotes)) return 'open'
   if (!TAKES_ITEMS.has(order.status) || order.on_hold) return null
-  return item.status === 'queued' || item.status === 'printing' ? null : 'after_acceptance'
+  if (item.status === 'queued' || item.status === 'printing') return null
+  return partlyFulfilled(attempts) ? null : 'after_acceptance'
 }
 
 /** How the confirm names each status that takes an item after acceptance. */

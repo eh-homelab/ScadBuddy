@@ -2282,12 +2282,11 @@ class Lifecycle:
         """Whether the attempt was made before the revision the accepted quote prices: it
         printed an earlier design (#5350). The rule, and why the order of the two
         ``created_at`` values holds across their transactions, is :func:`stale_attempt`."""
-        quotes = self.store.quotes(item.id, conn=conn)
-        accepted = next((q for q in quotes if q.accepted), None)
-        if accepted is None or accepted.revision_id is None:
-            return False
-        priced = self.store.revision(accepted.revision_id, conn=conn)
-        return stale_attempt(attempt, quotes, [] if priced is None else [priced])
+        return stale_attempt(
+            attempt,
+            self.store.quotes(item.id, conn=conn),
+            self.store.revisions(item.id, conn=conn),
+        )
 
     def update_fulfilment(
         self, order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, by: Actor

@@ -156,6 +156,16 @@ describe('RevisionsPanel (#5280)', () => {
     expect(screen.queryByRole('button', { name: 'New revision' })).toBeNull()
   })
 
+  it('offers no revision once an attempt is accepted, and says what to do (#5592)', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.quantity = 3
+    const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
+    await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
+    render(ORDER_ACCEPTED, ITEM_APPROVED)
+    const panel = await screen.findByTestId('revisions-panel')
+    expect(await within(panel).findByTestId('partly-fulfilled')).toHaveTextContent('cancel the item and add one with the new design')
+    expect(within(panel).queryByRole('button', { name: 'New revision' })).toBeNull()
+  })
+
   it('locks the approval for a settled item', async () => {
     state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
     render(ORDER_ACCEPTED, ITEM_APPROVED)

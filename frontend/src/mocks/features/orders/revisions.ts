@@ -119,7 +119,7 @@ function revisableAfterAcceptance(order: Order, item: OrderItem) {
   const open = printInFlight(item.id)
   if (open) throw new Refused('print_in_flight', `item ${item.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [item.id])
   // #5592: accepted units are real goods of the agreed design.
-  const accepted = state.fulfilments.filter((f) => f.order_item_id === item.id && f.purpose !== 'test' && f.accepted_at)
+  const accepted = state.fulfilments.filter((f) => f.order_item_id === item.id && f.purpose === 'production' && f.accepted_at)
   if (accepted.length > 0) {
     const made = accepted.reduce((sum, f) => sum + f.quantity, 0)
     throw new Refused('item_partly_fulfilled', `item ${item.id} has accepted attempts (${made} of ${item.quantity} made of the agreed design): cancel the item and add one with the new design`, [item.id])

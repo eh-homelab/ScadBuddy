@@ -429,7 +429,9 @@ its old price (seen on ORD-2026-3).
   revision (same design)" and "Change the design…" ask the person to confirm first, and
   the confirm names the order's status (`afterAcceptance.ts` `reviseMode`,
   `reviseWarning`). A failed save clears the confirm. The quote editor follows
-  `priceOpen`.
+  `priceOpen`. Once an attempt of the item is accepted, `reviseMode` gives no route
+  (`partlyFulfilled`, #5592): the panel offers no "New revision" and says to cancel the
+  item and add one with the new design.
 - The drawer offers the design and filament edits that `update_item` lets through
   `_open_for_requote` (#5582): a new design in the Revisions panel (`reviseMode`, which
   is `open` while `priceOpen` holds) and the filaments of a slice quote in the quote

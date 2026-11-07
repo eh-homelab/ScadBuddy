@@ -110,7 +110,7 @@ const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_i
  * the accepted quote prices printed an earlier design. Its accept is refused, and the detail
  * marks it `stale`. */
 function staleAttempt(attempt: Fulfilment): boolean {
-  if (attempt.purpose === 'test') return false
+  if (attempt.purpose !== 'production') return false
   const pricedId = quotesOf(attempt.order_item_id).find((q) => q.accepted)?.revision_id
   const priced = pricedId == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === pricedId)
   return priced !== undefined && Date.parse(attempt.created_at) < Date.parse(priced.created_at)
