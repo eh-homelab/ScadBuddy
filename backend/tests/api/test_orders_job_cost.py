@@ -243,3 +243,54 @@ def test_a_short_page_at_the_scan_cap_carries_the_cursor_where_the_scan_stopped(
     second = client.get(f"{query}&cursor={first['next_cursor']}").json()
     assert [r["id"] for r in second["items"]] == [loss]
     assert second["next_cursor"] is None
+
+
+def test_the_profit_report_and_its_rows_orders(client: TestClient, pg_conninfo: str) -> None:
+    """§6.4 (#5329): the model's row sums its items' costs reads, and its ``product``
+    with the period and currency lists exactly its orders."""
+    loss, [item] = accepted_order(client)  # charged 1200 by the typed quote
+    cost = {"order_item_id": item, "kind": "material", "amount_minor": 1500}
+    assert client.post(f"/api/v1/orders/{loss}/cost-entries", json=cost).status_code == 201
+    ok, _ = accepted(client, create_customer(client)["id"])
+    old, _ = accepted(client, create_customer(client)["id"])
+    now = datetime.now(UTC)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        for order, days in ((loss, 1), (ok, 2), (old, 120)):
+            conn.execute(
+                "UPDATE orders SET accepted_at = %s WHERE id = %s",
+                (now - timedelta(days=days), order),
+            )
+
+    answer = client.get("/api/v1/orders/reports/profit")
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert (body["group"], body["complete"], body["orders_read"]) == ("model", True, 2)
+    (model,) = [r for r in body["rows"] if r["group"] == "model"]
+    reads = [client.get(f"/api/v1/orders/{o}/costs").json() for o in (loss, ok)]
+    assert model["key"] == SLUG
+    assert model["revenue_minor"] == sum(r["items"][0]["revenue_minor"] for r in reads) == 2400
+    assert model["cost_minor"] == sum(r["items"][0]["cost_minor"] for r in reads)
+    assert (model["orders"], model["units"], model["minor_exponent"]) == (2, 2, 2)
+
+    listed = client.get(
+        "/api/v1/orders",
+        params={
+            "product": model["product"],
+            "accepted_from": body["period_from"],
+            "accepted_to": body["period_to"],
+            "currency": model["currency"],
+        },
+    )
+    assert listed.status_code == 200, listed.text
+    assert {o["id"] for o in listed.json()["items"]} == {loss, ok}
+
+    period = {"from": (now - timedelta(days=200)).isoformat(), "to": now.isoformat()}
+    wide = client.get("/api/v1/orders/reports/profit", params=period).json()
+    assert wide["orders_read"] == 3
+    backwards = {"from": now.isoformat(), "to": (now - timedelta(days=1)).isoformat()}
+    assert client.get("/api/v1/orders/reports/profit", params=backwards).status_code == 422
+    assert client.get("/api/v1/orders/reports/profit?group=sku").status_code == 422
+    assert client.get("/api/v1/orders/reports/profit?nope=1").status_code == 400
+    assert client.get("/api/v1/orders?product=nope").status_code == 422
+    assert client.get("/api/v1/orders?currency=usd").status_code == 422

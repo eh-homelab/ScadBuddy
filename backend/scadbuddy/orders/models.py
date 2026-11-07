@@ -238,6 +238,32 @@ class Order(BaseModel):
         return minor_exponent(self.currency)
 
 
+#: A profit report row's products: an item with a model ``slug``; else one with a ``sku``;
+#: else ``custom`` (a custom item with no SKU, or a request with no design yet).
+ProductKind = Literal["model", "sku", "custom"]
+
+
+class Product(BaseModel):
+    """A profit report row's key (job cost spec §6.4), and the orders list's ``product``
+    filter: ``model:<slug>``, ``sku:<sku>`` or ``custom``."""
+
+    kind: ProductKind
+    key: str | None = None
+
+    @classmethod
+    def parse(cls, value: str) -> Product:
+        """``ValueError`` for anything but the three forms."""
+        if value == "custom":
+            return cls(kind="custom")
+        kind, sep, key = value.partition(":")
+        if not sep or not key or kind not in ("model", "sku"):
+            raise ValueError("product is model:<slug>, sku:<sku> or custom")
+        return cls(kind="model" if kind == "model" else "sku", key=key)
+
+    def __str__(self) -> str:
+        return "custom" if self.kind == "custom" else f"{self.kind}:{self.key}"
+
+
 class OrderFilter(BaseModel):
     """What ``GET /orders`` narrows by (§4)."""
 
@@ -248,6 +274,13 @@ class OrderFilter(BaseModel):
     q: str | None = None
     since: datetime | None = None
     until: datetime | None = None
+    #: The profit report's row (job cost spec §6.4, #5329): orders accepted at or after
+    #: ``accepted_since`` and before ``accepted_until``, in ``currency``, with an item of
+    #: ``product``.
+    accepted_since: datetime | None = None
+    accepted_until: datetime | None = None
+    currency: str | None = None
+    product: Product | None = None
 
 
 # -- line items (§3.3) ------------------------------------------------------------------

@@ -98,6 +98,7 @@ from scadbuddy.orders.models import (
     Payment,
     PriceBook,
     PricingPolicy,
+    Product,
     Quote,
     Revision,
     Shipment,
@@ -112,6 +113,13 @@ from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.report import (
+    DEFAULT_DAYS,
+    ProfitReport,
+    ReportGroup,
+    default_period,
+    profit_report,
+)
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import (
@@ -137,8 +145,22 @@ MAX_LIMIT = 100
 SCAN_PAGE_SIZE = MAX_LIMIT
 MAX_SCAN_PAGES = 10
 LIST_PARAMS = frozenset(
-    {"status", "customer_id", "q", "from", "to", "margin_state", "cursor", "limit"}
+    {
+        "status",
+        "customer_id",
+        "q",
+        "from",
+        "to",
+        "accepted_from",
+        "accepted_to",
+        "currency",
+        "product",
+        "margin_state",
+        "cursor",
+        "limit",
+    }
 )
+REPORT_PARAMS = frozenset({"from", "to", "group"})
 #: A line item's largest quantity: `order_items.quantity` is an `integer` column
 #: (migration 20261020T0446Z_orders.sql), so a larger one is a 422, never a 500 (#4763).
 MAX_QUANTITY = 2**31 - 1
@@ -462,6 +484,10 @@ async def list_orders(
     q: str | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: datetime | None = None,
+    accepted_from: datetime | None = None,
+    accepted_to: datetime | None = None,
+    currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
+    product: Annotated[str | None, Query(min_length=1, max_length=210)] = None,
     margin_state: Annotated[list[MarginState] | None, Query()] = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
@@ -474,10 +500,30 @@ async def list_orders(
     (``margin_state=loss&margin_state=thin`` is the list's "Loss or thin"). An order with
     no charged figure has no state and never matches it. A ``margin_state`` request reads
     a bounded number of orders, so its page can be short or empty while ``next_cursor``
-    remains: follow the cursor until it is null."""
+    remains: follow the cursor until it is null. ``accepted_from`` (inclusive),
+    ``accepted_to`` (exclusive), ``currency`` and ``product`` (``model:<slug>``,
+    ``sku:<sku>`` or ``custom``) are a profit report row's orders (job cost spec §6.4)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
-    filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)
+    try:
+        wanted = None if product is None else Product.parse(product)
+    except ValueError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            errors=[{"loc": ["query", "product"], "msg": str(error)}],
+        ) from None
+    filters = OrderFilter(
+        status=status_,
+        customer_id=customer_id,
+        q=q,
+        since=from_,
+        until=to,
+        accepted_since=accepted_from,
+        accepted_until=accepted_to,
+        currency=currency,
+        product=wanted,
+    )
     if cursor is not None:
         try:
             decode_cursor(cursor)
@@ -794,6 +840,46 @@ async def unit_cost(
         currency=currency,
         unit_price_minor=unit_price_minor,
     )
+
+
+@router.get(
+    "/reports/profit",
+    response_model=ProfitReport,
+    summary="The profit report by model",
+    description=(
+        "Job cost spec §6.4: the orders accepted at or after `from` and before `to` "
+        f"(by default the last {DEFAULT_DAYS} days), cancelled ones too, per currency "
+        "(never summed across currencies) and per product: one row per model `slug`, one "
+        "per custom item `sku`, one `custom` row for items with neither. Each row has its "
+        "orders, units, what was charged, the real cost, the margin and the waste (the "
+        "cost of test and failed attempts). Each item's figures are those "
+        "`GET /orders/{id}/costs` gives it. The `order` row is the orders' own figures "
+        "(their entries, shipments' cost and charges), over the orders that have any, and "
+        "the `total` row each currency's orders' own figures summed. A product row's "
+        "`product` is its `GET /orders` filter (`custom` also matches an empty SKU). "
+        "The report reads at most `max_orders` orders, newest accepted first: "
+        "with `complete` false it covers the orders accepted from `read_from` only."
+    ),
+)
+async def profit(
+    request: Request,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    from_: Annotated[datetime | None, Query(alias="from")] = None,
+    to: datetime | None = None,
+    group: ReportGroup = "model",
+) -> ProfitReport:
+    _no_nul(request)
+    _unknown(request, REPORT_PARAMS)
+    since, until = default_period(to if to is not None else datetime.now(UTC))
+    if from_ is not None:
+        since = from_
+    if since.tzinfo is None or until.tzinfo is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from and to need a time zone")
+    if since >= until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from must be before to")
+    rates = await asyncio.to_thread(_cost_rates, settings)
+    return await asyncio.to_thread(profit_report, orders.store, rates, since=since, until=until)
 
 
 def item_price(item: ItemDetail) -> tuple[Money, bool] | None:
