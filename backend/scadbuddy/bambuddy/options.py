@@ -127,3 +127,22 @@ def resolve(*scopes: PrintOptions | None) -> PrintOptions:
         if scope is not None:
             merged.update(scope.queue_fields())
     return PrintOptions.model_validate(merged)
+
+
+#: The calibrations a print over the LAN cannot set (#5352): `printers/lan.py`
+#: `project_file_command` sends ``flow_cali`` off and no field for the others, so only
+#: Bambuddy's queue (`QueueItemCreate`) takes them.
+LAN_UNSET_CALIBRATIONS = ("bed_levelling", "flow_cali", "vibration_cali", "nozzle_offset_cali")
+
+
+def lan_calibration_refusal(options: PrintOptions) -> str | None:
+    """The 422 for a print's own ``options`` that set a calibration on a run over the
+    LAN (#5352), else ``None``: refused, never dropped without a word. Only the request's
+    own options are judged; a remembered one is Bambuddy's queue option, as before."""
+    asked = [name for name in LAN_UNSET_CALIBRATIONS if getattr(options, name) is not None]
+    if not asked:
+        return None
+    return (
+        f"A print over the LAN cannot set {', '.join(asked)}: only Bambuddy's queue takes"
+        ' calibrations. Leave them out, or print through Bambuddy (path "bambuddy").'
+    )

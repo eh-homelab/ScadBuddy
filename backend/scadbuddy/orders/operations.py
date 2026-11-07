@@ -491,6 +491,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 printers.reports,
                 printer=body.printer,
                 printer_id=body.printer_id,
+                asked=body.path,
             )
         except ApiError:
             return False
@@ -515,6 +516,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     printers.reports,
                     printer=body.printer,
                     printer_id=body.printer_id,
+                    asked=body.path,
                 )
             except ApiError:
                 # The run refuses it itself, with its own words.

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { nozzles, presetRef, slotChoice, tier } from './print.js'
+import { nozzles, presetRef, printOptionFields, printPath, slotChoice, tier } from './print.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
@@ -871,7 +871,10 @@ export const orderTools: Tool[] = [
       '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. With Bambuddy, a slot whose ' +
       "filament the item names and the plan leaves out takes that filament's spool loaded on the printer, else the " +
       'shelf spool with most left (never one loaded in another printer); `needs_spool_choice` names the slots with ' +
-      "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. Outward: it prints.",
+      "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. " +
+      '`path: "bambuddy"` (#5352) prints it through Bambuddy\'s queue even where it would go over the LAN: it is ' +
+      "filed under the item's project in the order's, and `options` sets the calibrations and timelapse. " +
+      'Over the LAN the print files under no project, and a calibration in `options` is refused. Outward: it prints.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -879,6 +882,11 @@ export const orderTools: Tool[] = [
       printer: sliceQuote.shape.printer,
       filament_plan: sliceQuote.shape.filament_plan,
       choices: printChoices,
+      options: printOptionFields.optional().describe(
+        "Per-print queue options, as print_output takes them: bed_levelling, flow_cali, nozzle_offset_cali, " +
+          "vibration_cali, timelapse and the rest. Its project_id and quantity are the item's, never these",
+      ),
+      path: printPath,
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
           'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
@@ -889,9 +897,10 @@ export const orderTools: Tool[] = [
       'POST /api/v1/orders/{order_id}/items/{item_id}/print',
       'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
     ],
-    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id }) =>
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path }) =>
       `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
-      (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : ''),
+      (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
+      (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : ''),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined

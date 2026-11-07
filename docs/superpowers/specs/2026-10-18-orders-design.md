@@ -565,6 +565,24 @@ upper-cased. The run's printer is the request's `printer_id`, else its registry 
 Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
 and for a slot the item names no filament for, the plan stays as the request gave it.
 
+**As built, the path, calibrations and timelapse (#5352).** On ORD-2026-3 a print on the
+hot path's backends went over the LAN, so it had no project, and the tools could not set
+calibrations or timelapse. Each plate went through a script that downloaded the quote's
+sliced file and uploaded it to Bambuddy. Now the body of `order_item_print` is the print
+route's `PrintRunRequest` with its `path` and `options` (print-flow spec §2, "As built:
+the request picks the path"). With `path` `bambuddy`, `item_project_of` and the spools'
+`native_run` judge the route as the run does (`run_route(..., asked=)`), so the print is
+filed under the item's project in the order's (`order_projects`, §8.1), the item's
+filaments fill the plan from Bambuddy's spools, and the calibrations and timelapse go to
+the queue item. With the quote's choices the run queues the quote's own slice: nothing is
+sliced again and no sliced file is uploaded (measured with Bambuddy's slicer:
+`tests/api/test_order_print.py` `test_an_item_prints_through_bambuddys_queue_with_its_calibrations`
+queues library file 301, the quote's slice). The one upload is the unsliced copy, filed
+in the item's project folder (#79). That is the same path as a print of the output from
+the dialog. Over the LAN a calibration in `options` is refused (422), and a `path`
+`native` the run cannot honour is refused. The agent's `order_item_print` takes `path` and
+`options` (outward, as before).
+
 ## 6. Fulfilment and provenance
 
 ### 6.1 Attempts

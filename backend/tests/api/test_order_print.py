@@ -534,3 +534,73 @@ def test_a_test_print_without_a_slice_quote_is_requote_needed(bambuddy: TestClie
     assert answer.status_code == 409 and answer.json()["type"].endswith("/requote_needed")
     store = _state(bambuddy).components.get(ORDERS).store
     assert store.fulfilments(item.item["id"], purpose=None) == []
+
+
+#: #5352: the calibrations and timelapse a print sets on Bambuddy's queue.
+CALIBRATIONS = {
+    "bed_levelling": "on",
+    "flow_cali": "on",
+    "nozzle_offset_cali": "off",
+    "vibration_cali": False,
+    "timelapse": True,
+}
+
+
+def test_an_item_prints_through_bambuddys_queue_with_its_calibrations(
+    bambuddy: TestClient,
+) -> None:
+    """#5352: asked through Bambuddy's queue, the item's print is filed under the item's
+    project in the order's and carries the calibrations and timelapse to the queue item.
+    The quote's own slice is printed: nothing is sliced or uploaded again."""
+    shop = QuoteShop(bambuddy)
+    slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    op = shop.quote()
+    assert op["status"] == "succeeded", op
+    quote = op["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    # The book's records are made the spools' filaments (as in the slice quote test).
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = bambuddy.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+    queued = queue_route()
+
+    def uploads() -> int:
+        return sum(
+            1
+            for call in respx.calls
+            if call.request.method == "POST" and call.request.url.path == "/api/v1/library/files"
+        )
+
+    sliced_before, uploaded_before = slices.posted.call_count, uploads()
+    attempt = answered(
+        bambuddy,
+        bambuddy.post(
+            f"{shop.path}/print",
+            json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+            headers=press(),
+        ),
+    )
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["status"] == "succeeded", run
+
+    item_project = next(
+        p["project_id"]
+        for p in bambuddy.get(f"/api/v1/orders/{shop.order['id']}").json()["projects"]
+        if p["item_id"] == shop.item["id"]
+    )
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["project_id"] == item_project
+    assert {name: sent[name] for name in CALIBRATIONS} == CALIBRATIONS
+    # The queue item is the quote's own sliced file (`BambuddySlices`: 300 + plate): no
+    # second slice, and no sliced file uploaded. The one upload is the unsliced copy
+    # filed in the item's project folder (#79).
+    assert sent["library_file_id"] == 301
+    assert slices.posted.call_count == sliced_before
+    assert uploads() == uploaded_before + 1

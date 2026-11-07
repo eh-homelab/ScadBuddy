@@ -310,7 +310,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md`): a print that
   touches Bambuddy nowhere. `hot_path_native(settings, path)` decides per run from the
   stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3` or
-  `bambuddy`) and the printer row's resolved path; there is no switch of its own. A
+  `bambuddy`) and the printer row's resolved path; there is no stored switch of its own.
+  One request may choose (#5352, print-flow spec §2 "As built: the request picks the
+  path"): `PrintRunRequest.path` `bambuddy` is Bambuddy's queue whatever the row says
+  (`run_route`/`ensured_route` `asked`, no LAN report read; the printer must link
+  Bambuddy), and `native` is refused when the run would not go over the LAN
+  (`LAN_PATH_REFUSAL`). A native run refuses a request whose own `options` set
+  `bed_levelling`, `flow_cali`, `nozzle_offset_cali` or `vibration_cali`
+  (`options.lan_calibration_refusal`, 422): the LAN start cannot send them. A
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
@@ -642,7 +649,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
   starts the item's output's print through `api/printing.py` `accept_run`, never a path of
-  its own, its `request_id` from the operation's key. The item is claimed first, under the
+  its own, its `request_id` from the operation's key. Its body's `path` and `options` are
+  the print route's (#5352): with `path` `bambuddy` the print files under the item's
+  project (`item_project_of` judges the route with `asked`) and the calibrations and
+  timelapse reach the queue item. The item is claimed first, under the
   order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
   file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
   item; then the run is attached (`attach_print`) or a refused start releases the claim

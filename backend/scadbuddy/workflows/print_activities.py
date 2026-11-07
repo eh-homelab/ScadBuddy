@@ -47,6 +47,7 @@ from scadbuddy.bambuddy.print_run import (
     QueuedPlate,
     ResolvedProject,
     RunPath,
+    asked_path_refusal,
     ensured_route,
     finish_run,
     plan_run,
@@ -309,6 +310,7 @@ class PrintActivities:
                 printer=request.printer,
                 printer_id=request.printer_id,
                 decide=self.d.native_run,
+                asked=request.path,
             )
             if route.row is None and route.printer_id is not None and native_backends(settings):
                 # A printer the registry has no row for yet: its row is made (or a
@@ -321,8 +323,14 @@ class PrintActivities:
                         self.d.reports,
                         route,
                         decide=self.d.native_run,
+                        asked=request.path,
                     )
             native = route.native
+            # #5352: a request that asked for the LAN and would not go over it, or that
+            # sets a calibration the LAN cannot, refused before anything is recorded.
+            refusal = asked_path_refusal(request, native)
+            if refusal is not None:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal)
             if native:
                 # D6: refused before anything is read or recorded.
                 if request.project_id is not None:

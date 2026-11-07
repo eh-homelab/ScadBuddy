@@ -258,7 +258,7 @@ function runOutcome(run: PrintRun, ctx: ToolContext) {
 const calibration = z.enum(['off', 'on', 'auto'])
 
 /** `PrintOptions` in backend/openapi.json: sparse, and the backend refuses unknown fields. */
-export const printOptions = z
+export const printOptionFields = z
   .object({
     auto_off_after: nullable(z.boolean()),
     bed_levelling: nullable(calibration),
@@ -276,7 +276,23 @@ export const printOptions = z
     vibration_cali: nullable(z.boolean()),
   })
   .strict()
-  .default({})
+export const printOptions = printOptionFields.default({})
+
+/**
+ * `PrintRunRequest.path` (#5352): how the print reaches its printer, over the printer row's own
+ * choice. Omitted is the backend's own choice (`run_route`).
+ */
+export const printPath = z
+  .enum(['bambuddy', 'native'])
+  .optional()
+  .describe(
+    "How the print reaches its printer. Omit for the backend's choice (the stored backends and the printer's " +
+      "row). 'bambuddy' queues it through Bambuddy's queue even where it would go over the LAN: it files " +
+      'under a Bambuddy project and takes every `options` field, the calibrations (bed_levelling, flow_cali, ' +
+      "nozzle_offset_cali, vibration_cali) and timelapse among them; the printer must link a Bambuddy printer. " +
+      "'native' asks for the LAN and is refused when the run would not go over it. Over the LAN a calibration " +
+      "in `options` is refused (422): only Bambuddy's queue takes them.",
+  )
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
 export const presetRef = z.object({
@@ -346,6 +362,7 @@ const PRINT_OUTPUT_INPUT = withSource({
   project_id: nullable(z.number().int()).describe('Omit for the default project; null for "No project"'),
   folder_id: z.number().int().optional().describe('A library folder of no project, in place of a project'),
   options: printOptions,
+  path: printPath,
   print_sequence: z
     .enum(['by layer', 'by object'])
     .optional()
@@ -441,6 +458,12 @@ async function printerOf(
             'the LAN. Send only `printer`.',
         )
       }
+      if (args.path === 'bambuddy') {
+        throw new ToolError(
+          `${row.name} links no Bambuddy printer, so it cannot print through Bambuddy's queue: omit path, or ` +
+            'link it to Bambuddy in Settings > Printers.',
+        )
+      }
       refuseProject(row.name, args)
       return { name: row.name, lan: true }
     }
@@ -475,7 +498,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
     `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
     `${printerName !== undefined ? ` on printer ${JSON.stringify(printerName)}` : printer_id !== undefined ? ` on printer ${printer_id}` : printer !== undefined ? ` on printer ${printer}` : ''}` +
-    `${lan ? ' over the LAN' : ''}` +
+    `${lan ? ' over the LAN' : args.path === 'bambuddy' ? " through Bambuddy's queue" : ''}` +
     `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
@@ -1291,6 +1314,7 @@ export const printTools: Tool[] = [
       'Bambuddy call, as the print dialog sends it: spools are its loaded trays, by the negative `spool_id`s ' +
       'get_print_filaments gives them, there is no project (a `project_id` is refused; `folder_id` names one ' +
       "of ScadBuddy's own folders, list_print_projects with `native`) and no queue item. " +
+      '`path: "bambuddy"` queues such a print through Bambuddy instead, with a project, calibrations and timelapse. ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids; over the LAN, `path: "native"` and a `follow` handle instead), or ' +
       'hands back the still-running run to poll with get_print_run. Then follow the print with ' +
@@ -1324,9 +1348,13 @@ export const printTools: Tool[] = [
     // two reads, a project the line approved can still be refused when the run starts.
     prepareApproval: async (args, ctx, needs) => {
       const { printerId, name, lan } = await printerOf(args, ctx.backend, ctx.signal, needs)
+      // #5352: a print asked through Bambuddy's queue never goes over the LAN.
       const native =
         lan === true ||
-        (needs.summary && args.printer !== undefined && (await linkedNative(ctx, sourceOf(args), args.printer, printerId)))
+        (args.path !== 'bambuddy' &&
+          needs.summary &&
+          args.printer !== undefined &&
+          (await linkedNative(ctx, sourceOf(args), args.printer, printerId)))
       if (native && !lan) refuseProject(name ?? `printer ${args.printer}`, args)
       const input = args.printer === undefined || lan ? args : { ...args, printer_id: printerId }
       return { input, summary: printSummary(input, name, native) }
@@ -1376,7 +1404,9 @@ export const printTools: Tool[] = [
         (chosenTier === undefined && processName === undefined)
       ) {
         const view = await getChoices(ctx, source, { printer_id: printerId, printer: args.printer })
-        if (args.printer !== undefined && view.lan_printers?.includes(args.printer)) native = true
+        // #5352: asked through Bambuddy's queue, it never goes over the LAN.
+        if (args.path !== 'bambuddy' && args.printer !== undefined && view.lan_printers?.includes(args.printer))
+          native = true
         // A LAN-only row's view names no Bambuddy printer, and the run must send none.
         if (!lanOnly) printerId ??= view.printer_id ?? undefined
         bedType ??= view.bed_type
@@ -1437,6 +1467,7 @@ export const printTools: Tool[] = [
         // #3651 — a library folder in place of a project; the backend refuses both.
         ...(args.folder_id === undefined ? {} : { folder_id: args.folder_id }),
         options: args.options,
+        ...(args.path === undefined ? {} : { path: args.path }),
         // The same for a library file as for an output (#907, #1756).
         ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
         ...(args.filament_profiles?.length ? { filament_profiles: args.filament_profiles } : {}),

@@ -82,6 +82,39 @@ Escalating is visible in the dialog before the click ("Bambuddy will slice this 
 *printer*, then queue it"), because it changes which printer the copies land on: a
 class-targeted pipeline fans out, a queued item does not.
 
+**As built: the request picks the path (#5352).** A run reaches its printer through
+Bambuddy's queue or over the LAN (`PrintRunResult.path`). Before #5352 only the stored
+backends and the printer row chose it (`printers/hot_path.py`, `print_run.run_path`).
+`PrintRunRequest.path` now lets the caller choose for one print:
+
+- Omitted: the choice as before. The run key does not change (`runs.run_key` leaves the
+  field out when it is not sent).
+- `bambuddy`: Bambuddy's queue, even where the run would go over the LAN.
+  `run_route(..., asked=)` and `ensured_route` return a route that is not native. They read
+  no LAN report, so a stale or missing report refuses nothing. `prepare_run` does not read
+  the path again. The printer must link a Bambuddy printer, or the run is refused as on
+  Bambuddy's path today (`_not_on_bambuddy`). The run then takes a project and every
+  `PrintOptions` field. The calibrations (`bed_levelling`, `flow_cali`,
+  `nozzle_offset_cali`, `vibration_cali`) and `timelapse` go to `POST /queue/` as before
+  (`dispatch.enqueue_plate`). `QueueItemCreate` already names each of them as Bambuddy's
+  `PrintQueueItemCreate` does (recorded in
+  `backend/tests/bambuddy/recordings/openapi/scadbuddy-routes.json`). No field is new.
+- `native`: the LAN. If the run would not go over the LAN, the check and the run refuse it
+  (`print_run.LAN_PATH_REFUSAL`, 422). They never send it through Bambuddy instead.
+
+The LAN start (`printers/lan.py` `project_file_command`) has no field for
+`bed_levelling`, `nozzle_offset_cali` or `vibration_cali`, and it always sends `flow_cali`
+off. So a native run refuses a request whose own `options` set any of the four, with a
+422 (`options.lan_calibration_refusal`). Before #5352 the LAN start dropped them without a
+word. `timelapse` and `layer_inspect` are LAN fields and still pass. A remembered option
+(global, printer or model scope) is not judged: it stays a Bambuddy queue option, as
+before. The refusal is in `prepare_run`, in the dialog's check (`check_print`,
+`asked_path_refusal`) and in the run's `print_check` activity, before anything is
+recorded. No workflow code changed, so the replays need no patch. The tier is
+unchanged: `print_output` and `order_item_print` stay `outward`. The agent's
+`print_output` and `order_item_print` take `path`, and `order_item_print` takes `options`.
+The print dialog has no control for it yet.
+
 ## 3. What each step reads
 
 One aggregation route, `GET /api/v1/print/outputs/{id}/filaments?printer_id&plate_id`,

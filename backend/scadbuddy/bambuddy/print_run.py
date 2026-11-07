@@ -97,7 +97,7 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan_inputs
-from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.options import PrintOptions, lan_calibration_refusal
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
     not_resliced,
@@ -246,6 +246,10 @@ QUEUE_PATH = "/queue"
 SPOOL_PRESET_READS = 4
 
 
+#: How a run reaches its printer (#3823, plan Task 8).
+RunPath = Literal["bambuddy", "native"]
+
+
 class PrintRunRequest(BaseModel):
     """The print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality and
     plate. Every slicer preset is derived from them by the resolver; there is no
@@ -323,6 +327,13 @@ class PrintRunRequest(BaseModel):
     accepted_fixes: list[Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]] = Field(
         default_factory=list, max_length=32
     )
+    #: How this print reaches its printer (#5352), over the row's own choice. Omitted is
+    #: today's choice: the stored backends and the printer row decide (`run_route`).
+    #: ``bambuddy`` queues it through Bambuddy, with its project and every option, even
+    #: where the run would go over the LAN; the printer must be linked to Bambuddy.
+    #: ``native`` asks for the LAN: a run that would not go over it is refused, never
+    #: sent through Bambuddy instead.
+    path: RunPath | None = None
 
     @field_validator("accepted_fixes")
     @classmethod
@@ -412,10 +423,6 @@ class RackPickView(BaseModel):
     #: A chosen spool is not in the inventory, so Glow could not be checked (spec §3).
     glow_unchecked: bool = False
     options: list[RackOption] = Field(default_factory=list)
-
-
-#: How a run reaches its printer (#3823, plan Task 8).
-RunPath = Literal["bambuddy", "native"]
 
 
 class PrintRunResult(BaseModel):
@@ -1037,9 +1044,13 @@ async def check_print(
                 printer=request.printer,
                 printer_id=request.printer_id,
                 say_fallback=False,
+                asked=request.path,
             )
         except RunRefusalError as error:
             return PrintCheck(errors=[error.detail])
+    refusal = asked_path_refusal(request, route is not None and route.native)
+    if refusal is not None:
+        return PrintCheck(errors=[refusal])
     if route is not None and route.native:
         return await _native_check(source, settings, request, route, rack=rack, profiles=profiles)
     client = bambuddy_client(client)
@@ -1937,18 +1948,23 @@ async def run_route(
     printer_id: int | None,
     say_fallback: bool = False,
     decide: Callable[[StoredSettings, RunPath], bool] | None = None,
+    asked: RunPath | None = None,
 ) -> RunRoute:
     """The run's :class:`RunRoute`, from the registry and its reports only: the row
     ``printer`` names, else the row linking ``printer_id`` (or Settings' printer). No
     Bambuddy call: a row Bambuddy has not been asked about yet is :func:`ensured_route`'s
     to make. ``decide`` is `hot_path_native` unless a caller's own
     (`PrintDeps.native_run`). ``say_fallback`` is off by default: on Bambuddy's path
-    `prepare_run` reads the path again and says the key's fallback itself, once."""
+    `prepare_run` reads the path again and says the key's fallback itself, once.
+    ``asked`` is the request's own ``path`` (#5352): ``bambuddy`` is Bambuddy's path
+    whatever the row says, with no LAN report read."""
     decide = decide or hot_path_native
     named, bambuddy_id = await _named_printer(printer, printer_id, settings, printers)
     row = named
     if row is None and printers is not None and bambuddy_id is not None:
         row = await asyncio.to_thread(printers.by_bambuddy_id, bambuddy_id)
+    if asked == "bambuddy":
+        return _bambuddy_route(named, row, bambuddy_id)
     path, report_status = await _registry_path(row, printers, reports, say_fallback=say_fallback)
     native = decide(settings, path)
     if not native and bambuddy_id is None:
@@ -1965,6 +1981,41 @@ async def run_route(
     )
 
 
+def _bambuddy_route(
+    named: PrinterRow | None,
+    row: PrinterRow | None,
+    bambuddy_id: int | None,
+    *,
+    listed: Printer | None = None,
+) -> RunRoute:
+    """The route of a request that asked for Bambuddy's path (#5352): its row, never
+    native, and no LAN report read, so a stale one refuses nothing. A printer Bambuddy
+    does not reach is refused, as on Bambuddy's path today."""
+    if bambuddy_id is None:
+        assert named is not None  # `_named_printer` refuses a request naming nothing
+        raise RunRefusalError(_not_on_bambuddy(named))
+    return RunRoute(
+        row=row, printer_id=bambuddy_id, path="bambuddy", status=None, native=False, listed=listed
+    )
+
+
+#: #5352: a request that asked for the LAN on a run that would go through Bambuddy.
+LAN_PATH_REFUSAL = (
+    'This print asked for the LAN (path "native"), but it would go through Bambuddy: the'
+    " stored backends or the printer's row do not put it on the LAN now. Leave path out,"
+    ' or ask for "bambuddy".'
+)
+
+
+def asked_path_refusal(request: PrintRunRequest, native: bool) -> str | None:
+    """Why a run whose route is ``native`` (or not) refuses ``request`` (#5352): it asked
+    for the LAN and would not go over it, or it goes over the LAN and its own options set
+    a calibration only Bambuddy's queue takes. ``None`` when neither."""
+    if request.path == "native" and not native:
+        return LAN_PATH_REFUSAL
+    return lan_calibration_refusal(request.options) if native else None
+
+
 async def ensured_route(
     client: BambuddyClient,
     settings: StoredSettings,
@@ -1973,12 +2024,13 @@ async def ensured_route(
     route: RunRoute,
     *,
     decide: Callable[[StoredSettings, RunPath], bool] | None = None,
+    asked: RunPath | None = None,
 ) -> RunRoute:
     """``route`` once its row is made or merged, as the run's first check makes it
     (`_ensure_row`, #4442 M2): a Bambuddy printer no row links yet, whose serial a
     LAN-linked row holds, takes that row's path from its first run. Only on the hot
     path's backends, and only then is Bambuddy asked for its printer: a row the
-    registry knows needs no read."""
+    registry knows needs no read. ``asked`` is as :func:`run_route` takes it."""
     if (
         route.row is not None
         or route.printer_id is None
@@ -1988,6 +2040,8 @@ async def ensured_route(
         return route
     printer = await _require_resolvable_printer(client, route.printer_id, any_model=True)
     row = await _ensure_row(printers, None, printer)
+    if asked == "bambuddy":
+        return _bambuddy_route(None, row, route.printer_id, listed=printer)
     path, report_status = await _registry_path(row, printers, reports, say_fallback=False)
     return RunRoute(
         row=row,
@@ -2123,6 +2177,9 @@ async def prepare_run(
     if native is not None:
         if request.project_id is not None:
             raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
+        refusal = lan_calibration_refusal(request.options)
+        if refusal is not None:
+            raise RunRefusalError(refusal)
         if request.folder_id is not None:
             await require_native_folder(native, request.folder_id)
     elif request.folder_id is not None:
@@ -2199,9 +2256,13 @@ async def prepare_run(
                 bambuddy_client(client), printer_id, any_model=source.is_sliced
             )
         row = await _ensure_row(printers, named, printer)
-        path, report_status = await _registry_path(
-            row, printers, reports, say_fallback=refuse_manual_pick
-        )
+        if request.path == "bambuddy":
+            # Asked for Bambuddy's path (#5352): no LAN report is read or required.
+            path, report_status = "bambuddy", None
+        else:
+            path, report_status = await _registry_path(
+                row, printers, reports, say_fallback=refuse_manual_pick
+            )
     if source.is_sliced:
         # Nothing is sliced, so no preset need resolve (#2671): any active printer the
         # file was sliced for prints it (`any_model` above).
