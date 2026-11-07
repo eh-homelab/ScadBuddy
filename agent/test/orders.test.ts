@@ -52,6 +52,7 @@ describe('order tools (#4249)', () => {
       'order_update',
       'order_item_add',
       'order_item_add_after_acceptance',
+      'order_charges_update_after_acceptance',
       'order_item_update',
       'order_item_quote',
       'order_item_accept_quote',
@@ -75,6 +76,7 @@ describe('order tools (#4249)', () => {
       order_update: 'write',
       order_item_add: 'write',
       order_item_add_after_acceptance: 'outward',
+      order_charges_update_after_acceptance: 'outward',
       order_item_update: 'write',
       order_item_quote: 'write',
       order_item_accept_quote: 'outward',
@@ -336,6 +338,30 @@ describe('order tools (#4249)', () => {
     expect(added.summarize({ order_id: ORDER, kind: 'custom', title: 'Tag 49' })).toBe(
       `Add Tag 49 to order ${ORDER}, after its acceptance`,
     )
+  })
+
+  it('changes the charges after acceptance on its own route, as an outward step (#5351)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/charges/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER, status: 'accepted' })
+      }),
+    )
+    const changed = tool('order_charges_update_after_acceptance')
+    expect(changed.risk).toBe('outward')
+    expect(changed.routes).toEqual(['PUT /api/v1/orders/{order_id}/charges/after-acceptance'])
+    // order_update keeps the plain PATCH and stays `write`.
+    expect(tool('order_update').risk).toBe('write')
+    expect(tool('order_update').routes).not.toContain('PUT /api/v1/orders/{order_id}/charges/after-acceptance')
+    const charges = [
+      { kind: 'shipping', label: 'Post', amount_minor: 500 },
+      { kind: 'discount', label: 'Agreed cap', amount_minor: -300 },
+    ]
+    const result = await changed.execute({ order_id: ORDER, charges }, ctx())
+    expect(sent).toEqual([{ charges }])
+    expect(firstText(result)).toEqual({ id: ORDER, status: 'accepted' })
+    expect(changed.summarize({ order_id: ORDER, charges })).toBe(`Set 2 charges on accepted order ${ORDER}`)
   })
 
   it('cancels the order or one item, each through its own route', async () => {

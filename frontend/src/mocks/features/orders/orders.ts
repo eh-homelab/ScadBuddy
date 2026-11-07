@@ -629,7 +629,9 @@ export const handlers = [
       notEnded(order)
       const structural = body.charges != null || 'shipping_address_id' in body || 'billing_address_id' in body
       if (structural && !OPEN_FOR_EDITS.has(order.status)) {
-        throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: only its notes and due date may change now`)
+        // #5351: past `quoted` the charges change on their own route, which the refusal names.
+        const route = body.charges != null && TAKES_ITEMS.has(order.status) ? `; change the charges with PUT /orders/${order.id}/charges/after-acceptance` : ''
+        throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: only its notes and due date may change now${route}`)
       }
       const owner = state.customers.find((c) => c.id === order.customer_id)
       for (const field of ['shipping_address_id', 'billing_address_id'] as const) {
@@ -646,6 +648,33 @@ export const handlers = [
         body.charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
         event(order, 'charges.replaced', { count: body.charges.length })
       }
+      order.updated_at = now()
+      return HttpResponse.json(order)
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
+
+  /** `PUT /orders/:id/charges/after-acceptance` (#5351): `Lifecycle.replace_charges_after_acceptance`. */
+  http.put('/api/v1/orders/:id/charges/after-acceptance', async ({ request, params }) => {
+    const body = (await request.json()) as { charges?: OrderPatch['charges'] } & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['charges'])
+    if (extra) return extra
+    if (!Array.isArray(body.charges)) return fieldProblem(request, 'charges', 'Field required')
+    const charges = body.charges
+    try {
+      const order = lock(String(params.id))
+      notEnded(order)
+      if (OPEN_FOR_EDITS.has(order.status)) {
+        throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted: change the charges with PATCH /orders/${order.id}`)
+      }
+      if (!TAKES_ITEMS.has(order.status)) throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: its charges are final once shipped`)
+      notOnHold(order)
+      const line = (c: { kind: string; label: string; amount_minor: number }) => ({ kind: c.kind, label: c.label, amount_minor: c.amount_minor })
+      const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
+      state.charges = state.charges.filter((c) => c.order_id !== order.id)
+      charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
+      event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after: charges.map(line) })
       order.updated_at = now()
       return HttpResponse.json(order)
     } catch (error) {

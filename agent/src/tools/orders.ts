@@ -17,7 +17,8 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 //
 // An item added to an order past `quoted` (#5349) changes what the customer gets, so it is
 // its own route and its own `outward` tool (order_item_add_after_acceptance); order_item_add
-// stays `write` for a draft or quoted order.
+// stays `write` for a draft or quoted order. The charges past `quoted` (#5351) change what
+// the customer pays, so they are order_charges_update_after_acceptance, `outward`, too.
 //
 // Phase 2 (#4250, plan Ruling 11): the price book is `read` to look at and `write` to keep
 // (the policy, a filament's record); order_item_quote takes both modes, a typed price or a
@@ -577,7 +578,8 @@ export const orderTools: Tool[] = [
     label: 'Edit an order',
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
-      'charges, replaced whole, while draft or quoted. `hold` puts it on hold or releases it (true/false): on hold, ' +
+      'charges, replaced whole, while draft or quoted (past that, charges answer 409 `order_not_editable`: use ' +
+      'order_charges_update_after_acceptance). `hold` puts it on hold or releases it (true/false): on hold, ' +
       'every step that advances the order is refused until released. Releasing is a write, as holding is: it ' +
       'commits nothing to the customer, and every step that does (accepting, fulfilling, shipping, closing) stays ' +
       'outward. `payment` records money the shop already received, in any state but cancelled.',
@@ -688,6 +690,31 @@ export const orderTools: Tool[] = [
             body: body as never,
           }),
           `add an item to accepted order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_charges_update_after_acceptance',
+    label: 'Change the charges of an accepted order',
+    description:
+      'Replace the charges of an order that is accepted, in production or ready (#5351), whole, as order_update ' +
+      'takes them before that. It changes what the customer pays. Use it to keep an agreed total: when an item ' +
+      'is added after acceptance, a `discount` (negative) or `fee` line absorbs its price. The audit row holds the ' +
+      'charges before and after. Refused: `order_not_accepted` on a draft or quoted order (use order_update), ' +
+      '`order_not_editable` once shipped, `order_closed`/`order_cancelled`, and `order_on_hold`.',
+    input: z.object({ order_id: orderId, charges: z.array(charge) }),
+    risk: 'outward',
+    routes: ['PUT /api/v1/orders/{order_id}/charges/after-acceptance'],
+    summarize: ({ order_id, charges }) =>
+      `Set ${charges.length} charge${charges.length === 1 ? '' : 's'} on accepted order ${order_id}`,
+    handler: async ({ order_id, charges }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/orders/{order_id}/charges/after-acceptance', {
+            params: { path: { order_id } },
+            body: { charges },
+          }),
+          `change the charges of accepted order ${order_id}`,
         ),
       ),
   }),

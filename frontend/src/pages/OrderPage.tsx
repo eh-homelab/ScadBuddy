@@ -339,7 +339,7 @@ export function OrderPage() {
           <Card size="sm">
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-medium">Money</h2>
-              <ChargesEditor orderId={order.id} currency={order.currency} exponent={order.minor_exponent} charges={charges} editable={editable} onChanged={reload} />
+              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
                 <dt className="text-muted-foreground">Items</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>
@@ -704,7 +704,7 @@ function ItemDrawer({
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
-        // left `quoted` (added after acceptance, or by the agent) is accepted here (#5541).
+        // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />

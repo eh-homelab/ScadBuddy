@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { OrderStatus } from '../../api/types'
-import { addMode, afterAcceptanceWarning, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
+import { addMode, afterAcceptanceWarning, chargesWarning, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
 
 type Extension = 'x-open-for-edits' | 'x-takes-items'
 
@@ -53,6 +53,16 @@ describe('afterAcceptance', () => {
     ['ready', /^ORD-2026-2 is ready\. Adding an item changes what the customer gets\. The order goes back to in production until the new item is made\./],
   ])('names a %s order in the confirm', (status, text) => {
     expect(afterAcceptanceWarning({ number: 'ORD-2026-2', status })).toMatch(text)
+  })
+
+  it.each<[OrderStatus, string]>([
+    ['accepted', 'accepted'],
+    ['in_production', 'in production'],
+    ['ready', 'ready'],
+  ])('names a %s order in the charges confirm (#5351)', (status, text) => {
+    expect(chargesWarning({ number: 'ORD-2026-2', status })).toMatch(
+      new RegExp(`^ORD-2026-2 is ${text}\\. Changing the charges changes what the customer pays\\.`),
+    )
   })
 
   it("opens an item past `quoted` only while it has no accepted quote", () => {

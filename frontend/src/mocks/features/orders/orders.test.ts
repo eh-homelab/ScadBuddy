@@ -43,6 +43,31 @@ describe('orders mock (#4249)', () => {
     expect(held?.problem.type).toBe(`${PROBLEMS}order_on_hold`)
   })
 
+  it('changes the charges after acceptance as the backend does (#5351)', async () => {
+    const post = { kind: 'shipping' as const, label: 'Post', amount_minor: 500 }
+    const cap = { kind: 'discount' as const, label: 'Agreed cap', amount_minor: -300 }
+    const plain = await failure(api.updateOrder(ORDER_ACCEPTED, { charges: [post, cap] }))
+    expect(plain?.problem.type).toBe(`${PROBLEMS}order_not_editable`)
+    expect(plain?.problem.detail).toMatch(/PUT \/orders\/.+\/charges\/after-acceptance/)
+    const early = await failure(api.replaceChargesAfterAcceptance(ORDER_DRAFT, [post]))
+    expect(early?.problem.type).toBe(`${PROBLEMS}order_not_accepted`)
+    const changed = await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [post, cap])
+    expect(changed.status).toBe('accepted')
+    const detail = await api.order(ORDER_ACCEPTED)
+    expect(detail.charges.map((c) => [c.kind, c.amount_minor])).toEqual([
+      ['shipping', 500],
+      ['discount', -300],
+    ])
+    expect(detail.totals.charges_minor).toBe(200)
+    const events = await api.orderEvents(ORDER_ACCEPTED)
+    expect(events.filter((e) => e.kind === 'charges.replaced_after_acceptance').map((e) => e.detail)).toEqual([
+      { order_status: 'accepted', before: [post], after: [post, cap] },
+    ])
+    await api.holdOrder(ORDER_ACCEPTED)
+    const held = await failure(api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, []))
+    expect(held?.problem.type).toBe(`${PROBLEMS}order_on_hold`)
+  })
+
   it('takes an item added after acceptance back, alone or with its order (#5349)', async () => {
     const added = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'request', title: 'Tag 49', quantity: 1 })
     await api.cancelOrderItem(ORDER_ACCEPTED, added.id)
