@@ -362,3 +362,29 @@ async def test_a_retried_attempt_writing_another_body_under_its_key_writes_anew(
     assert previous == _ref("a")
     named = BlobIndex(pool).get("k")
     assert named is not None and named.ref == _ref("b")
+
+
+# -- keys only the API writes (#5298 Task 18) ---------------------------------------
+
+
+@pytest.mark.parametrize("key", ["asset-" + "a" * 64, "font-dejavu", "src-demo-abc"])
+async def test_the_worker_cannot_store_a_key_only_the_api_writes(
+    index: RemoteBlobIndex, pool: Pool, key: str
+) -> None:
+    """An upload's copy is what an adopt writes the upload's row from: a render
+    credential that could store one could forge the row. Fonts and snapshots are the
+    API's too. Deleting one (a copy the worker cannot read) is still allowed."""
+    sql = BlobIndex(pool)
+    sql.put(key, _ref("b"), slug=None, meta={"name": "real"})
+    for write in (
+        lambda: index.put(key, _ref("a"), slug=None, meta={"name": "forged"}),
+        lambda: index.swap(key, _ref("a"), expected=None, slug=None, meta={}),
+        lambda: index.mark([key], backend="bambuddy", cutoff=sql.now(), name="forged"),
+    ):
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(write)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "api-owned-key"
+    held = sql.get(key)
+    assert held is not None and held.meta == {"name": "real"} and held.ref == _ref("b")
+    assert await asyncio.to_thread(index.delete, key) is not None

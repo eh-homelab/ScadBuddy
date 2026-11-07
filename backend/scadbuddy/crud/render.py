@@ -19,7 +19,8 @@ names, signatures and answers. Every write is natural.
 use, `IndexesBlobs`) over the routes, with the same answers: a `put` the object it
 replaced, a delete the row it took, `ReuseLostError` and, once the API's own retries are
 spent, `DeadlockDetected` as over SQL. Its non-natural writes send an
-``Idempotency-Key`` each (`WriteKeys`).
+``Idempotency-Key`` each (`WriteKeys`). A put, swap or mark of a key only the API writes
+(an upload's, a font's, a snapshot's) is refused, a `CrudRefusedError` 403.
 
 `RemoteStoreFolders` is `store/bambuddy.py` `FolderFinder` (`KeepsFolders`) over the
 routes (plan D6): the API finds or makes a folder in Bambuddy itself, with its own render

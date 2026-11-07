@@ -6,9 +6,11 @@ rows through `RemoteAssetRows` and `api/crud_render.py`.
 - `adopt` (R20) is natural: adopted twice, one row. The API checks the id, takes the
   asset's advisory lock, and writes the row from its own blob index's copy, so the worker
   sets no field of it.
-- `prune_local` (R21) reads the last uses in batches of at most `LAST_USED_MAX`. It held a
-  row lock while it removed a file; now a lock per asset id, shared with `use` and
-  `adopt` in the process, keeps a `use` from answering a file the prune removes.
+- `prune_local` (R21) reads the last uses in batches of at most `LAST_USED_MAX`, with no
+  lock held. It held a row lock while it removed a file; now each stale copy goes under a
+  lock per asset id, shared with `use` and `adopt` in the process, unless one of them let
+  the id go after the prune started: a `use` is never held up by the round trip, and
+  never answers a file the prune removes.
 """
 
 from __future__ import annotations
@@ -286,18 +288,25 @@ async def test_prune_local_removes_stale_copies_and_keeps_the_rows(
 
 
 class _Paused:
-    """`RemoteAssetRows` whose `last_used` waits, once answered, until ``go`` is set: a
-    prune held inside its round trip."""
+    """`RemoteAssetRows` that can hold a call: `last_used` waits, once answered, until
+    ``go`` is set (a prune inside its round trip); `use`, with ``hold_use``, waits before
+    it calls the API (a slow use with the id's lock held)."""
 
     def __init__(self, rows: RemoteAssetRows) -> None:
         self._rows = rows
         self.inside = threading.Event()
         self.go = threading.Event()
+        self.hold_use = False
+        self.using = threading.Event()
+        self.use_go = threading.Event()
 
     def get(self, asset_id: str) -> AssetMeta:
         return self._rows.get(asset_id)
 
     def use(self, asset_id: str) -> AssetMeta:
+        if self.hold_use:
+            self.using.set()
+            assert self.use_go.wait(30)
         return self._rows.use(asset_id)
 
     def adopt(self, meta: AssetMeta) -> None:
@@ -310,11 +319,11 @@ class _Paused:
         return answer
 
 
-async def test_a_use_during_a_local_prune_never_answers_a_removed_file(
+async def test_a_use_during_the_prunes_round_trip_is_not_held_and_keeps_its_file(
     api: AssetStore, remote: RemoteAssets, rows: RemoteAssetRows, tmp_path: Path, pool: Pool
 ) -> None:
-    """The prune read a stale last use; a `use` that comes in before it removes the file
-    waits for it, then finds the file gone (not found), and `ensure` fetches it again."""
+    """The prune read a stale last use and holds no lock across that read: a `use` then
+    goes through at once, and the prune, seeing the use, keeps the file."""
     paused = _Paused(rows)
     worker = RemoteAssetStore(tmp_path / "worker" / "assets", paused)
     meta = await _uploaded(api, remote)
@@ -322,27 +331,48 @@ async def test_a_use_during_a_local_prune_never_answers_a_removed_file(
     _age(pool, meta.id)
     pruning = asyncio.create_task(asyncio.to_thread(worker.prune_local, grace=3600))
     assert await asyncio.to_thread(paused.inside.wait, 30)
-
-    answers: list[object] = []
-
-    def use() -> None:
-        try:
-            found = worker.use(meta.id)
-            answers.append(found)
-            assert worker.blob_path(found).is_file()
-        except AssetNotFoundError as error:
-            answers.append(error)
-
-    using = asyncio.create_task(asyncio.to_thread(use))
-    await asyncio.sleep(0.3)
-    assert not using.done()  # waits on the prune's lock of this id
+    found = await asyncio.wait_for(asyncio.to_thread(worker.use, meta.id), 5)  # not held
+    assert found == meta
     paused.go.set()
-    assert await pruning == [meta.id]
-    await using
-    assert len(answers) == 1 and isinstance(answers[0], AssetNotFoundError)
-    # The render's `ensure` then brings the copy back.
+    assert await pruning == []
+    assert worker.blob_path(found).is_file()
+
+
+async def test_a_use_holding_its_id_when_the_prune_comes_keeps_its_file(
+    api: AssetStore, remote: RemoteAssets, rows: RemoteAssetRows, tmp_path: Path, pool: Pool
+) -> None:
+    """A slow `use` holds the id's lock while the prune reads a stale last use (the use
+    has not reached the API yet): the prune waits for the id, sees the use, and keeps
+    the file the use answered."""
+    paused = _Paused(rows)
+    paused.go.set()
+    worker = RemoteAssetStore(tmp_path / "worker" / "assets", paused)
+    meta = await _uploaded(api, remote)
     assert await remote.ensure(worker, [meta.id]) == []
-    assert worker.blob_path(meta).is_file()
+    _age(pool, meta.id)
+    paused.hold_use = True
+    using = asyncio.create_task(asyncio.to_thread(worker.use, meta.id))
+    assert await asyncio.to_thread(paused.using.wait, 30)
+    pruning = asyncio.create_task(asyncio.to_thread(worker.prune_local, grace=3600))
+    assert await asyncio.to_thread(paused.inside.wait, 30)
+    await asyncio.sleep(0.3)
+    assert not pruning.done()  # waits on the use's lock of this id
+    paused.use_go.set()
+    found = await using
+    assert await pruning == []
+    assert worker.blob_path(found).is_file()
+
+
+async def test_a_use_after_the_prune_removed_the_file_is_fetched_again(
+    api: AssetStore, remote: RemoteAssets, worker: RemoteAssetStore, pool: Pool
+) -> None:
+    meta = await _uploaded(api, remote)
+    assert await remote.ensure(worker, [meta.id]) == []
+    _age(pool, meta.id)
+    assert worker.prune_local(grace=3600) == [meta.id]
+    with pytest.raises(AssetNotFoundError):
+        worker.use(meta.id)
+    assert await remote.ensure(worker, [meta.id]) == []
     assert worker.use(meta.id) == meta
 
 
@@ -365,3 +395,4 @@ async def test_the_id_locks_are_forgotten_once_free(
     worker.use(meta.id)
     worker.prune_local(grace=3600)
     assert worker._locks.held() == 0
+    assert worker._touched == {}  # older than the prune's start: forgotten
