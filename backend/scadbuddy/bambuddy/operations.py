@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
 from scadbuddy.bambuddy.options import PrintOptions, options_scope
-from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
+from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
@@ -384,6 +384,10 @@ def bambuddy_kinds_over(
                 meta = await require(outputs, request["output_id"])
                 subject = PrintSubject.output(meta.id).run_subject
                 naming = await outputs.naming(meta)
+                # The run's refusal (#5649): a slice with none of the template's
+                # settings would show a print the run then refuses.
+                if naming.invalid_meta is not None:
+                    raise invalid_meta(naming.invalid_meta)
                 title = naming.title
                 source = OutputSource(
                     store=outputs,
