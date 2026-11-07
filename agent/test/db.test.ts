@@ -1,6 +1,32 @@
 import type { Sql } from 'postgres'
 import { describe, expect, it, vi } from 'vitest'
-import { type CancellableQuery, createLockClient, makePing, makeReady, TEST_LOCK_CONNECTIONS } from '../src/db.js'
+import {
+  AGENT_DB_CONNECTIONS,
+  APPLICATION_NAME,
+  type CancellableQuery,
+  clientOptions,
+  createLockClient,
+  IDLE_TIMEOUT_SECONDS,
+  makePing,
+  makeReady,
+  SQL_CONNECTIONS,
+  TEST_LOCK_CONNECTIONS,
+} from '../src/db.js'
+
+describe('the connection budget (#5226)', () => {
+  it('sums the stores, the lock client and the listener, and every client closes what sits idle', () => {
+    // Change this on purpose: README "Running it" counts it per pod.
+    expect(AGENT_DB_CONNECTIONS).toBe(9)
+    expect(SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS + 1).toBe(AGENT_DB_CONNECTIONS)
+    expect(IDLE_TIMEOUT_SECONDS).toBe(60)
+    expect(clientOptions(SQL_CONNECTIONS)).toMatchObject({
+      max: SQL_CONNECTIONS,
+      idle_timeout: IDLE_TIMEOUT_SECONDS,
+      connection: { application_name: APPLICATION_NAME },
+    })
+    expect(clientOptions(1, 'a_schema').connection).toEqual({ application_name: APPLICATION_NAME, search_path: 'a_schema' })
+  })
+})
 
 /** A fake postgres.js query that settles only when told to, and records cancels. */
 function fakeQuery() {

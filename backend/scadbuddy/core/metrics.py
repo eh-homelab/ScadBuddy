@@ -21,6 +21,8 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from prometheus_client.core import GaugeMetricFamily, Metric
+from prometheus_client.registry import Collector
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = [
@@ -468,6 +470,9 @@ class Metrics:
         for outcome in get_args(TraceRelayOutcome):
             self.trace_relay_batches.labels(outcome)
 
+        # Postgres connections (#5226): read from `core/pg_pool.py`'s registry per scrape.
+        r.register(_PoolCollector())
+
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:
         """Time one render step. Observed whether the step succeeds or raises: a
@@ -480,6 +485,47 @@ class Metrics:
 
     def exposition(self) -> bytes:
         return generate_latest(self.registry)
+
+
+class _PoolCollector(Collector):
+    """This process's Postgres pools and its ``LISTEN`` connection, by pool name: the
+    connections each holds now and the most it may. ``sum by (pod)`` of the second is
+    what a pod may take of ``max_connections``."""
+
+    def describe(self) -> list[Metric]:
+        return list(self._families())
+
+    def collect(self) -> Iterator[Metric]:
+        from scadbuddy.core.pg_pool import pools
+
+        open_now, most = self._families()
+        totals: dict[str, list[int]] = {}
+        for use in pools():
+            total = totals.setdefault(use.name, [0, 0])
+            total[0] += use.open
+            total[1] += use.max_size
+        for name, (now, top) in sorted(totals.items()):
+            open_now.add_metric([name], now)
+            most.add_metric([name], top)
+        yield open_now
+        yield most
+
+    @staticmethod
+    def _families() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
+        return (
+            GaugeMetricFamily(
+                "scadbuddy_db_pool_connections",
+                "Postgres connections this process's pool holds now (in use, idle or"
+                " connecting), by pool; the LISTEN connection is the pool"
+                " scadbuddy-listener.",
+                labels=["pool"],
+            ),
+            GaugeMetricFamily(
+                "scadbuddy_db_pool_max_connections",
+                "The most Postgres connections this process's pool may hold, by pool.",
+                labels=["pool"],
+            ),
+        )
 
 
 #: Requests that matched no API route: the SPA's static files and 404s. One label

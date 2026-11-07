@@ -16,9 +16,6 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends
-from psycopg import Connection
-from psycopg.rows import DictRow, dict_row
-from psycopg_pool import ConnectionPool
 from starlette.requests import HTTPConnection
 
 from scadbuddy.api.components import component_dep
@@ -33,7 +30,7 @@ from scadbuddy.auth.run_tokens import run_token_key
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.auth.store import Pool, SessionStore
 from scadbuddy.core.components import Component, Components, Core, Key
-from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.core.pg_pool import row_pool
 from scadbuddy.core.secrets import Envelope, Kek
 from scadbuddy.library.url_import import public_transport
 
@@ -54,20 +51,14 @@ class AuthComponent:
         self.would_refuse = WouldRefuse(core.metrics)
         self._lock = threading.Lock()
         self._opened = False
-        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+        # Its own, not the shared rows pool (`rows/component.py`): a burst of other
+        # writes must not queue a request's cookie lookup behind it.
+        self._pool = row_pool(
             core.settings.database_url,
-            min_size=1,
-            max_size=POOL_SIZE,
-            open=False,
-            timeout=CONNECT_TIMEOUT,
-            connection_class=Connection[DictRow],
-            kwargs={
-                "autocommit": True,
-                "row_factory": dict_row,
-                "connect_timeout": max(1, int(CONNECT_TIMEOUT)),
-                **TCP_KEEPALIVE,
-            },
             name="scadbuddy-auth",
+            max_size=POOL_SIZE,
+            timeout=CONNECT_TIMEOUT,
+            connect_timeout=CONNECT_TIMEOUT,
         )
         self._sessions = SessionStore(self._pool)
         self._config = LoginConfigStore(self._pool)

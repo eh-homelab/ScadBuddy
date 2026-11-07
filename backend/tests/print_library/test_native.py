@@ -17,10 +17,11 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.core.components import Components, Core
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
-from scadbuddy.print_library.component import COMPONENT, PrintLibrary
+from scadbuddy.print_library.component import COMPONENT, PRINT_LIBRARY, PrintLibrary
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads
 from scadbuddy.print_library.store import NativeFile
+from scadbuddy.rows.component import COMPONENT as ROWS_COMPONENT
 from scadbuddy.store.content import ContentStore
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.print_library.conftest import upload
@@ -234,7 +235,7 @@ def test_building_the_component_reads_nothing(
     core_without_pools: tuple[Core, FakeSettingsStore],
 ) -> None:
     core, settings_store = core_without_pools
-    lib = COMPONENT.build(core, Components(core, []))
+    lib = COMPONENT.build(core, Components(core, [ROWS_COMPONENT]))
     assert isinstance(lib, PrintLibrary) and settings_store.loads == 0
     assert lib.backend == "bambuddy" and lib.backend == "bambuddy"
     assert settings_store.loads == 1
@@ -246,9 +247,9 @@ async def test_the_component_builds_the_native_library_once(
     pg_conninfo: str, content: ContentStore, three_mf: Path
 ) -> None:
     core = _core(FakeSettingsStore("native"), pg_conninfo, store=SimpleNamespace(content=content))
-    lib = COMPONENT.build(core, Components(core, []))
-    assert COMPONENT.run is not None
-    async with COMPONENT.run(lib):
+    components = Components(core, [ROWS_COMPONENT, COMPONENT])
+    lib = components.get(PRINT_LIBRARY)
+    async with components.running():
         assert lib.native is lib.native and lib.native.content is content
         f = await upload(lib.native, three_mf)
         assert (await lib.native.library_file(f.id)).id == f.id

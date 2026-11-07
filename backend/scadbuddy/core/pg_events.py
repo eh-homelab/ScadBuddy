@@ -136,6 +136,7 @@ from scadbuddy.core.events import (
 )
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.pg_pool import async_pool
 
 logger = logging.getLogger(__name__)
 
@@ -344,13 +345,8 @@ class PgNotifyEventBus:
         #: Listeners still applying what they heard to in-process state (#1039): while
         #: any is, a read may show less than `last_event_id`, so it carries no cursor.
         self.settling = 0
-        self._pool: AsyncConnectionPool[AsyncConnection[TupleRow]] = AsyncConnectionPool(
-            conninfo,
-            min_size=1,
-            max_size=2,
-            open=False,
-            kwargs={"autocommit": True},
-            name="scadbuddy-events",
+        self._pool: AsyncConnectionPool[AsyncConnection[TupleRow]] = async_pool(
+            conninfo, name="scadbuddy-events", max_size=2
         )
         self._lock = threading.Lock()
         self._early: deque[Outgoing] = deque()

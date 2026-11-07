@@ -322,10 +322,14 @@ def _build_core(settings: Settings) -> AppState:
     )
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the projection's pool opens in the lifespan, and the
-    # event bus's in `PgNotifyEventBus.start`. The previews share the projection's
-    # pool (#454).
-    projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
+    # Nothing connects here: the settings pool opens first thing in the lifespan, and
+    # the event bus's in `PgNotifyEventBus.start`. One role, so one pool (#5226): the
+    # settings store owns it, closing it last, and the projection, the presets and
+    # everything that takes the projection's pool (the previews, #454) share it.
+    settings_store = SettingsStore(settings, pool_name="scadbuddy-api")
+    projection = JobProjection(
+        settings.database_url, pool_size=settings.database_pool_size, pool=settings_store.pool
+    )
     pool = projection.pool
     # Registered on the shared listener before the bus (#2507): a commit's HEAD is
     # refreshed here before the bus delivers the events the writer published after
@@ -361,9 +365,7 @@ def _build_core(settings: Settings) -> AppState:
     # ones rendered while it was on, which stay stored until their model goes.
     # The media list (#274) shares the projection's pool, opened in the lifespan.
     # Nothing connects here either: the lifespan opens it.
-    presets = PresetStore(
-        paths, settings.database_url, pool_size=min(4, settings.database_pool_size)
-    )
+    presets = PresetStore(paths, settings.database_url, pool=pool)
     catalogue = Catalogue(
         paths,
         history,
@@ -392,8 +394,8 @@ def _build_core(settings: Settings) -> AppState:
     previews = (
         build_previews(catalogue, outputs, render, config) if settings.preview_renders else None
     )
-    # Nothing connects here either: the lifespan opens it first thing.
-    settings_store = SettingsStore(settings, events=events)
+    # Told of every settings write from here on: nothing writes one before the lifespan.
+    settings_store.events = events
     print_progress = ProgressObserver(events)
     print_links = PrintLinkStore(pool)
     print_run_store = PrintRunStore(pool, events=transactional_events(events))

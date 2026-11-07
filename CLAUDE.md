@@ -590,6 +590,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
+- Postgres pools (#5226): every one is made by `core/pg_pool.py` (`row_pool`,
+  `async_pool`: `min_size` 0, idle connections closed after a minute, the pool's name
+  as `application_name`), never a `ConnectionPool(...)` of a feature's own. A feature's
+  short statements on the API's role go on the shared `scadbuddy-rows` pool
+  (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
+  and fails on any new or bigger one; change it, and README "Running it", on purpose.
 - Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
   table is one row per piece of background work, written by the sources (render, operation,
   print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
