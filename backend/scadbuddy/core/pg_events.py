@@ -37,10 +37,15 @@ Two paths lead there:
   after it.
 - :meth:`PgNotifyEventBus.publish` is for changes that are not in the database (the
   git-backed catalogue, outputs, settings, fonts). It never blocks and is safe from
-  any thread: the event goes into an outbox -- `_Outbox`, the same bounded,
+  any thread: the event goes into an outbox -- `Outbox`, the same bounded,
   drop-oldest, ``call_soon_threadsafe`` hand-off #321's subscriptions use -- and a
   task on the event loop drains it in short autocommit transactions. Publishes
   before :meth:`~PgNotifyEventBus.start` wait in a bounded buffer.
+
+A worker's event comes to the API over its CRUD route (#5298, plan D7) and goes in
+through :meth:`PgNotifyEventBus.publish_once` (`write_event_once`): a transaction of its
+own, ``ON CONFLICT (event_id) DO NOTHING``, and a NOTIFY only when the row was inserted,
+so the worker may send it again after a lost answer.
 
 Either way each event is encoded once: the payload whose size was checked is the
 one logged and NOTIFYed, carried through the outbox beside its event.
@@ -165,6 +170,10 @@ _LOCK_SQL = "SELECT pg_advisory_xact_lock(%s)"
 _INSERT_SQL = (
     "INSERT INTO events (event_id, kind, at, payload) VALUES (%s, %s, %s, %s::jsonb) RETURNING seq"
 )
+_INSERT_ONCE_SQL = (
+    "INSERT INTO events (event_id, kind, at, payload) VALUES (%s, %s, %s, %s::jsonb)"
+    " ON CONFLICT (event_id) DO NOTHING RETURNING seq"
+)
 _NOTIFY_SQL = "SELECT pg_notify(%s, %s)"
 
 
@@ -172,7 +181,7 @@ _NOTIFY_SQL = "SELECT pg_notify(%s, %s)"
 Outgoing = tuple[Event, str]
 
 
-class _Outbox:
+class Outbox:
     """The publish path's queue: bounded, oldest dropped (and counted) first, fed
     from any thread and drained on ``loop``. #321's `Subscription`, holding each
     event with the payload `publish` encoded, so the writer need not encode it
@@ -300,6 +309,19 @@ def write_event(conn: Connection[Any], event: Event, payload: str) -> int:
     return int(_first(row))
 
 
+async def write_event_once(conn: AsyncConnection[Any], event: Event, payload: str) -> int | None:
+    """`write_event`, but an event whose id the log holds already (the column is UNIQUE)
+    is neither logged nor NOTIFYed again: its ``seq``, or None when it was there. A
+    worker's event sent again after a lost answer (#5298, plan D7) is heard once."""
+    await conn.execute(_LOCK_SQL, (EVENT_LOG_LOCK,))
+    cursor = await conn.execute(_INSERT_ONCE_SQL, (event.id, event.kind, event.at, payload))
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    await conn.execute(_NOTIFY_SQL, (PG_CHANNEL, payload))
+    return int(_first(row))
+
+
 async def _awrite_event(conn: AsyncConnection[Any], event: Event, payload: str) -> int:
     await conn.execute(_LOCK_SQL, (EVENT_LOG_LOCK,))
     cursor = await conn.execute(_INSERT_SQL, (event.id, event.kind, event.at, payload))
@@ -350,7 +372,7 @@ class PgNotifyEventBus:
         )
         self._lock = threading.Lock()
         self._early: deque[Outgoing] = deque()
-        self._outbox: _Outbox | None = None
+        self._outbox: Outbox | None = None
         self._outbox_dropped = 0
         self._closed = False
         self._tasks: list[asyncio.Task[None]] = []
@@ -397,7 +419,7 @@ class PgNotifyEventBus:
         # The first pass is ours, not the timer's: run in a task, it would land whenever
         # the caller next yields, after events the caller has since logged (#1787).
         await self._prune_logged()
-        outbox = _Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
+        outbox = Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
         with self._lock:
             self._outbox = outbox
             early, self._early = list(self._early), deque()
@@ -469,6 +491,22 @@ class PgNotifyEventBus:
             self.metrics.events_dropped.labels("error").inc()
             return
         self.metrics.events_published.inc()
+
+    async def publish_once(self, event: Event) -> bool:
+        """Log and NOTIFY ``event`` now, in a transaction of its own, unless the log holds
+        its id already (`write_event_once`): a worker's event posted to the API (#5298,
+        plan D7), which it may send again. True when this call logged it. A database
+        error is raised, so the worker's call is answered 5xx and sent again; an event
+        over the payload cap is logged and counted, and answers False."""
+        payload = notify_payload(event, self.metrics)
+        if payload is None:
+            return False
+        async with self._pool.connection() as conn, conn.transaction():
+            seq = await write_event_once(conn, event, payload)
+        if seq is None:
+            return False
+        self.metrics.events_published.inc()
+        return True
 
     def subscribe(
         self, *, kinds: Collection[str] | None = None, maxsize: int | None = None
@@ -565,7 +603,7 @@ class PgNotifyEventBus:
 
     # -- internals ------------------------------------------------------------------
 
-    async def _drain(self, outbox: _Outbox) -> None:
+    async def _drain(self, outbox: Outbox) -> None:
         while (item := await outbox.get()) is not None:
             batch = [item]
             while len(batch) < WRITE_BATCH and (more := outbox.get_nowait()) is not None:

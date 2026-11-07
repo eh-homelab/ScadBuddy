@@ -64,7 +64,7 @@ from scadbuddy.bambuddy.print_source import (
     given_filaments,
 )
 from scadbuddy.bambuddy.progress import ProgressObserver
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRuns
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
@@ -151,7 +151,8 @@ class PrintDeps:
     #: Where a print records the output's last print (#1060).
     prints: OutputPrintStore | None
     uploads: BambuddyUploadStore
-    store: PrintRunStore
+    #: The run record: SQL in the API, the CRUD routes on the print worker (#5298).
+    store: PrintRuns
     observer: ProgressObserver
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
     rack: RackUsage | None = None

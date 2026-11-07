@@ -261,6 +261,9 @@ class PrintCommands:
     client: Client
     task_queue: str
     search_attributes: bool = False
+    #: How each print ended (#2665): the API's follow records it, and the print worker's
+    #: through the CRUD route (#5298).
+    outcomes: PrintOutcomeStore | None = None
 
 
 class _Immediate:
@@ -484,6 +487,7 @@ def _build_core(settings: Settings) -> AppState:
             client=temporal,
             task_queue=settings.temporal_task_queue_bambuddy,
             search_attributes=settings.temporal_search_attributes,
+            outcomes=outcomes,
         ),
         checkouts=checkouts,
         installs=installs,

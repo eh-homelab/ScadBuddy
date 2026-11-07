@@ -919,7 +919,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   them, so its own Bambuddy URL and key variables are not read. That answer is
   `no-store`. Every other sealed setting (the render key, the S3 secret) is null in it,
   and so is the rest of the S3 store's connection (`PRINT_UNREAD`; the fields that take
-  no null keep their defaults). The worker waits until the API lists the `settings` area before it serves. Its
+  no null keep their defaults). Its print runs, their outcomes, its operations' records
+  and the events it publishes go through the CRUD routes too
+  (`/api/v1/internal/crud/print/runs`, `…/outcomes`, `…/operations`, `…/events`, #5298):
+  the API writes each with its event and activity row, and takes only the
+  `print.progress`, `print.settled`, `printer.report` and `printer.changed` events from
+  it, each logged once by its id. The worker does not `LISTEN`. It waits until the API
+  lists the `settings`, `runs`, `operations` and `events` areas before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is

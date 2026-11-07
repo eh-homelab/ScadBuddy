@@ -12,9 +12,10 @@ test of the worker that renders nothing. `threaded_render_crud` is a render work
 blocking client of the render routes served on a thread of their own, for a test that
 calls them from its event loop or a sync test; `threaded_render_index` is the worker's
 `RemoteBlobIndex` over it. `print_crud_app` serves the print routes over the API's
-settings store, `threaded_print_crud` is a blocking client of them on a thread of their
-own, and `static_print_crud` is a print worker's client of a stand-in API that answers
-fixed settings. `FakeClock` is a
+settings store (and its run, outcome and operation stores and its bus), `threaded_print_crud`
+is a blocking client of them on a thread of their own, `served_print_crud` an async one on
+a local port, and `static_print_crud` is a print worker's client of a stand-in API that
+answers fixed settings. `FakeClock` is a
 client clock that moves only by the client's own waits, so a test's count of tries does
 not depend on wall time."""
 
@@ -47,7 +48,10 @@ from scadbuddy.auth.service_credentials import (
     ServiceCaller,
     ServiceCredentialStore,
 )
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.config import INSTALL_CONCURRENCY
+from scadbuddy.core.events import EventBus
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64, seal_bytes
@@ -418,13 +422,29 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
     )
 
 
-def print_crud_app(store: SettingsStore, credentials: ServiceCredentialStore) -> FastAPI:
-    """The print routes, reading the settings through the API's ``store``."""
+def print_crud_app(
+    store: SettingsStore,
+    credentials: ServiceCredentialStore,
+    *,
+    runs: PrintRunStore | None = None,
+    outcomes: PrintOutcomeStore | None = None,
+    events: EventBus | None = None,
+    operations: OperationStore | None = None,
+    kinds: Mapping[str, OperationKind] | None = None,
+) -> FastAPI:
+    """The print routes, reading the settings through the API's ``store``, the runs
+    through ``runs`` and ``outcomes``, publishing on ``events``, and writing operations
+    through ``operations`` of ``kinds``."""
     app = FastAPI(dependencies=[Depends(auth_check)])
-    parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
+    parts: dict[Any, Any] = {
+        AUTH: SimpleNamespace(would_refuse=_Noted()),
+        OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
+    }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
         settings_store=store,
+        print_runs=SimpleNamespace(store=runs, outcomes=outcomes),
+        events=events,
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_print.router, prefix="/api/v1")
@@ -436,12 +456,13 @@ def print_crud_app(store: SettingsStore, credentials: ServiceCredentialStore) ->
 
 @contextmanager
 def threaded_print_crud(
-    store: SettingsStore, caller: ServiceCaller = "print"
+    store: SettingsStore, caller: ServiceCaller = "print", **parts: Any
 ) -> Iterator[CrudSyncClient]:
-    """A `CrudSyncClient` of the print routes over ``store``, with ``caller``'s credential,
-    served on a thread of its own, so a blocking call from the test's loop is answered."""
+    """A `CrudSyncClient` of the print routes over ``store`` (and ``parts``, as
+    `print_crud_app` takes them), with ``caller``'s credential, served on a thread of its
+    own, so a blocking call from the test's loop is answered."""
     credentials = ServiceCredentialStore(store.pool)
-    app = print_crud_app(store, credentials)
+    app = print_crud_app(store, credentials, **parts)
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
     )
@@ -466,14 +487,35 @@ def threaded_print_crud(
         thread.join(30)
 
 
+@asynccontextmanager
+async def served_print_crud(store: SettingsStore, **parts: Any) -> AsyncIterator[CrudClient]:
+    """A print worker's `CrudClient` of `print_crud_app` over ``store`` and ``parts`` on a
+    local port, its credential minted in process on ``store``'s schema."""
+    credentials = ServiceCredentialStore(store.pool)
+    app = print_crud_app(store, credentials, **parts)
+    await listener.start(app, 0)
+    crud = CrudClient(
+        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
+        "print",
+        ServiceAuth(InProcessProvider("print", lambda: credentials)),
+        unavailable_budget=5,
+    )
+    try:
+        yield crud
+    finally:
+        await crud.aclose()
+        await listener.stop(app)
+
+
 def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
-    """A print worker's client of an API that lists the ``settings`` area and answers
-    ``current`` (the defaults) as the settings."""
+    """A print worker's client of an API that lists its areas and answers ``current``
+    (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
+    areas = ["settings", "runs", "operations", "events"]
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):
-            return httpx.Response(200, json={"areas": ["settings"]}, headers=CRUD_HEADERS)
+            return httpx.Response(200, json={"areas": areas}, headers=CRUD_HEADERS)
         if request.url.path.endswith("/print/settings"):
             return httpx.Response(200, json=body, headers=CRUD_HEADERS)
         return httpx.Response(404, headers=CRUD_HEADERS)

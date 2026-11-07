@@ -166,6 +166,6 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
 
 
 @pytest.mark.requires_postgres
-def test_the_print_areas_list_settings(crud: CrudSyncClient) -> None:
+def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> None:
     response = crud.request("GET", "/api/v1/internal/crud/print/areas")
-    assert response.json()["areas"] == ["settings"]
+    assert response.json()["areas"] == ["settings", "runs", "operations", "events"]

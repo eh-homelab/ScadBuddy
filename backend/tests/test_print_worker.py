@@ -27,7 +27,10 @@ from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy import print_run as print_run_module
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.operations import RemoteOperationStore
+from scadbuddy.crud.print import RemoteEvents, RemotePrintRunStore, WorkerHearsNoEventsError
 from scadbuddy.library.settings_store import PrintSettings, StoredSettings
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
@@ -52,7 +55,6 @@ from scadbuddy.workflows.operation_models import (
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import static_print_crud
 from tests.slicing.conftest import PROFILES
-from tests.support.recent_runs import assert_hears, record_recent_runs
 from tests.support.temporal import temporal_client
 from tests.test_worker import _healthy
 
@@ -157,16 +159,24 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
 
 
 @pytest.mark.requires_postgres
-async def test_a_print_run_through_the_workers_bus_drops_the_follows_kept_run(
+async def test_the_print_worker_builds_no_listener(
     pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#4541: a subject's print.run drops the follow's kept newest run."""
-    built = record_recent_runs(monkeypatch, worker_module)
+    """#5298 (plan D7): the worker does not LISTEN. Its events go to the API, and it
+    keeps no run to drop (`RecentRuns`): each read asks the API for the newest run."""
+
+    def refused(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the print worker built a PgListener")
+
+    monkeypatch.setattr(PgListener, "__init__", refused)
     deps = await asyncio.to_thread(build_print_deps, print_settings(pg_conninfo, tmp_path))
     try:
-        [recent] = built
+        assert isinstance(deps.events, RemoteEvents)
         await deps.events.start()
-        await assert_hears(recent, deps.events)
+        with pytest.raises(WorkerHearsNoEventsError):
+            deps.events.subscribe()
+        with pytest.raises(WorkerHearsNoEventsError):
+            deps.events.add_listener(lambda event: None)
     finally:
         await deps.aclose()
 
@@ -360,11 +370,20 @@ async def _delete_with_prelude(client: Client, library_queue: str, queue: str) -
 
 
 @pytest.mark.requires_postgres
-async def test_the_print_workers_stores_write_activity(pg_conninfo: str, tmp_path: Path) -> None:
+async def test_the_print_workers_runs_and_operations_go_through_the_api(
+    pg_conninfo: str, tmp_path: Path
+) -> None:
+    """#5298: the API writes them with their events and activity rows (Q8-Q14)."""
     deps = await asyncio.to_thread(build_print_deps, print_settings(pg_conninfo, tmp_path))
     try:
-        assert deps.print_runs.activity is not None
-        assert deps.operations.activity is not None
+        assert isinstance(deps.print_runs, RemotePrintRunStore)
+        assert isinstance(deps.operations, RemoteOperationStore)
+        [check] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "print_check"
+        ]
+        assert check.__self__.d.store is deps.print_runs  # type: ignore[attr-defined]
     finally:
         await deps.aclose()
 

@@ -52,6 +52,7 @@ from scadbuddy.bambuddy.progress import PrintProgress, from_failed_run, queue_ur
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.core.problems import DATABASE_ERRORS
+from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.lan_models import LanStopped
 
@@ -199,6 +200,42 @@ class TransactionalEvents(Protocol):
     """Publishes an event inside a caller's transaction (`PgNotifyEventBus`)."""
 
     def publish_in(self, conn: Connection[Any], event: Event) -> None: ...
+
+
+class LatestRuns(Protocol):
+    """The newest run of a run subject: `PrintRunStore`, or the print worker's
+    `crud/print.py` `RemotePrintRunStore` (#5298)."""
+
+    async def latest_for_output(self, output_id: str) -> PrintRun | None: ...
+
+
+class PrintRuns(LatestRuns, Protocol):
+    """What a ``PrintRun``'s activities write: `PrintRunStore` on SQL (the API's own
+    worker), `crud/print.py` `RemotePrintRunStore` over the CRUD routes (the print
+    worker, #5298)."""
+
+    async def insert_accepted(
+        self,
+        run_id: str,
+        *,
+        subject: PrintSubject,
+        key: str,
+        slug: str,
+        workflow_id: str,
+        workflow_run_id: str,
+        retention: timedelta | None,
+        printer: str | None = None,
+    ) -> PrintRun: ...
+
+    async def start_enqueue(self, run_id: str) -> None: ...
+
+    async def succeed(self, run_id: str, slug: str, result: PrintRunResult) -> PrintRun: ...
+
+    async def update_result(self, run_id: str, slug: str, result: PrintRunResult) -> PrintRun: ...
+
+    async def fail(
+        self, run_id: str, slug: str, error: PrintRunError, *, unqueued: bool = False
+    ) -> PrintRun: ...
 
 
 class PrintRunStore:
@@ -649,7 +686,11 @@ class RecentRuns:
     tick asks for the newest failure and the LAN print (plan 2026-10-16 Task 9) of one
     subject within it, and they share one query. A subject's ``print.run`` event drops
     its kept run (`heard`, an `EventBus` listener), so a tick just after a retry reads
-    the new run rather than the one before it (#4541)."""
+    the new run rather than the one before it (#4541).
+
+    Only a process that hears the events keeps runs: the API. The print worker does not
+    LISTEN (#5298, plan D7), so it builds none and reads the newest run through its CRUD
+    route on each use."""
 
     def __init__(
         self,
@@ -702,12 +743,16 @@ class RecentRuns:
 
 
 async def read_latest(latest: LatestRun, run_subject: str) -> PrintRun | None:
-    """The subject's newest run, or ``None`` with a database that does not answer."""
+    """The subject's newest run, or ``None`` with a database that does not answer: the
+    API's, or (the print worker's, #5298) the API that reads it."""
     try:
         return await latest(run_subject)
     except DATABASE_ERRORS:
-        logger.warning("print runs unreadable; progress read without them")
-        return None
+        pass
+    except CrudUnavailableError:
+        pass
+    logger.warning("print runs unreadable; progress read without them")
+    return None
 
 
 def failure_of(latest: PrintRun | None) -> str | None:
@@ -719,7 +764,7 @@ def failure_of(latest: PrintRun | None) -> str | None:
 
 
 async def newest_failure(
-    runs: PrintRunStore, run_subject: str, *, latest: LatestRun | None = None
+    runs: LatestRuns, run_subject: str, *, latest: LatestRun | None = None
 ) -> str | None:
     """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
     #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
@@ -737,7 +782,7 @@ NewestFailed = Callable[[str], Awaitable[PrintProgress | None]]
 
 
 def newest_failed_from(
-    runs: PrintRunStore,
+    runs: LatestRuns,
     load: Callable[[], StoredSettings],
     *,
     latest: LatestRun | None = None,
