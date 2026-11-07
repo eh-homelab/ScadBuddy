@@ -425,7 +425,9 @@ its old price (seen on ORD-2026-3).
   fulfilled or cancelled item (`item_not_open`), a custom item (`item_custom`), an item
   with no accepted quote (`item_not_priced`: use the plain route, #5349), while a
   print of the item is queued or running (`print_in_flight`), and once an attempt of the
-  item is accepted (`item_partly_fulfilled`, #5592). Accepted units are real goods of
+  item is accepted (`item_partly_fulfilled`, #5592). `item_partly_fulfilled` answers
+  before `print_in_flight`: it is permanent, so a caller that waits out the print is
+  not refused after it (#5598). Accepted units are real goods of
   the agreed design. A new design would count them as made of it, or leave them out of
   the count, and both are false. To change the design of the rest, the shop cancels the
   item and adds one with the new design. So an accepted attempt never predates the
@@ -469,7 +471,8 @@ its old price (seen on ORD-2026-3).
   `reviseWarning`). A failed save clears the confirm. The quote editor follows
   `priceOpen`. Once an attempt of the item is accepted, `reviseMode` gives no route
   (`partlyFulfilled`, #5592): the panel offers no "New revision" and says to cancel the
-  item and add one with the new design.
+  item and add one with the new design. It says so only when the accepted attempt is the
+  reason, not while the order is on hold or a print of the item runs (#5598).
 - The drawer offers the design and filament edits that `update_item` lets through
   `_open_for_requote` (#5582): a new design in the Revisions panel (`reviseMode`, which
   is `open` while `priceOpen` holds) and the filaments of a slice quote in the quote

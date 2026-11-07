@@ -115,15 +115,16 @@ function revisableAfterAcceptance(order: Order, item: OrderItem) {
   if (!quotesOf(item.id).some((q) => q.accepted)) {
     throw new Refused('item_not_priced', `item ${item.id} has no accepted quote: revise it with POST /orders/${order.id}/items/${item.id}/revisions`, [item.id])
   }
-  if (item.status === 'queued' || item.status === 'printing') throw new Refused('print_in_flight', `item ${item.id} is ${item.status}: settle its print first`, [item.id])
-  const open = printInFlight(item.id)
-  if (open) throw new Refused('print_in_flight', `item ${item.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [item.id])
-  // #5592: accepted units are real goods of the agreed design.
+  // #5592: accepted units are real goods of the agreed design. Permanent, so before the
+  // transient `print_in_flight` (#5598).
   const accepted = state.fulfilments.filter((f) => f.order_item_id === item.id && f.purpose === 'production' && f.accepted_at)
   if (accepted.length > 0) {
     const made = accepted.reduce((sum, f) => sum + f.quantity, 0)
     throw new Refused('item_partly_fulfilled', `item ${item.id} has accepted attempts (${made} of ${item.quantity} made of the agreed design): cancel the item and add one with the new design`, [item.id])
   }
+  if (item.status === 'queued' || item.status === 'printing') throw new Refused('print_in_flight', `item ${item.id} is ${item.status}: settle its print first`, [item.id])
+  const open = printInFlight(item.id)
+  if (open) throw new Refused('print_in_flight', `item ${item.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [item.id])
 }
 
 /** `POST …/revisions` and, with `afterAcceptance`, `POST …/revisions/after-acceptance` (#5350). */
