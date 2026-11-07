@@ -380,6 +380,8 @@ jobs:
                  when a failure there would be Blocking.
                  Keep it to one line: name what was not checked and why, with no
                  worked analysis or account of what you did check instead.
+                 Do not list the test suites or CI there: CI runs them, so "I did
+                 not run the tests" is not a gap.
 
                **Do not hedge a concrete defect down to Non-blocking.** If you
                can name the input or sequence that makes code this diff changes or
@@ -388,6 +390,16 @@ jobs:
                contradicts its own comment or spec), it is a correctness bug and
                Blocking. "If that matters" or "if that should hold" fits only a
                real design choice with no wrong answer, and that is Non-blocking.
+
+               **Find every Blocking finding in this pass.** Each push gets a
+               new review, so a defect this pass could have found but did not
+               costs the author a full extra round. Before you post, go through
+               the diff a second time: every function it changes, every caller
+               of a changed signature or contract, and every sentence it adds.
+               On a re-review, the whole diff is in scope, not only the new
+               commits. If you raise a Blocking finding on code the last review
+               already saw, say so in one clause ("missed in the last review"),
+               so the author knows their new commits did not cause it.
 
                Every finding, in either section, must be clearly actionable.
                When unsure whether something is Blocking, ask whether merging

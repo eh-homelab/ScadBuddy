@@ -287,7 +287,10 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   the diff **adds** blocks too, not only one it leaves stale (#5304 merged a diagram that
   said "reads" for a grant that also writes, listed twice as Non-blocking). A concrete
   defect is never hedged down to Non-blocking with "if that matters" (#5303 and #5306
-  did that to user-visible async races). Ported from eh-homelab/clusters#2989 and #3055,
+  did that to user-visible async races). The review reports every Blocking finding in
+  one pass and marks one it missed earlier ("missed in the last review"). On #5565 a
+  defect in the first commit surfaced only in round 2, and #5603 passed two reviews of
+  one commit before a third blocked it. Ported from eh-homelab/clusters#2989 and #3055,
   where those stale comments had been listed as Non-blocking on almost every PR and
   never fixed after merge. A person adding the
   `claude-make-follow-up-issues` label to the PR files every outstanding finding as
