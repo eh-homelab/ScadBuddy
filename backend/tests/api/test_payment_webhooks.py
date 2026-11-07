@@ -14,7 +14,8 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.payments.fake import signed_event
+from scadbuddy.payments.fake import FAKE, signed_event
+from scadbuddy.payments.provider import ProviderUnavailableError
 from tests.api.test_auth_enforce import ENABLED, HEADER, PUBLIC, _app, _sign_in
 from tests.api.test_order_payments import (
     connect_fake,
@@ -167,6 +168,27 @@ def test_an_unreadable_credential_is_503(client: TestClient, pg_conninfo: str) -
     refused = client.post(HOOK, content=body, headers=headers)
     assert refused.status_code == 503
     assert "s3cret" not in refused.text
+    assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
+
+
+def test_a_provider_that_does_not_answer_after_the_signature_is_503_and_records_nothing(
+    client: TestClient, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4958: the adapter may call its provider once the signature holds. When that call
+    fails, nothing is recorded, so the provider sends the event again."""
+    order_id, req = linked_request(client)
+
+    async def down(*args: object, **kwargs: object) -> object:
+        raise ProviderUnavailableError("the provider did not answer")
+
+    monkeypatch.setattr(FAKE, "parse_webhook", down)
+    body, headers = signed_event("s3cret", paid(req))
+    refused = client.post(HOOK, content=body, headers=headers)
+    assert refused.status_code == 503
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/payments/provider_unavailable"
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT count(*) FROM payment_events").fetchone()
+    assert row is not None and row[0] == 0
     assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
 
 

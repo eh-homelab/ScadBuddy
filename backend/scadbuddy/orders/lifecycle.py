@@ -951,6 +951,19 @@ class Lifecycle:
                 payments.set_request_status(conn, found.id, "expired")
                 self._event(conn, order, by, "payment_request.expired", request_id=found.id)
             return "recorded", None
+        if event.kind in ("pending", "failed"):
+            # #4958: money on its way, or money that did not come. Neither is a payment.
+            # A request already past ``pending`` keeps its status: the provider does not
+            # keep event order, so a late ``pending`` must not undo a ``paid``.
+            if found.status != "open" and not (
+                event.kind == "failed" and found.status == "pending"
+            ):
+                return "ignored", None
+            payments.set_request_status(conn, found.id, event.kind)
+            self._event(conn, order, by, f"payment_request.{event.kind}", request_id=found.id)
+            return "recorded", None
+        if event.kind == "fee":
+            return self._late_fee(conn, order, found, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
@@ -990,17 +1003,27 @@ class Lifecycle:
         self._close_balance(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
-            fee, _ = self.store.insert_cost_entry(
-                conn,
-                order.id,
-                CostEntryInput(
-                    kind="payment_fee",
-                    amount_minor=event.fee_minor,
-                    source=f"payment:{payment.id}",
-                    note=f"{provider} fee",
-                ),
-                created_by=by,
-            )
+            self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return "recorded", payment
+
+    def _write_fee(
+        self, conn: Conn, order: Order, payment_id: str, provider: str, fee_minor: int, by: Actor
+    ) -> bool:
+        """The provider's fee for ``payment_id`` as a ``payment_fee`` cost entry, and whether
+        this call wrote it. The unique ``(order_id, kind, source)`` index keeps it to one
+        per payment (``insert_cost_entry`` writes ON CONFLICT DO NOTHING)."""
+        fee, written = self.store.insert_cost_entry(
+            conn,
+            order.id,
+            CostEntryInput(
+                kind="payment_fee",
+                amount_minor=fee_minor,
+                source=f"payment:{payment_id}",
+                note=f"{provider} fee",
+            ),
+            created_by=by,
+        )
+        if written:
             self._event(
                 conn,
                 order,
@@ -1011,7 +1034,28 @@ class Lifecycle:
                 entry_kind=fee.kind,
                 amount_minor=fee.amount_minor,
             )
-        return "recorded", payment
+        return written
+
+    def _late_fee(
+        self,
+        conn: Conn,
+        order: Order,
+        found: PaymentRequestView,
+        provider: str,
+        event: ProviderEvent,
+        by: Actor,
+    ) -> tuple[EventOutcome, Payment | None]:
+        """#4958: a fee the provider knew only after it told the payment. It goes on the
+        payment this provider made for the request, under the order's lock taken by the
+        caller, once: a payment that already has its fee keeps it."""
+        if not event.fee_minor or not self._paid_by(conn, order, found, provider):
+            return "ignored", None
+        assert found.payment_id is not None
+        payment = next(
+            p for p in self.store.payments(order.id, conn=conn) if p.id == found.payment_id
+        )
+        written = self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return ("recorded" if written else "ignored"), payment
 
     # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
     # A record of what the job took, allowed in every status, ended and on hold included:

@@ -11,8 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, UrlConstraints
 from scadbuddy.orders.models import Actor, Money
 
 PaymentRequestKind = Literal["deposit", "balance"]
-PaymentRequestStatus = Literal["open", "paid", "expired", "cancelled"]
-ProviderEventKind = Literal["paid", "refunded", "expired", "other"]
+#: ``pending``: the customer paid by a method that settles later (a US bank debit, #4958);
+#: ``failed``: that payment did not settle. Neither records money.
+PaymentRequestStatus = Literal["open", "pending", "paid", "expired", "cancelled", "failed"]
+#: ``fee``: the provider's fee for a payment it already told, once it is known (#4958).
+ProviderEventKind = Literal["paid", "pending", "failed", "refunded", "expired", "fee", "other"]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]
