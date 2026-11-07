@@ -220,14 +220,27 @@ refusals below cover it going away.
 - Printing starts the library print route's own run (`start_library_run`, run subject
   `library:<file id>`, the file's filament slots read as that route reads them), so the
   item follows its print as any other (`print_runs.output_id` is the run subject).
-  Every print of one file shares that subject, and the follow reads and records only the
-  subject's newest run's print (`bambuddy/follow.py`, `progress.py` `library_progress`,
-  `outcomes.py`). So of two items of one file printing at once (two items of one order,
-  the file on two orders, or a dialog print of it), only the newer attempt settles by
-  itself; the older one stays `unknown` and is settled by hand (`PATCH` the attempt,
-  #5611). An output item has the same limit, but two items rarely share an output. To
-  settle each attempt by its own run, the follow must follow each run, not each subject:
-  the follow workflow, the progress reads and the LAN reads all key on the subject today.
+  Every print of one file shares that subject. Each run is settled on its own (#5613):
+  the subject's one follow (`FollowPrint`, workflow id `follow-print-<subject>`) reads
+  the subject's newest run as before, and on each pass also reads each older run still
+  open by that run (`Follower.read_run`, `progress.py` `run_reader`): a library file's
+  run on Bambuddy's queue by its own sends (`PrintLinkStore.run_sends`), a LAN run from
+  its printer's report (`LanProgress.read_run`). Each settled one is recorded against its
+  own run (`outcomes.py` `record_run`), and the follow ends only once none is open. An
+  older run is open while it `succeeded`, has no outcome and started within
+  `OPEN_RUN_WINDOW` (3 days). So two items of one file printing at once (two items of one
+  order, the file on two orders, or a dialog print of it) each settle by themselves.
+  Design note: the change is in the follow's activity only. The workflow, its id, its
+  input and its commands are unchanged, so a follow open across the deploy needs no
+  `workflow.patched`: its next attempt (a worker that stops ends its attempt, and the
+  retry runs on the new build) reads the older runs too (`tests/test_follow_replay.py`
+  replays histories recorded before). A follow per run was weighed and not taken: a new
+  workflow id needs a patched start in `PrintRunWorkflow`, and every reader of the
+  subject's topic and progress would change. Limits: an output's older run on Bambuddy's
+  queue is not read (an output's queue items are its last print's, not kept per run; two
+  items rarely share an output), nor is an older run past the window; such a print is
+  settled by hand (`PATCH` the attempt). A follow that ended before the deploy while an
+  older print still ran starts again on the next print or progress read of its subject.
 - A file gone since it was added is 409 `library_file_gone` (naming the item) in the
   quote's check and run and in the print's check, before anything starts; the item can
   still be priced by hand, cancelled, or replaced by a new item. A revision, a reference
@@ -695,7 +708,8 @@ attempt with its refusal, the first `print.progress` after the run succeeded mak
 `printing`, and `print_outcomes` (#2665) settles it, `printed` with `copies` made or
 `failed`. That outcome is written by the follow of every path, the native LAN print's too
 (#3823's follow, #4540), so **a native print settles by itself**; only an `unknown` end, or
-an outcome recorded against a newer run of the same output, is settled by hand. An attempt
+an older run of the same subject that the follow cannot read by its own run (§3.3), is
+settled by hand. An attempt
 is edited in `queued`, `printing` and `printed`, and accepted in `printed` (an accepted
 part leaves the item `approved` for the rest). Not yet: the run slices the item's output
 with the request's choices rather than printing the quote's file itself (with the quote's
