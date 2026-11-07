@@ -234,6 +234,12 @@ describe("this session's tool-results directory (#5542)", () => {
     const long = `/${'x'.repeat(250)}`
     expect(projectDirName(long)).toMatch(/^-x{199}-[0-9a-z]+$/)
     expect(projectDirName(long)).not.toBe(projectDirName(`/${'x'.repeat(251)}`))
+    // Measured (#5588): the bundled Claude Code 2.1.314 (`claude --version`) ran `-p hi` with
+    // CLAUDE_CONFIG_DIR set, a bogus API key and ANTHROPIC_BASE_URL at a closed port, in a
+    // directory with this real path (221 characters). It made this directory under `projects/`
+    // before the request failed.
+    const measured = `/tmp/scadbuddy-5588/${'a'.repeat(100)}/${'b'.repeat(100)}`
+    expect(projectDirName(measured)).toBe(`-tmp-scadbuddy-5588-${'a'.repeat(100)}-${'b'.repeat(79)}-e1mqbl`)
   })
 
   it('lets Read and Grep reach a file in it, and Grep the directory itself', async () => {
