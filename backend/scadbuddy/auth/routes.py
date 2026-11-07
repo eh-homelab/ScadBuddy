@@ -18,7 +18,6 @@ from typing import Literal
 from fastapi.routing import APIRoute, APIWebSocketRoute
 
 from scadbuddy.auth.models import Anonymous, Caller, Person, PersonalToken, Service
-from scadbuddy.crud.wire import CRUD_PREFIXES
 
 RouteClass = Literal[
     "public",
@@ -33,7 +32,6 @@ RouteClass = Literal[
     "crud.projects",
     "crud.render",
     "crud.print",
-    # The storefront edge's (#5282): `/internal/storefront/…`, `crud/wire.py` `CRUD_PREFIXES`.
     "crud.storefront",
     # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
@@ -178,18 +176,15 @@ SCRIPTLESS_GETS = frozenset(
     }
 )
 
+#: A CRUD route's path (#5298): the class is its caller's, whatever the module.
+CRUD_PATH = re.compile(r"(?:/api/v1)?/internal/crud/([a-z]+)(?:/|$)")
 CRUD_CLASSES: dict[str, RouteClass] = {
     "projects": "crud.projects",
     "render": "crud.render",
     "print": "crud.print",
     "storefront": "crud.storefront",
 }
-#: A CRUD route's path (#5298), by `CRUD_PREFIXES`: the class is its caller's, whatever
-#: the module.
-CRUD_PATHS: tuple[tuple[re.Pattern[str], RouteClass], ...] = tuple(
-    (re.compile(rf"(?:/api/v1)?{re.escape(prefix)}(?:/|$)"), CRUD_CLASSES[caller])
-    for caller, prefix in CRUD_PREFIXES.items()
-)
+CRUD_CALLERS = frozenset(CRUD_CLASSES)
 
 Route = APIRoute | APIWebSocketRoute
 
@@ -208,9 +203,8 @@ def route_class(route: Route) -> RouteClass:
         return "person"
     if endpoint_name(route) in FLOW_HOST_ENDPOINTS:
         return "flow.host"
-    for path, crud_class in CRUD_PATHS:
-        if path.match(route.path):
-            return crud_class
+    if (match := CRUD_PATH.match(route.path)) and match.group(1) in CRUD_CALLERS:
+        return CRUD_CLASSES[match.group(1)]
     return INTERNAL_MODULES.get(module, "api")
 
 

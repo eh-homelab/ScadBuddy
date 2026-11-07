@@ -496,8 +496,8 @@ async def test_a_refusal_carries_its_retry_after() -> None:
     assert plain.value.retry_after is None
 
 
-async def test_the_storefront_counts_its_areas_and_waits_on_its_own_prefix() -> None:
-    """#5282: the storefront's routes are under `/internal/storefront/`, not `/internal/crud/`."""
+async def test_the_storefront_counts_its_areas_and_waits_on_its_own_routes() -> None:
+    """#5282: the storefront's routes are under `/internal/crud/storefront/`."""
     script = Script(httpx.Response(200, json={"areas": ["listings"]}, headers=HEADER), ok())
     metrics = Metrics(CollectorRegistry())
     client = CrudClient(
@@ -509,10 +509,10 @@ async def test_the_storefront_counts_its_areas_and_waits_on_its_own_prefix() -> 
         backoff=0.01,
     )
     assert await wait_for_areas(client, "storefront", {"listings"}, asyncio.Event()) is True
-    await client.request("GET", "/api/v1/internal/storefront/listings")
+    await client.request("GET", "/api/v1/internal/crud/storefront/listings")
     assert [r.url.path for r in script.requests] == [
-        "/api/v1/internal/storefront/areas",
-        "/api/v1/internal/storefront/listings",
+        "/api/v1/internal/crud/storefront/areas",
+        "/api/v1/internal/crud/storefront/listings",
     ]
     sample = metrics.registry.get_sample_value(
         "scadbuddy_crud_client_seconds_count",

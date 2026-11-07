@@ -1,6 +1,5 @@
 """The CRUD listener (#5298, plan D3): a second port, ``SCADBUDDY_CRUD_PORT``, served by
-the API process on the same app, that answers only the CRUD routes (the storefront's
-among them, under ``/api/v1/internal/storefront/``, #5282), the service-token
+the API process on the same app, that answers only the CRUD routes, the service-token
 exchange (which stays on the main port too) and ``/healthz``. Every other path is a
 plain 404 there, so a pod admitted only to this port (the render worker, whose pod runs
 template Python until #5296) reaches nothing else.
@@ -23,12 +22,11 @@ from fastapi import FastAPI
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from scadbuddy.crud.wire import CRUD_PREFIXES
+from scadbuddy.crud.wire import PREFIX
 
 logger = logging.getLogger(__name__)
 
-#: Each caller's CRUD routes, `CRUD_PREFIXES` under ``/api/v1``.
-CRUD_PATH_PREFIXES: Final = tuple(f"/api/v1{prefix}/" for prefix in CRUD_PREFIXES.values())
+CRUD_PATH_PREFIX: Final = f"/api/v1{PREFIX}/"
 EXACT_PATHS: Final = frozenset({"/api/v1/auth/service-token", "/healthz"})
 #: Where the lifespan keeps the running listener, on ``app.state``.
 STATE_ATTR: Final = "crud_listener"
@@ -45,7 +43,7 @@ def serves(path: str) -> bool:
     normal (``..``, ``//``, a trailing ``/``) is refused, whatever it would resolve to."""
     if posixpath.normpath(path) != path:
         return False
-    return path in EXACT_PATHS or path.startswith(CRUD_PATH_PREFIXES)
+    return path in EXACT_PATHS or path.startswith(CRUD_PATH_PREFIX)
 
 
 class CrudOnly:

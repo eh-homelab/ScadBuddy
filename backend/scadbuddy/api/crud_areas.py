@@ -1,8 +1,8 @@
-"""``GET /api/v1/internal/crud/<caller>/areas`` (#5298, plan "Rolling deploy"; the
-storefront's is ``GET /api/v1/internal/storefront/areas``): the CRUD areas this API pod
-serves to that caller. A new worker waits until it lists every area
-the worker needs before it polls Temporal. Each area's task appends its name to
-`CRUD_AREAS` once the area is complete."""
+"""``GET /api/v1/internal/crud/<caller>/areas`` (#5298, plan "Rolling deploy"): the CRUD
+areas this API pod serves to that caller. A new worker waits until it lists every area
+the worker needs before it polls Temporal; the storefront edge (#5282) waits the same way
+before it serves. Each area's task appends its name to `CRUD_AREAS` once the area is
+complete."""
 
 from __future__ import annotations
 

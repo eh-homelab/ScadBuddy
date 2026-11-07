@@ -4,7 +4,7 @@
 
 **Goal:** A visitor with no account browses the shop's published listings, customizes one within the bounds the shop set, renders it under per-visitor limits, sees a rough price, and adds it (or a design request) to a draft order. The shop manages listings on a back-office Storefront page (#5282).
 
-**Architecture:** The public site is an edge process, `python -m scadbuddy.storefront`, on port 8083 from the same image. It holds no database secret, no KEK, no S3 key and no Temporal client. It serves the page, signs and checks the visitor cookie with a key of its own, limits requests per client and checks `Origin`. It then calls the CRUD service (the API process) at `/api/v1/internal/storefront/*` with a #5325 service credential of caller `storefront`: a projected ServiceAccount token exchanged at `POST /api/v1/auth/service-token` for a 15-minute credential scoped `crud.storefront`. This is the pattern the render and projects workers use since #5298 (`crud/guard.py`, `crud/client.py`, `auth/service_credentials.py` `exchange_source`). The CRUD routes are the boundary. Each does only what the public may do: it reads published listings only, scopes every draft, render and estimate to the visitor id the edge sends, never trusts the edge to have checked ownership, and counts the render limits in Postgres. The listing, limit, render, estimate and draft code runs in the API, in `backend/scadbuddy/orders/storefront/`. The page is a second Vite entry, `frontend/storefront.html` and `frontend/src/storefront/`.
+**Architecture:** The public site is an edge process, `python -m scadbuddy.storefront`, on port 8083 from the same image. It holds no database secret, no KEK, no S3 key and no Temporal client. It serves the page, signs and checks the visitor cookie with a key of its own, limits requests per client and checks `Origin`. It then calls the CRUD service (the API process) at `/api/v1/internal/crud/storefront/*` with a #5325 service credential of caller `storefront`: a projected ServiceAccount token exchanged at `POST /api/v1/auth/service-token` for a 15-minute credential scoped `crud.storefront`. This is the pattern the render and projects workers use since #5298 (`crud/guard.py`, `crud/client.py`, `auth/service_credentials.py` `exchange_source`). The CRUD routes are the boundary. Each does only what the public may do: it reads published listings only, scopes every draft, render and estimate to the visitor id the edge sends, never trusts the edge to have checked ownership, and counts the render limits in Postgres. The listing, limit, render, estimate and draft code runs in the API, in `backend/scadbuddy/orders/storefront/`. The page is a second Vite entry, `frontend/storefront.html` and `frontend/src/storefront/`.
 
 **Tech Stack:** Python 3.12, FastAPI, uvicorn, httpx, pydantic-settings, psycopg 3 (API side only), Postgres 18, Temporal (API side only), S3 content store, pytest, respx; React 19, Vite (rolldown), msw, vitest, Playwright; ESLint `no-restricted-imports`.
 
@@ -15,8 +15,8 @@ Not in this phase (#5283): submit, `submitted_at` being written, order numbers f
 ## Global Constraints
 
 - **The edge holds no database secret.** `python -m scadbuddy.storefront` reads only its own settings class, `StorefrontSettings`. That class has no `database_url`, `secret_key_file`, `temporal_address` or S3 field. The process refuses to start (exit code 2) when `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set in its environment. It never imports `psycopg_pool`, `scadbuddy.orders`, `scadbuddy.render`, `scadbuddy.workflows`, `scadbuddy.store` or `scadbuddy.library`; `backend/tests/storefront/test_edge.py` checks both.
-- **The CRUD routes are the boundary.** Every route under `/api/v1/internal/storefront/` (spec §5.1's path) is guarded by `crud/guard.py` `require_crud("storefront")` (a live `storefront` credential with scope `crud.storefront`, in every `SCADBUDDY_AUTH_MODE`). It is hidden from the OpenAPI schema (`include_in_schema=False`, as every CRUD router is). It never trusts the edge for ownership: see "Trust model".
-- New service caller `storefront`: `ServiceCaller` gains it; `SCOPES["storefront"] = frozenset({"crud.storefront"})`; `auth/exchange.py` `SERVICE_ACCOUNTS["scadbuddy-storefront"] = "storefront"`; `crud/guard.py` `CrudCaller` and `auth/routes.py` `CRUD_CLASSES` gain `"storefront"`. It is an exchange-only caller (`exchange_source`, the #5325 credential); it has no `ROLES` or `VIEWS` entry and no sealed credential. Its CRUD prefix is the one exception to `/internal/crud/<caller>`: `crud/guard.py` gains `CRUD_PREFIXES: Mapping[CrudCaller, str]` (`"storefront": "/internal/storefront"`, every other caller `/internal/crud/<caller>`), which `crud_router`, `CrudClient`, `wait_for_areas` and `auth/routes.py` `route_class` read.
+- **The CRUD routes are the boundary.** Every route under `/api/v1/internal/crud/storefront/` (the standard CRUD path; spec §5.1 names `/api/v1/internal/storefront/`) is guarded by `crud/guard.py` `require_crud("storefront")` (a live `storefront` credential with scope `crud.storefront`, in every `SCADBUDDY_AUTH_MODE`). It is hidden from the OpenAPI schema (`include_in_schema=False`, as every CRUD router is). It never trusts the edge for ownership: see "Trust model".
+- New service caller `storefront`: `ServiceCaller` gains it; `SCOPES["storefront"] = frozenset({"crud.storefront"})`; `auth/exchange.py` `SERVICE_ACCOUNTS["scadbuddy-storefront"] = "storefront"`; `crud/guard.py` `CrudCaller` and `auth/routes.py` `CRUD_CLASSES` gain `"storefront"`. It is an exchange-only caller (`exchange_source`, the #5325 credential); it has no `ROLES` or `VIEWS` entry and no sealed credential. Its CRUD routes take the standard path, `/internal/crud/storefront/`, as every caller's do: `crud_router`, `CrudClient`, `wait_for_areas` and `auth/routes.py` `CRUD_PATH` (`/internal/crud/<caller>/…` → class `crud.<caller>`) cover it with no special case, and the CRUD port (`crud/listener.py`) serves it.
 - The storefront edge never runs openscad, `openscad-lsp`, git or template Python. The CRUD side reaches them only as the API does today: a render starts a Temporal workflow that the render workers run.
 - The edge mounts no `/api/v1` route and never proxies `/api/v1` (spec §3 anti-goal). Its routes are `/api/store/v1/*`, `/healthz` and the page.
 - The CRUD side's storefront routes refuse with 409 `storefront_needs_s3` unless `store_backend` is `s3` (spec §5.1). The edge mounts no data volume and stores nothing on disk.
@@ -62,7 +62,7 @@ Not in this phase (#5283): submit, `submitted_at` being written, order numbers f
 17. **The edge serves only its own page's files**: `storefront.html` and the chunks in its import closure, read from Vite's `.vite/manifest.json`.
 18. **Back-office listing routes are not agent tools in phase 3.** They get `NOT_A_TOOL` entries ("the shop edits listings on the Storefront page; an agent tool follows with #5283").
 19. **The shop's live preview** mounts the storefront's own `ListingView` component with the unsaved listing. The back office may import from `src/storefront/`; the reverse is the lint rule.
-20. **The spec's path `/api/v1/internal/storefront/*` reuses the CRUD machinery** through `CRUD_PREFIXES`, so `require_crud`, the CRUD headers, the idempotency ledger, `CrudClient`'s retries and `GET …/areas` apply unchanged.
+20. **The storefront's CRUD routes are at the standard path `/api/v1/internal/crud/storefront/*`** (controller decision, 2026-11-07; spec §5.1 names `/api/v1/internal/storefront/*`), so `require_crud`, the CRUD headers, the idempotency ledger, `CrudClient`'s retries and `GET …/areas` apply unchanged.
 21. **Every edge write sends an `Idempotency-Key`** (a UUID per browser request, kept across the CRUD client's retries), and the CRUD side records it through `crud/idempotency.py` `idempotent_write`. A retried render is therefore counted once against the limits, and a retried add makes one item.
 
 ## Review Focus
@@ -190,7 +190,7 @@ git commit -m "feat(storefront): the storefront edge process, with no database s
 
 **Files:**
 - Create: `backend/scadbuddy/api/crud_storefront.py`, `backend/scadbuddy/crud/storefront.py`
-- Modify: `backend/scadbuddy/auth/service_credentials.py` (`ServiceCaller`, `SCOPES` at `:69`), `backend/scadbuddy/auth/exchange.py` (`SERVICE_ACCOUNTS` at `:112`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES` at `:180`, `CRUD_PATH` at `:179` also matches `/internal/storefront`), `backend/scadbuddy/crud/guard.py` (`CrudCaller`, `CRUD_PREFIXES`, `crud_router` at `:148`), `backend/scadbuddy/crud/client.py` (the path at `:116` and `wait_for_areas` at `:391` read `CRUD_PREFIXES`), `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS`), `backend/scadbuddy/main.py` (mount the router), `backend/scadbuddy/storefront/app.py` (build the client, wait for the areas)
+- Modify: `backend/scadbuddy/auth/service_credentials.py` (`ServiceCaller`, `SCOPES` at `:69`), `backend/scadbuddy/auth/exchange.py` (`SERVICE_ACCOUNTS` at `:112`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES` at `:180`, `CRUD_PATH` at `:179` matches `/internal/crud/storefront` unchanged), `backend/scadbuddy/crud/guard.py` (`CrudCaller`; `crud_router` at `:148` is unchanged), `backend/scadbuddy/crud/client.py` (the path at `:116` and `wait_for_areas` at `:391` are unchanged), `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS`), `backend/scadbuddy/main.py` (mount the router), `backend/scadbuddy/storefront/app.py` (build the client, wait for the areas)
 - Test: `backend/tests/crud/test_storefront_routes.py`, `backend/tests/auth/test_exchange.py`, `backend/tests/storefront/test_edge.py`
 
 **Interfaces:**
@@ -209,18 +209,18 @@ git commit -m "feat(storefront): the storefront edge process, with no database s
 
 ```python
 def test_a_storefront_route_needs_the_storefront_credential(client: TestClient, render_token: str, storefront_token: str) -> None:
-    url = "/api/v1/internal/storefront/areas"
+    url = "/api/v1/internal/crud/storefront/areas"
     assert client.get(url).status_code == 401
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     r = client.get(url, headers=bearer(storefront_token))
     assert r.status_code == 200 and r.headers["X-ScadBuddy-Crud"] == "1"
 
 def test_the_storefront_routes_are_not_in_the_schema(client: TestClient) -> None:
-    assert not [p for p in client.get("/openapi.json").json()["paths"] if "/internal/storefront" in p]
+    assert not [p for p in client.get("/openapi.json").json()["paths"] if "/internal/crud/storefront" in p]
 
 @pytest.mark.parametrize("token", ["", "short", "x" * 42 + "!", "x" * 44])
 def test_a_malformed_visitor_token_is_400(client: TestClient, storefront_token: str, token: str) -> None:
-    r = client.get("/api/v1/internal/storefront/draft", headers={**bearer(storefront_token), "X-ScadBuddy-Visitor": token, "X-ScadBuddy-Store-Client": "203.0.113.1"})
+    r = client.get("/api/v1/internal/crud/storefront/draft", headers={**bearer(storefront_token), "X-ScadBuddy-Visitor": token, "X-ScadBuddy-Store-Client": "203.0.113.1"})
     assert r.status_code == 400
 
 def test_the_other_callers_keep_their_paths(client: TestClient, render_token: str) -> None:

@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -40,7 +41,7 @@ from scadbuddy.auth.routes import (
     would_refuse,
 )
 from scadbuddy.core.settings import Settings
-from scadbuddy.crud.guard import CRUD_PREFIXES, crud_router
+from scadbuddy.crud.guard import CrudCaller, crud_router
 from scadbuddy.main import create_app
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
@@ -145,13 +146,14 @@ def test_every_crud_route_has_its_callers_class_and_guard() -> None:
     )
     checked: set[str] = set()
     for route in _mounted(app.routes):
-        for caller, prefix in CRUD_PREFIXES.items():
-            if re.match(rf"(?:/api/v1)?{prefix}/", route.path):
-                assert route_class(route) == f"crud.{caller}", route.path
-                assert _depends_on_guard(route, caller), route.path
-                checked.add(caller)
+        match = re.match(r"(?:/api/v1)?/internal/crud/([a-z]+)/", route.path)
+        if match:
+            caller = match.group(1)
+            assert route_class(route) == f"crud.{caller}", route.path
+            assert _depends_on_guard(route, caller), route.path
+            checked.add(caller)
     # Each caller's `GET …/areas` at least (`api/crud_areas.py`).
-    assert checked == set(CRUD_PREFIXES)
+    assert checked == set(get_args(CrudCaller))
 
 
 def test_a_crud_router_route_is_classed_and_guarded() -> None:
@@ -170,8 +172,9 @@ def test_a_crud_router_route_is_classed_and_guarded() -> None:
     assert not _depends_on_guard(routes[0], "print")
 
 
-def test_the_storefront_router_has_its_own_prefix() -> None:
-    """#5282: the one caller whose CRUD routes are not under `/internal/crud/`."""
+def test_the_storefront_router_has_the_standard_prefix() -> None:
+    """#5282: the storefront's CRUD routes are under `/internal/crud/storefront/`, as
+    every caller's are."""
     router = crud_router("storefront")
 
     @router.get("/x")
@@ -180,7 +183,7 @@ def test_the_storefront_router_has_its_own_prefix() -> None:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
     routes = [r for r in _mounted(app.routes) if r.path.endswith("/x")]
-    assert [r.path.removeprefix("/api/v1") for r in routes] == ["/internal/storefront/x"]
+    assert [r.path.removeprefix("/api/v1") for r in routes] == ["/internal/crud/storefront/x"]
     assert route_class(routes[0]) == "crud.storefront"
     assert _depends_on_guard(routes[0], "storefront")
 

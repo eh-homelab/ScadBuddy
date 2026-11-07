@@ -1,4 +1,4 @@
-"""The storefront's CRUD routes (#5282, plan Task 2): under ``/api/v1/internal/storefront``,
+"""The storefront's CRUD routes (#5282, plan Task 2): under ``/api/v1/internal/crud/storefront``,
 guarded by the ``storefront`` credential, hidden from the schema, and taking the visitor
 id and the client address from the edge's headers."""
 
@@ -94,7 +94,7 @@ def client() -> TestClient:
 @pytest.mark.parametrize("mode", ["off", "observe", "enforce"])
 def test_the_storefront_guard_holds_in_every_mode(mode: str, render_token: str) -> None:
     client = make_client(mode)
-    url = "/api/v1/internal/storefront/areas"
+    url = "/api/v1/internal/crud/storefront/areas"
     assert client.get(url).status_code == 401
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     assert client.get(url, headers=bearer("sbsvc_storefront")).status_code == 200
@@ -113,7 +113,7 @@ def test_the_storefront_credential_reaches_no_other_route(storefront_token: str)
 def test_a_storefront_route_needs_the_storefront_credential(
     client: TestClient, render_token: str, storefront_token: str
 ) -> None:
-    url = "/api/v1/internal/storefront/areas"
+    url = "/api/v1/internal/crud/storefront/areas"
     assert client.get(url).status_code == 401
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     r = client.get(url, headers=bearer(storefront_token))
@@ -129,8 +129,8 @@ def test_the_storefront_routes_are_not_in_the_schema() -> None:
             temporal_address=UNUSED_TEMPORAL_ADDRESS,
         )
     )
-    assert not [p for p in app.openapi()["paths"] if "/internal/storefront" in p]
-    assert app.url_path_for("crud_storefront_areas") == "/api/v1/internal/storefront/areas"
+    assert not [p for p in app.openapi()["paths"] if "/internal/crud/storefront" in p]
+    assert app.url_path_for("crud_storefront_areas") == "/api/v1/internal/crud/storefront/areas"
 
 
 @pytest.mark.parametrize("token", ["", "short", "x" * 42 + "!", "x" * 44])
@@ -138,7 +138,7 @@ def test_a_malformed_visitor_token_is_400(
     client: TestClient, storefront_token: str, token: str
 ) -> None:
     r = client.get(
-        "/api/v1/internal/storefront/draft",
+        "/api/v1/internal/crud/storefront/draft",
         headers={**bearer(storefront_token), VISITOR_HEADER: token, CLIENT_HEADER: "203.0.113.1"},
     )
     assert r.status_code == 400
@@ -148,7 +148,7 @@ def test_a_malformed_visitor_token_is_400(
 
 def test_a_missing_visitor_header_is_400(client: TestClient, storefront_token: str) -> None:
     r = client.get(
-        "/api/v1/internal/storefront/draft",
+        "/api/v1/internal/crud/storefront/draft",
         headers={**bearer(storefront_token), CLIENT_HEADER: "203.0.113.1"},
     )
     assert r.status_code == 400
@@ -162,7 +162,7 @@ def test_a_client_that_is_not_an_ip_address_is_400(
     headers = {**bearer(storefront_token), VISITOR_HEADER: VISITOR}
     if address is not None:
         headers[CLIENT_HEADER] = address
-    r = client.get("/api/v1/internal/storefront/draft", headers=headers)
+    r = client.get("/api/v1/internal/crud/storefront/draft", headers=headers)
     assert r.status_code == 400
     assert r.json()["type"].endswith("/storefront/store_client")
 
@@ -172,7 +172,7 @@ def test_a_well_formed_visitor_and_client_pass(
     client: TestClient, storefront_token: str, address: str
 ) -> None:
     r = client.get(
-        "/api/v1/internal/storefront/draft",
+        "/api/v1/internal/crud/storefront/draft",
         headers={**bearer(storefront_token), VISITOR_HEADER: VISITOR, CLIENT_HEADER: address},
     )
     assert r.status_code == 200
@@ -184,8 +184,6 @@ def test_the_other_callers_keep_their_paths(client: TestClient, render_token: st
         client.get("/api/v1/internal/crud/render/areas", headers=bearer(render_token)).status_code
         == 200
     )
-    # The storefront's prefix is its own: it has none under `/internal/crud/`.
+    # The storefront has no path of its own outside `/internal/crud/`.
     storefront = bearer("sbsvc_storefront")
-    assert (
-        client.get("/api/v1/internal/crud/storefront/areas", headers=storefront).status_code == 404
-    )
+    assert client.get("/api/v1/internal/storefront/areas", headers=storefront).status_code == 404

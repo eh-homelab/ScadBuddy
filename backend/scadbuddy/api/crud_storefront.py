@@ -1,5 +1,5 @@
 """The storefront edge's CRUD routes (#5282, spec 2026-11-02 §5.1): under
-``/api/v1/internal/storefront/``, for the ``storefront`` credential only (`crud_router`).
+``/api/v1/internal/crud/storefront/``, for the ``storefront`` credential only (`crud_router`).
 Its ``GET …/areas`` is `api/crud_areas.py`'s; each area's task adds its routes here.
 
 The edge sends the visitor id it verified in the cookie (`VISITOR_HEADER`) and the

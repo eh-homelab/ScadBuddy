@@ -1,7 +1,6 @@
 """The CRUD routers' guard (#5298, plan decisions D1, D2, D4).
 
-A route under ``/api/v1/internal/crud/<caller>/`` (the storefront's: under
-``/api/v1/internal/storefront/``, `CRUD_PREFIXES`) is class ``crud.<caller>``
+A route under ``/api/v1/internal/crud/<caller>/`` is class ``crud.<caller>``
 (`auth/routes.py`). ``require_crud`` refuses it unless the request carries a live service
 credential of that caller whose scopes hold the class, in every ``SCADBUDDY_AUTH_MODE``:
 these routes are new, so no client needs ``off`` or ``observe`` to let it through. A
@@ -34,7 +33,6 @@ from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.wire import CRUD_HEADER as CRUD_HEADER
 from scadbuddy.crud.wire import CRUD_HEADERS as CRUD_HEADERS
-from scadbuddy.crud.wire import CRUD_PREFIXES as CRUD_PREFIXES
 from scadbuddy.crud.wire import DATABASE_UNAVAILABLE as DATABASE_UNAVAILABLE
 from scadbuddy.crud.wire import PREFIX as PREFIX
 from scadbuddy.crud.wire import CrudCaller as CrudCaller
@@ -144,10 +142,10 @@ def _registered_handler(request: Request, error: Exception) -> Callable[..., Any
 
 
 def crud_router(caller: CrudCaller) -> APIRouter:
-    """A router for ``/api/v1`` plus the caller's `CRUD_PREFIXES` entry: hidden from the
-    schema, guarded by :func:`require_crud`, answering with the CRUD headers."""
+    """A router for ``/api/v1/internal/crud/<caller>``: hidden from the schema, guarded
+    by :func:`require_crud`, answering with the CRUD headers."""
     return APIRouter(
-        prefix=CRUD_PREFIXES[caller],
+        prefix=f"{PREFIX}/{caller}",
         include_in_schema=False,
         dependencies=[require_crud(caller)],
         route_class=_CrudRoute,

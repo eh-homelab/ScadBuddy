@@ -1,6 +1,6 @@
 """The storefront edge's client of its CRUD routes (#5282, plan "Trust model").
 
-The edge holds no database: it calls ``/api/v1/internal/storefront/…`` with its
+The edge holds no database: it calls ``/api/v1/internal/crud/storefront/…`` with its
 ``storefront`` service credential, which it exchanges for its proof (`exchange_source`).
 `CrudClient` retries a missing route, a 5xx and a transport failure for 30 s and raises
 `CrudRefusedError` for a CRUD route's 4xx; the edge answers a public one with its status,
@@ -19,13 +19,13 @@ from typing import Any, Final
 
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
 from scadbuddy.crud.client import CrudClient, wait_for_areas
-from scadbuddy.crud.wire import CRUD_PREFIXES
+from scadbuddy.crud.wire import PREFIX
 from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here.
 EDGE_AREAS: Final[frozenset[str]] = frozenset()
-BASE: Final = f"/api/v1{CRUD_PREFIXES['storefront']}"
+BASE: Final = f"/api/v1{PREFIX}/storefront"
 
 
 class StorefrontCrud:

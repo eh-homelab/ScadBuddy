@@ -2,8 +2,8 @@
 
 A render, print or projects worker holds no database secret: it calls
 ``/api/v1/internal/crud/<caller>/…`` with its service credential (`ServiceAuth`). The
-storefront edge (#5282) calls ``/api/v1/internal/storefront/…`` (`CRUD_PREFIXES`) the same
-way. This module imports no database code (`crud/wire.py`, `auth/service_auth.py`).
+storefront edge (#5282) calls ``/api/v1/internal/crud/storefront/…`` the same way. This
+module imports no database code (`crud/wire.py`, `auth/service_auth.py`).
 
 - A response without ``X-ScadBuddy-Crud`` did not come from a CRUD route: the route is
   missing (an old API pod during a roll). It is tried again on a new connection, and a
@@ -30,8 +30,7 @@ way. This module imports no database code (`crud/wire.py`, `auth/service_auth.py
   its own (a render `project` write's 10 s attempt).
 - `CrudClient.blocking` is a `CrudSyncClient` on the same API, credential and options.
 - `wait_for_areas` is a worker's start gate (plan "Rolling deploy"): it polls
-  ``GET …/<caller>/areas`` (under the caller's `CRUD_PREFIXES` entry) until the API lists
-  every area the worker needs.
+  ``GET …/<caller>/areas`` until the API lists every area the worker needs.
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ from temporalio import activity
 
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.crud.wire import CRUD_HEADER, CRUD_PREFIXES, DATABASE_UNAVAILABLE, CrudCaller
+from scadbuddy.crud.wire import CRUD_HEADER, DATABASE_UNAVAILABLE, PREFIX, CrudCaller
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +120,10 @@ def activity_key(ordinal: int) -> str:
     return hashlib.sha256(material.encode()).hexdigest()
 
 
-def _area(path: str, caller: CrudCaller) -> str:
-    _, found, rest = path.partition(f"{CRUD_PREFIXES[caller]}/")
-    area = rest.split("/")[0]
-    return area if found and area else "other"
+def _area(path: str) -> str:
+    _, found, rest = path.partition(f"{PREFIX}/")
+    parts = rest.split("/")
+    return parts[1] if found and len(parts) > 1 and parts[1] else "other"
 
 
 def _problem(response: httpx.Response) -> dict[str, Any]:
@@ -140,7 +139,7 @@ class _Call:
 
     def __init__(self, owner: _Base, path: str, budget: float | None) -> None:
         self._owner = owner
-        self._area = _area(path, owner._caller)
+        self._area = _area(path)
         self._deadline = owner._clock() + (owner._budget if budget is None else budget)
         self._attempt = 0
         self.refresh = False
@@ -404,9 +403,7 @@ async def wait_for_areas(
     stopped = asyncio.create_task(stop.wait())
     try:
         while True:
-            asking = asyncio.create_task(
-                crud.request("GET", f"/api/v1{CRUD_PREFIXES[caller]}/areas")
-            )
+            asking = asyncio.create_task(crud.request("GET", f"/api/v1{PREFIX}/{caller}/areas"))
             await asyncio.wait({asking, stopped}, return_when=asyncio.FIRST_COMPLETED)
             if stopped.done():
                 asking.cancel()

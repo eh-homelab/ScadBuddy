@@ -523,8 +523,8 @@ exchanges and revokes what it holds until it is resumed.
 
 **The CRUD port (#5298).** The API process also listens on `SCADBUDDY_CRUD_PORT`
 (default `8082`), started by the app itself, so the image's one `uvicorn` command serves
-both ports. That port answers only the workers' CRUD routes
-(`/api/v1/internal/crud/<caller>/…`, each refused without that caller's service
+both ports. That port answers only the CRUD routes of the workers and the storefront
+edge (`/api/v1/internal/crud/<caller>/…`, each refused without that caller's service
 credential in every `SCADBUDDY_AUTH_MODE`), `POST /api/v1/auth/service-token` and
 `/healthz`; every other path is a plain `404` there. The exchange stays on `8080` too. A
 pod admitted only to `8082` (the render worker's) reaches nothing else of the API. A
