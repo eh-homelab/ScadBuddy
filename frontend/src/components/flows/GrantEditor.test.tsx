@@ -93,6 +93,23 @@ describe('GrantEditor', () => {
     expect(grantProblems(spec, new Date(), OUTWARD)).toEqual([])
   })
 
+  it('keeps an order id typed as "any" an id, and refuses more ids than the backend takes', async () => {
+    const { user, onSubmit } = render()
+    const print = await rule('queue_print')
+    await user.click(within(print).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.click(within(print).getByRole('checkbox', { name: 'Only calls that name an order' }))
+    await user.click(within(print).getByRole('checkbox', { name: /^Any order/ }))
+    const ids = within(print).getByLabelText('Order ids')
+    await user.click(ids)
+    await user.paste(Array.from({ length: 257 }, (_, i) => `o${i}`).join(','))
+    expect(screen.getByText('queue_print: name at most 256 order ids, or choose any order.')).toBeInTheDocument()
+    await user.clear(ids)
+    await user.type(ids, 'any')
+    expect(within(print).getByLabelText('Order ids')).toHaveValue('any')
+    await user.click(screen.getByRole('button', { name: 'Use grant' }))
+    expect(onSubmit.mock.calls[0]![0].rules).toEqual([{ fn: 'queue_print', orders: ['any'] }])
+  })
+
   it('refuses an order id the backend would refuse', async () => {
     const { user } = render()
     const print = await rule('queue_print')

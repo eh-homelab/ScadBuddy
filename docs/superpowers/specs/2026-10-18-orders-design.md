@@ -985,8 +985,8 @@ What this relies on, and what the design adds for it:
   choices. A refusal before anything printed is `status` `refused` with `error` the
   problem's detail and `problem` the last segment of its `type` (`requote_needed`,
   `order_on_hold`, `needs_spool_choice`, ...); an operation that failed with no named
-  problem, or a route that answered a server error (5xx) with none, is `failed` with
-  `may_have_queued`, since it may have failed after its run started. The grant counts
+  problem, a route that answered at once with none, or a follow of the operation that
+  failed, is `failed` with `may_have_queued`, since it may have failed after its run started. The grant counts
   the accepted slice quote's plates, and the print refuses an output whose plate count
   is not the quote's (`requote_needed`), so the two never drift apart. A trigger's
   run kept to its order (`narrowed_to_order`) takes effect once order events are trigger events (#4252's trigger PR); until then no

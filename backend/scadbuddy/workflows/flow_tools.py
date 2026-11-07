@@ -158,11 +158,9 @@ class RouteRefusedError(Exception):
     """ScadBuddy refused the call; the message is the problem's `detail`, and `problem`
     its `type` when the route named one (#4252)."""
 
-    def __init__(self, detail: str, problem: str | None = None, status: int | None = None) -> None:
+    def __init__(self, detail: str, problem: str | None = None) -> None:
         super().__init__(detail)
         self.problem = problem
-        #: The route's HTTP status, when the refusal carried it.
-        self.status = status
 
 
 class ToolFailedError(Exception):
@@ -290,11 +288,8 @@ _TIER_TIMEOUT = timedelta(seconds=30)
 def _refusal(err: ActivityError) -> BaseException:
     cause = err.cause
     if isinstance(cause, ApplicationError) and cause.type in {ROUTE_REFUSED, API_URL_MISSING}:
-        details = list(cause.details)
-        kind = details[0] if details and isinstance(details[0], str) and details[0] else None
-        # A refusal recorded before the status was carried (an older build's) has none.
-        status = details[1] if len(details) > 1 and isinstance(details[1], int) else None
-        return RouteRefusedError(cause.message, kind, status)
+        kind = cause.details[0] if cause.details else None
+        return RouteRefusedError(cause.message, kind if isinstance(kind, str) else None)
     return err
 
 
@@ -511,8 +506,11 @@ async def _item_print(
 ) -> PrintOutcome:
     """A line item's print (#4252, orders spec §5.4, §7.2): `order_item_print`, which
     fills the run from the accepted quote (its key, from the call, is the run's), then
-    the run followed. A refusal before anything printed (`requote_needed`, `order_on_hold`,
-    ...) is an outcome the script reads, not an error."""
+    the run followed. A named refusal (`requote_needed`, `order_on_hold`, ...), which
+    comes before anything printed, is `refused`; any other failure of the route or of the
+    operation's follow, answered at once or after a 202, is `failed` with
+    `may_have_queued`, since the run may have started. Both are outcomes the script
+    reads, not errors."""
     try:
         sent = await _post(call_id, path, request, outward="queue_print")
         attempt = sent.body
@@ -524,23 +522,14 @@ async def _item_print(
             )
             if operation["status"] == "failed":
                 error = operation.get("error") or {}
-                detail = error.get("detail") or "the print did not start"
-                if problem_name(error.get("type")) is None:
-                    # No named refusal (`requote_needed`, ...): it may have failed after
-                    # the run started, so the script must not take it as nothing printed.
-                    return PrintOutcome(
-                        run_id="",
-                        status="failed",
-                        may_have_queued=True,
-                        error=detail,
-                        narrowed_by=narrowed_by,
-                    )
-                raise RouteRefusedError(detail, error.get("type"))
+                raise RouteRefusedError(
+                    error.get("detail") or "the print did not start", error.get("type")
+                )
             attempt = operation["result"] or {}
     except RouteRefusedError as refused:
-        if problem_name(refused.problem) is None and (refused.status or 0) >= 500:
-            # An unnamed server error answered in time, as on the 202 path: the run may
-            # have started, so the script must not take it as nothing printed.
+        if problem_name(refused.problem) is None:
+            # No named refusal: it may have failed after the run started, so the script
+            # must not take it as nothing printed.
             return PrintOutcome(
                 run_id="",
                 status="failed",
