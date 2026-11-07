@@ -43,7 +43,9 @@ class _Refs:
     """`blob_refs` without Postgres: the store is thrown away after the run, so a ref
     has nothing to hold."""
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
         pass
 
 
@@ -73,7 +75,7 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
             paths=paths,
             assets=AssetStore(paths.assets),
             blobs=LocalBlobStore(paths.blobs),
-            refs=_Refs(),  # type: ignore[arg-type]
+            refs=_Refs(),
             projection=None,  # type: ignore[arg-type]
         )
         finals: dict[str, Projection] = {}

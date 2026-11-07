@@ -61,11 +61,12 @@ from scadbuddy.render.projection import (
 )
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
-from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
+from scadbuddy.store import BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.refs import HoldsBlobs
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
@@ -83,7 +84,7 @@ from scadbuddy.workflows.models import (
 )
 
 if TYPE_CHECKING:
-    from scadbuddy.crud.render import RemoteBlobRefs, RemoteGeometryIndex, RemoteJobProjection
+    from scadbuddy.crud.render import RemoteGeometryIndex, RemoteJobProjection
     from scadbuddy.store.index import Pool
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ class WorkerDeps:
     blobs: BlobStore
     #: The render worker's ``refs``, ``projection`` and ``geometry`` are the API's CRUD
     #: routes (#5298); the in-process worker's, SQL.
-    refs: BlobRefs | RemoteBlobRefs
+    refs: HoldsBlobs
     projection: JobProjection | RemoteJobProjection
     history: ModelHistory | None = None
     checkouts: CheckoutGate | None = None

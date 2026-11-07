@@ -124,7 +124,7 @@ def _world(
         paths=paths,
         assets=AssetStore(paths.assets),
         blobs=blobs or LocalBlobStore(paths.blobs),
-        refs=refs or RecordingRefs(),  # type: ignore[arg-type]
+        refs=refs or RecordingRefs(),
         projection=None,  # type: ignore[arg-type]
         template_python=sys.executable,
     )

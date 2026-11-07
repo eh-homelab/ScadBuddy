@@ -2,10 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import timedelta
+from typing import Protocol
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+
+
+class HoldsBlobs(Protocol):
+    """What a render worker's activities call on its blob refs (`WorkerDeps.refs`):
+    `BlobRefs` over SQL, `crud/render.py` `RemoteBlobRefs` over the API's routes, and
+    `workflows/verify_pipeline.py`'s, which holds nothing."""
+
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None: ...
 
 
 class BlobRefs:
