@@ -318,6 +318,34 @@ describe('order tools (#4249)', () => {
     expect(firstText(gone)).toEqual({ deleted: ITEM })
   })
 
+  it('adds a library file as an item, its tier unchanged (#5544)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'library_file', status: 'draft' }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'library_file', status: 'draft' }, { status: 201 })
+      }),
+    )
+    const add = tool('order_item_add')
+    expect(add.risk).toBe('write')
+    await add.execute({ order_id: ORDER, library_file_id: 89, quantity: 2 }, ctx())
+    await tool('order_item_add_after_acceptance').execute(
+      { order_id: ORDER, kind: 'library_file', library_file_id: 89, title: 'Bracket' },
+      ctx(),
+    )
+    // The body is sent as given: no `accept`, which only a custom item takes.
+    expect(sent).toEqual([
+      { library_file_id: 89, quantity: 2, notes: '' },
+      { kind: 'library_file', library_file_id: 89, title: 'Bracket', quantity: 1, notes: '' },
+    ])
+    expect(add.summarize({ order_id: ORDER, library_file_id: 89 })).toContain('"library_file_id":89')
+    expect(() => z.object(add.shape).parse({ order_id: ORDER, library_file_id: 0 })).toThrow()
+  })
+
   it('adds an item after acceptance on its own route, as an outward step (#5349)', async () => {
     const sent: unknown[] = []
     server.use(
@@ -1032,6 +1060,30 @@ describe('design revisions (#5280)', () => {
     expect(revise.summarize?.({ order_id: ORDER, item_id: ITEM } as never)).toBe(
       `Revise the design of accepted item ${ITEM} of order ${ORDER}`,
     )
+  })
+
+  it('names item_partly_fulfilled in the after-acceptance revision, and order_get passes `stale` through (#5592, #5598)', async () => {
+    const revise = tool('order_item_revision_add_after_acceptance')
+    expect(revise.description).toContain('`item_partly_fulfilled` once an attempt of it is accepted')
+    expect(revise.description).toContain('cancel the item and add one with the new design')
+    // order_item_fulfil tells the model that order_get marks an attempt of the old design.
+    expect(tool('order_item_fulfil').description).toContain('order_get marks such an attempt `stale: true`')
+    const attempts = [
+      { id: 'f1', attempt: 1, purpose: 'production', accepted_at: null, stale: true },
+      { id: 'f2', attempt: 2, purpose: 'production', accepted_at: null, stale: false },
+    ]
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({ order: { id: ORDER }, items: [{ id: ITEM, fulfilments: attempts }] }),
+      ),
+    )
+    const read = firstText(await tool('order_get').execute({ order_id: ORDER }, ctx())) as {
+      items: { fulfilments: { id: string; stale: boolean }[] }[]
+    }
+    expect(read.items[0]!.fulfilments.map((f) => [f.id, f.stale])).toEqual([
+      ['f1', true],
+      ['f2', false],
+    ])
   })
 
   it('tiers the revision tools', () => {

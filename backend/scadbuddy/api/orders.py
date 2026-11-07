@@ -50,12 +50,14 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.print_source import printable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives
+from scadbuddy.orders.bambuddy import ServedLibrary
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
     CostRates,
@@ -90,6 +92,7 @@ from scadbuddy.orders.models import (
     FilamentPatch,
     Fulfilment,
     ItemKind,
+    LibraryFileRef,
     Money,
     Order,
     OrderEvent,
@@ -132,6 +135,8 @@ from scadbuddy.orders.store import (
     decode_cursor,
     encode_cursor,
 )
+from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
+from scadbuddy.print_library.ids import is_native_id
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +238,15 @@ class ItemCreate(ReferenceBody):
     ``commit`` and ``inputs``. A ``custom`` item (#4954) names nothing: it takes a
     ``title`` and a ``unit_price_minor`` instead, and ``requires_printing``. A ``request``
     item (#5280) is what a customer wants made before any design exists: a ``title``,
-    ``quantity``, ``notes`` and ``sku`` only; its first revision names the design."""
+    ``quantity``, ``notes`` and ``sku`` only; its first revision names the design. A
+    ``library_file`` item (#5544) names a file of the library: ``library_file_id``, with
+    ``kind`` left out or ``library_file``, and no other source."""
 
     kind: ItemKind = "model"
     output_id: str | None = None
+    #: A file of the library that serves (#5544), as `print_output` takes one: the item
+    #: prints it. Its ``kind`` is ``library_file``.
+    library_file_id: int | None = Field(default=None, ge=1)
     quantity: int = Field(ge=1, le=MAX_QUANTITY)
     title: str | None = Field(default=None, max_length=200)
     notes: str = ""
@@ -260,6 +270,32 @@ class ItemCreate(ReferenceBody):
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
+        if self.library_file_id is not None or self.kind == "library_file":
+            if "kind" in self.model_fields_set and self.kind != "library_file":
+                raise ValueError(
+                    f"library_file_id names a library file item: drop kind {self.kind!r}"
+                )
+            if self.library_file_id is None:
+                raise ValueError("a library_file item needs a library_file_id")
+            named = [
+                name
+                for name in (
+                    "slug",
+                    "commit",
+                    "inputs",
+                    "output_id",
+                    "unit_price_minor",
+                    "requires_printing",
+                    "accept",
+                )
+                if getattr(self, name) is not None
+            ]
+            if named:
+                raise ValueError(
+                    f"a library file item names its file only: drop {', '.join(named)}"
+                )
+            self.kind = "library_file"
+            return self
         if self.kind == "custom":
             named = [
                 name
@@ -1338,6 +1374,8 @@ async def add_item(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    settings: SettingsStoreDep,
+    library: PrintLibraryDep,
 ) -> OrderItem:
     """From an output (``output_id``: its commit, inputs, libraries and colours), or by
     hand (``slug``, ``commit``, ``inputs``); either way the reference is checked
@@ -1347,7 +1385,12 @@ async def add_item(
     false (the agent's), which leaves it `quoted`. A ``request`` item (#5280) is a title,
     a quantity, notes and a sku, approved design first: it has no design until its first
     revision. Only while the order is `draft` or `quoted`: past that, 409
-    ``item_locked`` names `POST /orders/{id}/items/after-acceptance`."""
+    ``item_locked`` names `POST /orders/{id}/items/after-acceptance`. A library file
+    item (#5544) names ``library_file_id``, a file of the library that serves, read as
+    `POST /print/library/{file_id}/run` reads it: a file it does not have (deleted, or
+    the other library's) or one it does not print is 422; the item records the file's
+    id, name and library, starts `draft`, and is priced by a slice quote of the file or a
+    manual quote."""
     return await _add_item(
         order_id,
         body,
@@ -1359,6 +1402,8 @@ async def add_item(
         paths=paths,
         config=config,
         fetcher=fetcher,
+        settings=settings,
+        library=library,
     )
 
 
@@ -1378,6 +1423,8 @@ async def add_item_after_acceptance(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    settings: SettingsStoreDep,
+    library: PrintLibraryDep,
 ) -> OrderItem:
     """#5349: the same body as `POST /orders/{id}/items`, on an order that is
     `accepted`, `in_production` or `ready`. It changes what the customer gets. The item
@@ -1399,6 +1446,8 @@ async def add_item_after_acceptance(
         paths=paths,
         config=config,
         fetcher=fetcher,
+        settings=settings,
+        library=library,
     )
 
 
@@ -1414,11 +1463,28 @@ async def _add_item(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    settings: SettingsStore,
+    library: PrintLibrary,
 ) -> OrderItem:
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     by = current_actor()
+    if body.kind == "library_file":
+        assert body.library_file_id is not None
+        file = await _library_file(body.library_file_id, settings, library)
+        return await _run(
+            lambda: orders.lifecycle.add_library_item(
+                order_id,
+                by,
+                file,
+                quantity=body.quantity,
+                title=body.title,
+                notes=body.notes,
+                sku=body.sku,
+                after_acceptance=after_acceptance,
+            )
+        )
     if body.kind == "custom":
         assert body.title is not None and body.unit_price_minor is not None
         title, price = body.title.strip(), body.unit_price_minor
@@ -1474,6 +1540,35 @@ async def _add_item(
             sku=body.sku,
             after_acceptance=after_acceptance,
         )
+    )
+
+
+async def _library_file(
+    file_id: int, settings: SettingsStore, library: PrintLibrary
+) -> LibraryFileRef:
+    """The file a library file item names (#5544), read from the library that serves as
+    `POST /print/library/{file_id}/run` reads it: 422 ``library_file_id`` for a file it
+    does not have (deleted, trashed, or the other library's) or one it does not print."""
+    found = await ServedLibrary(settings, library.serving_native).file(file_id)
+    if found is None:
+        raise _bad_library_file(f"no library file {file_id} in the library that serves")
+    if not printable(found.file_type):
+        raise _bad_library_file(
+            f"library file {found.filename} is a {found.file_type or 'file of unknown type'}:"
+            " ScadBuddy prints only 3MF and STL files"
+        )
+    return LibraryFileRef(
+        id=file_id,
+        filename=found.filename,
+        library="native" if is_native_id(file_id) else "bambuddy",
+    )
+
+
+def _bad_library_file(message: str) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        message,
+        errors=[{"loc": ["body", "library_file_id"], "msg": message}],
     )
 
 

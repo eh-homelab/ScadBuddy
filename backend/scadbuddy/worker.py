@@ -73,10 +73,12 @@ from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.crud.render import (
+    RemoteBlobIndex,
     RemoteBlobRefs,
     RemoteGeometryIndex,
     RemoteJobProjection,
     RemoteRenderSettingsSource,
+    RemoteStoreFolders,
 )
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
@@ -222,13 +224,16 @@ def build_worker_deps(
     jobs: RemoteJobProjection,
     refs: RemoteBlobRefs,
     geometry: RemoteGeometryIndex,
+    index: RemoteBlobIndex,
+    folders: RemoteStoreFolders,
     metrics: Metrics | None = None,
     stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``current`` is ``source``'s first read, which the store is built from. ``jobs``
-    writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry;
-    its caller closes their client. ``stopping`` ends the wait for the API's
-    schema and grants (`WorkerStoppedError`)."""
+    writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry,
+    ``index`` the blob index, ``folders`` the Bambuddy store's folders; its caller closes
+    their clients. ``stopping`` ends the wait
+    for the API's schema and grants (`WorkerStoppedError`)."""
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
     paths = DataPaths(root=settings.data_dir)
@@ -243,9 +248,10 @@ def build_worker_deps(
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = metrics or worker_metrics(settings, "render")
-    # For the stores still on SQL, until #5298 Tasks 16-20 move them to CRUD routes: the
-    # job rows, their events and activity rows (``jobs``), the blob refs (``refs``) and
-    # the piece geometry (``geometry``) already go through them.
+    # For the stores still on SQL, until #5298 Tasks 18-20 move them to CRUD routes: the
+    # job rows, their events and activity rows (``jobs``), the blob refs (``refs``), the
+    # piece geometry (``geometry``), the blob index (``index``) and the Bambuddy store's
+    # folders (``folders``) already go through them.
     pool: Pool = ConnectionPool(
         settings.database_url,
         min_size=1,
@@ -277,6 +283,8 @@ def build_worker_deps(
             config=config,
             paths=paths,
             pool=pool,
+            index=index,
+            folders=folders,
             source=source,
             # On bambuddy a worker has no git: the API makes the snapshots it renders from.
             history=None,
@@ -1054,7 +1062,7 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
 
 
 #: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs"})
+RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs", "blob-index", "store-folders"})
 
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
@@ -1104,7 +1112,7 @@ async def run_worker(
             return
         current = reading.result()
         # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
-        # client for the three, closed with ``jobs``.
+        # client for the four, closed with ``jobs``.
         remote = crud.blocking()
         jobs = RemoteJobProjection(remote)
         try:
@@ -1120,6 +1128,9 @@ async def run_worker(
                     jobs=jobs,
                     refs=RemoteBlobRefs(remote),
                     geometry=RemoteGeometryIndex(remote),
+                    index=RemoteBlobIndex(remote),
+                    # On the loop, as the store calls it: the async client.
+                    folders=RemoteStoreFolders(crud, source=source),
                     metrics=metrics,
                     stopping=stop.is_set,
                 )

@@ -9,8 +9,10 @@ deleted. No dot-named folders: Bambuddy shows them.
 
 Every folder ScadBuddy makes or adopts is recorded in `store_folders`, under the
 Bambuddy instance (its base URL) and inbox it was found on, and a delete is refused
-unless the file sits in one recorded as `work` there (#683). What each file is lives in
-`store_blobs`, so a fetch is by file id, never a folder scan.
+unless the file sits in one recorded as `work` there (#683). `FolderFinder` finds,
+records and forgets them over SQL: the API's, and the render worker's through the API's
+CRUD routes (`crud/render.py` `RemoteStoreFolders`, #5298), both `KeepsFolders`. What
+each file is lives in `store_blobs`, so a fetch is by file id, never a folder scan.
 
 Known limits (#682): a folder is adopted by `(parent, name)`, so two templates whose
 titles clean to the same name share one folder pair, and a template titled "Shared"
@@ -30,7 +32,7 @@ from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 import httpx
@@ -52,7 +54,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.store.content_models import BlobData, BlobKind, BlobMissingError, BlobScope
 from scadbuddy.store.content_models import RefusedDeleteError as RefusedDeleteError
-from scadbuddy.store.index import Pool
+from scadbuddy.store.index import BlobIndex, IndexesBlobs, Pool
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +98,7 @@ def instance_key(url: str) -> str:
 
 
 @dataclass(frozen=True)
-class _Inbox:
+class Inbox:
     """Where this call's folders are: one inbox on one Bambuddy instance."""
 
     instance: str
@@ -160,17 +162,19 @@ class StoreSettingsSource:
         self._at = float("-inf")
 
     async def target(self) -> BambuddyTarget:
-        current = await self.current()
-        if not current.bambuddy_url or current.library_folder_id is None:
-            raise not_configured(
-                "the Bambuddy store needs a Bambuddy URL and a library folder in Settings"
-            )
-        return BambuddyTarget(
-            config=BambuddyConfig(
-                base_url=current.bambuddy_url.rstrip("/"), api_key=current.api_key
-            ),
-            inbox_id=current.library_folder_id,
+        return render_target(await self.current())
+
+
+def render_target(current: RenderStoreSettings) -> BambuddyTarget:
+    """The Bambuddy and inbox the store's settings name, with the render key."""
+    if not current.bambuddy_url or current.library_folder_id is None:
+        raise not_configured(
+            "the Bambuddy store needs a Bambuddy URL and a library folder in Settings"
         )
+    return BambuddyTarget(
+        config=BambuddyConfig(base_url=current.bambuddy_url.rstrip("/"), api_key=current.api_key),
+        inbox_id=current.library_folder_id,
+    )
 
 
 class RenderSettingsSource(StoreSettingsSource):
@@ -192,8 +196,14 @@ class RenderSettingsSource(StoreSettingsSource):
         return await asyncio.to_thread(load_render_store_settings, self._pool, self._defaults)
 
 
-#: How long a find waits for another worker's folder lock before it fails.
-FOLDER_LOCK_TIMEOUT = "30s"
+#: How long a find waits for another finder's folder lock before it fails. The same in
+#: the API and in an older worker that still finds over SQL, so the two exclude each
+#: other during a roll (#5298).
+FOLDER_LOCK_SECONDS = 30
+FOLDER_LOCK_TIMEOUT = f"{FOLDER_LOCK_SECONDS}s"
+
+#: A recorded folder's role: a template's own folder, or the `Work/` under it.
+FolderRole = Literal["template", "work"]
 
 
 def folder_lock_key(instance: str, inbox: int, slug: str, role: str) -> int:
@@ -211,9 +221,15 @@ class BambuddyContentBackend:
         pool: Pool,
         *,
         http: httpx.AsyncClient | None = None,
+        index: IndexesBlobs | None = None,
+        folders: KeepsFolders | None = None,
     ) -> None:
+        """``index`` says whether a row names an uploaded file (`sweep_unrecorded`);
+        ``folders`` finds, records and forgets the store's folders. Each is SQL on
+        ``pool`` unless given (the render worker's are its CRUD routes', #5298)."""
         self._target = target
-        self._pool = pool
+        self._index: IndexesBlobs = index if index is not None else BlobIndex(pool)
+        self._kept: KeepsFolders = folders if folders is not None else FolderFinder(pool)
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._folders: dict[tuple[str, int, str, str], int] = {}
@@ -226,9 +242,9 @@ class BambuddyContentBackend:
             await self._http.aclose()
 
     @asynccontextmanager
-    async def _client(self) -> AsyncIterator[tuple[BambuddyClient, _Inbox]]:
+    async def _client(self) -> AsyncIterator[tuple[BambuddyClient, Inbox]]:
         target = await self._target()
-        inbox = _Inbox(target.instance, target.inbox_id)
+        inbox = Inbox(target.instance, target.inbox_id)
         async with BambuddyClient(target.config, http=self._http) as client:
             yield client, inbox
 
@@ -249,7 +265,7 @@ class BambuddyContentBackend:
                     # or never kept: forget it, make it again.
                     if error.status != 404 or attempt == 2:
                         raise
-                    await asyncio.to_thread(self._forget, inbox, scope.slug or "")
+                    await self._forget(inbox, scope.slug or "")
                     continue
                 return str(uploaded.id)
         raise AssertionError("unreachable")
@@ -279,7 +295,7 @@ class BambuddyContentBackend:
         async with self._client() as (client, inbox):
             # #1272: the file's folder is the last thing read before the DELETE, so a
             # move in Bambuddy's UI has one round trip to slip through, not two reads.
-            work = await asyncio.to_thread(self._work_folders, inbox)
+            work = await self._work_folders(inbox)
             try:
                 file = await client.library_file(int(backend_id))
             except ApiError as error:
@@ -311,7 +327,7 @@ class BambuddyContentBackend:
         is_recorded = self._recorded_id if recorded is None else recorded
         removed: list[str] = []
         async with self._client() as (client, inbox):
-            for folder_id in sorted(await asyncio.to_thread(self._work_folders, inbox)):
+            for folder_id in sorted(await self._work_folders(inbox)):
                 try:
                     files = await client.library_listing(folder_id=folder_id)
                 except ApiError as error:
@@ -341,17 +357,11 @@ class BambuddyContentBackend:
         return removed
 
     def _recorded_id(self, backend_id: str) -> bool:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
-                " AS recorded",
-                (self.backend, backend_id),
-            ).fetchone()
-        return bool(row and row["recorded"])
+        return self._index.recorded(self.backend, backend_id)
 
     # --- folders -------------------------------------------------------------
 
-    async def _folder_for(self, client: BambuddyClient, inbox: _Inbox, scope: BlobScope) -> int:
+    async def _folder_for(self, client: BambuddyClient, inbox: Inbox, scope: BlobScope) -> int:
         if scope.folder == "output" and scope.project_id is not None:
             folders = await client.folders_by_project(scope.project_id)
             if not folders:
@@ -360,38 +370,81 @@ class BambuddyContentBackend:
                 )
             return folders[0].id
         slug = scope.slug or ""
-        title = folder_name(scope.title or scope.slug or SHARED_TITLE)
-        template = await self._ensure(client, inbox, slug, "template", title, inbox.id)
-        if scope.folder == "output":
+        title = scope.title or scope.slug or SHARED_TITLE
+        role: FolderRole = "template" if scope.folder == "output" else "work"
+        cache_key = (inbox.instance, inbox.id, slug, role)
+        found = self._folders.get(cache_key)
+        if found is not None:
+            return found
+        # This process's other callers for the folder wait in the event loop.
+        async with self._finding.setdefault(cache_key, asyncio.Lock()):
+            found = self._folders.get(cache_key)
+            if found is None:
+                found = await self._kept.find(client, inbox, slug, role, title)
+                self._folders[cache_key] = found
+            return found
+
+    async def _forget(self, inbox: Inbox, slug: str) -> None:
+        await self._kept.forget(inbox, slug)
+        for role in ("template", "work"):
+            self._folders.pop((inbox.instance, inbox.id, slug, role), None)
+
+    async def _work_folders(self, inbox: Inbox) -> set[int]:
+        return await self._kept.work_folders(inbox)
+
+
+class KeepsFolders(Protocol):
+    """Finds, records and forgets the store's folders on one Bambuddy inbox: SQL
+    (`FolderFinder`), or the render worker's CRUD routes (`crud/render.py`
+    `RemoteStoreFolders`, #5298), where the API finds them with its own client and target.
+
+    `find` answers the folder of ``slug`` in ``role``, made under ``inbox`` (named
+    ``title``, cleaned by `folder_name`) or under the template's folder (`Work/`) when
+    none is recorded, and records it. `forget` drops the template's rows, `work_folders`
+    lists the `Work/` folders recorded under ``inbox``."""
+
+    async def find(
+        self, client: BambuddyClient, inbox: Inbox, slug: str, role: FolderRole, title: str
+    ) -> int: ...
+
+    async def forget(self, inbox: Inbox, slug: str) -> None: ...
+
+    async def work_folders(self, inbox: Inbox) -> set[int]: ...
+
+
+class FolderFinder:
+    """`KeepsFolders` over SQL on ``pool``: the API's. A find takes the folder's
+    advisory lock (`folder_lock_key`) across its Bambuddy calls, so two finders never
+    both make a folder."""
+
+    def __init__(self, pool: Pool) -> None:
+        self._pool = pool
+
+    async def find(
+        self, client: BambuddyClient, inbox: Inbox, slug: str, role: FolderRole, title: str
+    ) -> int:
+        template = await self._ensure(client, inbox, slug, "template", folder_name(title), inbox.id)
+        if role == "template":
             return template
         return await self._ensure(client, inbox, slug, "work", WORK, template)
 
     async def _ensure(
         self,
         client: BambuddyClient,
-        inbox: _Inbox,
+        inbox: Inbox,
         slug: str,
-        role: str,
+        role: FolderRole,
         name: str,
         parent_id: int,
     ) -> int:
-        cache_key = (inbox.instance, inbox.id, slug, role)
-        found = self._folders.get(cache_key)
-        if found is not None:
-            return found
-        async with self._finding.setdefault(cache_key, asyncio.Lock()):
-            found = self._folders.get(cache_key)
-            if found is not None:
-                return found
-            # Across processes: the lock's own connection, used for the lookup and the
-            # record too, so a find takes no pooled connection and no thread.
-            async with self._locked(folder_lock_key(inbox.instance, inbox.id, slug, role)) as conn:
-                found = await self._recorded(conn, inbox, slug, role)
-                if found is None:
-                    found = await self._adopt_or_create(client, name, parent_id)
-                    await self._record(conn, inbox, slug, role, found)
-            self._folders[cache_key] = found
-            return found
+        # Across processes: the lock's own connection, used for the lookup and the
+        # record too, so a find takes no pooled connection and no thread.
+        async with self._locked(folder_lock_key(inbox.instance, inbox.id, slug, role)) as conn:
+            found = await self._recorded(conn, inbox, slug, role)
+            if found is None:
+                found = await self._adopt_or_create(client, name, parent_id)
+                await self._record(conn, inbox, slug, role, found)
+        return found
 
     async def _adopt_or_create(self, client: BambuddyClient, name: str, parent_id: int) -> int:
         for root in await client.folders():
@@ -413,7 +466,7 @@ class BambuddyContentBackend:
 
     @asynccontextmanager
     async def _locked(self, key: int) -> AsyncIterator[AsyncConnection[DictRow]]:
-        """A transaction-scoped advisory lock, so two workers never both create a folder,
+        """A transaction-scoped advisory lock, so two finders never both create a folder,
         on a connection of its own: the wait is in the event loop, not a thread, and a
         find never holds a pooled connection. A path that leaves without the COMMIT
         (a cancellation) closes the connection, and the rollback releases the lock.
@@ -433,7 +486,7 @@ class BambuddyContentBackend:
 
     @staticmethod
     async def _recorded(
-        conn: AsyncConnection[DictRow], inbox: _Inbox, slug: str, role: str
+        conn: AsyncConnection[DictRow], inbox: Inbox, slug: str, role: str
     ) -> int | None:
         cursor = await conn.execute(
             "SELECT folder_id FROM store_folders"
@@ -445,7 +498,7 @@ class BambuddyContentBackend:
 
     @staticmethod
     async def _record(
-        conn: AsyncConnection[DictRow], inbox: _Inbox, slug: str, role: str, folder_id: int
+        conn: AsyncConnection[DictRow], inbox: Inbox, slug: str, role: str, folder_id: int
     ) -> None:
         await conn.execute(
             "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
@@ -454,20 +507,24 @@ class BambuddyContentBackend:
             (inbox.instance, inbox.id, slug, role, folder_id),
         )
 
-    def _forget(self, inbox: _Inbox, slug: str) -> None:
+    async def forget(self, inbox: Inbox, slug: str) -> None:
+        await asyncio.to_thread(self._forget, inbox, slug)
+
+    def _forget(self, inbox: Inbox, slug: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
                 "DELETE FROM store_folders WHERE instance = %s AND inbox_id = %s AND slug = %s",
                 (inbox.instance, inbox.id, slug),
             )
-        for role in ("template", "work"):
-            self._folders.pop((inbox.instance, inbox.id, slug, role), None)
 
-    def _work_folders(self, inbox: _Inbox) -> set[int]:
+    async def work_folders(self, inbox: Inbox) -> set[int]:
         """The `Work/` folders recorded under the configured inbox on the configured
         Bambuddy. One recorded under an inbox Settings no longer names, or on another
         instance (whose ids mean other folders here, #683), is not ScadBuddy's to
         delete from."""
+        return await asyncio.to_thread(self._work_folders, inbox)
+
+    def _work_folders(self, inbox: Inbox) -> set[int]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT folder_id FROM store_folders"

@@ -33,10 +33,12 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.render import (
+    RemoteBlobIndex,
     RemoteBlobRefs,
     RemoteGeometryIndex,
     RemoteJobProjection,
     RemoteRenderSettingsSource,
+    RemoteStoreFolders,
 )
 from scadbuddy.library.assets import AssetMeta, AssetStore
 from scadbuddy.library.history import ModelHistory
@@ -61,7 +63,6 @@ from scadbuddy.render.worker_role import (
 )
 from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
 from scadbuddy.store.content import BlobScope, ContentStore
-from scadbuddy.store.index import BlobIndex
 from scadbuddy.worker import build_worker_deps, run_worker
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PrepareResult, piece_key
@@ -165,14 +166,16 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
         for relation in ("settings", "render_settings"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
-        # The job rows, their events and activity rows, the blob refs and the piece
-        # geometry go through the API too (#5298).
+        # The job rows, their events and activity rows, the blob refs, the piece
+        # geometry, the blob index and the store's folders go through the API too (#5298).
         for table in (
             "render_jobs",
             "events",
             "activity",
             "blob_refs",
             "piece_geometry",
+            "store_blobs",
+            "store_folders",
             "operations",
             "print_runs",
             "saved_presets",
@@ -381,6 +384,8 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
             jobs=RemoteJobProjection(remote),
             refs=RemoteBlobRefs(remote),
             geometry=RemoteGeometryIndex(remote),
+            index=RemoteBlobIndex(remote),
+            folders=RemoteStoreFolders(crud),
         )
         try:
             await _the_slots_follow_the_settings(owner, deps)
@@ -465,7 +470,7 @@ def test_the_worker_waits_for_migrations_then_grants(
             )
         with pool.connection() as conn:
             assert pending_migrations(conn) == []
-            assert "store_blobs: INSERT" in missing_privileges(conn)
+            assert "assets: INSERT" in missing_privileges(conn)
         with pytest.raises(WorkerStoppedError):
             wait_until_ready(pool, stopping=lambda: True, poll=0.01)
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
@@ -513,8 +518,10 @@ def _folder(**values: Any) -> dict[str, Any]:
 
 @respx.mock
 async def test_the_bambuddy_store_works_as_the_role(
-    granted: Pool, monkeypatch: pytest.MonkeyPatch
+    granted: Pool, owner: Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Its index and its folders through the API's CRUD routes (#5298): the API finds a
+    folder on its own render target, the one Settings names."""
     monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
 
     async def target() -> BambuddyTarget:
@@ -548,8 +555,29 @@ async def test_the_bambuddy_store_works_as_the_role(
         ]
     )
     respx.get(f"{API}/library/files/500").mock(return_value=httpx.Response(404))
-    backend = BambuddyContentBackend(target, granted)
-    content = ContentStore(backend, BlobIndex(granted))
+    respx.route(host="127.0.0.1").pass_through()
+    with owner.connection() as conn:
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES"
+            " ('bambuddy_url', %s), ('library_folder_id', %s)",
+            (Jsonb(BASE_URL), Jsonb(INBOX)),
+        )
+    defaults = _defaults(tmp_path).model_copy(update={"bambuddy_api_key": "k"})
+    async with served_render_crud(owner, defaults) as crud:
+        remote = crud.blocking()
+        index = RemoteBlobIndex(remote)
+        backend = BambuddyContentBackend(
+            target, granted, index=index, folders=RemoteStoreFolders(crud)
+        )
+        try:
+            await _the_bambuddy_store_works(backend, ContentStore(backend, index), read_back)
+        finally:
+            remote.close()
+
+
+async def _the_bambuddy_store_works(
+    backend: BambuddyContentBackend, content: ContentStore, read_back: respx.Route
+) -> None:
     try:
         scope = BlobScope(slug="kit", title="Kit")
         await content.put("piece", b"a", name="a.zip", scope=scope, key="piece-a")

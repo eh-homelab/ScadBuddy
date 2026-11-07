@@ -334,6 +334,25 @@ def test_an_item_with_an_accepted_attempt_refuses_it(shop: Shop) -> None:
     assert len(shop.rows.revisions(item.id)) == 1
 
 
+def test_an_accepted_attempt_answers_before_a_print_in_flight(shop: Shop) -> None:
+    """#5598: `item_partly_fulfilled` is permanent and `print_in_flight` is transient, so
+    the permanent refusal answers first. A caller that waits out the print is not then
+    refused anyway."""
+    order, item = shop.accepted(quantity=3)
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    shop.lifecycle.claim_print(
+        order.id, item.id, BY, request_id="req-1", sliced_sha256="a" * 64, sliced_blob_key="q-a"
+    )
+    assert shop.get_item(item).status == "queued"
+
+    with pytest.raises(LifecycleError) as refused:
+        revise(shop, order, item)
+    assert refused.value.slug == "item_partly_fulfilled"
+
+
 def test_attempts_not_accepted_let_it_through(shop: Shop) -> None:
     """Only an accepted attempt refuses the revision: one not accepted stays, stale."""
     order, item = shop.accepted(quantity=3)

@@ -18,12 +18,12 @@ from scadbuddy.store import BlobStore
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import RECOVER_LOCAL_SQL as RECOVER_LOCAL_SQL
 from scadbuddy.store.backends import RemoteBackend, build_backend
-from scadbuddy.store.bambuddy import StoreSettingsSource
+from scadbuddy.store.bambuddy import KeepsFolders, StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore, StoreUsage
 from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.fonts import FontMirror
-from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.index import IndexesBlobs, Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.locks import KeyLocks
 from scadbuddy.store.snapshots import SnapshotStore
@@ -63,14 +63,19 @@ def build_store(
     config: Config,
     paths: DataPaths,
     pool: Pool,
+    index: IndexesBlobs,
     source: StoreSettingsSource,
     history: ModelHistory | None,
     fonts: FontService,
     metrics: Metrics | None,
     downloads_dir: Path | None = None,
+    folders: KeepsFolders | None = None,
 ) -> StoreBundle:
     """``downloads_dir`` is where this process keeps whole Bambuddy downloads (#2788),
-    None for none: the API passes its default, a worker only one it is set (README)."""
+    None for none: the API passes its default, a worker only one it is set (README).
+    ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
+    `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
+    folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`)."""
     local = LocalBlobStore(paths.blobs)
     downloads = (
         DownloadCache(
@@ -83,10 +88,10 @@ def build_store(
     )
     if backend == "local":
         return StoreBundle("local", local, None, None, None, None, source, downloads=downloads)
-    remote = build_backend(backend, current, source, pool)
+    remote = build_backend(backend, current, source, pool, index, folders)
     content = ContentStore(
         remote,
-        BlobIndex(pool),
+        index,
         max_total_bytes=config.store_max_total_bytes,
         max_count=config.store_max_count,
         metrics=metrics,

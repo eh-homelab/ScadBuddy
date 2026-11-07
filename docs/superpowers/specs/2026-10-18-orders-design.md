@@ -152,8 +152,9 @@ pickers, and `POST /customers/{id}/unarchive` clears it, putting them back. A cu
   The reference is complete without it; a deleted output leaves the item renderable
   (F2, F3).
 
-The reference is the one way a line item names what to make. **Nothing on an order is a
-file path or a Bambuddy id.** The `// file` assets an item's inputs name are kept alive
+The reference is the one way a template's line item names what to make. **Nothing on an
+order is a file path or a Bambuddy id**, except the file a library file item names
+(#5544, below). The `// file` assets an item's inputs name are kept alive
 by adding `order_items.inputs` to `referenced_asset_ids`
 (`library/assets.py:766-780`), so the asset sweep never takes an ordered upload.
 
@@ -187,6 +188,51 @@ the asset sweep reads nothing of it. It is made by hand: the drawer's **Mark don
 it, and it then ships as any fulfilled item. The grid shows a "Custom" badge in place
 of its picture and an entry row under the items (title, SKU, notes, quantity, unit
 price, "Requires printing"; Enter saves).
+
+**As built: a library file as a line item (#5544).** A shop sells a model that is not a
+catalogue template: a file of the library (`/library`, Bambuddy's or ScadBuddy's own).
+`kind` `library_file` names the file by `library_file_id`, `library_filename` (its name
+when the item was added, for display after a delete or a rename) and `library_source`
+(`bambuddy` or `native`, which the id's range gives); the wire shape is
+`OrderItem.library_file` `{id, filename, library}`. It has no reference, no inputs, no
+output and no revisions, and it always prints; the check `order_items_library_file`
+keeps the three columns whole on such an item and null on any other (migration
+`20261107T0732Z_order_items_library_file.sql`). This is the one place an order names a
+Bambuddy id: the file is not ScadBuddy's to keep, so the item points at it and the
+refusals below cover it going away.
+
+- `POST /orders/{id}/items` (and `…/items/after-acceptance`, with the same rules) takes
+  `library_file_id`, with `kind` left out or `library_file`. Any other source (`output_id`,
+  `slug`, `commit`, `inputs`), another `kind`, or a custom item's fields is 422. The route
+  reads the file from the library that serves, as `POST /print/library/{file_id}/run` does
+  (`check_served`, `served_reads`; `orders/bambuddy.py` `ServedLibrary`): a file it does
+  not have (deleted, trashed, the other library's) or does not print (not a 3MF or STL)
+  is 422 on `library_file_id`. The title defaults to the file's name. The item starts
+  `draft`, approved with its quote.
+- Pricing is a manual quote, or a slice quote of the file: `quote.py` `_library_quote`
+  slices every plate through the dialog's background slice of a library file
+  (`Slicer.start_library`, `orders/bambuddy.py` `start_library_quote_preview`), and its
+  first quote gives the item the colour slots its plates use (`library_colours`: colours
+  from the file's filament requirements, grey where it names none), priced with the
+  body's filaments. The quote names no revision. A sliced file has nothing to slice (the
+  dialog's 422); it takes a manual quote. A later filament change writes the slots on
+  the item (`update_item`, no revision) and drops the accepted quote, as a quantity does.
+- Printing starts the library print route's own run (`start_library_run`, run subject
+  `library:<file id>`, the file's filament slots read as that route reads them), so the
+  item follows its print as any other (`print_runs.output_id` is the run subject).
+  Every print of one file shares that subject, and the follow reads and records only the
+  subject's newest run's print (`bambuddy/follow.py`, `progress.py` `library_progress`,
+  `outcomes.py`). So of two items of one file printing at once (two items of one order,
+  the file on two orders, or a dialog print of it), only the newer attempt settles by
+  itself; the older one stays `unknown` and is settled by hand (`PATCH` the attempt,
+  #5611). An output item has the same limit, but two items rarely share an output. To
+  settle each attempt by its own run, the follow must follow each run, not each subject:
+  the follow workflow, the progress reads and the LAN reads all key on the subject today.
+- A file gone since it was added is 409 `library_file_gone` (naming the item) in the
+  quote's check and run and in the print's check, before anything starts; the item can
+  still be priced by hand, cancelled, or replaced by a new item. A revision, a reference
+  `PATCH` or `approval: design_first` is refused (`item_library_file`, 422 `reference`,
+  422 `approval`), and so is a test print, which prints a revision.
 
 ### 3.4 Quotes
 
@@ -387,7 +433,9 @@ its old price (seen on ORD-2026-3).
   fulfilled or cancelled item (`item_not_open`), a custom item (`item_custom`), an item
   with no accepted quote (`item_not_priced`: use the plain route, #5349), while a
   print of the item is queued or running (`print_in_flight`), and once an attempt of the
-  item is accepted (`item_partly_fulfilled`, #5592). Accepted units are real goods of
+  item is accepted (`item_partly_fulfilled`, #5592). `item_partly_fulfilled` answers
+  before `print_in_flight`: it is permanent, so a caller that waits out the print is
+  not refused after it (#5598). Accepted units are real goods of
   the agreed design. A new design would count them as made of it, or leave them out of
   the count, and both are false. To change the design of the rest, the shop cancels the
   item and adds one with the new design. So an accepted attempt never predates the
@@ -431,7 +479,8 @@ its old price (seen on ORD-2026-3).
   `reviseWarning`). A failed save clears the confirm. The quote editor follows
   `priceOpen`. Once an attempt of the item is accepted, `reviseMode` gives no route
   (`partlyFulfilled`, #5592): the panel offers no "New revision" and says to cancel the
-  item and add one with the new design.
+  item and add one with the new design. It says so only when the accepted attempt is the
+  reason, not while the order is on hold or a print of the item runs (#5598).
 - The drawer offers the design and filament edits that `update_item` lets through
   `_open_for_requote` (#5582): a new design in the Revisions panel (`reviseMode`, which
   is `open` while `priceOpen` holds) and the filaments of a slice quote in the quote

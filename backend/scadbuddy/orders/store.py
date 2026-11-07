@@ -49,6 +49,7 @@ from scadbuddy.orders.models import (
     FulfilmentPurpose,
     ItemKind,
     ItemStatus,
+    LibraryFileRef,
     Order,
     OrderEvent,
     OrderFilter,
@@ -142,7 +143,7 @@ _ITEM = (
     "id, order_id, position, status, quantity, title, notes, kind, requires_printing, sku,"
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
     " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
-    " revised_after_acceptance"
+    " revised_after_acceptance, library_file_id, library_filename, library_source"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -229,6 +230,14 @@ def _item_of(row: DictRow) -> OrderItem:
             libraries=row["libraries"],
             template_name=row["template_name"],
             render_key=row["render_key"],
+        ),
+        # The table's check keeps these whole on a `library_file` item, null elsewhere.
+        library_file=None
+        if row["library_file_id"] is None
+        else LibraryFileRef(
+            id=row["library_file_id"],
+            filename=row["library_filename"],
+            library=row["library_source"],
         ),
         colours=row["colours"],
         output_id=row["output_id"],
@@ -1060,6 +1069,40 @@ class OrderStore:
         assert row is not None
         return _item_of(row)
 
+    def insert_library_item(
+        self,
+        conn: Conn,
+        order_id: str,
+        *,
+        file: LibraryFileRef,
+        quantity: int,
+        title: str | None = None,
+        notes: str = "",
+        sku: str | None = None,
+    ) -> OrderItem:
+        """A library file item (#5544), appended after the order's items: the file's
+        reference, no template reference, no colours until its first slice quote, no
+        output. ``title`` defaults to the file's name."""
+        row = conn.execute(
+            "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
+            " library_file_id, library_filename, library_source) VALUES (%s,"
+            " (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items WHERE order_id = %s),"
+            f" 'library_file', %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            (
+                order_id,
+                order_id,
+                quantity,
+                title or file.filename,
+                notes,
+                sku,
+                file.id,
+                file.filename,
+                file.library,
+            ),
+        ).fetchone()
+        assert row is not None
+        return _item_of(row)
+
     def item(self, item_id: str, *, conn: Conn | None = None) -> OrderItem | None:
         with self._read(conn) as c:
             row = c.execute(f"SELECT {_ITEM} FROM order_items WHERE id = %s", (item_id,)).fetchone()
@@ -1089,7 +1132,7 @@ class OrderStore:
         revised_after_acceptance: bool | UnsetType = UNSET,
     ) -> OrderItem:
         """The item's own fields; its design (reference and colours) is `set_design`'s
-        alone (spec 2026-11-02 §4.1)."""
+        alone (spec 2026-11-02 §4.1), or a library file item's `set_library_colours`."""
         fields: dict[str, Any] = {
             "output_id": output_id,
             "quantity": quantity,
@@ -1140,6 +1183,21 @@ class OrderStore:
         ).fetchone()
         assert row is not None
         return _revision_of(row)
+
+    def set_library_colours(
+        self, conn: Conn, item_id: str, colours: Sequence[ColourSlot]
+    ) -> OrderItem:
+        """A library file item's colour slots and their filaments (#5544): it has no
+        revisions, so its slots are its own. Only a ``library_file`` item's: any other
+        item's design is `set_design`'s."""
+        row = conn.execute(
+            "UPDATE order_items SET colours = %s, updated_at = now()"
+            f" WHERE id = %s AND kind = 'library_file' RETURNING {_ITEM}",
+            (Jsonb(_dump(list(colours))), item_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no library file item {item_id}")
+        return _item_of(row)
 
     def set_design(
         self, conn: Conn, item_id: str, revision: Revision, *, output_id: str | None

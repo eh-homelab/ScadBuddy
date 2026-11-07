@@ -66,7 +66,13 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.guard import CRUD_HEADERS
-from scadbuddy.crud.render import RemoteBlobRefs, RemoteGeometryIndex, RemoteJobProjection
+from scadbuddy.crud.render import (
+    RemoteBlobIndex,
+    RemoteBlobRefs,
+    RemoteGeometryIndex,
+    RemoteJobProjection,
+    RemoteStoreFolders,
+)
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
@@ -507,7 +513,7 @@ async def test_a_stop_ends_the_render_workers_first_settings_read(
     async def answer(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
         if request.url.path.endswith("/areas"):
-            areas = {"areas": ["settings", "jobs", "refs"]}
+            areas = {"areas": sorted(worker_module.RENDER_CRUD_AREAS)}
             return httpx.Response(200, json=areas, headers=CRUD_HEADERS)
         await asyncio.Event().wait()  # the settings never come
         raise AssertionError("unreachable")
@@ -2408,6 +2414,8 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         jobs=RemoteJobProjection(remote),
         refs=RemoteBlobRefs(remote),
         geometry=RemoteGeometryIndex(remote),
+        index=RemoteBlobIndex(remote),
+        folders=RemoteStoreFolders(static_render_crud()),
     )
 
 

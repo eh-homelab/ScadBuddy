@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from scadbuddy.orders.integrations import OrderIntegrations
+from scadbuddy.orders.lifecycle import has_design
 from scadbuddy.orders.models import Order, OrderItem, OrderProject
 from scadbuddy.orders.store import OrderStore, item_subject, order_subject
 
@@ -47,8 +48,9 @@ def item_project_name(order: Order, item: OrderItem) -> str:
 
 
 def prints(item: OrderItem) -> bool:
-    """Whether the item is one a print makes: a template's, not a custom item's."""
-    return item.reference is not None and item.status != "cancelled"
+    """Whether the item is one a print makes: a template's or a library file's (#5544),
+    not a custom item's."""
+    return has_design(item) and item.status != "cancelled"
 
 
 #: How long one Bambuddy project create may take while the order's lock is held.

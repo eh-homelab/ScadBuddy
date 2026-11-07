@@ -49,7 +49,13 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
 from scadbuddy.orders.archives import copy_check, copy_in
-from scadbuddy.orders.bambuddy import download_sliced, quote_preview_job, start_quote_preview
+from scadbuddy.orders.bambuddy import (
+    ServedLibrary,
+    download_sliced,
+    quote_preview_job,
+    start_library_quote_preview,
+    start_quote_preview,
+)
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
@@ -61,6 +67,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    library_file_gone,
     operation_quote_id,
     quote_check,
     quote_run,
@@ -71,6 +78,7 @@ from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.read_budget import budget_of
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
@@ -143,6 +151,23 @@ class PreviewSlicer:
     async def start(
         self, output_id: str, request: SliceQuoteRequest, subject: str
     ) -> list[PreviewStarted]:
+        return await self._start(request, subject, output_id=output_id)
+
+    async def start_library(
+        self, file_id: int, request: SliceQuoteRequest, subject: str
+    ) -> list[PreviewStarted]:
+        """A library file item's plates (#5544), read as the dialog's background slice
+        of a library file reads it (``bambuddy/operations.py`` ``preview_run``)."""
+        return await self._start(request, subject, file_id=file_id)
+
+    async def _start(
+        self,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        output_id: str | None = None,
+        file_id: int | None = None,
+    ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
         body = PrintRunRequest(
@@ -166,6 +191,22 @@ class PreviewSlicer:
         )
         lan = route is not None and route.native
         native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
+        slicing = self.components.get(SLICING)
+        if file_id is not None:
+            return await start_library_quote_preview(
+                file_id,
+                settings,
+                core.uploads,
+                body,
+                lan=lan,
+                subject=subject,
+                native=slicing.starter,
+                native_slices=slicing.store,
+                temporal=slicing.temporal(),
+                native_reads=native_reads,
+                route=route,
+            )
+        assert output_id is not None
         outputs = LocalOutputs(core.outputs, core.catalogue)
         meta = await require(outputs, output_id)
         naming = await outputs.naming(meta)
@@ -180,7 +221,6 @@ class PreviewSlicer:
             # A native run's copy goes into the native library (D6).
             native=native_reads if lan else None,
         )
-        slicing = self.components.get(SLICING)
         return await start_quote_preview(
             source,
             settings,
@@ -370,6 +410,18 @@ async def claimed_run(
 def order_kinds(core: Core, components: Components) -> list[OperationKind]:
     """The orders' kinds, bound to this process's state."""
 
+    def served_library() -> ServedLibrary:
+        """The library that serves, for a library file item (#5544)."""
+        return ServedLibrary(core.settings_store, components.get(PRINT_LIBRARY).serving_native)
+
+    async def library_file_stands(item_id: str) -> None:
+        """409 ``library_file_gone`` for a library file item whose file is gone, in a
+        check, before the 202."""
+        item = await asyncio.to_thread(components.get(ORDERS).store.item, item_id)
+        file = None if item is None else item.library_file
+        if item is not None and file is not None and not await served_library().exists(file.id):
+            raise library_file_gone(item.id, file)
+
     async def quote_check_kind(request: dict[str, Any]) -> dict[str, Any]:
         orders = components.get(ORDERS)
         body = SliceQuoteRequest.model_validate(request["request"])
@@ -377,6 +429,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         slots = await asyncio.to_thread(
             quote_check, orders.store, policy, request["order_id"], request["item_id"], body
         )
+        await library_file_stands(request["item_id"])
         if body.printer is not None:
             # A registry printer the run would refuse (a disagreeing pair, a virtual
             # printer) is refused here, before the 202, as Arrange refuses it (#4551).
@@ -408,6 +461,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             blobs=core.store.blobs,
             refs=orders.refs,
             schema_of=lambda reference: reference_schema(core, reference),
+            library=served_library(),
         )
         try:
             quote = await quote_run(
@@ -454,6 +508,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 request["order_id"],
                 request["item_id"],
                 schema_of=lambda reference: reference_schema(core, reference),
+                library=served_library(),
             )
         if body.printer is not None:
             settings = await asyncio.to_thread(core.settings_store.load)
@@ -545,12 +600,18 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
+        from scadbuddy.api.library_print import start_library_run
         from scadbuddy.api.printing import accept_run
         from scadbuddy.workflows.print_models import SourceSpec
 
-        output_id = checked["output_id"]
-
-        subject = PrintSubject.output(output_id)
+        # A library file item (#5544) prints its file, as `POST /print/library/{id}/run`.
+        file_id: int | None = checked.get("library_file_id")
+        output_id: str | None = checked.get("output_id")
+        if file_id is not None:
+            subject = PrintSubject.library(file_id)
+        else:
+            assert output_id is not None
+            subject = PrintSubject.output(output_id)
         project_id = await item_project_of(request)
         store = components.get(ORDERS).store
         # The check's filled plan (§5.4 "Spools"); one checked before it has none.
@@ -577,6 +638,22 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 found = await claimed_run(core.print_runs, subject, request, copies, projects, plan)
                 if found is not None:
                     return found
+            if file_id is not None:
+                # The library print route's own start (#5544): its subject, its slug and
+                # the file's filament slots, read as that route reads them (#2550).
+                started = await start_library_run(
+                    file_id,
+                    print_body(request, copies, projects[0], plan),
+                    runs=core.print_runs,
+                    activity=components.get(ACTIVITY),
+                    store=core.settings_store,
+                    paths=core.paths,
+                    budget=budget_of(core.settings),
+                    downloads=core.store.downloads,
+                    native=await components.get(PRINT_LIBRARY).serving_native(),
+                )
+                assert isinstance(started, PrintRun)
+                return started
             run = await accept_run(
                 core.print_runs,
                 Response(),
