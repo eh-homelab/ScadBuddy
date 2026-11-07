@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import gc
 import re
+import time
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -92,6 +93,9 @@ def test_a_pool_closes_what_it_no_longer_uses(
     name = f"scadbuddy-test-{uuid.uuid4().hex[:8]}"
     pool = row_pool(pg_conninfo, name=name, max_size=2)
     assert pool.min_size == 0 and pool.max_idle == IDLE_SECONDS
+    # Shortened before `open`, which schedules the pool's shrink every `max_idle`, so the
+    # test watches psycopg_pool's own maintenance close the connection.
+    pool.max_idle = 0.5
     pool.open(wait=True, timeout=30)
     try:
         assert pool.get_stats().get("pool_size", 0) == 0
@@ -99,13 +103,18 @@ def test_a_pool_closes_what_it_no_longer_uses(
             row = conn.execute("SELECT current_setting('application_name') AS name").fetchone()
             assert row is not None and row["name"] == name
         with psycopg.connect(pg_conninfo, autocommit=True) as watcher:
-            held = watcher.execute(
-                "SELECT count(*) FROM pg_stat_activity WHERE application_name = %s", (name,)
-            ).fetchone()
-            assert held == (1,)
-        # What `ShrinkPool` runs every `max_idle`: a connection unused all through it goes.
-        pool._shrink_pool()
-        pool._shrink_pool()
+
+            def held() -> int:
+                row = watcher.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE application_name = %s", (name,)
+                ).fetchone()
+                return row[0] if row is not None else 0
+
+            assert held() == 1
+            deadline = time.monotonic() + 15
+            while held() and time.monotonic() < deadline:
+                time.sleep(0.25)
+            assert held() == 0
         assert pool.get_stats().get("pool_size", 0) == 0
     finally:
         pool.close()

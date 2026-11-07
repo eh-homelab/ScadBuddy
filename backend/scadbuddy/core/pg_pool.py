@@ -57,15 +57,33 @@ class PoolUse:
     waiting: int = 0
 
 
+class _RowPool(ConnectionPool[Connection[DictRow]]):
+    """Remembers that it was opened, so the registry tells unopened from closed."""
+
+    was_opened = False
+
+    def open(self, wait: bool = False, timeout: float = 30.0) -> None:
+        self.was_opened = True
+        super().open(wait=wait, timeout=timeout)
+
+
+class _AsyncPool(AsyncConnectionPool[AsyncConnection[TupleRow]]):
+    was_opened = False
+
+    async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
+        self.was_opened = True
+        await super().open(wait=wait, timeout=timeout)
+
+
 class _PoolEntry:
-    def __init__(self, pool: ConnectionPool[Any] | AsyncConnectionPool[Any]) -> None:
+    def __init__(self, pool: _RowPool | _AsyncPool) -> None:
         self._pool = weakref.ref(pool)
 
     def use(self) -> PoolUse | None:
         pool = self._pool()
         # A pool not yet opened counts at its most; one closed after opening is gone
         # (psycopg_pool never reopens one).
-        if pool is None or (pool.closed and getattr(pool, "_opened", False)):
+        if pool is None or (pool.closed and pool.was_opened):
             return None
         stats = pool.get_stats() if not pool.closed else {}
         return PoolUse(
@@ -132,7 +150,7 @@ def row_pool(
     """An autocommit ``dict_row`` pool, unopened (``open=False``: nothing connects
     until its owner opens it). ``timeout`` bounds the wait for a connection and
     ``connect_timeout``, when given, each connect."""
-    pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+    pool = _RowPool(
         conninfo,
         min_size=min_size,
         max_size=max_size,
@@ -152,7 +170,7 @@ def async_pool(
     conninfo: str, *, name: str, max_size: int, min_size: int = 0
 ) -> AsyncConnectionPool[AsyncConnection[TupleRow]]:
     """An autocommit async pool of tuple rows, unopened."""
-    pool: AsyncConnectionPool[AsyncConnection[TupleRow]] = AsyncConnectionPool(
+    pool = _AsyncPool(
         conninfo,
         min_size=min_size,
         max_size=max_size,
