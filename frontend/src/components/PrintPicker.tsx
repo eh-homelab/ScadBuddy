@@ -2063,6 +2063,7 @@ export function PrintPicker({
                             subject={subject}
                             printerId={printerId}
                             registryPrinter={registryPrinter}
+                            native={native}
                             value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
                             toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
                             onChange={({ quantity, ...rest }) => {

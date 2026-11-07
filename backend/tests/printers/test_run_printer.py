@@ -784,7 +784,7 @@ async def test_a_calibration_over_the_lan_is_refused_not_dropped(
         )
     assert refused.value.status == 422
     assert refused.value.detail == lan_calibration_refusal(request.options)
-    assert "flow_cali, vibration_cali" in refused.value.detail
+    assert 'flow_cali "on", vibration_cali true' in refused.value.detail
     assert asked_path_refusal(request, True) == refused.value.detail
     # Timelapse is the LAN start's own field, and Bambuddy's path takes them all.
     assert asked_path_refusal(run_request(options={"timelapse": True}), True) is None

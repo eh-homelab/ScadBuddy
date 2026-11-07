@@ -102,11 +102,16 @@ backends and the printer row chose it (`printers/hot_path.py`, `print_run.run_pa
 - `native`: the LAN. If the run would not go over the LAN, the check and the run refuse it
   (`print_run.LAN_PATH_REFUSAL`, 422). They never send it through Bambuddy instead.
 
-The LAN start (`printers/lan.py` `project_file_command`) has no field for
-`bed_levelling`, `nozzle_offset_cali` or `vibration_cali`, and it always sends `flow_cali`
-off. So a native run refuses a request whose own `options` set any of the four, with a
-422 (`options.lan_calibration_refusal`). Before #5352 the LAN start dropped them without a
-word. `timelapse` and `layer_inspect` are LAN fields and still pass. A remembered option
+The LAN start (`printers/lan.py` `project_file_command`, line 173) has no field for
+`bed_levelling`, `nozzle_offset_cali` or `vibration_cali`, so the printer applies its own
+default. It always sends `flow_cali: false` (`lan_models.ProjectFile.flow_cali`, which
+`print_activities._command` never sets). So a native run refuses only a value the LAN
+cannot honour, with a 422 (`options.lan_calibration_refusal`, `LAN_CALIBRATIONS`):
+`flow_cali` `"on"` or `"auto"`, `bed_levelling` or `nozzle_offset_cali` `"on"` or `"off"`,
+and `vibration_cali` either way (a plain bool, with no "the printer decides"). What the
+LAN does passes: `flow_cali` `"off"`, and `"auto"` for bed levelling and nozzle offset.
+The dialog offers only those values on a native route, with a hint. Before #5352 the LAN
+start dropped them without a word. `timelapse` and `layer_inspect` are LAN fields and still pass. A remembered option
 (global, printer or model scope) is not judged: it stays a Bambuddy queue option, as
 before. The refusal is in `prepare_run`, in the dialog's check (`check_print`,
 `asked_path_refusal`) and in the run's `print_check` activity, before anything is

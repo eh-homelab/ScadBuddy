@@ -85,6 +85,15 @@ async def test_a_call_asking_for_bambuddys_queue_is_named_so_on_a_lan_printer() 
     assert bound.summary == "Prints on Garage (Bambuddy printer 2)"
 
 
+async def test_a_lan_only_printer_asked_through_bambuddys_queue_names_the_refusal() -> None:
+    """#5352: the run refuses it, so the line never says it prints over the LAN."""
+    call = {**CALL, "path": "bambuddy"}
+    bound = await bind_call("print_output", call, holding(row(None)), native(True))
+    assert bound.summary == (
+        "Refused: Garage links no Bambuddy printer, so it cannot print through Bambuddy's queue"
+    )
+
+
 async def test_a_printer_only_the_lan_reaches_is_not_checked_for_its_path() -> None:
     bound = await bind_call("print_output", CALL, holding(row(None)), nothing_native)
     assert bound.summary == "Prints on Garage over the LAN"

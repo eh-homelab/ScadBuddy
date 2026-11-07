@@ -579,9 +579,18 @@ sliced again and no sliced file is uploaded (measured with Bambuddy's slicer:
 `tests/api/test_order_print.py` `test_an_item_prints_through_bambuddys_queue_with_its_calibrations`
 queues library file 301, the quote's slice). The one upload is the unsliced copy, filed
 in the item's project folder (#79). That is the same path as a print of the output from
-the dialog. Over the LAN a calibration in `options` is refused (422), and a `path`
+the dialog. Over the LAN a calibration value the LAN start cannot honour is refused
+(422; `flow_cali` `"off"` and `"auto"` bed levelling and nozzle offset pass), and a `path`
 `native` the run cannot honour is refused. A slice quote takes `path` too
-(`SliceQuoteRequest.path`), so the quote slices on the route its print will take. The
+(`SliceQuoteRequest.path`), so the quote slices on the route its print will take. A quote
+made without `path` on a printer the LAN reaches is sliced over the LAN; printing it with
+`path` `bambuddy` is not `requote_needed` (the quote's file and digest still stand, and
+the attempt holds that file), but the run slices the output again on Bambuddy's route,
+because the LAN's slice is planned for the LAN start and the printer's trays
+(`tests/api/test_order_print.py`
+`test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice`: the
+fake slicer runs twice). To print the quote's own slice through Bambuddy's queue, quote
+with `path` `bambuddy`. The
 agent's `order_item_print` takes `path` and `options` (outward, as before), and
 `order_item_quote`'s `slice` takes `path`.
 

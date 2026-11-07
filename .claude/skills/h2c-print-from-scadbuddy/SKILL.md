@@ -26,7 +26,7 @@ behaviour, so decide the path first.
 | You need | Path |
 |---|---|
 | Print now, printer idle, calibrations left to the printer's "auto" | LAN, section 1 |
-| Bed levelling, flow dynamics, nozzle offset or vibration calibration **forced on** | Bambuddy queue, section 3. The LAN path hardcodes them and ignores `options` |
+| Bed levelling, flow dynamics, nozzle offset or vibration calibration **forced on** | Bambuddy queue, section 3 (`print_output` `path: "bambuddy"`). The LAN path hardcodes them and refuses (422) a calibration value in `options` it cannot honour (#5352) |
 | Several plates, each started once the bed is cleared | Bambuddy queue. LAN has no queue; a send to a busy printer is refused |
 | The printer sits in `FAILED` after a stop | Bambuddy queue, section 4 |
 

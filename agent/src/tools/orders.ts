@@ -876,7 +876,9 @@ export const orderTools: Tool[] = [
       "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. " +
       '`path: "bambuddy"` (#5352) prints it through Bambuddy\'s queue even where it would go over the LAN: it is ' +
       "filed under the item's project in the order's, and `options` sets the calibrations and timelapse. " +
-      'Over the LAN the print files under no project, and a calibration in `options` is refused. Outward: it prints.',
+      'Over the LAN the print files under no project, and a calibration value the LAN start cannot honour is refused ' +
+      "(see `path` on print_output). A quote sliced over the LAN is sliced again when printed with `path: \"bambuddy\"`; " +
+      'quote with that `path` to print the quote\'s own slice. Outward: it prints.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,

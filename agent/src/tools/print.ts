@@ -290,8 +290,9 @@ export const printPath = z
       "row). 'bambuddy' queues it through Bambuddy's queue even where it would go over the LAN: it files " +
       'under a Bambuddy project and takes every `options` field, the calibrations (bed_levelling, flow_cali, ' +
       "nozzle_offset_cali, vibration_cali) and timelapse among them; the printer must link a Bambuddy printer. " +
-      "'native' asks for the LAN and is refused when the run would not go over it. Over the LAN a calibration " +
-      "in `options` is refused (422): only Bambuddy's queue takes them.",
+      "'native' asks for the LAN and is refused when the run would not go over it. Over the LAN only what the " +
+      "LAN start does passes (flow_cali 'off', bed_levelling and nozzle_offset_cali 'auto', no vibration_cali); " +
+      "any other calibration value in `options` is refused (422): only Bambuddy's queue takes it.",
   )
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
