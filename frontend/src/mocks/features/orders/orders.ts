@@ -12,7 +12,10 @@ import type {
   OrderPatch,
   OrderRow,
   OrderStatus,
+  Payment,
   PaymentCreate,
+  PaymentRequestCreate,
+  PaymentRequestView,
   Quote,
   Shipment,
   ShipmentEdit,
@@ -263,11 +266,44 @@ function detail(order: Order): OrderDetail {
     items,
     charges,
     payments,
+    payment_requests: state.paymentRequests.filter((r) => r.order_id === order.id),
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
     projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
     totals: { subtotal_minor: subtotal, pending_minor: pending, unpriced_items: unpriced, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
   }
+}
+
+/** The balance now: the total minus what was paid (`totals_of`), refunds included. */
+export const balanceOf = (order: Order) => detail(order).totals.balance_minor
+
+/** `payments.set_request_status`: the request's new state, and the payment that paid it. */
+export function settleRequest(request: PaymentRequestView, status: PaymentRequestView['status'], paymentId?: string) {
+  request.status = status
+  if (status === 'paid') {
+    request.paid_at = now()
+    request.payment_id = paymentId ?? null
+  }
+}
+
+/** `Lifecycle._close_balance`: a balance at zero or below closes the open balance requests. */
+export function closeBalance(order: Order, payment: Payment) {
+  if (balanceOf(order) > 0) return
+  for (const open of state.paymentRequests) {
+    if (open.order_id === order.id && open.status === 'open' && open.kind === 'balance') settleRequest(open, 'paid', payment.id)
+  }
+}
+
+function requestOf(order: Order, requestId: string): PaymentRequestView {
+  const found = state.paymentRequests.find((r) => r.id === requestId && r.order_id === order.id)
+  if (!found) throw new Refused('payment_request_not_found', `no payment request ${requestId} of order ${order.number}`, [], true)
+  return found
+}
+
+function openRequestOf(order: Order, requestId: string): PaymentRequestView {
+  const found = requestOf(order, requestId)
+  if (found.status !== 'open') throw new Refused('payment_request_not_open', `payment request ${requestId} is ${found.status}`)
+  return found
 }
 
 /** `Lifecycle._reopened_status`: what a cancelled item comes back as, and whether priced. */
@@ -880,6 +916,11 @@ export const handlers = [
         }
       }
       // As `Lifecycle.cancel_order` records it: what it was, and the items it took.
+      // No one pays a cancelled order: its open requests end with it.
+      for (const open of state.paymentRequests.filter((r) => r.order_id === order.id && r.status === 'open')) {
+        settleRequest(open, 'cancelled')
+        event(order, 'payment_request.cancelled', { request_id: open.id })
+      }
       event(order, 'order.status', { from_status: order.status, to: 'cancelled', items: cancelled })
       order.status = 'cancelled'
       order.cancelled_at ??= now()
@@ -972,17 +1013,86 @@ export const handlers = [
       return order
     }),
   ),
+  http.get('/api/v1/orders/:id/payment-requests', ({ request, params }) => transition(request, () => detail(lock(String(params.id))).payment_requests ?? [])),
+  http.post('/api/v1/orders/:id/payment-requests', async ({ request, params }) => {
+    const body = (await request.json()) as PaymentRequestCreate & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['kind', 'amount_minor', 'provider'])
+    if (extra) return extra
+    if (body.amount_minor !== undefined && body.amount_minor !== null && (!Number.isInteger(body.amount_minor) || body.amount_minor < 1)) {
+      return fieldProblem(request, 'amount_minor', 'Input should be greater than or equal to 1')
+    }
+    try {
+      const order = lock(String(params.id))
+      notEnded(order)
+      const amount = body.amount_minor ?? balanceOf(order)
+      if (amount <= 0) throw new Refused('nothing_due', `order ${order.number} has nothing due`)
+      // `provider` left out is the default one; null collects by hand.
+      let provider: string | null
+      if (!('provider' in body)) provider = state.providers.find((p) => p.is_default)?.id ?? null
+      else if (body.provider !== null && !state.providers.some((p) => p.id === body.provider)) return fieldProblem(request, 'provider', `no connected payment provider '${String(body.provider)}'`)
+      else provider = body.provider ?? null
+      const id = newId('pr')
+      const opened: PaymentRequestView = {
+        id,
+        order_id: order.id,
+        kind: body.kind ?? 'balance',
+        provider,
+        amount_minor: amount,
+        currency: order.currency,
+        hosted_url: provider ? `https://pay.${provider}.example/${id}` : null,
+        status: 'open',
+        created_at: now(),
+        paid_at: null,
+        provider_ref: provider ? `${provider}_${id}` : null,
+        link_error: null,
+        payment_id: null,
+        created_by: BROWSER,
+      }
+      state.paymentRequests.push(opened)
+      event(order, 'payment_request.opened', { request_id: id, kind: opened.kind, amount_minor: amount })
+      return HttpResponse.json(opened, { status: 201 })
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
+  http.post('/api/v1/orders/:id/payment-requests/:request/cancel', ({ request, params }) =>
+    transition(request, () => {
+      const order = lock(String(params.id))
+      const open = openRequestOf(order, String(params.request))
+      settleRequest(open, 'cancelled')
+      event(order, 'payment_request.cancelled', { request_id: open.id })
+      return open
+    }),
+  ),
+  http.post('/api/v1/orders/:id/payment-requests/:request/link', ({ request, params }) =>
+    transition(request, () => {
+      const found = requestOf(lock(String(params.id)), String(params.request))
+      // Retried: a request with a provider, still open and not yet linked gets its page.
+      if (found.provider && found.status === 'open' && !found.hosted_url) {
+        found.hosted_url = `https://pay.${found.provider}.example/${found.id}`
+        found.link_error = null
+      }
+      return found
+    }),
+  ),
   http.post('/api/v1/orders/:id/payments', async ({ request, params }) => {
     const body = (await request.json()) as PaymentCreate & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['amount_minor', 'method', 'reference', 'received_at', 'notes'])
+    const extra = unknownKeys(request, body, ['amount_minor', 'method', 'reference', 'received_at', 'notes', 'payment_request_id'])
     if (extra) return extra
     if (typeof body.amount_minor !== 'number') return fieldProblem(request, 'amount_minor', 'Field required')
     try {
       const order = lock(String(params.id))
       if (order.status === 'cancelled') throw new Refused('order_cancelled', `order ${order.number} is cancelled`)
-      const payment = { id: newId('p'), order_id: order.id, amount_minor: body.amount_minor, method: body.method ?? null, reference: body.reference ?? null, received_at: body.received_at ?? null, notes: body.notes ?? '', created_at: now() }
+      let named: PaymentRequestView | null = null
+      if (body.payment_request_id) {
+        named = openRequestOf(order, body.payment_request_id)
+        if (body.amount_minor < 1) return fieldProblem(request, 'amount_minor', 'a payment that closes a request must be above zero')
+      }
+      const payment: Payment = { id: newId('p'), order_id: order.id, amount_minor: body.amount_minor, method: body.method ?? null, reference: body.reference ?? null, received_at: body.received_at ?? null, notes: body.notes ?? '', created_at: now(), payment_request_id: body.payment_request_id ?? null, provider: null }
       state.payments.push(payment)
-      event(order, 'payment.added', { payment_id: payment.id })
+      if (named) settleRequest(named, 'paid', payment.id)
+      if (payment.amount_minor > 0) closeBalance(order, payment)
+      event(order, 'payment.added', { payment_id: payment.id, payment_request_id: body.payment_request_id ?? null })
       return HttpResponse.json(payment, { status: 201 })
     } catch (error) {
       return refused(request, error)

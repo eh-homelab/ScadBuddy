@@ -444,6 +444,12 @@ export type FulfilmentInput = Defaulted<Schemas['FulfilmentInput'], 'notes' | 'f
 export type ShipmentInput = Partial<Schemas['ShipmentInput']>
 /** `PATCH …/shipments/{shipment}`: only what is sent changes. */
 export type ShipmentEdit = Schemas['ShipmentEdit']
+/** #4957 — the payments seam: providers, and requests for money. `provider` left out
+ * takes the default provider; null collects by hand. */
+export type PaymentRequestView = Schemas['PaymentRequestView']
+export type ProviderStatus = Schemas['ProviderStatus']
+export type ProviderConnect = Schemas['ProviderConnect']
+export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
