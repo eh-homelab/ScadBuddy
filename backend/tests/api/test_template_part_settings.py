@@ -35,6 +35,11 @@ def declare(
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     meta["part_print_settings"] = {"label_color": {"top_shell_layers": 8, "wall_loops": 3}}
     paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+    source = paths.model_source(model)
+    source.write_text(
+        'label_color = "#FFFFFF"; // color\n' + source.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     outputs = state(client).outputs
     params_file = outputs.directory(output_id) / PARAMS_NAME
     params = json.loads(params_file.read_text(encoding="utf-8"))

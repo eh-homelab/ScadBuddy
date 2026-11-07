@@ -96,6 +96,7 @@ from scadbuddy.library.upstream import (
     state_of,
 )
 from scadbuddy.meshmodel.scene import SceneSource
+from scadbuddy.render.schema import find_annotations
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -481,8 +482,9 @@ class ModelMeta(BaseModel):
         description=(
             "The template's own slicer settings per colour part, from its model.json: each"
             " key a colour parameter, each value the settings for the parts in that colour."
-            " The server lays a print request's part_settings over them, per key, on every"
-            " slice of an output; for clients they are informational, and no request sets"
+            " The server lays a print request's part_settings over them, per key, on a slice"
+            " of an output where the copy can carry them (not an arranged output, not a 3MF"
+            " that prints as it is); for clients they are informational, and no request sets"
             " them."
         ),
     )
@@ -1006,8 +1008,34 @@ class Catalogue:
 
     def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
         """The template's ``part_print_settings`` as its model.json has them now
-        (#5626), by colour parameter; read and refused as :meth:`print_settings`."""
-        declared = self._meta(slug, self.read_raw_meta(slug)).part_print_settings
+        (#5626), by colour parameter; read and refused as :meth:`print_settings`.
+
+        A key that is not a ``// color`` parameter of the template's ``model.scad`` is
+        refused too, naming it, so a typo never sets nothing in silence. A template
+        with a pipeline (whose params need not be ``model.scad``'s) or with no
+        ``model.scad`` is only warned about."""
+        meta = self._meta(slug, self.read_raw_meta(slug))
+        declared = meta.part_print_settings
+        if declared:
+            try:
+                source = self.paths.model_source(slug).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                source = None
+            colours = (
+                {n for n, a in find_annotations(source).items() if a.kind == "color"}
+                if source is not None
+                else set()
+            )
+            unknown = [name for name in declared if name not in colours]
+            if unknown:
+                problem = (
+                    f"part_print_settings names {', '.join(map(repr, unknown))}, which is not a"
+                    " // color parameter of model.scad"
+                )
+                if source is None or meta.pipeline is not None:
+                    logger.warning("template %s: %s", slug, problem)
+                else:
+                    raise InvalidModelMetaError(slug, problem)
         return {name: PartSettings.model_validate(raw) for name, raw in declared.items()}
 
     def _record(

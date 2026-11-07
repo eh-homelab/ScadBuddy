@@ -368,7 +368,11 @@ A template names the part by its `// color` parameter, never by slot:
 colours a render used (`layout.colours`, slot N is colour N-1). It moves when two colour
 parameters take one value (they become one slot) or when a colour's parts are not drawn.
 A colour parameter keeps naming the same parts whatever colours are chosen. The key must
-be an OpenSCAD identifier (`COLOUR_PARAMETER_PATTERN`).
+be an OpenSCAD identifier (`COLOUR_PARAMETER_PATTERN`). `Catalogue.part_print_settings`
+also refuses a key that is not a `// color` parameter of `model.scad`
+(`render/schema.py` `find_annotations`), naming it, so a typo never sets nothing in
+silence. A template with a pipeline (its params need not be `model.scad`'s) or with no
+`model.scad` only logs a warning.
 
 They are read as `model.json` has them now, as `print_settings` are (#770):
 `Catalogue.part_print_settings`, from `LocalOutputs.naming`, which the print worker

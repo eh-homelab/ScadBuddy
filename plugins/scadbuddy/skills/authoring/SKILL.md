@@ -101,9 +101,12 @@ per part"). Each key is a `// color` parameter of `model.scad`, never a slot num
   `sparse_infill_density` (0-100), `sparse_infill_pattern` and `ironing_type`. Values
   are JSON numbers and strings, not Bambu's strings. An unknown key or a value out of
   range fails the load, as in `print_settings`.
+- A key that is not a `// color` parameter of `model.scad` makes the print fail, and
+  the error names the key. A template with a pipeline is only warned about.
 - Each print reads the parameter's value in the output and gives the settings to the
-  slot of that colour. A colour the output does not print sets nothing. A print's own
-  `part_settings` win per key.
+  slot of that colour. A colour the output does not print sets nothing. An arranged
+  output gets none: its parts can come from other outputs or library files. A print's
+  own `part_settings` win per key.
 
 Through ScadBuddy's tools (issue #252; AI spec
 `docs/superpowers/specs/2026-09-27-ai-integration-design.md` §8.6, "As built for

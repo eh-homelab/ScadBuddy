@@ -18,11 +18,14 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
 
+#: A template with one colour parameter, ``base_color``.
+SOURCE = 'base_color = "#FFFFFF"; // color\ncolor(base_color) cube(1);\n'
+
 
 def _catalogue(tmp_path: Path, meta: dict[str, object]) -> Catalogue:
     paths = DataPaths(tmp_path)
     paths.model_dir("demo").mkdir(parents=True)
-    paths.model_source("demo").write_text("cube(1);\n", encoding="utf-8")
+    paths.model_source("demo").write_text(SOURCE, encoding="utf-8")
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
     return Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
@@ -92,6 +95,33 @@ def test_the_catalogue_answers_them_and_the_record_states_only_what_is_set(
     assert record["part_print_settings"] == {"base_color": {"wall_loops": 3}}
 
 
+def test_a_name_that_is_not_a_colour_parameter_is_refused(tmp_path: Path) -> None:
+    """#5638 review: a typo must not set nothing in silence."""
+    catalogue = _catalogue(
+        tmp_path, {"name": "Demo", "part_print_settings": {"base_colour": {"wall_loops": 3}}}
+    )
+
+    with pytest.raises(InvalidModelMetaError, match="'base_colour', which is not a // color"):
+        catalogue.part_print_settings("demo")
+
+
+def test_a_pipeline_template_is_only_warned_about(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Its params need not be model.scad's, so an unknown name cannot be judged there."""
+    catalogue = _catalogue(
+        tmp_path,
+        {
+            "name": "Demo",
+            "pipeline": {"module": "pipeline/pipeline.py", "api": 1},
+            "part_print_settings": {"shell_color": {"wall_loops": 3}},
+        },
+    )
+
+    assert catalogue.part_print_settings("demo") == {"shell_color": PartSettings(wall_loops=3)}
+    assert "'shell_color', which is not a // color parameter" in caplog.text
+
+
 def test_a_template_that_is_gone_has_none(tmp_path: Path) -> None:
     assert _catalogue(tmp_path, {"name": "Demo"}).part_print_settings("gone") == {}
 
@@ -139,6 +169,11 @@ async def test_an_arranged_output_takes_no_template_part_settings(tmp_path: Path
     meta = json.loads(paths.model_meta("demo").read_text(encoding="utf-8"))
     meta["part_print_settings"] = {"label_color": {"top_shell_layers": 8}}
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
+    source = paths.model_source("demo")
+    source.write_text(
+        'label_color = "#FFFFFF"; // color\n' + source.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     for output in (plain, arranged):
         params = store.directory(output.id) / PARAMS_NAME
         params.write_text(json.dumps({"label_color": output.colors[0]}), encoding="utf-8")
