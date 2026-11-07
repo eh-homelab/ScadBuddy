@@ -58,6 +58,19 @@ class _Service:
         return SimpleNamespace(run_id="wr2")
 
 
+class _WaitClock:
+    """A client clock that moves only by the client's own waits."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def _temporal(service: _Service) -> Any:
     return SimpleNamespace(namespace="default", workflow_service=service)
 
@@ -342,10 +355,19 @@ async def test_a_transient_temporal_failure_is_retried(store: FlowStore, service
     await _history(store)
     before = await store.get_run("r1")
     service.error = RPCError("try later", RPCStatusCode.UNAVAILABLE, b"")
+    # The client's clock moves only when it waits (#5547), so the count of tries does not
+    # depend on how long each round trip takes under load: waits of 0.25 s and 0.25 s
+    # spend the 0.5 s budget, so the reset is tried three times.
+    clock = _WaitClock()
     async with served_flow_store(
-        store, client=_temporal(service), unavailable_budget=0.5
+        store,
+        client=_temporal(service),
+        unavailable_budget=0.5,
+        backoff=0.25,
+        clock=clock,
+        sleep=clock.sleep,
     ) as remote:
         with pytest.raises(CrudUnavailableError, match="500"):
             await _reset(remote, "op1")
-    assert len(service.resets) > 1
+    assert len(service.resets) == 3
     assert await store.get_run("r1") == before
