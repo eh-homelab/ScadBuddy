@@ -43,6 +43,7 @@ from scadbuddy.auth.service_credentials import (
     ServiceAuth,
     ServiceCredentialStore,
 )
+from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64, seal_bytes
@@ -60,6 +61,7 @@ from scadbuddy.crud.render import (
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
 from scadbuddy.library.settings_store import RenderStoreSettings, SettingsStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
@@ -239,10 +241,11 @@ def render_crud_app(
 ) -> FastAPI:
     """The render routes, reading the store settings from ``pool`` under ``settings``
     (none: a test of the job routes only), writing the job rows through ``projection``,
-    and the blob refs, piece geometry, blob index and the uploads' rows on ``pool`` (the
-    API's upload files are not these routes': its `AssetStore` has no root to read).
-    ``content`` is the API's blob store, which drops an upload's copy (none: the local
-    store, which keeps no copies)."""
+    and the blob refs, piece geometry, blob index, the uploads' rows and the library
+    leases, pin holds and install slots (`INSTALL_CONCURRENCY` of them) on ``pool`` (the
+    API's upload files and checkouts are not these routes': its `AssetStore` and
+    `CheckoutLeases` have no root to read). ``content`` is the API's blob store, which
+    drops an upload's copy (none: the local store, which keeps no copies)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
     app.state.scadbuddy = SimpleNamespace(
@@ -252,6 +255,8 @@ def render_crud_app(
         refs=BlobRefs(pool),
         assets=AssetStore(Path("/nonexistent/api-assets"), pool),
         store=SimpleNamespace(content=content),
+        checkouts=CheckoutGate(CheckoutLeases(pool, Path("/nonexistent/api-libraries"))),
+        installs=InstallPermits(INSTALL_CONCURRENCY, pool),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_render.router, prefix="/api/v1")
@@ -367,9 +372,9 @@ class FixedToken:
 
 def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient:
     """A render worker's client of an API that lists the ``settings``, ``jobs``, ``refs``,
-    ``blob-index``, ``store-folders`` and ``assets`` areas and answers ``current`` (the
-    defaults: the local store) as the store settings. Its job, ref, geometry, index, folder
-    and upload routes are missing (a 404)."""
+    ``blob-index``, ``store-folders``, ``assets`` and ``libraries`` areas and answers
+    ``current`` (the defaults: the local store) as the store settings. Its job, ref,
+    geometry, index, folder, upload and library routes are missing (a 404)."""
     body = (current or RenderStoreSettings()).model_dump(mode="json")
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -377,7 +382,15 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
             return httpx.Response(
                 200,
                 json={
-                    "areas": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets"]
+                    "areas": [
+                        "settings",
+                        "jobs",
+                        "refs",
+                        "blob-index",
+                        "store-folders",
+                        "assets",
+                        "libraries",
+                    ]
                 },
                 headers=CRUD_HEADERS,
             )

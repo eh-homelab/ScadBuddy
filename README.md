@@ -749,8 +749,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
   (`http://scadbuddy:8082`; the worker reads the store settings and writes its jobs'
   `render_jobs` rows, their `job.*` events and activity rows, their `blob_refs`, the
-  `piece_geometry` rows, the blob index `store_blobs` and its uploads' `assets` rows
-  through its CRUD routes, and the API finds the Bambuddy store's folders `store_folders`
+  `piece_geometry` rows, the blob index `store_blobs`, its uploads' `assets` rows and
+  its library leases, pin holds and install slots (`library_leases`,
+  `library_pin_holds`, `library_install_slots`) through its CRUD routes, and the API finds the Bambuddy store's folders `store_folders`
   for it, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
   `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
   credential. The proof is required: without one the worker refuses to start, since
@@ -769,15 +770,15 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
   up by hand. At every start the API grants that role exactly
   `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`):
-  the library leases (`library_leases`, `library_pin_holds`,
-  `library_install_slots`) and the migrations ledger (read only). It gets nothing
+  the migrations ledger (read only). It gets nothing
   on `settings`: it reads the store's settings (backend, Bambuddy URL, library
   folder, render key, S3 keys) from the API's CRUD route
   `/api/v1/internal/crud/render/settings` (#5298), which answers the full Bambuddy
   key **only while no render key is saved** in Settings, the fallback `/healthz`
   reports as `render_key_fallback`. Save a render key and the worker cannot read the
   full key at all. It gets nothing on `render_jobs`, `events`, `activity`, `blob_refs`,
-  `piece_geometry`, `store_blobs`, `store_folders` or `assets` either: the API writes a job's row,
+  `piece_geometry`, `store_blobs`, `store_folders`, `assets`, `library_leases`,
+  `library_pin_holds` or `library_install_slots` either: the API writes a job's row,
   its events and its activity row for it, through the routes under
   `/api/v1/internal/crud/render/jobs`, holds a done job's blobs and records a piece's
   geometry for it, through `/api/v1/internal/crud/render/blob-refs` and
@@ -791,12 +792,17 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   library folder is not that one yet (it tries again). The API reads, marks used and
   records, for the worker, the uploads it fetched, through `…/render/assets`; their files stay on the
   worker's volume, and the API writes a fetched upload's row from its own copy's metadata
-  in the store. A role granted the older
+  in the store. It takes, renews and releases the worker's library leases, pin holds
+  and install slots, through `…/render/leases`, `…/render/pin-holds` and
+  `…/render/install-slots`, under the same lock as the API's own library removal, so a
+  render or a pin on the worker still holds a removal off; a renew or release must
+  name the token the worker took it under, and a lease or hold lives at most five
+  minutes unless renewed. A role granted the older
   `render_settings` view or those tables keeps them until #5298 revokes the role. A role created after the API started is granted
   on the API's next start.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
-  `store-folders`, `assets`) and answers its first read of
+  `store-folders`, `assets`, `libraries`) and answers its first read of
   the store settings, then until the API has applied every migration its build has
   and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
   worker comes up first, it starts once the API has. On the API's own role (the

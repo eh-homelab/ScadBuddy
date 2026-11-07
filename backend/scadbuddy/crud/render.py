@@ -37,6 +37,14 @@ uses a prune reads. Each refusal is the error the SQL store raised: no row is
 (the API out of reach) stays the client's `CrudUnavailableError`, which the activity
 retries, never a not-found a render fails on for good. Every call is natural: an adopt
 sent again is the same row (ON CONFLICT), a use stamps the row again.
+
+`RemoteCheckoutLeases` and `RemoteInstallSlots` are `library/libraries.py` `SharedLeases`
+and `InstallSlots` (the render leases, pin holds and install slots) over the routes, with
+the same names, signatures and answers. The worker chooses each token, so every take and
+claim is natural; a take that waits on the API's removal keeps waiting (`REMOVAL_RUNNING`),
+as the SQL take waited on `REMOVAL_LOCK`. A renew or release the API refuses (no row of
+that token, a slot another token holds) is a `CrudRefusedError`, which the renewing loop
+logs, as it logs any failed renewal; the SQL path renewed nothing there silently.
 """
 
 from __future__ import annotations
@@ -48,6 +56,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -61,6 +70,7 @@ from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient, 
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.library.assets import AssetMeta, AssetNotFoundError, AssetRejectedError
+from scadbuddy.library.libraries import LEASE_TTL, checkout_names
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
@@ -87,6 +97,11 @@ COPY_MISMATCH = "copy-mismatch"
 #: `api/crud_render.py` `TARGET_MOVED` and `FOLDER_LOCKED`.
 TARGET_MOVED = "target-moved"
 FOLDER_LOCKED = "folder-locked"
+#: `api/crud_render.py` `REMOVAL_RUNNING`: a lease or pin hold the API's removal kept
+#: waiting for its `LEASE_LOCK_WAIT`, sent again.
+REMOVAL_RUNNING = "removal-running"
+#: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait.
+TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
 #: A problem's RFC 9457 members; every other member is an extension of the `ApiError`.
 _PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
 #: How many activity attempts `WriteKeys` counts writes for at once; the oldest is
@@ -621,6 +636,76 @@ class RemoteAssetRows:
             asset_id: None if stamp is None else datetime.fromisoformat(stamp)
             for asset_id, stamp in response.json().items()
         }
+
+
+class RemoteCheckoutLeases:
+    """`SharedLeases` over the routes, called from worker threads. ``ttl`` is each row's,
+    at most `LEASE_TTL_MAX`; the `CheckoutGate` renews every third of it. Each call has
+    the client's own budget, as each SQL call waited the pool's default for a
+    connection."""
+
+    def __init__(self, client: CrudSyncClient, *, ttl: float = LEASE_TTL) -> None:
+        self._client = client
+        self.ttl = ttl
+
+    def _take(self, path: str, body: dict[str, Any]) -> None:
+        """Sent again for as long as the API's removal runs, each send under the same
+        token, so a lost answer finds the same rows."""
+        while True:
+            try:
+                self._client.request("POST", f"{BASE}{path}", json=body, timeout=TAKE_TIMEOUT)
+                return
+            except CrudRefusedError as error:
+                if (error.status, error.problem.get("reason")) != (423, REMOVAL_RUNNING):
+                    raise
+                logger.info("a library take waits for a removal on the API", extra={"path": path})
+
+    def take(self, holder: str, checkouts: Sequence[Path]) -> uuid.UUID:
+        token = uuid.uuid4()
+        named = [
+            {"library": library, "commit": commit} for library, commit in checkout_names(checkouts)
+        ]
+        self._take(
+            "/leases",
+            {"token": str(token), "holder": holder, "checkouts": named, "ttl_s": self.ttl},
+        )
+        return token
+
+    def renew(self, token: uuid.UUID) -> None:
+        self._client.request("PUT", f"{BASE}/leases/{token}", json={"ttl_s": self.ttl})
+
+    def drop(self, token: uuid.UUID) -> None:
+        self._client.request("DELETE", f"{BASE}/leases/{token}")
+
+    def take_pin(self) -> uuid.UUID:
+        token = uuid.uuid4()
+        self._take("/pin-holds", {"token": str(token), "ttl_s": self.ttl})
+        return token
+
+    def renew_pin(self, token: uuid.UUID) -> None:
+        self._client.request("PUT", f"{BASE}/pin-holds/{token}", json={"ttl_s": self.ttl})
+
+    def drop_pin(self, token: uuid.UUID) -> None:
+        self._client.request("DELETE", f"{BASE}/pin-holds/{token}")
+
+
+class RemoteInstallSlots:
+    """`InstallSlots` over the routes: the API's slots, its limit and its TTL
+    (`LEASE_TTL`, which the worker's `InstallPermits` renews by)."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    def claim(self, token: uuid.UUID) -> int | None:
+        response = self._client.request("POST", f"{BASE}/install-slots", json={"token": str(token)})
+        slot = response.json()["slot"]
+        return None if slot is None else int(slot)
+
+    def renew(self, slot: int, token: uuid.UUID) -> None:
+        self._client.request("PUT", f"{BASE}/install-slots/{slot}?token={token}")
+
+    def drop(self, slot: int, token: uuid.UUID) -> None:
+        self._client.request("DELETE", f"{BASE}/install-slots/{slot}?token={token}")
 
 
 def _where(inbox: Inbox, **query: Any) -> dict[str, Any]:

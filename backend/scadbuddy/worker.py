@@ -75,7 +75,9 @@ from scadbuddy.crud.render import (
     RemoteAssetRows,
     RemoteBlobIndex,
     RemoteBlobRefs,
+    RemoteCheckoutLeases,
     RemoteGeometryIndex,
+    RemoteInstallSlots,
     RemoteJobProjection,
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
@@ -88,7 +90,6 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     CheckoutFetcher,
     CheckoutGate,
-    CheckoutLeases,
     InstallPermits,
     LibraryStore,
 )
@@ -227,13 +228,16 @@ def build_worker_deps(
     index: RemoteBlobIndex,
     folders: RemoteStoreFolders,
     assets: RemoteAssetRows,
+    leases: RemoteCheckoutLeases,
+    slots: RemoteInstallSlots,
     metrics: Metrics | None = None,
     stopping: Callable[[], bool] = lambda: False,
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``current`` is ``source``'s first read, which the store is built from. ``jobs``
     writes the job rows, ``refs`` the job's blob refs, ``geometry`` the piece geometry,
     ``index`` the blob index, ``folders`` the Bambuddy store's folders, ``assets`` the
-    uploads' rows; its caller closes their clients. ``stopping`` ends the wait
+    uploads' rows, ``leases`` the library leases and pin holds, ``slots`` the install
+    slots; its caller closes their clients. ``stopping`` ends the wait
     for the API's schema and grants (`WorkerStoppedError`)."""
     # Editor checks run in the API, never here: no CPU is kept back for them.
     config = replace(settings.to_config(), serves_checks=False)
@@ -249,10 +253,11 @@ def build_worker_deps(
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = metrics or worker_metrics(settings, "render")
-    # For the stores still on SQL, until #5298 Tasks 19-20 move them to CRUD routes: the
+    # For the stores still on SQL, until #5298 Task 20 moves them to CRUD routes: the
     # job rows, their events and activity rows (``jobs``), the blob refs (``refs``), the
     # piece geometry (``geometry``), the blob index (``index``), the Bambuddy store's
-    # folders (``folders``) and the uploads' rows (``assets``) already go through them.
+    # folders (``folders``), the uploads' rows (``assets``) and the library leases, pin
+    # holds and install slots (``leases``, ``slots``) already go through them.
     pool: Pool = row_pool(
         settings.database_url,
         name="scadbuddy-render",
@@ -262,10 +267,12 @@ def build_worker_deps(
     # Never migrated here (#601): the worker's own role may not, and in a rollout the
     # API, which does, may not have started yet. Wait for it instead.
     pool.open(wait=True, timeout=POOL_CONNECT_TIMEOUT)
-    # The leases in Postgres, where the API's removals see them (#872).
-    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
+    # The leases on the API, where its removals see them (#872, #5298).
+    checkouts = CheckoutGate(leases)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(libraries, InstallPermits(INSTALL_CONCURRENCY, pool), checkouts)
+    fetcher = CheckoutFetcher(
+        libraries, InstallPermits(INSTALL_CONCURRENCY, slots=slots), checkouts
+    )
     # The files on this volume, the rows the API's: a worker never uploads, so no caps.
     uploads = RemoteAssetStore(paths.assets, assets, metrics=metrics)
     try:
@@ -1058,7 +1065,9 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
 
 
 #: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs", "blob-index", "store-folders", "assets"})
+RENDER_CRUD_AREAS = frozenset(
+    {"settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"}
+)
 
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
@@ -1108,7 +1117,7 @@ async def run_worker(
             return
         current = reading.result()
         # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
-        # client for the five, closed with ``jobs``.
+        # client for the seven, closed with ``jobs``.
         remote = crud.blocking()
         jobs = RemoteJobProjection(remote)
         try:
@@ -1128,6 +1137,8 @@ async def run_worker(
                     # On the loop, as the store calls it: the async client.
                     folders=RemoteStoreFolders(crud, source=source),
                     assets=RemoteAssetRows(remote),
+                    leases=RemoteCheckoutLeases(remote),
+                    slots=RemoteInstallSlots(remote),
                     metrics=metrics,
                     stopping=stop.is_set,
                 )

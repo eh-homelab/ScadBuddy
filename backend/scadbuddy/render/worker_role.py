@@ -38,12 +38,11 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # `store_folders` or `assets`: a finished job's blob refs, a finished piece's
     # geometry, the blob index, the Bambuddy store's folders and the uploads' rows go
     # through them too (`RemoteBlobRefs`, `RemoteGeometryIndex`, `RemoteBlobIndex`,
-    # `RemoteStoreFolders`, `RemoteAssetRows`; the API finds a folder itself). A role
-    # granted them before keeps them until #5298 Task 22 revokes them.
-    # Render leases, pins in flight and install slots (`library/libraries.py`).
-    "library_leases": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "library_pin_holds": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "library_install_slots": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    # `RemoteStoreFolders`, `RemoteAssetRows`; the API finds a folder itself). Nor
+    # `library_leases`, `library_pin_holds` or `library_install_slots`: the render
+    # leases, pins in flight and install slots go through them as well
+    # (`RemoteCheckoutLeases`, `RemoteInstallSlots`). A role granted them before keeps
+    # them until #5298 Task 22 revokes them.
     # No `render_settings`: the store settings come from the API's CRUD route (#5298,
     # `crud/render.py`). A role granted it before keeps it until the role is revoked.
     # Whether the API has migrated to this build's schema (`wait_until_ready`).
@@ -198,6 +197,19 @@ def _current_schema(conn: Connection[Any]) -> str:
     return str(row[0])
 
 
+def _ledger_unreadable(conn: Connection[Any]) -> bool:
+    """Whether the migrations ledger exists and this role may not read it."""
+    row = (
+        conn.cursor(row_factory=tuple_row)
+        .execute(
+            "SELECT CASE WHEN to_regclass('scadbuddy_migrations') IS NULL THEN false"
+            " ELSE NOT has_table_privilege('scadbuddy_migrations', 'SELECT') END"
+        )
+        .fetchone()
+    )
+    return bool(row and row[0])
+
+
 def pending_migrations(
     conn: Connection[Any], migrations: tuple[Migration, ...] = MIGRATIONS
 ) -> list[str]:
@@ -245,12 +257,16 @@ def wait_until_ready(
     holds `RENDER_GRANTS`; until then log what is missing and look again every
     ``poll`` seconds. A worker never migrates: in a rollout it may start before the
     API, and its role may not create anything. ``stopping`` ends the wait with
-    `WorkerStoppedError`."""
+    `WorkerStoppedError`. A ledger the role may not read yet (migrated, not yet
+    granted) is a missing grant, waited for, never an error."""
     last: tuple[list[str], list[str]] | None = None
     while True:
         with pool.connection() as conn:
-            pending = pending_migrations(conn)
-            missing = [] if pending else missing_privileges(conn, grants)
+            if _ledger_unreadable(conn):
+                pending, missing = [], missing_privileges(conn, grants)
+            else:
+                pending = pending_migrations(conn)
+                missing = [] if pending else missing_privileges(conn, grants)
         if not pending and not missing:
             return
         if (pending, missing) != last:

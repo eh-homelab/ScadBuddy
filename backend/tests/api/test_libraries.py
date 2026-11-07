@@ -1953,7 +1953,7 @@ def test_a_pin_on_the_library_worker_holds_off_another_processs_removal(
     the removal then finds it pinned, rather than deleting the checkout under it."""
     create_model(lib_client)
     state: AppState = getattr(libraries_app.state, STATE_ATTR)
-    assert state.checkouts.shared is not None
+    assert isinstance(state.checkouts.shared, CheckoutLeases)
     pool = state.checkouts.shared.pool
     elsewhere = replace(
         state,
