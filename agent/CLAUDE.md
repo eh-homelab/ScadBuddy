@@ -9,7 +9,8 @@ the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep
 `ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
 `workflow_run_decisions`, `flow_grants`, `flow_grant_uses`, and `blob_refs` through a
 trigger; `backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). `src/db/grants.ts`
-grants the API's role its `ai_*` reads and writes; the projects worker's list is empty (#5298).
+grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
+projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
 as the owner URL and the KEK (`docs/ai/security.md`, "Plugin packages").
 

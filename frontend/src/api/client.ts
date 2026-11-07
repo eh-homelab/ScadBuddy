@@ -188,7 +188,7 @@ import type {
   LoginConfigView,
   LoginConfigUpdate,
   LoginDiscoveryReport,
-  ServiceCaller,
+  LegacyCaller,
   ServiceCredentialView,
   AccessTokenCreate,
   AccessTokenCreated,
@@ -1634,7 +1634,7 @@ export const api = {
     request<LoginConfigView>('/auth/config', { method: 'PUT', body: JSON.stringify(body) }),
   testLoginConfig: () => request<LoginDiscoveryReport>('/auth/config/test', { method: 'POST' }),
   listServiceCredentials: () => request<ServiceCredentialView[]>('/auth/service-credentials'),
-  rotateServiceCredential: (caller: ServiceCaller) =>
+  rotateServiceCredential: (caller: LegacyCaller) =>
     request<ServiceCredentialView[]>('/auth/service-credentials/rotate', {
       method: 'POST',
       body: JSON.stringify({ caller }),
