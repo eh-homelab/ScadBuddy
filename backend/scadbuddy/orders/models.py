@@ -119,7 +119,7 @@ class Actor(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["browser", "agent"]
+    kind: Literal["browser", "agent", "provider"]
     principal: str | None = None
     session: str | None = None
 
@@ -211,6 +211,8 @@ class Payment(BaseModel):
     received_at: datetime | None
     notes: str
     created_at: datetime
+    provider: str | None = None
+    payment_request_id: str | None = None
 
 
 class OrderEvent(BaseModel):

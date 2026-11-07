@@ -164,7 +164,10 @@ _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
 )
 _CHARGE = "id, order_id, kind, label, amount_minor, position"
-_PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, created_at"
+_PAYMENT = (
+    "id, order_id, amount_minor, method, reference, received_at, notes, created_at,"
+    " provider, payment_request_id"
+)
 _EVENT = "id, order_id, at, by, kind, detail"
 _TIME_ENTRY = (
     "id, order_id, order_item_id, kind, minutes, rate_minor_per_hour, note, started_at,"
@@ -2045,12 +2048,24 @@ class OrderStore:
         reference: str | None,
         received_at: datetime | None,
         notes: str,
+        provider: str | None = None,
+        payment_request_id: str | None = None,
     ) -> Payment:
         row = conn.execute(
             "INSERT INTO order_payments"
-            " (order_id, amount_minor, method, reference, received_at, notes)"
-            f" VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_PAYMENT}",
-            (order_id, amount_minor, method, reference, received_at, notes),
+            " (order_id, amount_minor, method, reference, received_at, notes, provider,"
+            " payment_request_id)"
+            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_PAYMENT}",
+            (
+                order_id,
+                amount_minor,
+                method,
+                reference,
+                received_at,
+                notes,
+                provider,
+                payment_request_id,
+            ),
         ).fetchone()
         assert row is not None
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
