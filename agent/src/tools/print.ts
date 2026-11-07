@@ -301,6 +301,7 @@ export const printPath = z
  * backend's (`bambuddy/part_settings.py`, from Bambu Studio's PrintConfig.cpp).
  */
 const shellLayers = z.number().int().min(0).max(1000)
+const SLOT_KEY = /^[1-9][0-9]*$/
 export const partSettings = z
   .object({})
   .catchall(
@@ -322,13 +323,19 @@ export const partSettings = z
       })
       .strict(),
   )
+  // A slot id from 1, as the backend's `SlotId` (1-64); `catchall`, not `z.record`, as
+  // `params` in common.ts says, so the key is checked here.
+  .refine((slots) => Object.keys(slots).every((slot) => SLOT_KEY.test(slot) && Number(slot) <= 64), {
+    message: 'part_settings is keyed by slot id, a whole number from 1 to 64 (as filament_plan numbers slots)',
+  })
   .optional()
   .describe(
     'Slicer settings for the parts of one filament slot (#5571), keyed by slot id (from 1, as `filament_plan`), ' +
       'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Each omitted setting is the ' +
       "process's. Only a ScadBuddy output takes them; a slot no printed part of the output is made in (one only painted " +
       'on faces among them), an unknown key or a value out of range is refused (422). A painted part takes the ' +
-      'settings of the slot it is made in, not of its painted faces.',
+      'settings of the slot it is made in, not of its painted faces. An output whose 3MF prints as it is (sliced, ' +
+      "another slicer's, or past the size caps) takes none (422).",
   )
 
 /** `part_settings`' phrase in an approval line. */

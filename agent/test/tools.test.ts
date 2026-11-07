@@ -1279,6 +1279,11 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     // An unknown key or a value out of range is refused before anything is sent.
     expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { infill_wall_overlap: 15 } } }).success).toBe(false)
     expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { sparse_infill_density: 150 } } }).success).toBe(false)
+    // Keys are slot ids from 1 (#5571 review): no 0, no leading zero, no name, nothing past 64.
+    for (const slot of ['0', '01', 'Color 2', '-1', '1.5', '65']) {
+      expect(z.object(t.shape).safeParse({ ...args, part_settings: { [slot]: { wall_loops: 3 } } }).success).toBe(false)
+    }
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '64': { wall_loops: 3 } } }).success).toBe(true)
   })
 
   it('sends the accepted analyzer fixes it is given and names them in its approval line (#284)', async () => {

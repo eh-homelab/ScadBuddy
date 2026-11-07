@@ -134,7 +134,7 @@ from scadbuddy.bambuddy.resolver import (
     process_preset_for,
     resolve,
 )
-from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, request_scope, resolve_print_options
 from scadbuddy.bambuddy.slot_presets import SlotPresets
 from scadbuddy.bambuddy.supports import (
     SUPPORT_KEYS,
@@ -187,7 +187,12 @@ from scadbuddy.rack.usage import (
     record_seen,
     save_picks,
 )
-from scadbuddy.render.bambu3mf import FilamentMap, model_settings_text, printed_part_slots
+from scadbuddy.render.bambu3mf import (
+    FilamentMap,
+    layout_of,
+    model_settings_text,
+    printed_part_slots,
+)
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 from scadbuddy.slicing.values import values_for
@@ -751,14 +756,19 @@ PART_SETTINGS_OUTPUT_ONLY = (
 
 async def part_settings_refusal(source: PrintSource, request: PrintRunRequest) -> str | None:
     """Why ``request``'s ``part_settings`` cannot print from ``source`` (#5571): it is
-    not an output, or it names a slot no printed part of the output is made in (one only
-    painted on another part's faces among them). ``None`` when they can."""
+    not an output; its 3MF is one nothing can be written into (``layout_of`` ``as_is``:
+    past the caps, sliced, or with no ``project_settings.config``), which prints as it is,
+    so its copy could never carry them (:data:`PART_SETTINGS_AS_IS`); or it names a slot
+    no printed part of the output is made in (one only painted on another part's faces
+    among them). ``None`` when they can."""
     if request.part_settings is None:
         return None
     if not isinstance(source, OutputSource) or source.is_sliced:
         return PART_SETTINGS_OUTPUT_ONLY
     payload = await source.fetch_3mf(None)
-    text = None if payload is None else await asyncio.to_thread(model_settings_text, payload)
+    if payload is None or await asyncio.to_thread(layout_of, payload) == "as_is":
+        return PART_SETTINGS_AS_IS
+    text = await asyncio.to_thread(model_settings_text, payload)
     slots = printed_part_slots(text) if text is not None else set()
     unknown = unknown_slots(request.part_settings, slots)
     if not unknown:

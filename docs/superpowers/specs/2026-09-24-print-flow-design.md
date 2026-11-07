@@ -279,7 +279,11 @@ each slot's settings to every printed `<part>` of that slot in
 self-closing `<part …/>` becomes an open and a close tag around them. A painted part
 takes the settings of the slot it is made in, not those of its painted faces. In an
 author's file they are written even when its layout falls back to the file as it is
-(`ArchiveTooLargeError`), so the copy's key never names settings its bytes lack. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
+(`ArchiveTooLargeError`). A 3MF nothing can be written into (`layout_of` `as_is`: past
+the size caps, sliced, or with no `project_settings.config`) prints as it is, so it
+cannot carry them: `part_settings_refusal` refuses it before anything is uploaded (422,
+`send.PART_SETTINGS_AS_IS`), and `_laid_out_for` refuses a target with settings for one
+too. So the copy's key never names settings its bytes lack. The copy's `Target.key` gets `&parts:` and a digest of the settings, before the
 colours, so a copy with settings is never reused for one without, nor the other way
 round; a copy without settings keeps the key it had. `plan_run` builds the copy for the
 run, the dialog's background slice and the quote alike. A slice quote records the

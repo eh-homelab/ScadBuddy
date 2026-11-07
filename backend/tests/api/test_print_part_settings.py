@@ -11,6 +11,8 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.print_run import PART_SETTINGS_OUTPUT_ONLY, PrintRunRequest
+from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME
 from tests.api.test_filament_profiles import preset_values
@@ -19,6 +21,7 @@ from tests.api.test_print_library import SLICED_RUN, library_file, run_library, 
 from tests.api.test_print_run_choices import body, run_print
 from tests.api.test_print_supports import routes
 from tests.api.test_send import _uploaded_3mf, configure, upload_route
+from tests.bambuddy.test_part_settings import without_project_settings
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -53,6 +56,30 @@ def test_a_slot_the_output_lacks_is_refused(client: TestClient, model: str) -> N
     assert response.status_code == 422, response.text
     assert "part_settings names slot 2" in response.json()["detail"]
     assert any("part_settings names slot 2" in error for error in check.json()["errors"])
+
+
+@respx.mock
+def test_an_output_that_prints_as_it_is_refuses_part_settings(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#5571 review: an output whose 3MF nothing can be written into (``as_is``: here
+    without its ``project_settings.config``) is refused before anything is uploaded,
+    never printed under a key that names settings its copy lacks."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    routes()
+    preset_values({})
+    [model_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    model_3mf.write_bytes(without_project_settings(model_3mf.read_bytes()))
+    request = {**body(), "part_settings": {"1": {"top_shell_layers": 8}}}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    response = run_print(client, output_id, json=request)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == PART_SETTINGS_AS_IS
+    assert PART_SETTINGS_AS_IS in check.json()["errors"]
+    assert not upload.called
 
 
 def test_a_setting_out_of_range_is_refused(client: TestClient, model: str) -> None:

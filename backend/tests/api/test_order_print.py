@@ -751,3 +751,39 @@ def test_a_print_that_sends_no_part_settings_prints_with_the_quotes(
     assert attempt["sliced_sha256"] == quote["sliced_sha256"]
     [request] = sent
     assert dumped(request.part_settings) == settings
+
+
+def test_a_test_print_takes_its_slice_quotes_part_settings(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5571 review: a test print (`test_print_check`, the revision's newest slice quote)
+    refuses settings per slot its quote was not sliced with, and one that sends none
+    prints with the quote's."""
+    sent: list[PrintRunRequest] = []
+
+    async def recorded(*args: Any, request: PrintRunRequest, **kwargs: Any) -> Any:
+        sent.append(request)
+        return await accept_run(*args, request=request, **kwargs)
+
+    monkeypatch.setattr(printing_api, "accept_run", recorded)
+    shop = QuoteShop(bambuddy)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    settings = {"1": {"wall_loops": 4}}
+    started = shop.post(part_settings=settings)
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    assert op["result"]["part_settings"] == settings
+    revision = shop.get_item()["current_revision_id"]
+    _books_spools(shop)
+    url = f"{shop.path}/revisions/{revision}/test-print"
+
+    other = {**body(), "part_settings": {"1": {"wall_loops": 5}}}
+    problem(bambuddy.post(url, json=other, headers=press()), "requote_needed")
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(url, json=body(), headers=press()))
+    assert attempt["purpose"] == "test"
+    [request] = sent
+    assert dumped(request.part_settings) == settings

@@ -15,9 +15,12 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.part_settings import PartSettings, overrides_of, unknown_slots
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import run_key
-from scadbuddy.bambuddy.send import Target, _laid_out_for
+from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, Target, _laid_out_for
+from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
+    PROJECT_SETTINGS_NAME,
+    layout_of,
     printed_part_slots,
     set_part_settings,
     with_part_settings,
@@ -240,3 +243,26 @@ def test_the_laid_out_copy_carries_the_settings_and_nothing_else_changes(
             if name != MODEL_SETTINGS_NAME:
                 assert a.read(name) == b.read(name), name
     assert with_part_settings(plain, None) == plain
+
+
+def without_project_settings(payload: bytes) -> bytes:
+    """``payload`` with no ``project_settings.config``: ``layout_of`` says ``as_is``."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(out, "w") as copy:
+        for info in source.infolist():
+            if info.filename != PROJECT_SETTINGS_NAME:
+                copy.writestr(info, source.read(info.filename))
+    return out.getvalue()
+
+
+def test_a_file_that_prints_as_it_is_refuses_part_settings(tmp_path: Path) -> None:
+    """#5571 review: nothing is written into an ``as_is`` file, so a target with settings
+    per part is refused rather than laid out under a key that names them."""
+    payload = without_project_settings(_two_colours(tmp_path))
+    assert layout_of(payload) == "as_is"
+    plate = plate_for("H2C")
+    assert _laid_out_for(payload, Target(plate, "0.4")) == payload
+    with pytest.raises(ApiError) as refused:
+        _laid_out_for(payload, Target(plate, "0.4", part_settings=((2, (("wall_loops", "3"),)),)))
+    assert refused.value.status == 422
+    assert refused.value.detail == PART_SETTINGS_AS_IS

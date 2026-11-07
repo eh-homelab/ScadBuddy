@@ -174,6 +174,12 @@ _BED_STATED = "#bed"
 #: its tower at ``wipe_tower_y`` 5 (3 mm reserved for its brim), which a tall plate's
 #: brim passes, and reusing it kept every quote failing after the fix (#5566).
 _TOWER_BRIM = "#brim"
+#: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
+#: written into (``layout_of`` ``as_is``): it prints as it is, so it cannot carry them.
+PART_SETTINGS_AS_IS = (
+    "This output's 3MF prints as it is (it is sliced, from another slicer, or past the size"
+    " caps), so it cannot take settings per part."
+)
 #: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),
 #: followed by :func:`part_settings_digest`.
 _PART_SETTINGS = "&parts:"
@@ -371,11 +377,16 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     keeps its placement and every plate it lays out; only the nozzles and colours are
     stated (:func:`state_nozzles`). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
-    unchanged. The print's settings per part (#5571) are written last, into whatever
+    unchanged, and so takes no settings per part: a ``target`` with some is refused
+    (422, :data:`PART_SETTINGS_AS_IS`), as the run refuses it first
+    (``print_run.part_settings_refusal``), so no copy's key names settings its bytes
+    lack. Otherwise the print's settings per part (#5571) are written last, into whatever
     the file's own layout came to (:func:`with_part_settings`).
     """
     layout = layout_of(payload)
     if layout == "as_is":
+        if target.part_settings:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_AS_IS)
         return payload
     colours = _colours_for(payload, target.colours)
     if layout == "author":
