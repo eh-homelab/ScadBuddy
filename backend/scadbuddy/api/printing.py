@@ -82,6 +82,7 @@ from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.options import LAN_CALIBRATION_API_HINT, LAN_CALIBRATION_PROBLEM
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
     PreviewStarted,
@@ -138,7 +139,6 @@ from scadbuddy.core.problems import (
     PROBLEM_MEDIA_TYPE,
     ApiError,
 )
-from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
 from scadbuddy.library.settings_store import (
@@ -1377,16 +1377,12 @@ async def post_check(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
-    refusal: str | None = None
-    try:
-        # The template's defaults, by-object printing among them (#2976).
-        print_settings = await asyncio.to_thread(library_catalogue.print_settings, meta.slug)
-        await asyncio.to_thread(library_catalogue.part_print_settings, meta.slug)
-    except InvalidModelMetaError as error:
-        # The run's 409 (`LocalOutputs.naming`), said before Print (#5649); the rest
-        # of the check judges the request alone.
-        print_settings = {}
-        refusal = str(error)
+    # The template's defaults, by-object printing among them (#2976), and the run's
+    # 409 for a model.json that refuses them, from the run's own naming (#5649,
+    # #5653); with a refusal the rest of the check judges the request alone.
+    naming = await LocalOutputs(outputs, library_catalogue).naming(meta)
+    print_settings = naming.print_settings
+    refusal = naming.invalid_meta
     # The path first (D2): a native run's check builds no client (D3), so it answers
     # with no Bambuddy configured at all (AC2).
     route = await dialog_route(

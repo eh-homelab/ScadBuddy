@@ -320,15 +320,20 @@ async def _until(done: Any, timeout: float = 60.0) -> None:
 class Outputs:
     """``OutputsRead`` over one output, the reference's render unless told otherwise."""
 
-    def __init__(self, item: OrderItem, *, gone: bool = False) -> None:
+    def __init__(self, item: OrderItem, *, gone: bool = False, plates: int = 0) -> None:
         assert item.reference is not None
         self.reference = item.reference
         self.gone = gone
+        self.plates = plates
 
     def get(self, output_id: str) -> OutputMeta:
         if self.gone:
             raise OSError(output_id)
-        meta = SimpleNamespace(slug=self.reference.slug, model_version=self.reference.commit)
+        meta = SimpleNamespace(
+            slug=self.reference.slug,
+            model_version=self.reference.commit,
+            layout_plates=[{}] * self.plates,
+        )
         return cast(OutputMeta, meta)
 
     def inputs(self, output_id: str) -> dict[str, Any]:
@@ -385,6 +390,29 @@ def test_the_check_reads_the_quotes_file(shop: Shop, pool: PgPool, tmp_path: Pat
     blobs.remove("quote-a")
     assert _refusal(lambda: _check(shop, order, item, blobs, outputs)) == "requote_needed"
     assert held(pool, QUOTE_HOLDER)
+
+
+def test_an_output_with_other_plates_than_the_quote_is_requoted(
+    shop: Shop, pool: PgPool, tmp_path: Path
+) -> None:
+    """Security review of #5645: a flow's grant counts the accepted quote's plates, so an
+    output whose plate count is not the quote's (changed after the quote) never prints
+    under it: the grant's count and the run's cannot drift apart."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order, item = _slice_accepted(shop, blobs, b"sliced")
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_item_quotes SET sliced_sha256 = %s WHERE order_item_id = %s",
+            (hashlib.sha256(b"sliced").hexdigest(), item.id),
+        )
+    quote = next(q for q in shop.rows.quotes(item.id) if q.accepted)
+    quoted = len(quote.plates)
+    assert quoted >= 1
+    # A one-plate output records no layout plates; one of the quote's count stands.
+    same = 0 if quoted == 1 else quoted
+    assert _check(shop, order, item, blobs, Outputs(item, plates=same))["quote_id"] == quote.id
+    more = Outputs(item, plates=quoted + 1)
+    assert _refusal(lambda: _check(shop, order, item, blobs, more)) == "requote_needed"
 
 
 def test_the_check_prints_what_is_left(shop: Shop, pool: PgPool, tmp_path: Path) -> None:

@@ -71,7 +71,9 @@ from scadbuddy.crud.render import (
     RemoteAssetRows,
     RemoteBlobIndex,
     RemoteBlobRefs,
+    RemoteCheckoutLeases,
     RemoteGeometryIndex,
+    RemoteInstallSlots,
     RemoteJobProjection,
     RemoteStoreFolders,
 )
@@ -2420,6 +2422,8 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         index=RemoteBlobIndex(remote),
         folders=RemoteStoreFolders(static_render_crud()),
         assets=RemoteAssetRows(remote),
+        leases=RemoteCheckoutLeases(remote),
+        slots=RemoteInstallSlots(remote),
     )
 
 

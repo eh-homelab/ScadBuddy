@@ -2,8 +2,9 @@
 R2), for `crud/render.py` `RemoteRenderSettingsSource`, its jobs' rows (R3-R10), for
 `RemoteJobProjection`, and its jobs' blob refs and the piece geometry (R11, R12), for
 `RemoteBlobRefs` and `RemoteGeometryIndex`, the blob index (R13-R16), for
-`RemoteBlobIndex`, the Bambuddy store's folders (R17, R18), for `RemoteStoreFolders`, and
-the uploads' ``assets`` rows (R19-R21), for `RemoteAssetRows`.
+`RemoteBlobIndex`, the Bambuddy store's folders (R17, R18), for `RemoteStoreFolders`, the
+uploads' ``assets`` rows (R19-R21), for `RemoteAssetRows`, and the library leases, pin
+holds and install slots (R22-R24), for `RemoteCheckoutLeases` and `RemoteInstallSlots`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.render`` (plan D8): the
 render key (or the full key while no render key is saved) and the S3 keys. The CRUD
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, Any
@@ -46,6 +48,15 @@ from scadbuddy.library.assets import (
     AssetMeta,
     AssetNotFoundError,
     AssetRejectedError,
+)
+from scadbuddy.library.libraries import (
+    COMMIT_PATTERN,
+    LEASE_TTL,
+    LEASE_TTL_MAX,
+    NAME_PATTERN,
+    CheckoutLeases,
+    InstallSlotRows,
+    LeaseTokenTakenError,
 )
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
 from scadbuddy.render.inputs import legacy_inputs
@@ -101,6 +112,25 @@ BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
 #: the client does not retry, so the call fails after one wait as the SQL find did.
 #: `crud/render.py` `FOLDER_LOCKED`.
 FOLDER_LOCKED = "folder-locked"
+#: Seconds a lease or pin hold waits for a removal's `REMOVAL_LOCK` before the route
+#: answers a 423 ``removal-running``, which the worker sends again: the take keeps
+#: waiting as long as the removal runs, as the SQL take did, and no request holds a
+#: thread here past this: a waiting take holds an API pool connection and an executor
+#: thread for at most 2 s, at the cost of more 423 rounds while a removal runs.
+#: `crud/render.py` `REMOVAL_RUNNING`.
+LEASE_LOCK_WAIT = 2.0
+REMOVAL_RUNNING = "removal-running"
+#: A lease taken under a token that holds another lease: `crud/render.py` `TOKEN_TAKEN`.
+TOKEN_TAKEN = "token-taken"
+#: A renew of a lease or a hold with no row: `crud/render.py` `NO_LEASE`, `NO_HOLD`.
+NO_LEASE = "no-lease"
+NO_HOLD = "no-hold"
+#: A renew or release of an install slot another token holds: `crud/render.py`
+#: `NOT_HOLDER`.
+NOT_HOLDER = "not-holder"
+#: The most checkouts one lease names: a render's ``OPENSCADPATH`` holds one per pinned
+#: library.
+LEASE_CHECKOUTS_MAX = 256
 
 
 def released(current: RenderStoreSettings) -> list[str]:
@@ -794,3 +824,157 @@ async def drop_asset_copy(asset_id: str, state: StateDep) -> Dropped:
 async def assets_last_used(body: LastUsedAsk, state: StateDep) -> dict[str, datetime | None]:
     """R21: each id's last use, null for one with no row; at most `LAST_USED_MAX` ids."""
     return await asyncio.to_thread(state.assets.last_used, body.ids)
+
+
+# -- library leases, pin holds and install slots (inventory R22-R24) --------------
+#
+# Each route is the API's own `CheckoutLeases` or `InstallSlotRows` method, on the API's
+# gate and permits. A lease or a hold is inserted under `REMOVAL_LOCK` shared, the key an
+# older worker on SQL and the API's removal take, so the three exclude each other during
+# a roll. Every write is natural (plan D5): the worker chooses the token, and a take sent
+# again finds the same lease, hold or slot. A renew or release names the token; one that
+# matches no row of the caller's answers a 4xx with a ``reason``, never a silent success,
+# so a render credential renews and releases only what it took. ``ttl_s`` is at most
+# `LEASE_TTL_MAX` (300 s): a row the worker stops renewing lapses within it.
+
+
+class Checkout(BaseModel):
+    library: str = Field(pattern=NAME_PATTERN)
+    commit: str = Field(pattern=COMMIT_PATTERN)
+
+
+class Ttl(BaseModel):
+    ttl_s: float = Field(default=LEASE_TTL, gt=0, le=LEASE_TTL_MAX)
+
+
+class LeaseTake(Ttl):
+    token: uuid.UUID
+    holder: str = Field(min_length=1, max_length=256)
+    checkouts: list[Checkout] = Field(min_length=1, max_length=LEASE_CHECKOUTS_MAX)
+
+
+class PinHoldTake(Ttl):
+    token: uuid.UUID
+
+
+class SlotClaim(BaseModel):
+    token: uuid.UUID
+
+
+class SlotClaimed(BaseModel):
+    slot: int | None
+
+
+def _leases(state: AppState) -> CheckoutLeases:
+    leases = state.checkouts.shared
+    assert isinstance(leases, CheckoutLeases)
+    return leases
+
+
+def _slots(state: AppState) -> InstallSlotRows:
+    slots = state.installs.slots
+    assert isinstance(slots, InstallSlotRows)
+    return slots
+
+
+def _removal_running() -> ApiError:
+    return ApiError(
+        status.HTTP_423_LOCKED,
+        "A library removal is running; send the take again.",
+        reason=REMOVAL_RUNNING,
+    )
+
+
+@router.post("/leases", name="crud_render_take_lease")
+async def take_lease(body: LeaseTake, state: StateDep) -> None:
+    """R22: a lease for ``holder`` on ``checkouts`` under ``token``, once no removal
+    runs. A removal still running after `LEASE_LOCK_WAIT` is a 423 ``removal-running``;
+    a token holding another lease, a 409 ``token-taken``."""
+    try:
+        await asyncio.to_thread(
+            _leases(state).take_named,
+            body.token,
+            body.holder,
+            [(checkout.library, checkout.commit) for checkout in body.checkouts],
+            ttl=body.ttl_s,
+            lock_wait=LEASE_LOCK_WAIT,
+        )
+    except LockNotAvailable:
+        raise _removal_running() from None
+    except LeaseTokenTakenError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This token holds another lease.",
+            reason=TOKEN_TAKEN,
+        ) from None
+
+
+@router.put("/leases/{token}", name="crud_render_renew_lease")
+async def renew_lease(token: uuid.UUID, body: Ttl, state: StateDep) -> None:
+    """R22: the lease's rows live ``ttl_s`` more; a 404 ``no-lease`` when it has none."""
+    if not await asyncio.to_thread(_leases(state).renew, token, ttl=body.ttl_s):
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such lease.", reason=NO_LEASE)
+
+
+@router.delete("/leases/{token}", name="crud_render_drop_lease")
+async def drop_lease(token: uuid.UUID, state: StateDep) -> None:
+    """R22: release the lease; a lease already gone is a success."""
+    await asyncio.to_thread(_leases(state).drop, token)
+
+
+@router.post("/pin-holds", name="crud_render_take_pin_hold")
+async def take_pin_hold(body: PinHoldTake, state: StateDep) -> None:
+    """R23: a pin's hold under ``token``, once no removal runs; a 423
+    ``removal-running`` as a lease's."""
+    try:
+        await asyncio.to_thread(
+            _leases(state).take_pin, body.token, ttl=body.ttl_s, lock_wait=LEASE_LOCK_WAIT
+        )
+    except LockNotAvailable:
+        raise _removal_running() from None
+
+
+@router.put("/pin-holds/{token}", name="crud_render_renew_pin_hold")
+async def renew_pin_hold(token: uuid.UUID, body: Ttl, state: StateDep) -> None:
+    """R23: the hold lives ``ttl_s`` more; a 404 ``no-hold`` when it has no row."""
+    if not await asyncio.to_thread(_leases(state).renew_pin, token, ttl=body.ttl_s):
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such pin hold.", reason=NO_HOLD)
+
+
+@router.delete("/pin-holds/{token}", name="crud_render_drop_pin_hold")
+async def drop_pin_hold(token: uuid.UUID, state: StateDep) -> None:
+    """R23: release the hold; a hold already gone is a success."""
+    await asyncio.to_thread(_leases(state).drop_pin, token)
+
+
+@router.post("/install-slots", name="crud_render_claim_install_slot")
+async def claim_install_slot(body: SlotClaim, state: StateDep) -> SlotClaimed:
+    """R24: the slot ``token`` holds, or a free one of the API's, taken for the API's
+    TTL; null while all are held. Sent again, the same slot."""
+    return SlotClaimed(slot=await asyncio.to_thread(_slots(state).claim, body.token))
+
+
+def _not_holder() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT, "This token does not hold that slot.", reason=NOT_HOLDER
+    )
+
+
+@router.put("/install-slots/{slot}", name="crud_render_renew_install_slot")
+async def renew_install_slot(
+    slot: int, state: StateDep, token: Annotated[uuid.UUID, Query()]
+) -> None:
+    """R24: the slot lives the API's TTL more; a 409 ``not-holder`` unless ``token``
+    holds it."""
+    if not await asyncio.to_thread(_slots(state).renew, slot, token):
+        raise _not_holder()
+
+
+@router.delete("/install-slots/{slot}", name="crud_render_drop_install_slot")
+async def drop_install_slot(
+    slot: int, state: StateDep, token: Annotated[uuid.UUID, Query()]
+) -> None:
+    """R24: free the slot. A free slot is a success (a release sent again); one another
+    token holds, a 409 ``not-holder``."""
+    if not await asyncio.to_thread(_slots(state).drop, slot, token):
+        raise _not_holder()

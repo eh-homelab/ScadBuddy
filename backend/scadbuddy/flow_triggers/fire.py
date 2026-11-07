@@ -46,6 +46,15 @@ def run_id_of(trigger_id: str, fire_key: str) -> str:
     return str(uuid.uuid5(TRIGGER_NAMESPACE, f"{trigger_id}:{fire_key}"))
 
 
+def order_of(event: dict[str, Any] | None) -> str | None:
+    """The order an order or line item event is about (orders spec §7.1), which the run's
+    grant is narrowed to; None for any other event or a schedule's fire."""
+    if event is None or event.get("kind") not in ("order.changed", "order_item.changed"):
+        return None
+    order_id = event.get("order_id")
+    return order_id if isinstance(order_id, str) else None
+
+
 def runs_as(created_by: dict[str, Any]) -> dict[str, Any]:
     """Who a triggered run acts as (§12.4): the trigger's creator from its row, without
     the session it was made in, which is not there when it fires."""
@@ -173,7 +182,7 @@ class TriggerFires:
         await flows.store.delete_grant(run_id)
         try:
             await self.store.seed_run_grant(
-                run_id, trigger_id, started_by, datetime.now(UTC), checked
+                run_id, trigger_id, started_by, datetime.now(UTC), checked, order_of(event)
             )
         except TriggerChangedError:
             # Edited since it was admitted: nothing starts on its old settings.

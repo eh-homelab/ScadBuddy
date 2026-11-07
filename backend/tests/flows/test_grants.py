@@ -17,6 +17,7 @@ from scadbuddy.flows.grants import (
     RuleUse,
     admits,
     choose,
+    narrowed_to_order,
     validate_spec,
 )
 
@@ -183,3 +184,48 @@ def test_a_narrowing_that_widens_admits_nothing_beyond_the_grant() -> None:
     assert verdict(facts()) == (0, 0)
     # A narrowing narrower than the grant refuses what it excludes.
     assert isinstance(verdict(facts(), Narrowing(rules=[rule(printers=[5])])), str)
+
+
+def test_orders_bound_a_print_and_an_order_tool_by_the_order_they_name() -> None:
+    """#4252 (orders spec §7.2, Ruling 10): a list of orders, or "any" order; a call
+    that names no order is outside either."""
+    fulfil = GrantRule.model_validate({"fn": "tool", "tool": "order_item_fulfil", "orders": ["o1"]})
+    call = CallFacts(fn="tool", tool="order_item_fulfil", args={"order_id": "o1"}, order_id="o1")
+    assert admits(fulfil, call, RuleUse()) is None
+    other = call.model_copy(update={"order_id": "o2"})
+    assert admits(fulfil, other, RuleUse()) == "order not in the grant"
+    anyone = fulfil.model_copy(update={"orders": "any"})
+    assert admits(anyone, other, RuleUse()) is None
+    none = call.model_copy(update={"order_id": None})
+    assert admits(anyone, none, RuleUse()) == "order not in the grant"
+    assert admits(rule(orders=["o1"]), facts(order_id="o1"), RuleUse()) is None
+    assert admits(rule(orders="any"), facts(), RuleUse()) == "order not in the grant"
+
+
+def test_orders_bound_only_prints_and_tools() -> None:
+    assert validate_spec(spec({"fn": "arrange", "orders": "any"}), tool_tiers=TIERS, now=NOW)
+    both = spec({"fn": "queue_print", "orders": ["o1"]}, {"fn": "queue_print", "orders": "any"})
+    assert validate_spec(both, tool_tiers=TIERS, now=NOW) == []
+    with pytest.raises(ValidationError):
+        rule(orders=[])
+    with pytest.raises(ValidationError):
+        rule(orders="all")
+
+
+def test_narrowed_to_an_order() -> None:
+    """A run grant seeded for one order (§7.2): "any" and a list holding it become that
+    order; a list without it admits nothing, keeping its index (a standing grant's
+    counters are kept by index); an unbounded rule stays as it is."""
+    grant = spec(
+        {"fn": "tool", "tool": "send_to_bambuddy", "orders": "any"},
+        {"fn": "queue_print", "orders": ["o1", "o2"]},
+        {"fn": "queue_print", "orders": ["o3"]},
+        {"fn": "arrange"},
+    )
+    narrowed = narrowed_to_order(grant, "o1")
+    assert [r.orders for r in narrowed.rules] == [["o1"], ["o1"], ["o1"], None]
+    assert [r.max_calls for r in narrowed.rules] == [None, None, 0, None]
+    print_o1 = facts(order_id="o1")
+    assert admits(narrowed.rules[2], print_o1, RuleUse()) is not None
+    assert admits(narrowed.rules[1], print_o1, RuleUse()) is None
+    assert admits(narrowed.rules[1], facts(order_id="o2"), RuleUse()) is not None

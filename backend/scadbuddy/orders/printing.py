@@ -326,12 +326,18 @@ async def _stands(
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None,
 ) -> dict[str, Any]:
     """``requote_needed`` unless ``quote`` still stands for what would print: the item's
-    output the reference's render, and a slice quote's file there and the file it priced.
-    Then what the run needs."""
+    output the reference's render with as many plates as a slice quote priced, and its
+    file there and the file it priced. Then what the run needs."""
     schema = await schema_of(reference) if schema_of is not None else None
     if not await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         raise requote(item, "its output is gone or is no longer its reference's render")
     assert item.output_id is not None
+    if quote.plates:
+        # A flow's grant counts the quote's plates (#4252): an output with another
+        # count would print more (or less) than it spent, so it needs a new quote.
+        meta = await asyncio.to_thread(outputs.get, item.output_id)
+        if (len(meta.layout_plates) or 1) != len(quote.plates):
+            raise requote(item, "its output's plates are not the ones its quote priced")
     await _quoted_file_stands(blobs, item, quote)
     return {
         "output_id": item.output_id,

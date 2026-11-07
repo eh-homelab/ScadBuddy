@@ -416,7 +416,7 @@ test already fails for an unclassified route (`routes.py:1-7`). Each new CRUD ro
 |---|---|
 | `render` | `crud.render` |
 | `print` | `internal.outputs`, `internal.library`, `crud.print` |
-| `projects` | `flow.host` (the 11 routes in `backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`: render, the job and operation reads, outputs create, read and arrange, print runs create (output and library) and read, the print options read, and the printer read of `flow_decide`), `crud.projects` |
+| `projects` | `flow.host` (the 13 routes in `backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`: render, the job and operation reads, outputs create, read and arrange, print runs create (output and library) and read, the print options read, the printer read of `flow_decide`, and an order's read and a line item's print (#4252)), `crud.projects` |
 | `agent` | `api`, `internal.workspace`, `crud.agent` |
 | `storefront` (added 2026-11-07, #5282) | `crud.storefront` |
 

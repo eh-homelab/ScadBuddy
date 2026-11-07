@@ -13,9 +13,16 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.flows.models import Run
@@ -23,6 +30,7 @@ if TYPE_CHECKING:
 #: The latest a grant may expire, from its approval (§3.1, Ruling 7).
 MAX_EXPIRY = timedelta(days=7)
 MAX_RULES = 32
+MAX_ORDERS = 256
 
 HostFn = Literal["queue_print", "arrange", "tool"]
 JsonScalar = str | int | float | bool | None
@@ -38,7 +46,11 @@ _BOUNDS: dict[str, frozenset[str]] = {
     "max_filament_g": frozenset({"queue_print"}),
     "max_calls": frozenset({"queue_print", "arrange", "tool"}),
     "args": frozenset({"tool"}),
+    "orders": frozenset({"queue_print", "tool"}),
 }
+#: An order id in an `orders` bound (text uuids).
+_ORDER_ID = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+OrderId = Annotated[str, StringConstraints(pattern=_ORDER_ID)]
 
 
 class ArgBound(BaseModel):
@@ -65,6 +77,17 @@ class GrantRule(BaseModel):
     max_filament_g: float | None = Field(default=None, ge=0)
     max_calls: int | None = Field(default=None, ge=0)
     args: list[ArgBound] | None = None
+    #: The orders a print of a line item, or an order tool's call (its `order_id`), may
+    #: name (#4252, orders spec §7.2); "any" admits a call that names some order. A run
+    #: grant seeded for one order narrows "any" to it (`narrowed_to_order`).
+    orders: list[OrderId] | Literal["any"] | None = Field(default=None)
+
+    @field_validator("orders")
+    @classmethod
+    def _orders(cls, value: list[str] | str | None) -> list[str] | str | None:
+        if isinstance(value, list) and not 1 <= len(value) <= MAX_ORDERS:
+            raise ValueError(f'orders lists 1 to {MAX_ORDERS} order ids, or is "any"')
+        return value
 
 
 class GrantSpec(BaseModel):
@@ -109,6 +132,8 @@ class CallFacts(BaseModel):
     printer_id: int | None = None
     models: list[str] = []
     library_file: int | None = None
+    #: The order the call names: a line item print's, or an order tool's `order_id`.
+    order_id: str | None = None
     #: Print items (copies times plates); None when they could not be counted.
     prints: int | None = 0
     filament_g: float | None = None
@@ -315,6 +340,10 @@ def admits(rule: GrantRule, facts: CallFacts, used: RuleUse) -> str | None:
         facts.library_file is None or facts.library_file not in rule.library_files
     ):
         return "library file not in the grant"
+    if rule.orders is not None and (
+        facts.order_id is None or (rule.orders != "any" and facts.order_id not in rule.orders)
+    ):
+        return "order not in the grant"
     if rule.max_prints is not None:
         if facts.prints is None:
             return "prints unknown"
@@ -335,6 +364,23 @@ def admits(rule: GrantRule, facts: CallFacts, used: RuleUse) -> str | None:
         if not any(_same_json(value, allowed) for allowed in arg.in_):
             return f"{arg.path} not in the grant"
     return None
+
+
+def narrowed_to_order(spec: GrantSpec, order_id: str) -> GrantSpec:
+    """`spec` for one order (orders spec §7.2: "this order only" in a run grant): each
+    rule with an `orders` bound is bound to `order_id` alone, and one whose bound did not
+    admit it admits nothing (`max_calls` 0). A rule with no `orders` bound stays as it
+    is. Every rule keeps its index, which a standing grant's counters are kept by. Narrow,
+    never wide (10-11 §4.3)."""
+    rules: list[GrantRule] = []
+    for rule in spec.rules:
+        if rule.orders is None:
+            rules.append(rule)
+        elif rule.orders == "any" or order_id in rule.orders:
+            rules.append(rule.model_copy(update={"orders": [order_id]}))
+        else:
+            rules.append(rule.model_copy(update={"orders": [order_id], "max_calls": 0}))
+    return spec.model_copy(update={"rules": rules})
 
 
 def apply_pins(args: dict[str, Any], pins: Mapping[str, JsonScalar]) -> dict[str, Any]:

@@ -58,11 +58,17 @@ interface RowDraft {
   printers: number[] | null
   models: string[] | null
   libraryFiles: string | null
+  /** #4252: null for no bound, else the ids as typed (unused while `anyOrder`). */
+  orders: string | null
+  /** #4252: the bound is any order. Its own flag, so an id typed as "any" stays an id. */
+  anyOrder: boolean
   maxPrints: string
   maxFilament: string
   maxCalls: string
   args: ArgDraft[]
 }
+
+const MAX_ORDERS = 256
 
 const numberText = (value: number | null | undefined) => (value == null ? '' : String(value))
 
@@ -75,6 +81,8 @@ function rowOf(key: string, rule: FlowGrantRule, on: boolean): RowDraft {
     printers: rule.printers ?? null,
     models: rule.models ?? null,
     libraryFiles: rule.library_files == null ? null : rule.library_files.join(', '),
+    orders: rule.orders == null ? null : rule.orders === 'any' ? '' : rule.orders.join(', '),
+    anyOrder: rule.orders === 'any',
     maxPrints: numberText(rule.max_prints),
     maxFilament: numberText(rule.max_filament_g),
     maxCalls: numberText(rule.max_calls),
@@ -106,6 +114,7 @@ function ruleOf(row: RowDraft): FlowGrantRule {
   if (applies('printers') && row.printers) rule.printers = row.printers
   if (applies('models') && row.models) rule.models = row.models
   if (applies('library_files') && row.libraryFiles !== null) rule.library_files = listOf(row.libraryFiles).map(Number)
+  if (applies('orders') && row.orders !== null) rule.orders = row.anyOrder ? 'any' : listOf(row.orders)
   if (applies('max_prints') && row.maxPrints.trim()) rule.max_prints = Number(row.maxPrints)
   if (applies('max_filament_g') && row.maxFilament.trim()) rule.max_filament_g = Number(row.maxFilament)
   if (applies('max_calls') && row.maxCalls.trim()) rule.max_calls = Number(row.maxCalls)
@@ -129,6 +138,21 @@ function typingProblems(rows: RowDraft[]): string[] {
     }
     if (row.libraryFiles !== null && listOf(row.libraryFiles).some((id) => !whole(id))) {
       problems.push(`${name}: library file ids are whole numbers.`)
+    }
+    if (row.orders !== null && !row.anyOrder && listOf(row.orders).length === 0) {
+      problems.push(`${name}: name at least one order id, or choose any order.`)
+    }
+    // The backend's `MAX_ORDERS` (`flows/grants.py`).
+    if (row.orders !== null && !row.anyOrder && listOf(row.orders).length > MAX_ORDERS) {
+      problems.push(`${name}: name at most ${MAX_ORDERS} order ids, or choose any order.`)
+    }
+    // The backend's `OrderId` (`flows/grants.py`): a letter or digit, then up to 63 more.
+    if (
+      row.orders !== null &&
+      !row.anyOrder &&
+      listOf(row.orders).some((id) => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id))
+    ) {
+      problems.push(`${name}: an order id is letters, digits, "-" and "_", at most 64.`)
     }
   })
   return problems
@@ -354,6 +378,29 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
                   value={row.libraryFiles}
                   onChange={(e) => update({ libraryFiles: e.target.value })}
                 />
+              )}
+            </div>
+          )}
+          {applies('orders') && (
+            <div className="flex flex-col gap-1.5">
+              <Check checked={row.orders !== null} onChange={(on) => update({ orders: on ? '' : null, anyOrder: on })}>
+                Only calls that name an order
+              </Check>
+              {row.orders !== null && (
+                <>
+                  <Check checked={row.anyOrder} onChange={(any) => update({ anyOrder: any })}>
+                    Any order (once order events start runs, a run for an order gets that order only;
+                    a rule with no order bound is not kept to it)
+                  </Check>
+                  {!row.anyOrder && (
+                    <Input
+                      aria-label="Order ids"
+                      placeholder="Order ids, comma-separated"
+                      value={row.orders}
+                      onChange={(e) => update({ orders: e.target.value })}
+                    />
+                  )}
+                </>
               )}
             </div>
           )}
