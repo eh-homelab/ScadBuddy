@@ -19,7 +19,9 @@ names, signatures and answers. Every write is natural.
 use, `IndexesBlobs`) over the routes, with the same answers: a `put` the object it
 replaced, a delete the row it took, `ReuseLostError` and, once the API's own retries are
 spent, `DeadlockDetected` as over SQL. Its non-natural writes send an
-``Idempotency-Key`` each (`WriteKeys`).
+``Idempotency-Key`` each (`WriteKeys`). A put, swap, mark or delete of a key only the API
+writes (an upload's, a font's, a snapshot's) is refused, a `CrudRefusedError` 403; a
+forget of a font's or snapshot's copy goes to the API's ``forget-copy`` instead.
 
 `RemoteStoreFolders` is `store/bambuddy.py` `FolderFinder` (`KeepsFolders`) over the
 routes (plan D6): the API finds or makes a folder in Bambuddy itself, with its own render
@@ -27,6 +29,14 @@ target and key, under the folder's advisory lock, and records it, all in one req
 does so only for the Bambuddy and inbox the worker names, which must be the API's own.
 Every call is natural: a find sent again answers the folder the first one recorded, and a
 forget of nothing is a success.
+
+`RemoteAssetRows` is the ``assets`` rows of `library/assets.py` `RemoteAssetStore`, the
+worker's uploads, whose files stay on the worker's volume: get, use, adopt and the last
+uses a prune reads. Each refusal is the error the SQL store raised: no row is
+`AssetNotFoundError`, an adopt the API refuses `AssetRejectedError`. A failure that passes
+(the API out of reach) stays the client's `CrudUnavailableError`, which the activity
+retries, never a not-found a render fails on for good. Every call is natural: an adopt
+sent again is the same row (ON CONFLICT), a use stamps the row again.
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
+from scadbuddy.library.assets import AssetMeta, AssetNotFoundError, AssetRejectedError
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, StepInfo
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
@@ -67,6 +78,12 @@ REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
+#: `api/crud_render.py` `FORGETTABLE_PREFIXES`: the keys only the API writes that the
+#: worker has it forget.
+FORGETTABLE_PREFIXES = ("font-", "src-")
+#: `api/crud_render.py` `NO_COPY` and `COPY_MISMATCH`: an adopt's own refusals.
+NO_COPY = "no-copy"
+COPY_MISMATCH = "copy-mismatch"
 #: `api/crud_render.py` `TARGET_MOVED` and `FOLDER_LOCKED`.
 TARGET_MOVED = "target-moved"
 FOLDER_LOCKED = "folder-locked"
@@ -416,6 +433,15 @@ class RemoteBlobIndex:
         self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/touch")
 
     def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
+        """A font's or snapshot's key with no ``backend`` (`ContentStore.forget` of a copy
+        the worker could not read) goes to ``…/forget-copy``, where the API drops the
+        row: the worker writes no key only the API writes. Any other key only the API
+        writes is refused (a `CrudRefusedError` 403); an upload's copy is dropped through
+        `RemoteAssetRows.drop_copy`."""
+        if backend is None and key.startswith(FORGETTABLE_PREFIXES):
+            response = self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/forget-copy")
+            forgotten = response.json()
+            return None if forgotten is None else BlobStat.model_validate(forgotten)
         body = self._write("DELETE", f"/{_part(key)}", backend=backend)
         return None if body is None else BlobStat.model_validate(body)
 
@@ -539,6 +565,62 @@ class RemoteStoreFolders:
             "GET", _with(f"{BASE}/store-folders/work", _where(inbox))
         )
         return {int(folder_id) for folder_id in response.json()}
+
+
+class RemoteAssetRows:
+    """`AssetRows` over the routes. Each call has the client's own budget, as each SQL
+    call waited the pool's default for a connection; a `use` waits there on the API's
+    sweep's row lock, as the SQL `use` did."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    def _meta(self, method: str, asset_id: str, path: str = "") -> AssetMeta:
+        try:
+            response = self._client.request(method, f"{BASE}/assets/{_part(asset_id)}{path}")
+        except CrudRefusedError as error:
+            if error.status == 404:
+                raise AssetNotFoundError(asset_id) from error
+            raise
+        return AssetMeta.model_validate(response.json())
+
+    def get(self, asset_id: str) -> AssetMeta:
+        return self._meta("GET", asset_id)
+
+    def use(self, asset_id: str) -> AssetMeta:
+        return self._meta("POST", asset_id, "/use")
+
+    def adopt(self, meta: AssetMeta) -> None:
+        """The route's own refusals, a 404 ``no-copy`` (no copy of the id in the API's
+        blob store) and a 422 ``copy-mismatch`` (a copy of another kind or size), are the
+        `AssetRejectedError` of a fetched file that does not match: `RemoteAssets.ensure`
+        then reports the upload as not in the store and drops the copy. Any other refusal
+        stays `CrudRefusedError`, so no answer but those two drops a valid copy. (A 404
+        without the CRUD header, a pod without the route, is retried and ends as
+        `CrudUnavailableError`.)"""
+        try:
+            self._client.request(
+                "POST", f"{BASE}/assets/{_part(meta.id)}/adopt", json=meta.model_dump(mode="json")
+            )
+        except CrudRefusedError as error:
+            reason = error.problem.get("reason")
+            if (error.status, reason) in ((404, NO_COPY), (422, COPY_MISMATCH)):
+                raise AssetRejectedError(str(error.problem.get("detail", ""))) from error
+            raise
+
+    def drop_copy(self, asset_id: str) -> bool:
+        """Have the API drop its blob-store copy of an upload the worker could not read
+        (`ContentStore.delete` on the API: a copy whose object cannot be released stays
+        tracked). Whether it went."""
+        response = self._client.request("POST", f"{BASE}/assets/{_part(asset_id)}/drop-copy")
+        return bool(response.json()["dropped"])
+
+    def last_used(self, ids: Sequence[str]) -> dict[str, datetime | None]:
+        response = self._client.request("POST", f"{BASE}/assets/last-used", json={"ids": list(ids)})
+        return {
+            asset_id: None if stamp is None else datetime.fromisoformat(stamp)
+            for asset_id, stamp in response.json().items()
+        }
 
 
 def _where(inbox: Inbox, **query: Any) -> dict[str, Any]:

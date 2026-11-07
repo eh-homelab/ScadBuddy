@@ -68,6 +68,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.render import (
+    RemoteAssetRows,
     RemoteBlobIndex,
     RemoteBlobRefs,
     RemoteGeometryIndex,
@@ -2093,8 +2094,9 @@ def test_one_housekeeping_pass_prunes_old_exports_and_uploads_and_keeps_fresh_on
         export.mkdir(parents=True)
         (export / "model.scad").write_text("cube(1);")
     _aged(old_export)
-    old = deps.assets.put(SVG, "old.svg")
-    fresh = deps.assets.put(SVG.replace(b'"4"', b'"5"'), "fresh.svg")
+    store = cast(AssetStore, deps.assets)
+    old = store.put(SVG, "old.svg")
+    fresh = store.put(SVG.replace(b'"4"', b'"5"'), "fresh.svg")
     _aged(deps.assets.blob_path(old))
     _last_used_long_ago(pg_pool, old.id)
 
@@ -2115,7 +2117,7 @@ def test_housekeeping_leaves_a_volume_shared_with_the_api_alone(
     export = deps.paths.model_revision_dir("demo", "a" * 40)
     export.mkdir(parents=True)
     _aged(export)
-    upload = deps.assets.put(SVG, "old.svg")
+    upload = cast(AssetStore, deps.assets).put(SVG, "old.svg")
     _aged(deps.assets.blob_path(upload))
     _last_used_long_ago(pg_pool, upload.id)
 
@@ -2417,6 +2419,7 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         geometry=RemoteGeometryIndex(remote),
         index=RemoteBlobIndex(remote),
         folders=RemoteStoreFolders(static_render_crud()),
+        assets=RemoteAssetRows(remote),
     )
 
 

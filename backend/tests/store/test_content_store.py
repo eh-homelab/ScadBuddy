@@ -45,7 +45,8 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(
     content: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = content
-    first = await store.put("asset", b"<svg/>", name="a.svg", scope=SCOPE)
+    # Not "asset": the render worker may not store an upload's key, only the API (#5298).
+    first = await store.put("library", b"<svg/>", name="a.svg", scope=SCOPE)
     uploads = 0
     upload = store.backend.upload
 
@@ -55,13 +56,13 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(
         return await upload(*args, **kwargs)
 
     monkeypatch.setattr(store.backend, "upload", counting)
-    again = await store.put("asset", b"<svg/>", name="b.svg", scope=SCOPE)
+    again = await store.put("library", b"<svg/>", name="b.svg", scope=SCOPE)
     assert first == again
     assert uploads == 0  # not uploaded a second time
     assert await store.read(first) == b"<svg/>"
     usage = store.usage()
-    assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"asset": 6})
-    assert (await store.stat(f"asset-{first.sha256}")) is not None
+    assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"library": 6})
+    assert (await store.stat(f"library-{first.sha256}")) is not None
 
 
 class _ClosingBackend(LocalContentBackend):
@@ -156,7 +157,9 @@ async def test_sweep_takes_only_unreferenced_stale_pieces_and_snapshots(
     refs = BlobRefs(pool)
     for key in ("kept", "fresh", "stale"):
         await store.put("piece", key.encode(), name=key, scope=SCOPE, key=key)
-    await store.put("asset", b"asset", name="a.svg", scope=SCOPE, key="asset-x")
+    # The API's write: the render worker may not store an upload's key (#5298).
+    api = ContentStore(store.backend, BlobIndex(pool))
+    await api.put("asset", b"asset", name="a.svg", scope=SCOPE, key="asset-x")
     refs.add("kept", "job", "j1")
     old = datetime.now(UTC) - timedelta(hours=2)
     with pool.connection() as conn:

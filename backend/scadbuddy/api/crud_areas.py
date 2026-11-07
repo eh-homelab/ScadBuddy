@@ -10,10 +10,11 @@ from pydantic import BaseModel
 
 from scadbuddy.crud.guard import CrudCaller, crud_router
 
-#: Each caller's complete areas.
+#: Each caller's complete areas. The render ``assets`` area also covers
+#: ``…/render/blob-index/{key}/forget-copy``, added with it (#5298 Task 18).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
-    "render": ["settings", "jobs", "refs", "blob-index", "store-folders"],
+    "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets"],
     "print": [],
 }
 
