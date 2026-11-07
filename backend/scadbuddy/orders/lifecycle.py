@@ -68,6 +68,14 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
+from scadbuddy.orders.parts import (
+    ItemPart,
+    ItemPartRow,
+    PartNotFoundError,
+    PartStore,
+    rule_parts,
+    use_amount,
+)
 from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
@@ -330,12 +338,18 @@ def _settle_open(items: Sequence[OrderItem]) -> OrderStatus:
     return "quoted" if open_items and all(i.status == "approved" for i in open_items) else "draft"
 
 
+def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
+    return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
+
+
 class Lifecycle:
     def __init__(self, store: OrderStore, bus: EventBus | None, refs: BlobRefs | None = None):
         self.store = store
         self.bus = bus
         #: The slice quotes' holds (#4250 Ruling 3); None where nothing holds a file.
         self.refs = refs
+        #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
+        self.parts = PartStore(store)
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -1203,6 +1217,19 @@ class Lifecycle:
                 colours=resolved.colours,
                 output_id=output_id,
             )
+            rule = self.parts.rule(resolved.reference.slug, conn=conn)
+            given = rule_parts(rule.lines, resolved.colours)
+            if given:
+                self.parts.set_item_parts(conn, item.id, given)
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "item.parts_set",
+                    item_id=item.id,
+                    parts=_parts_detail(given),
+                    from_rule=True,
+                )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -2133,6 +2160,7 @@ class Lifecycle:
             changed: list[tuple[OrderItem, int | None]] = []
             if made >= item.quantity:
                 item = self.store.update_item(conn, item.id, status="fulfilled")
+                self._use_parts(conn, order, item, by)
             elif item.status == "printed":
                 # Some are still to make: the next print is for the rest (§5.4 `copies`).
                 item = self.store.update_item(conn, item.id, status="approved")
@@ -2193,6 +2221,7 @@ class Lifecycle:
             attempt = self.store.unaccept_fulfilment(conn, accepted.id)
             status = self._after(attempts[-1], item.status)
             item = self.store.update_item(conn, item.id, status=status)
+            self._return_parts(conn, order, item, by)
             self._event(
                 conn,
                 order,
@@ -2206,6 +2235,123 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, attempt.attempt)]))
         return item
+
+    # -- parts (job cost spec §11, #5543) --------------------------------------------------
+    # An item's parts leave stock when it becomes `fulfilled` and come back when it is
+    # unfulfilled, under the order's lock and then the parts' (in id order). Stock never
+    # refuses: it can go below zero. A failed attempt uses nothing.
+
+    def set_item_parts(
+        self, order_id: str, item_id: str, parts: Sequence[ItemPart], by: Actor
+    ) -> list[ItemPartRow]:
+        """The parts one unit of the item uses, replaced whole. Refused once the order is
+        ended, and for a fulfilled item, whose parts are already out of stock (unfulfil it
+        first), so an unfulfil gives back what was taken."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.status == "fulfilled":
+                raise LifecycleError(
+                    "item_parts_used",
+                    f"item {item_id} is fulfilled: its parts are out of stock; unfulfil it"
+                    " to change them",
+                    items=[item.id],
+                )
+            try:
+                self.parts.set_item_parts(conn, item.id, parts)
+            except PartNotFoundError as error:
+                raise LifecycleError("part_not_found", str(error)) from None
+            self._event(
+                conn, order, by, "item.parts_set", item_id=item.id, parts=_parts_detail(parts)
+            )
+            rows = self.parts.item_parts([item.id], conn=conn)[item.id]
+        self._told(_Change(order, [(item, None)]))
+        return rows
+
+    def _use_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
+        """The item's parts times its quantity out of stock, each a `material` cost entry
+        (``part:<item>:<part>``) at the part's unit cost now, when the part is priced in the
+        order's currency and costs anything."""
+        rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used == 0]
+        if not rows:
+            return
+        locked = self.parts.lock_parts(conn, [r.part_id for r in rows])
+        used: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda r: r.part_id):
+            part = locked[row.part_id]
+            count = row.per_unit * item.quantity
+            amount = use_amount(part.unit_cost_minor, count)
+            entry_id: str | None = None
+            if part.currency == order.currency and amount > 0:
+                entry, _ = self.store.insert_cost_entry(
+                    conn,
+                    order.id,
+                    CostEntryInput(
+                        order_item_id=item.id,
+                        kind="material",
+                        amount_minor=amount,
+                        note=f"{count} x {part.name}",
+                        source=f"part:{item.id}:{part.id}",
+                    ),
+                    created_by=by,
+                )
+                entry_id = entry.id
+            costed = amount if entry_id is not None else None
+            self.parts.move(
+                conn,
+                part,
+                "use",
+                -count,
+                by,
+                amount_minor=costed,
+                order_id=order.id,
+                order_item_id=item.id,
+            )
+            self.parts.set_used(conn, item.id, part.id, count)
+            used.append(
+                {"part_id": part.id, "count": count, "entry_id": entry_id, "amount_minor": costed}
+            )
+        self._event(conn, order, by, "parts.used", item_id=item.id, parts=used)
+
+    def _return_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
+        """What the item's fulfilment took, back in stock at the cost it was taken at, and
+        its cost entries removed."""
+        rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used > 0]
+        if not rows:
+            return
+        locked = self.parts.lock_parts(conn, [r.part_id for r in rows])
+        entries = {
+            e.source: e
+            for e in self.store.cost_entries(order.id, conn=conn)
+            if e.kind == "material" and e.source is not None
+        }
+        returned: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda r: r.part_id):
+            part = locked[row.part_id]
+            entry = entries.get(f"part:{item.id}:{part.id}")
+            if entry is not None:
+                self.store.delete_cost_entry(conn, order.id, entry.id)
+            self.parts.move(
+                conn,
+                part,
+                "return",
+                row.used,
+                by,
+                amount_minor=None if entry is None else entry.amount_minor,
+                unit_cost=self.parts.used_at(conn, item.id, part.id),
+                order_id=order.id,
+                order_item_id=item.id,
+            )
+            self.parts.set_used(conn, item.id, part.id, 0)
+            returned.append(
+                {
+                    "part_id": part.id,
+                    "count": row.used,
+                    "entry_id": None if entry is None else entry.id,
+                }
+            )
+        self._event(conn, order, by, "parts.returned", item_id=item.id, parts=returned)
 
     # -- the print path (§5.4, #4719) -----------------------------------------------------
 

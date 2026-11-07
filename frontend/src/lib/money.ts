@@ -24,6 +24,25 @@ export function formatMoney(minor: number, currency: string, exponent: number): 
 }
 
 /**
+ * #5543 — a rate in minor units with its fraction kept (a part's `unit_cost_minor`, a
+ * decimal string such as "5.99" for 5.99 cents), shown with up to four more places than
+ * the currency's own, so a cent's fraction is not rounded away.
+ */
+export function formatUnitCost(minor: string, currency: string, exponent: number): string {
+  const major = Number(minor) / 10 ** exponent
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent + 4,
+    }).format(major)
+  } catch {
+    return `${major.toFixed(exponent + 4)} ${currency}`
+  }
+}
+
+/**
  * The minor units a typed major amount ("12.34") means at `exponent` decimal places, or
  * null for anything else, a finer amount included ("12.345" at 2): never rounded.
  */

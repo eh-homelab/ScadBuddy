@@ -330,3 +330,75 @@ A new page, Orders → Profit, `GET /orders/reports/profit?from=&to=&group=model
 4. The profit report (§6.4).
 5. The automatic writers: the assistant entry (with the request-to-model project) and
    payment fees (with #4957).
+6. Parts inventory (§11, #5543).
+
+## 11. Parts inventory (phase 6)
+
+Approved by the owner on 2026-11-06 (#5543). Non-filament parts: keychain hooks, rings,
+magnets.
+
+### 11.1 Design
+
+- **Parts.** Orders → Parts page. A part has a name, a supplier, a link, a pack size and a
+  pack price with tax. Unit cost = pack price / pack size. When stock is added, the unit
+  cost becomes the weighted average of the stock on hand and the new pack. Old orders keep
+  their cost.
+- **Stock.** On-hand count and a low-stock level. "Add stock" records a bought pack.
+  "Adjust" corrects a count and needs a note. Every change is on an audit line.
+- **Parts rule on the model.** A model can name the parts each unit uses. A part can depend
+  on colours, for example "pink in the colours → pink hook, else silver hook". When an item
+  is added, the rule fills in the item's parts. The operator can change them on the item. A
+  model with no rule: parts are set on the item by hand.
+- **Use.** When an item is fulfilled, its parts × quantity come out of stock. Each part
+  becomes a `material` cost entry with source `part:<item>:<part>`, so it is in the job's
+  real cost (§4.4). Unfulfil puts the parts back and removes the entry. A failed print uses
+  no parts.
+- **Warnings.** Low stock shows on the Parts page and the orders list. An order whose items
+  need more than is on hand shows "short: 3 silver hooks". Stock can go below zero; it never
+  blocks.
+- **Quote warning.** The parts cost goes into the suggested price (§6.3).
+- **Assistant tools:** `part_list`, `part_stock_add`, `order_item_parts_set`.
+
+Out of scope: purchase orders, more than one supplier per part, automatic reorder.
+
+### 11.2 As built (#5543)
+
+The builder's calls, each also a comment on #5543:
+
+- **Tables** (`20261107T0015Z_parts_inventory.sql`): `parts`, `part_stock_moves` (the audit
+  line: `add`, `adjust`, `use`, `return`, with the count and unit cost after each),
+  `model_part_rules` (one row per slug) and `order_item_parts` (an item's parts per unit and
+  `used`, how many its fulfilment took). A part is never deleted: rules, items and moves
+  name it. Its name is unique in any case.
+- **Unit cost** is a rate, `numeric(20, 6)` minor units, so a pack of 100 for 5.99 costs
+  5.99 minor units each and an average does not drift. Every amount made from it (a cost
+  entry) is integer minor units, rounded once, half up. With nothing on hand (or less than
+  nothing) a new pack's own cost replaces the average.
+- **A pack edit** (`PATCH /parts/{id}`) sets what the next "Add stock" records; the unit cost
+  changes only when nothing is on hand to average. "Add stock" may name a new pack price,
+  which becomes the part's. One "Add stock" moves at most 1,000,000 units (its packs times
+  the pack size) and leaves at most 1,000,000,000 on hand; past either it is a 422.
+- **Currency.** A part is priced in the shop's `orders_currency` when it is made. A part used
+  on an order in another currency still leaves stock, but writes no cost entry (one currency
+  is never added to another, §5).
+- **Rule shape.** A rule is lines of `{per_unit, part_id, when: [{colour, part_id}]}`: the
+  first `when` whose colour the item has in any slot (in any case), else `part_id`, else
+  nothing. A part two lines name is summed. The rule is applied once, when the item is
+  added; items already added keep their parts. A `request` item gets its design later
+  through a revision (`add_revision`), which does not apply the rule: the item was added
+  with no model, and its parts are set on the item by hand, as for a model with no rule. It lives in Postgres keyed by slug, not in
+  the template's `model.json`, so a rule change never moves a template's revision.
+- **Changing an item's parts** is refused (`item_parts_used`) while the item is fulfilled,
+  so an unfulfil returns exactly what was taken; it is allowed in every other state of an
+  open order, and refused once the order is closed or cancelled.
+- **Return** puts the units back at the unit cost the use took them at (from its `use`
+  line), averaged into what is on hand, and deletes the `part:` cost entry.
+- **Short** (`GET /orders/{id}/parts`) is per order: its items not yet fulfilled nor
+  cancelled, their parts × quantity, against each part's whole stock on hand. Other orders'
+  needs are not reserved.
+- **Quote warning.** `GET /orders/history/unit-cost` takes `item_id`: each past job's own
+  `part:` entries leave its cost, and the item's parts at today's unit costs
+  (`parts_unit_minor`) are added per unit, in the unit cost, the `other` part and the
+  suggested price. With no history it still shows nothing.
+- **Locks.** A part route holds only the part's row lock; the lifecycle takes the order's,
+  then the parts' in id order.

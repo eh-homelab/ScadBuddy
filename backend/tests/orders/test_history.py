@@ -5,6 +5,7 @@ suggested price. Every job's time is pinned: the WSL clock jumps."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -296,3 +297,30 @@ def test_a_mixed_history_names_filament_from_the_slice_jobs_alone(shop: Shop, po
     # (50 + 36 + 20) over 2 units.
     assert (answer.jobs, answer.unit_cost_minor) == (2, 53)
     assert (answer.main_reason, answer.main_reason_minor) == ("filament", 15)
+
+
+def test_the_items_parts_replace_the_jobs_own_once(shop: Shop, pool: PgPool) -> None:
+    """§11 (#5543): a job's parts entries (``part:``) leave its cost and this item's parts
+    at today's unit cost take their place, so they are counted once."""
+    order, item = job(shop, pool, 3, cost=100, quantity=2)
+    shop.lifecycle.add_cost_entry(
+        order.id,
+        CostEntryInput(
+            order_item_id=item.id,
+            kind="material",
+            amount_minor=40,
+            source=f"part:{item.id}:hook",
+        ),
+        BY,
+    )
+
+    plain = unit_cost_history(shop.rows, "demo", USD, markup_percent="0", now=NOW)
+    parts = unit_cost_history(
+        shop.rows, "demo", USD, markup_percent="0", now=NOW, parts_unit_minor=Decimal("30.5")
+    )
+
+    assert plain.unit_cost_minor == 70
+    assert plain.parts_unit_minor is None
+    # (100 + 2 x 30.5) over 2 units: 80.5, rounded once.
+    assert (parts.unit_cost_minor, parts.parts_unit_minor) == (81, 31)
+    assert (parts.main_reason, parts.main_reason_minor) == ("other", 81)

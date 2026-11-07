@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import type { UnitCostHistory } from '../../../api/types'
 import { mockSettings } from '../../handlers'
+import { partsUnitOf } from './parts'
 import { fieldProblem, minorExponent } from './state'
 
 /**
@@ -53,13 +54,19 @@ export const handlers = [
       main_reason: null,
       main_reason_minor: null,
       suggested_unit_price_minor: null,
+      parts_unit_minor: null,
       margin_percent: null,
       warning: false,
       below_cost: false,
     }
     if (!seed || seed.unit_cost_minor == null) return HttpResponse.json(answer)
-    const cost = seed.unit_cost_minor
-    Object.assign(answer, seed, { suggested_unit_price_minor: suggested(cost, markup, thin) })
+    // #5543: the item's parts at today's unit costs join the unit cost (the seed has none
+    // of its own, so nothing is swapped out).
+    const itemId = query.get('item_id')
+    const parts = itemId ? partsUnitOf(itemId, currency) : null
+    const cost = seed.unit_cost_minor + Math.round(parts ?? 0)
+    answer.parts_unit_minor = parts === null ? null : Math.round(parts)
+    Object.assign(answer, seed, { unit_cost_minor: cost, suggested_unit_price_minor: suggested(cost, markup, thin) })
     if (price !== null) {
       const unit = Number(price)
       const percent = unit > 0 ? ((unit - cost) * 100) / unit : null

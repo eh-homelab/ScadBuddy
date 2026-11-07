@@ -26,6 +26,7 @@ import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, 
 import { pushRevision } from './revisions'
 import { orderRow } from './costs'
 import { productOf } from './report'
+import { fillFromRule, returnParts, useParts } from './parts'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -493,6 +494,7 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
       added(order, created, afterAcceptance)
       // `Lifecycle.add_item`: the design it is made with is its revision 1.
       pushRevision(order, created, resolved.reference, resolved.colours, '')
+      fillFromRule(order, created)
       rederive(order)
       return HttpResponse.json(created, { status: 201 })
     } catch (error) {
@@ -1080,8 +1082,10 @@ export const handlers = [
       if (!FULFILLABLE.has(found.status) && found.status !== 'printed') throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       attempt.accepted_at = now()
       const made = attemptsOf(found.id).filter((f) => f.accepted_at).reduce((sum, f) => sum + f.quantity, 0)
-      if (made >= found.quantity) found.status = 'fulfilled'
-      else if (found.status === 'printed') found.status = 'approved'
+      if (made >= found.quantity) {
+        found.status = 'fulfilled'
+        useParts(order, found)
+      } else if (found.status === 'printed') found.status = 'approved'
       event(order, 'fulfilment.accepted', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, made })
       rederive(order)
       return attempt
@@ -1179,6 +1183,7 @@ export const handlers = [
       accepted.accepted_at = null
       found.status = productionOf(found.id).at(-1)!.outcome === 'failed' ? 'failed' : 'approved'
       found.updated_at = now()
+      returnParts(order, found)
       event(order, 'item.unfulfilled', { item_id: found.id, fulfilment_id: accepted.id, attempt: accepted.attempt, to: found.status })
       rederive(order)
       return found

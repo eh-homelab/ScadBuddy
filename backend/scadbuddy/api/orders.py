@@ -827,7 +827,9 @@ async def estimate(
         "With `unit_price_minor`, `warning` says that price leaves a margin below "
         "`orders_thin_margin_percent`, and `below_cost` that it is below the unit cost "
         "itself (a price above the cost can still warn with a thin margin). Advice only. "
-        "With no history, `jobs` is 0 and nothing warns."
+        "With no history, `jobs` is 0 and nothing warns. With `item_id` (the item being "
+        "quoted), its parts at today's unit costs (`parts_unit_minor`, #5543) replace the "
+        "past jobs' own parts entries in the unit cost and the suggestion."
     ),
 )
 async def unit_cost(
@@ -836,9 +838,17 @@ async def unit_cost(
     slug: Annotated[str, Query(min_length=1, max_length=200)],
     currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
     unit_price_minor: Annotated[int | None, Query(ge=0)] = None,
+    item_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
 ) -> UnitCostHistory:
-    _path(slug)
+    _path(slug, *([item_id] if item_id is not None else []))
     runtime = settings.snapshot().runtime
+    parts_unit: Decimal | None = None
+    if item_id is not None:
+        parts_unit = await asyncio.to_thread(
+            orders.lifecycle.parts.unit_cost_of_item,
+            item_id,
+            currency or runtime.orders_currency,
+        )
     return await asyncio.to_thread(
         unit_cost_history,
         orders.store,
@@ -848,6 +858,7 @@ async def unit_cost(
         now=datetime.now(UTC),
         currency=currency,
         unit_price_minor=unit_price_minor,
+        parts_unit_minor=parts_unit,
     )
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import type { OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
+import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, itemOpen, OPEN_FOR_EDITS, TAKES_ITEMS } from '../components/orders/afterAcceptance'
@@ -18,6 +18,7 @@ import { itemPrice, parseUnitPrice, UNIT_PRICE_HINT, unitPrice } from '../compon
 import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
 import { PrintItem } from '../components/orders/PrintItem'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
+import { ItemPartsEditor, PartsShort } from '../components/orders/ItemParts'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
 import { UnfulfilDialog } from '../components/orders/Unfulfil'
@@ -63,6 +64,8 @@ export function OrderPage() {
   const events = useAsync(() => api.orderEvents(id), [id], [`order:${id}`])
   // #5326 — the money view, and the header's loss or thin-margin badge.
   const costs = useAsync(() => api.orderCosts(id), [id], [`order:${id}`])
+  // #5543 — each item's parts, and what the open items are short of.
+  const orderParts = useAsync(() => api.orderParts(id), [id], [`order:${id}`])
   // #4953 — `orders_allow_unfulfil`; on until the settings answer, as the backend's default.
   const unfulfilAllowed = useAsync(() => api.getSettings(), []).data?.orders_allow_unfulfil ?? true
   const detail = view.data
@@ -117,6 +120,7 @@ export function OrderPage() {
     view.refresh()
     events.refresh()
     costs.refresh()
+    orderParts.refresh()
   }
 
   async function act(action: () => Promise<unknown>) {
@@ -413,6 +417,7 @@ export function OrderPage() {
           </CardContent>
         </Card>
 
+        {orderParts.data?.order_id === order.id && <PartsShort parts={orderParts.data} />}
         {costs.data?.order_id === order.id ? (
           <Card size="sm">
             <CardContent>
@@ -453,7 +458,16 @@ export function OrderPage() {
       </div>
       {adds && <AddItemDialog open={adding} orderId={order.id} mode={adds} order={order} onAdded={reload} onClose={() => setAdding(false)} />}
       {current && (
-        <ItemDrawer key={current.id} detail={detail} item={current} slices={slices} unfulfilAllowed={unfulfilAllowed} onClose={() => setOpenItem(null)} onChanged={reload} />
+        <ItemDrawer
+          key={current.id}
+          detail={detail}
+          item={current}
+          parts={orderParts.data?.order_id === order.id ? (orderParts.data.items.find((i) => i.item_id === current.id)?.parts ?? []) : undefined}
+          slices={slices}
+          unfulfilAllowed={unfulfilAllowed}
+          onClose={() => setOpenItem(null)}
+          onChanged={reload}
+        />
       )}
     </div>
   )
@@ -462,6 +476,7 @@ export function OrderPage() {
 function ItemDrawer({
   detail,
   item,
+  parts,
   slices,
   unfulfilAllowed,
   onClose,
@@ -469,6 +484,8 @@ function ItemDrawer({
 }: {
   detail: OrderDetail
   item: OrderItemDetail
+  /** #5543 — the item's parts per unit; undefined until read. */
+  parts: ItemPartRow[] | undefined
   slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'dismiss'>
   /** #4953 — `orders_allow_unfulfil`. */
   unfulfilAllowed: boolean
@@ -684,12 +701,13 @@ function ItemDrawer({
         )}
       </dl>
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
+      {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
         // left `quoted` (added after acceptance, or by the agent) is accepted here (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
       <PrintItem order={order} item={item} onChanged={onChanged} />

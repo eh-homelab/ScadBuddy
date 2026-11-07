@@ -638,6 +638,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
   `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
   `orders_profit_report` (read) and `order_list`'s new filters.
+  Job cost phase 6, parts (#5543, §11): `orders/parts.py` (`PartStore`, the `parts`,
+  `part_stock_moves`, `model_part_rules` and `order_item_parts` rows; a unit cost is a
+  `numeric` rate, each cost entry rounded once), routes `api/parts.py` (`/parts…`,
+  `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`). `Lifecycle.add_item` copies
+  the model's rule; `accept_fulfilment` making an item `fulfilled` takes its parts out of stock
+  as `material` cost entries `part:<item>:<part>` (`parts.used`), `unfulfil_item` gives them
+  back (`parts.returned`); a fulfilled item's parts are fixed (`item_parts_used`). The
+  unit-cost history takes `item_id` (`parts_unit_minor`). Agent `part_list`, `part_stock_add`,
+  `order_item_parts_set`.
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
