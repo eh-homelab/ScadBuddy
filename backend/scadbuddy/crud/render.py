@@ -42,9 +42,11 @@ sent again is the same row (ON CONFLICT), a use stamps the row again.
 and `InstallSlots` (the render leases, pin holds and install slots) over the routes, with
 the same names, signatures and answers. The worker chooses each token, so every take and
 claim is natural; a take that waits on the API's removal keeps waiting (`REMOVAL_RUNNING`),
-as the SQL take waited on `REMOVAL_LOCK`. A renew or release the API refuses (no row of
-that token, a slot another token holds) is a `CrudRefusedError`, which the renewing loop
-logs, as it logs any failed renewal; the SQL path renewed nothing there silently.
+as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses (no row of that token,
+a slot another token holds) is a `CrudRefusedError`, which the renewing loop logs, as it
+logs any failed renewal; the SQL path renewed nothing there silently. A slot's release
+that finds another token on it (`NOT_HOLDER`: ours lapsed and was taken) is released,
+as the SQL path's was.
 """
 
 from __future__ import annotations
@@ -100,7 +102,10 @@ FOLDER_LOCKED = "folder-locked"
 #: `api/crud_render.py` `REMOVAL_RUNNING`: a lease or pin hold the API's removal kept
 #: waiting for its `LEASE_LOCK_WAIT`, sent again.
 REMOVAL_RUNNING = "removal-running"
-#: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait.
+#: `api/crud_render.py` `NOT_HOLDER`: a slot another token holds.
+NOT_HOLDER = "not-holder"
+#: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait
+#: (`tests/crud/test_crud_library_leases.py` checks that the two agree).
 TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
 #: A problem's RFC 9457 members; every other member is an extension of the `ApiError`.
 _PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
@@ -705,7 +710,13 @@ class RemoteInstallSlots:
         self._client.request("PUT", f"{BASE}/install-slots/{slot}?token={token}")
 
     def drop(self, slot: int, token: uuid.UUID) -> None:
-        self._client.request("DELETE", f"{BASE}/install-slots/{slot}?token={token}")
+        """A slot another token holds is ours no longer: it lapsed and was taken."""
+        try:
+            self._client.request("DELETE", f"{BASE}/install-slots/{slot}?token={token}")
+        except CrudRefusedError as error:
+            if (error.status, error.problem.get("reason")) != (409, NOT_HOLDER):
+                raise
+            logger.info("an install slot lapsed before its release", extra={"slot": slot})
 
 
 def _where(inbox: Inbox, **query: Any) -> dict[str, Any]:
