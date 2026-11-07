@@ -27,6 +27,7 @@ from scadbuddy.core.problems import (
     install_problem_handlers,
     problem_response,
 )
+from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.routes import router, visitor_router
@@ -95,6 +96,8 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     )
     app.state.settings = settings
     app.state.crud = client
+    # Parsed once here, not on each request (`routes.py` `_client`).
+    app.state.trusted_proxies = parse_cidr_list(settings.trusted_proxies)
     install_problem_handlers(app)
 
     @app.exception_handler(CrudRefusedError)

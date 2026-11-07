@@ -157,6 +157,28 @@ def test_a_crud_refusal_passes_through_with_its_retry_after(
     assert r.json() == limited
 
 
+def test_a_trusted_proxy_names_the_client_and_is_parsed_once(
+    edge_env: None, crud_mock: respx.Router, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scadbuddy.storefront.app as edge
+    from scadbuddy.core.proxies import parse_cidr_list as real
+
+    parsed: list[str] = []
+
+    def counting(raw: str) -> Any:
+        parsed.append(raw)
+        return real(raw)
+
+    monkeypatch.setattr(edge, "parse_cidr_list", counting)
+    app = create_app(load(trusted_proxies="203.0.113.0/24"))
+    with TestClient(app, client=CLIENT) as c:
+        for _ in range(2):
+            r = c.get("/api/store/v1/listings", headers={"X-Forwarded-For": "198.51.100.7"})
+            assert r.status_code == 200
+    assert crud_mock["listings"].calls.last.request.headers[CLIENT_HEADER] == "198.51.100.7"
+    assert parsed == ["203.0.113.0/24"]
+
+
 def test_a_good_cookie_keeps_its_visitor(edge_env: None, crud_mock: respx.Router) -> None:
     with TestClient(create_app(load()), client=CLIENT) as c:
         first = c.get("/api/store/v1/listings").headers["set-cookie"].split(";")[0]

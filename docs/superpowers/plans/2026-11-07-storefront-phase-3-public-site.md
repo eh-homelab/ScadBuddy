@@ -120,7 +120,7 @@ Each PR is based on `main` after the one before it merged (no stacked auto-merge
 **Interfaces:**
 - Consumes: `core/proxies.py` `parse_cidr_list`; `core/problems.py` `ApiError` and the app's problem handler.
 - Produces:
-  - `class StorefrontSettings(BaseSettings)` (`env_prefix="SCADBUDDY_"`): `api_internal_url: str`, `service_token_file: Path | None = None`, `service_bootstrap_file: Path | None = None` (exactly one required), `storefront_cookie_key_file: Path` (refused when the file holds fewer than 32 bytes), `storefront_public_url: str` (an `https://` origin with no path), `trusted_proxies: str = ""`, `storefront_dist: Path = Path("/app/frontend/dist")`, `log_level: str = "INFO"`.
+  - `class StorefrontSettings(BaseSettings)` (`env_prefix="SCADBUDDY_"`): `api_internal_url: str`, `service_token_file: Path | None = None`, `service_bootstrap_file: Path | None = None` (exactly one required), `storefront_cookie_key_file: Path` (refused when the file holds fewer than 32 bytes), `storefront_public_url: str` (an `https://` origin with no path), `trusted_proxies: str = ""` (parsed once, into `app.state.trusted_proxies`), `log_level: str = "INFO"`. Task 11 (the public page) adds `storefront_dist: Path = Path("/app/frontend/dist")`, the one that serves it.
   - `FORBIDDEN_ENV: Final = ("SCADBUDDY_DATABASE_URL", "PGPASSWORD", "PGPASSFILE", "SCADBUDDY_SECRET_KEY_FILE")`.
   - `class EdgeRefusal(Exception)` with `reasons: list[str]`; `check_environment(environ: Mapping[str, str]) -> None` raises it naming each `FORBIDDEN_ENV` variable set.
   - `STOREFRONT_PORT: Final = 8083`; `STOREFRONT_PREFIX: Final = "/api/store/v1"`.

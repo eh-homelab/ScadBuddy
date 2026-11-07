@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.proxies import client_address, parse_cidr_list
+from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 
@@ -35,7 +35,7 @@ def _visitor(request: Request) -> str:
 
 def _client(request: Request) -> str:
     """The browser's address: a trusted proxy's ``X-Forwarded-For``, else the peer."""
-    trusted = parse_cidr_list(request.app.state.settings.trusted_proxies)
+    trusted = request.app.state.trusted_proxies
     peer = request.client.host if request.client else None
     address = client_address(peer, request.headers.get("x-forwarded-for"), trusted)
     if address is None:
