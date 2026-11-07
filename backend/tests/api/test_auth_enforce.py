@@ -21,7 +21,12 @@ from scadbuddy.auth.check import FORBIDDEN, SIGNED_OUT
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import SESSION_COOKIE
 from scadbuddy.auth.oidc import OidcClient
-from scadbuddy.auth.service_credentials import ServiceCaller, TokenReader
+from scadbuddy.auth.service_credentials import (
+    LEGACY_CALLERS,
+    ServiceCaller,
+    ServiceCredentialStore,
+    TokenReader,
+)
 from scadbuddy.auth.start_check import LoginNotUsableError
 from scadbuddy.core.settings import AuthMode, Settings
 from scadbuddy.main import create_app
@@ -244,8 +249,13 @@ def test_a_revoked_session_closes_its_socket_with_4401(
 def _bearer(client: TestClient, settings: Settings, caller: ServiceCaller) -> dict[str, str]:
     app = client.app
     assert isinstance(app, FastAPI)
-    kek = getattr(app.state, STATE_ATTR).settings_store.kek
-    token = TokenReader(caller, settings.database_url, kek).token()
+    store = getattr(app.state, STATE_ATTR).settings_store
+    if caller in LEGACY_CALLERS:
+        token = TokenReader(caller, settings.database_url, store.kek).token()
+    else:
+        # No sealed credential (#5298): the caller exchanges its proof, as in prod.
+        issued = ServiceCredentialStore(store.pool).issue(caller, "bootstrap", rate_limited=False)
+        token = issued.token
     assert token is not None
     return {"Authorization": f"Bearer {token}"}
 
