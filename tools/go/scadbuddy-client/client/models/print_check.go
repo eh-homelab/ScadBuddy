@@ -17,6 +17,8 @@ type PrintCheck struct {
 	nozzle_plan NozzlePlanable
 	// The objects property
 	objects PrintCheck_PrintCheck_objectsable
+	// The process_part_settings property
+	process_part_settings PartSettingsable
 	// The rack property
 	rack RackPickViewable
 	// The warnings property
@@ -182,6 +184,16 @@ func (m *PrintCheck) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["process_part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePartSettingsFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProcessPartSettings(val.(PartSettingsable))
+		}
+		return nil
+	}
 	res["rack"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateRackPickViewFromDiscriminatorValue)
 		if err != nil {
@@ -223,6 +235,12 @@ func (m *PrintCheck) GetObjects() PrintCheck_PrintCheck_objectsable {
 	return m.objects
 }
 
+// GetProcessPartSettings gets the process_part_settings property value. The process_part_settings property
+// returns a PartSettingsable when successful
+func (m *PrintCheck) GetProcessPartSettings() PartSettingsable {
+	return m.process_part_settings
+}
+
 // GetRack gets the rack property value. The rack property
 // returns a RackPickViewable when successful
 func (m *PrintCheck) GetRack() RackPickViewable {
@@ -251,6 +269,12 @@ func (m *PrintCheck) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteObjectValue("objects", m.GetObjects())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("process_part_settings", m.GetProcessPartSettings())
 		if err != nil {
 			return err
 		}
@@ -302,6 +326,11 @@ func (m *PrintCheck) SetObjects(value PrintCheck_PrintCheck_objectsable) {
 	m.objects = value
 }
 
+// SetProcessPartSettings sets the process_part_settings property value. The process_part_settings property
+func (m *PrintCheck) SetProcessPartSettings(value PartSettingsable) {
+	m.process_part_settings = value
+}
+
 // SetRack sets the rack property value. The rack property
 func (m *PrintCheck) SetRack(value RackPickViewable) {
 	m.rack = value
@@ -318,11 +347,13 @@ type PrintCheckable interface {
 	GetErrors() []string
 	GetNozzlePlan() NozzlePlanable
 	GetObjects() PrintCheck_PrintCheck_objectsable
+	GetProcessPartSettings() PartSettingsable
 	GetRack() RackPickViewable
 	GetWarnings() []FilamentWarningable
 	SetErrors(value []string)
 	SetNozzlePlan(value NozzlePlanable)
 	SetObjects(value PrintCheck_PrintCheck_objectsable)
+	SetProcessPartSettings(value PartSettingsable)
 	SetRack(value RackPickViewable)
 	SetWarnings(value []FilamentWarningable)
 }
