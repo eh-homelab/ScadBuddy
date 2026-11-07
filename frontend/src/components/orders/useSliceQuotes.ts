@@ -33,9 +33,10 @@ interface Failure {
 
 /**
  * #5585 — what the follow of a `running` activity row found: its operation still running,
- * or ended (the row was stale), with its failure when it failed for a reason it names.
+ * or ended (the row was stale), with its failure when it failed for a reason it names, or
+ * `unknown` when its first read was lost (it may be running).
  */
-type Probe = { running: true } | { running: false; failure?: Failure }
+type Probe = { running: true | 'unknown' } | { running: false; failure?: Failure }
 
 /** An operation's activity row id is `operation:<id>`; a quote's subject `order_item:<id>`. */
 const OPERATION = 'operation:'
@@ -216,6 +217,15 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
               if (current.current === forOrder) quoted.current()
             },
             (cause: unknown) => {
+              if (!shown && mayHaveRun(cause)) {
+                // Its first read was lost: it may be running still, so it hides the item's
+                // failures as a running one does. Neither kept nor marked followed: the
+                // next reload follows its row again, or, once the row is gone, shows them.
+                told({ running: 'unknown' })
+                probes.current.delete(operationId)
+                followed.current.delete(operationId)
+                return
+              }
               // A failure it names, with a start to order it by; not a lost answer, nor a
               // pruned operation's 404.
               const failed = !mayHaveRun(cause) && !(cause instanceof ApiError && cause.status === 404) && !Number.isNaN(started)
@@ -272,9 +282,9 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
       void (async () => {
         await running
         const found = await Promise.all(itemProbes.get(item.id) ?? [])
-        if (found.some((p) => p.running) || seen.current.runs.has(item.id) || current.current !== forOrder) return
+        if (found.some((p) => p.running !== false) || seen.current.runs.has(item.id) || current.current !== forOrder) return
         const stale = found
-          .map((p) => (p.running ? undefined : p.failure))
+          .map((p) => (p.running === false ? p.failure : undefined))
           .reduce<Failure | undefined>((a, b) => (!a || (b && b.startedAt > a.startedAt) ? b : a), undefined)
         let row: ActivityPage['items'][number] | undefined
         try {

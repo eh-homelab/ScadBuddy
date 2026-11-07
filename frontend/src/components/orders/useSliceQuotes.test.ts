@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, OPERATION_UNFINISHED } from '../../api/client'
+import { api, ApiError, OPERATION_UNFINISHED, UNANSWERED } from '../../api/client'
 import type { Activity, OperationAccepted, OrderItemDetail, Quote, SliceQuoteRequest } from '../../api/types'
 import { seedActivity } from '../../mocks/features/activity'
 import { useSliceQuotes } from './useSliceQuotes'
@@ -304,6 +304,31 @@ describe('useSliceQuotes (#4693)', () => {
     const { result } = renderHook(() => useSliceQuotes('order-1', items, vi.fn()))
     await waitFor(() => expect(result.current.runs.get('item-1')?.error).toContain('No printer takes this plate.'))
     expect(result.current.runs.get('item-1')).toMatchObject({ startedAt: Date.parse('2026-11-06T14:04:00Z') })
+  })
+
+  it('shows no old failure while a running row’s first read was lost, and shows it once the row is gone (#5585)', async () => {
+    const running = vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-1', subject: 'order_item:item-1', created_at: '2026-11-06T15:00:00Z' }], next_cursor: null })
+    const failed = vi.spyOn(api, 'failedQuotes').mockResolvedValue({ items: [{ ...FAILED, id: 'operation:op-old', subject: 'order_item:item-1' }], next_cursor: null })
+    const lost = new ApiError({ type: UNANSWERED, title: 'Bad Gateway', status: 502 })
+    const followed = vi.spyOn(api, 'followQuote').mockImplementation((id) =>
+      Promise.reject(id === 'op-1' ? lost : new ApiError(422, 'An old failure.')),
+    )
+    const first = [ITEM] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, vi.fn()), { initialProps: { items: first } })
+    await waitFor(() => expect(followed).toHaveBeenCalledWith('op-1', expect.any(AbortSignal), expect.any(Function)))
+    await act(async () => {})
+    expect(result.current.runs.has('item-1')).toBe(false)
+    expect(followed).not.toHaveBeenCalledWith('op-old', expect.anything())
+    expect(failed).not.toHaveBeenCalled()
+    // A reload with the row still running follows it again, and its first read is lost again.
+    rerender({ items: [...first] })
+    await waitFor(() => expect(followed).toHaveBeenCalledTimes(2))
+    await act(async () => {})
+    expect(result.current.runs.has('item-1')).toBe(false)
+    // Once the row is gone, the old failure is the item's newest again.
+    running.mockResolvedValue({ items: [], next_cursor: null })
+    rerender({ items: [...first] })
+    await waitFor(() => expect(result.current.runs.get('item-1')?.error).toContain('An old failure.'))
   })
 
   it('shows no old failure on a reload while an earlier follow’s first read is still out (#5585)', async () => {
