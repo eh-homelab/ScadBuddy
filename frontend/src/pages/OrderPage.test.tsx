@@ -279,4 +279,36 @@ describe('OrderPage payment requests (#4957)', () => {
     await screen.findByLabelText('Received (USD)')
     expect(screen.queryByRole('combobox', { name: 'For request' })).not.toBeInTheDocument()
   })
+
+  it('names a provider in the history, not the browser', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'paid')
+    render(ORDER_ACCEPTED)
+    const history = await screen.findByRole('region', { name: 'Audit line' })
+    const added = (await within(history).findAllByText('payment.added'))[0]!.closest('li')!
+    expect(added).toHaveTextContent('Fake (provider)')
+    expect(within(history).getByText('cost.added').closest('li')).toHaveTextContent('Fake (provider)')
+    expect(within(history).getByText('payment_request.opened').closest('li')).toHaveTextContent('browser')
+  })
+
+  it('labels a provider payment with the provider’s own label', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'paid')
+    render(ORDER_ACCEPTED)
+    expect(within(await screen.findByRole('list', { name: 'Payments' })).getByText(/Paid by Fake/)).toBeInTheDocument()
+  })
+
+  it('drops the chosen request from the form once it is no longer open', async () => {
+    mockConnectProvider()
+    await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    const { user } = render(ORDER_ACCEPTED)
+    await choose(user, await screen.findByRole('combobox', { name: 'For request' }), /Balance .*10\.00/)
+    await user.type(screen.getByLabelText('Received (USD)'), '5.00')
+    await user.click(within(screen.getByRole('list', { name: 'Payment requests' })).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('combobox', { name: 'For request' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Payments' })).getByText('$5.00')).toBeInTheDocument())
+  })
 })

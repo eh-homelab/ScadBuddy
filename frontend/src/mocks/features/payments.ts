@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { Order, Payment, PaymentRequestView, ProviderConnect, ProviderStatus } from '../../api/types'
+import type { CostEntry, Order, Payment, PaymentRequestView, ProviderConnect, ProviderStatus } from '../../api/types'
 import { newId, now, problem, state } from './orders/state'
 import { closeBalance, lock, settleRequest } from './orders/orders'
 
@@ -127,7 +127,7 @@ export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid
   // A request already paid keeps the payment that paid it first.
   if (found.status !== 'paid') settleRequest(found, 'paid', payment.id)
   closeBalance(order, payment)
-  state.costEntries.push({
+  const fee: CostEntry = {
     id: newId('ce'),
     order_id: order.id,
     order_item_id: null,
@@ -137,5 +137,7 @@ export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid
     source: `payment:${payment.id}`,
     created_by: by,
     created_at: now(),
-  })
+  }
+  state.costEntries.push(fee)
+  state.events.push({ id: state.events.length + 1, order_id: order.id, at: now(), by, kind: 'cost.added', detail: { entry_id: fee.id, item_id: null, entry_kind: fee.kind, amount_minor: fee.amount_minor } })
 }

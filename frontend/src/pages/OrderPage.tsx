@@ -43,8 +43,6 @@ const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
 /** The "For request" select's value for a payment that answers no request. */
 const NO_REQUEST = '__no_request__'
-/** A provider's id as a person reads it ("fake" is Fake). */
-const providerLabel = (id: string) => id.charAt(0).toUpperCase() + id.slice(1)
 /** #4693 — the search parameter naming the open line item: `/orders/<id>?item=<item id>`. */
 const ITEM_PARAM = 'item'
 const ITEM_HASH = `#${itemAnchor('')}`
@@ -119,6 +117,8 @@ export function OrderPage() {
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
   const [due, setDue] = useState<string | null>(null)
+  const providers = useAsync(() => api.paymentProviders(), []).data
+  const providerLabel = (id: string) => (providers ?? []).find((p) => p.id === id)?.label ?? id
   const [payment, setPayment] = useState({ amount: '', method: '', request: NO_REQUEST })
 
   function reload() {
@@ -163,6 +163,8 @@ export function OrderPage() {
   const { order, items, totals, charges, payments, shipments, attachments } = detail
   const requests = detail.payment_requests ?? []
   const openRequests = requests.filter((r) => r.status === 'open')
+  // A request closed elsewhere leaves the list: the select falls back to none.
+  const chosenRequest = openRequests.some((r) => r.id === payment.request) ? payment.request : NO_REQUEST
   const editable = OPEN_FOR_EDITS.has(order.status)
   // #5349: `after_acceptance` on an accepted, in-production or ready order not on hold.
   const adds = addMode(order)
@@ -393,7 +395,7 @@ export function OrderPage() {
                       setRefusal({ text: 'Enter the amount received, such as 12.50.', items: [] })
                       return
                     }
-                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: payment.method.trim() || null, ...(payment.request === NO_REQUEST ? {} : { payment_request_id: payment.request }) })).then(() => setPayment({ amount: '', method: '', request: NO_REQUEST }))
+                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: payment.method.trim() || null, ...(chosenRequest === NO_REQUEST ? {} : { payment_request_id: chosenRequest }) })).then(() => setPayment({ amount: '', method: '', request: NO_REQUEST }))
                   }}
                 >
                   <div className="flex flex-col gap-1">
@@ -407,7 +409,7 @@ export function OrderPage() {
                   {openRequests.length > 0 && (
                     <div className="flex flex-col gap-1">
                       <Label htmlFor="payment-request">For request</Label>
-                      <Select value={payment.request} onValueChange={(request) => setPayment({ ...payment, request })}>
+                      <Select value={chosenRequest} onValueChange={(request) => setPayment({ ...payment, request })}>
                         <SelectTrigger id="payment-request" aria-label="For request" className="w-52">
                           <SelectValue />
                         </SelectTrigger>
@@ -473,7 +475,7 @@ export function OrderPage() {
               {[...events.data].reverse().map((e) => (
                 <li key={e.id}>
                   <span className="text-foreground">{e.kind}</span>
-                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : 'browser'}
+                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : 'browser'}
                 </li>
               ))}
             </ol>

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { copyText } from '../../lib/clipboard'
 import { formatMoney, toMajor, toMinor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
 import { When } from './When'
@@ -42,7 +43,7 @@ export function PaymentRequests({
   const [form, setForm] = useState<{ amount: string; kind: 'deposit' | 'balance'; provider: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [copied, setCopied] = useState<string | null>(null)
+  const [copied, setCopied] = useState<{ id: string; ok: boolean } | null>(null)
 
   async function act(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true)
@@ -67,8 +68,8 @@ export function PaymentRequests({
       setError('Enter the amount to ask for, such as 12.50.')
       return
     }
-    // A provider is named only when the person had a choice; else the default one takes it.
-    const provider = connected.length > 1 ? { provider: form.provider === NONE ? null : form.provider } : {}
+    // With a provider connected the person chooses one, or by hand; with none the request is by hand.
+    const provider = connected.length > 0 ? { provider: form.provider === NONE ? null : form.provider } : {}
     void act(() => api.requestPayment(order.id, { kind: form.kind, ...(minor === undefined ? {} : { amount_minor: minor }), ...provider })).then((ok) => {
       if (ok) setForm(null)
     })
@@ -120,7 +121,7 @@ export function PaymentRequests({
               </SelectContent>
             </Select>
           </div>
-          {connected.length > 1 && <ProviderSelect connected={connected} value={form.provider} onChange={(provider) => setForm({ ...form, provider })} />}
+          {connected.length > 0 && <ProviderSelect connected={connected} value={form.provider} onChange={(provider) => setForm({ ...form, provider })} />}
           <Button type="submit" size="sm" disabled={busy}>
             Request
           </Button>
@@ -162,8 +163,9 @@ export function PaymentRequests({
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => {
-                          void navigator.clipboard?.writeText(r.hosted_url ?? '').then(() => setCopied(r.id))
+                        onClick={(event) => {
+                          const link = event.currentTarget.parentElement?.querySelector<HTMLElement>('[data-payment-link]')
+                          void copyText(r.hosted_url ?? '', link).then((ok) => setCopied({ id: r.id, ok }))
                         }}
                       >
                         Copy link
@@ -171,9 +173,12 @@ export function PaymentRequests({
                       <Button size="sm" variant="outline" asChild>
                         <a href={`mailto:?subject=${encodeURIComponent(`Payment for order ${order.number}`)}&body=${encodeURIComponent(r.hosted_url)}`}>Email</a>
                       </Button>
-                      {copied === r.id && (
-                        <span role="status" className="text-xs text-muted-foreground">
-                          Copied
+                      <code data-payment-link className="text-xs break-all text-muted-foreground">
+                        {r.hosted_url}
+                      </code>
+                      {copied?.id === r.id && (
+                        <span role="status" className={copied.ok ? 'text-xs text-muted-foreground' : 'text-xs text-warn'}>
+                          {copied.ok ? 'Copied' : 'Copy failed, press Ctrl+C'}
                         </span>
                       )}
                     </>

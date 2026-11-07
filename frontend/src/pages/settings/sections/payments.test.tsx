@@ -62,4 +62,11 @@ describe('Settings → Payments (#4957)', () => {
     await waitFor(() => expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument())
     expect(within(region('Payments')).getByLabelText('Account')).toBeInTheDocument()
   })
+
+  it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {
+    setMockKek(false)
+    resetMockState()
+    const body = { settings: { account: 'a' }, secrets: { signing_secret: 's' } }
+    expect((await api.connectPaymentProvider('fake', body)).connected).toBe(true)
+  })
 })

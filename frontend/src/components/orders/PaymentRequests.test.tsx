@@ -1,9 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent } from '../../mocks/features/payments'
 import { ORDER_ACCEPTED, ORDER_CLOSED, state } from '../../mocks/features/orders/state'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { useAsync } from '../../lib/useAsync'
 import { PaymentRequests } from './PaymentRequests'
@@ -88,5 +89,40 @@ describe('PaymentRequests (#4957)', () => {
     renderPage(<Host id={ORDER_CLOSED} />)
     await screen.findByText('No payment requests yet.')
     expect(screen.queryByRole('button', { name: 'Request payment' })).not.toBeInTheDocument()
+  })
+
+  it('offers a By hand choice with one provider connected, and asks with no provider', async () => {
+    const { user } = await setup()
+    await user.click(await screen.findByRole('button', { name: 'Request payment' }))
+    await choose(user, screen.getByRole('combobox', { name: 'Provider' }), 'By hand')
+    await user.click(screen.getByRole('button', { name: 'Request' }))
+    expect(await screen.findByText('Record the payment below when it arrives')).toBeInTheDocument()
+    expect(state.paymentRequests.at(-1)?.provider).toBeNull()
+  })
+
+  it('shows no provider select with none connected, and the request is by hand', async () => {
+    const { user } = renderPage(<Host id={ORDER_ACCEPTED} />)
+    await user.click(await screen.findByRole('button', { name: 'Request payment' }))
+    expect(screen.queryByRole('combobox', { name: 'Provider' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Request' }))
+    expect(await screen.findByText('Record the payment below when it arrives')).toBeInTheDocument()
+  })
+
+  describe('copying the link', () => {
+    afterEach(() => vi.restoreAllMocks())
+
+    it('says so when the browser refuses the copy', async () => {
+      const { user } = await setup((id) => void id)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => Promise.reject(new Error('denied')) } })
+      await user.click(await screen.findByRole('button', { name: 'Copy link' }))
+      expect(await screen.findByText('Copy failed, press Ctrl+C')).toBeInTheDocument()
+    })
+
+    it('says Copied when it works', async () => {
+      const { user } = await setup((id) => void id)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => Promise.resolve() } })
+      await user.click(await screen.findByRole('button', { name: 'Copy link' }))
+      expect(await screen.findByText('Copied')).toBeInTheDocument()
+    })
   })
 })
