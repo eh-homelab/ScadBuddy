@@ -54,6 +54,10 @@ PROJECT_BUDGET = 4.0
 #: passes (`pipelines.ACCEPT_RETRY`), so a slow API is never answered render-unstartable.
 ACCEPT_TIMEOUT = 2.0
 ACCEPT_BUDGET = 1.0
+#: A template call's hold of the blob it emitted (`pipeline_activities._hold`): as long as
+#: the SQL store's pool wait (30 s). The hold comes after the template ran, so a hold
+#: that fails reruns the template.
+HOLD_BUDGET = 30.0
 
 
 class RemoteRenderSettingsSource(StoreSettingsSource):
@@ -181,11 +185,14 @@ class RemoteBlobRefs:
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
-        """Bounded as a `project` write: `project` holds a done job's blobs inside its
-        10 s attempt. A job that is gone (pruned while it ran) is no refusal: the SQL
-        write held a blob for any holder id, and the sweep dropped that orphan ref, so a
-        ref for it holds nothing and the render goes on."""
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
+        """``budget``: how long the call tries; None bounds it as a `project` write, since
+        `project` holds a done job's blobs inside its 10 s attempt. A job that is gone
+        (pruned while it ran) is no refusal: the SQL write held a blob for any holder id,
+        and the sweep dropped that orphan ref, so a ref for it holds nothing and the
+        render goes on."""
         body = {"key": key, "holder_kind": holder_kind, "holder_id": holder_id}
         try:
             self._client.request(
@@ -193,7 +200,7 @@ class RemoteBlobRefs:
                 f"{BASE}/blob-refs",
                 json=body,
                 timeout=PROJECT_POOL_TIMEOUT,
-                budget=PROJECT_BUDGET,
+                budget=PROJECT_BUDGET if budget is None else budget,
             )
         except CrudRefusedError as error:
             if error.status != 404:

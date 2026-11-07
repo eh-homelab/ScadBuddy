@@ -21,7 +21,11 @@ class BlobRefs:
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
-    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+    def add(
+        self, key: str, holder_kind: str, holder_id: str, *, budget: float | None = None
+    ) -> None:
+        """``budget`` is `crud/render.py` `RemoteBlobRefs.add`'s, ignored here: the
+        connection waits the pool's own timeout."""
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
