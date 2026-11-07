@@ -633,7 +633,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   The stored setting `orders_allow_unfulfil` (#4953, live, default on) turns it off:
   the route passes it as `allowed` and the lifecycle answers `unfulfil_disabled`.
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
-  times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
+  times its quantity (`orders/totals.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
@@ -774,9 +774,59 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`components/orders/LibraryFilePicker.tsx` over `GET /print/library/search`), the items
   grid's file line, and `QuoteEditor` and `PrintItem` on a `library` print source; mock
   `mocks/features/orders/orders.ts` `addLibraryItem`.
+  Recent renders (#4777, order operations spec 2026-11-07 §3.1): `GET /outputs` lists every
+  model's saved outputs, newest first, as `OutputDetail`s, filtered by `from`/`to`, `slug`,
+  `tag` (the model's catalogue tags), `q` (name, or the params that differ from the cached
+  schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
+  `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
+  writes on save (a failure is logged), rename and delete; the API's start runs
+  `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
+  whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
+  gone is dropped as it is read. `POST /orders/{id}/items/batch` and
+  `…/items/after-acceptance/batch` (`ItemBatch`, at most `MAX_BATCH_ITEMS` 50) add
+  `ItemCreate`s through `Lifecycle.add_items`, the one transaction every single add now
+  uses (`NewModelItem`, `NewLibraryItem`, `NewCustomItem`, `NewRequestItem`); a body
+  refused before the add names its place, `item_index`. Agent `list_recent_outputs`
+  and `order_item_add`'s `items`; frontend `components/orders/RecentRendersPicker.tsx`
+  ("Recent renders" in `AddItemDialog`), mocks `mocks/features/recentOutputs.ts` and
+  `orders/orders.ts` `addItems`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+- `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
+  `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
+  a payment request asks the customer for money through a provider's hosted page, or by
+  hand with no provider. `models.py` (`PaymentRequest`, the storefront's shape with no
+  `provider_ref`; `PaymentRequestView`, the back office's; `ProviderEvent`), `store.py`
+  (SQL in the caller's transaction; `open_requests_for_order`), `provider.py` (the
+  `PaymentProvider` protocol, `BadSignatureError`, `ProviderError`), `registry.py` (the
+  offered providers; the fake one only with the bootstrap
+  `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
+  `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
+  sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
+  a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
+  `kek_missing`), `service.py` (`Payments`, what the routes call) and
+  `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
+  `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
+  webhook records one payment; no body column) and `payment_credentials`, plus
+  `order_payments.provider` and `.payment_request_id` (migration `…_payments_seam.sql`),
+  all on the orders pool. The lifecycle (`open_payment_request`, `cancel_payment_request`,
+  `set_request_link`, `record_provider_event`, `add_payment(payment_request_id=…)`) writes
+  the rows under the order's lock, with an audit line for each but `set_request_link` (the
+  link is the provider's, not a person's decision). A named provider's credential row is
+  held `FOR SHARE` while a request opens, so a disconnect waits and then refuses; a
+  default provider no longer offered (`Lifecycle.offered_providers`) is no provider. A
+  provider is called only after
+  that commit (`Payments.link`), with the request id as its idempotency key, and a
+  failure stays on the open request as `link_error` (`POST …/payment-requests/{id}/link`
+  retries). A provider's `paid` event with a fee writes a `payment_fee` cost entry,
+  `source` `payment:<payment id>`, in the payment's own transaction (job cost spec
+  §4.4); a manual payment writes none. Routes: `api/order_payments.py`
+  (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
+  disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
+  (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
+  most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
+  `payment:<id>`). No route, log, problem or audit row carries a secret.

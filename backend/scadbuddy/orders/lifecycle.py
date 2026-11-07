@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
@@ -92,6 +93,15 @@ from scadbuddy.orders.store import (
     order_subject,
     quote_file_keys,
     revision_subject,
+)
+from scadbuddy.orders.totals import totals_of
+from scadbuddy.payments import store as payments
+from scadbuddy.payments.models import (
+    EventOutcome,
+    HostedRequest,
+    PaymentRequestKind,
+    PaymentRequestView,
+    ProviderEvent,
 )
 from scadbuddy.store.refs import BlobRefs
 
@@ -273,6 +283,40 @@ class LabourRate:
     currency: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class NewItem:
+    """One item to add (`Lifecycle.add_items`): what every kind has."""
+
+    quantity: int
+    title: str | None = None
+    notes: str = ""
+    sku: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewModelItem(NewItem):
+    resolved: ResolvedReference
+    output_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewLibraryItem(NewItem):
+    file: LibraryFileRef
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewCustomItem(NewItem):
+    title: str
+    unit_price_minor: int
+    requires_printing: bool = False
+    accept: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewRequestItem(NewItem):
+    title: str
+
+
 @dataclass
 class _Change:
     """What one transition did, told after commit."""
@@ -411,6 +455,9 @@ class Lifecycle:
         self.refs = refs
         #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
         self.parts = PartStore(store)
+        #: The payment providers offered (#4957, ``payments/registry.py``): a default
+        #: provider not among them is no provider. Set by ``OrdersComponent``.
+        self.offered_providers: frozenset[str] = frozenset()
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -662,12 +709,26 @@ class Lifecycle:
         reference: str | None = None,
         received_at: datetime | None = None,
         notes: str = "",
+        payment_request_id: str | None = None,
     ) -> Payment:
-        """Money the shop already received: a record, allowed on hold (Ruling 14)."""
+        """Money the shop already received: a record, allowed on hold (Ruling 14). A
+        payment that names an open request of this order closes it. Named or not, a
+        payment that brings the balance to zero or below closes the open ``balance``
+        requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
+        provider's event does."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if order.status == "cancelled":
                 raise LifecycleError("order_cancelled", f"order {order.number} is cancelled")
+            named = None
+            if payment_request_id is not None:
+                named = self._open_request(conn, order, payment_request_id)
+                if amount_minor < 1:
+                    raise LifecycleError(
+                        "amount_minor",
+                        "a payment that closes a request must be above zero",
+                        unprocessable=True,
+                    )
             payment = self.store.insert_payment(
                 conn,
                 order.id,
@@ -676,10 +737,281 @@ class Lifecycle:
                 reference=reference,
                 received_at=received_at,
                 notes=notes,
+                payment_request_id=payment_request_id,
             )
-            self._event(conn, order, by, "payment.added", payment_id=payment.id)
+            if named is not None:
+                payments.set_request_status(conn, named.id, "paid", payment_id=payment.id)
+            if payment.amount_minor > 0:
+                self._close_balance(conn, order, payment)
+            self._event(
+                conn,
+                order,
+                by,
+                "payment.added",
+                payment_id=payment.id,
+                payment_request_id=payment_request_id,
+            )
         self._told(_Change(order))
         return payment
+
+    # -- payment requests (#4957) ---------------------------------------------------------
+    # A request asks the customer for money, through a provider's hosted page or by hand.
+    # Its amount is fixed once opened. Its link is made after commit (``set_request_link``).
+
+    def _close_balance(self, conn: Conn, order: Order, payment: Payment) -> None:
+        """Once the balance is zero or below, ``payment`` closes the open balance requests."""
+        if totals_of(self.store, conn, order.id).balance_minor > 0:
+            return
+        for open_request in payments.open_requests_for_order(conn, order.id):
+            if open_request.kind == "balance":
+                payments.set_request_status(conn, open_request.id, "paid", payment_id=payment.id)
+
+    def _request_of(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
+        found = payments.request(conn, request_id)
+        if found is None or found.order_id != order.id:
+            raise LifecycleError(
+                "payment_request_not_found",
+                f"no payment request {request_id} of order {order.number}",
+                not_found=True,
+            )
+        return found
+
+    def _open_request(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
+        found = self._request_of(conn, order, request_id)
+        if found.status != "open":
+            raise LifecycleError(
+                "payment_request_not_open", f"payment request {request_id} is {found.status}"
+            )
+        return found
+
+    def open_payment_request(
+        self,
+        order_id: str,
+        by: Actor,
+        *,
+        kind: PaymentRequestKind = "balance",
+        amount_minor: Money | None = None,
+        provider: str | UnsetType | None = UNSET,
+    ) -> PaymentRequestView:
+        """A request for ``amount_minor`` (the balance now when None), through
+        ``provider`` (the default provider when unset and still offered; None collects by
+        hand). A named provider that is not connected is refused as 422 ``provider``."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            amount = (
+                totals_of(self.store, conn, order.id).balance_minor
+                if amount_minor is None
+                else amount_minor
+            )
+            if amount <= 0:
+                raise LifecycleError("nothing_due", f"order {order.number} has nothing due")
+            if isinstance(provider, UnsetType):
+                provider = payments.default_provider(conn, self.offered_providers)
+            elif provider is not None and not payments.hold_provider(conn, provider):
+                raise LifecycleError(
+                    "provider",
+                    f"no connected payment provider {provider!r}",
+                    unprocessable=True,
+                )
+            opened = payments.insert_request(
+                conn,
+                order_id=order.id,
+                kind=kind,
+                provider=provider,
+                amount_minor=amount,
+                currency=order.currency,
+                created_by=by,
+            )
+            # ``kind`` is ``_event``'s own argument, so the detail goes in whole.
+            self.store.insert_event(
+                conn,
+                order.id,
+                by,
+                "payment_request.opened",
+                {"request_id": opened.id, "kind": kind, "amount_minor": amount},
+            )
+        self._told(_Change(order))
+        return opened
+
+    def cancel_payment_request(
+        self, order_id: str, request_id: str, by: Actor
+    ) -> PaymentRequestView:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._open_request(conn, order, request_id)
+            cancelled = payments.set_request_status(conn, request_id, "cancelled")
+            self._event(conn, order, by, "payment_request.cancelled", request_id=request_id)
+        self._told(_Change(order))
+        return cancelled
+
+    def set_request_link(
+        self, request_id: str, *, hosted: HostedRequest | None, error: str | None
+    ) -> PaymentRequestView:
+        """The provider's answer to a request's link, under the request's order lock: its
+        hosted page, or why it failed (the link it had stays). A request no longer open
+        (cancelled or expired while the provider answered) keeps no new link, so no one
+        pays it. A paid request is returned as it is: it needs no link and no error. A
+        reference another request holds is kept as ``link_error``, not as the link. No
+        audit row: the link is the provider's, not a person's decision."""
+        with self.store.transaction() as conn:
+            found = payments.request(conn, request_id)
+            if found is None:
+                raise LifecycleError(
+                    "payment_request_not_found", f"no payment request {request_id}", not_found=True
+                )
+            order = self._lock(conn, found.order_id)
+            found = payments.request(conn, request_id) or found
+            if found.status == "paid":
+                return found
+            if found.status != "open":
+                hosted, error = None, f"the payment request is {found.status}"
+            try:
+                # A savepoint: a refused write leaves the transaction usable.
+                with conn.transaction():
+                    linked = payments.set_request_link(
+                        conn,
+                        request_id,
+                        provider_ref=found.provider_ref if hosted is None else hosted.provider_ref,
+                        hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
+                        link_error=error,
+                    )
+            except errors.UniqueViolation:
+                # ``payment_requests_ref``: the provider answered with another request's
+                # reference. The request keeps no link, so no one pays the wrong page.
+                linked = payments.set_request_link(
+                    conn,
+                    request_id,
+                    provider_ref=found.provider_ref,
+                    hosted_url=found.hosted_url,
+                    link_error="the provider's reference is held by another payment request",
+                )
+        self._told(_Change(order))
+        return linked
+
+    def record_provider_event(self, provider: str, event: ProviderEvent) -> EventOutcome:
+        """A provider's event, in one transaction. The event row is written first, so a
+        second delivery waits on the first's unique key and then reads ``replayed``. A
+        ``paid`` event is recorded on an ended or held order too: the money arrived."""
+        by = Actor(kind="provider", principal=f"payment:{provider}")
+        change: _Change | None = None
+        with self.store.transaction() as conn:
+            row = payments.insert_event(conn, provider, event)
+            if row is None:
+                return "replayed"
+            found = (
+                None
+                if event.provider_ref is None
+                else payments.request_by_ref(conn, provider, event.provider_ref)
+            )
+            if found is None:
+                payments.finish_event(conn, row, outcome="unmatched")
+                return "unmatched"
+            order = self._lock(conn, found.order_id)
+            found = payments.request(conn, found.id) or found
+            outcome, payment = self._apply_event(conn, order, found, provider, event, by)
+            payments.finish_event(
+                conn,
+                row,
+                outcome=outcome,
+                order_id=order.id,
+                payment_request_id=found.id,
+                payment_id=None if payment is None else payment.id,
+            )
+            if outcome == "recorded":
+                change = _Change(order)
+        if change is not None:
+            self._told(change)
+        return outcome
+
+    def _paid_by(self, conn: Conn, order: Order, found: PaymentRequestView, provider: str) -> bool:
+        """Whether this provider's own payment already paid the request. A request paid
+        by hand, cancelled or expired takes a provider's payment: that money is real."""
+        if found.status != "paid" or found.payment_id is None:
+            return False
+        paid = next(
+            (p for p in self.store.payments(order.id, conn=conn) if p.id == found.payment_id),
+            None,
+        )
+        return (
+            paid is not None and paid.provider == provider and paid.reference == found.provider_ref
+        )
+
+    def _apply_event(
+        self,
+        conn: Conn,
+        order: Order,
+        found: PaymentRequestView,
+        provider: str,
+        event: ProviderEvent,
+        by: Actor,
+    ) -> tuple[EventOutcome, Payment | None]:
+        if event.kind == "expired":
+            if found.status == "open":
+                payments.set_request_status(conn, found.id, "expired")
+                self._event(conn, order, by, "payment_request.expired", request_id=found.id)
+            return "recorded", None
+        if event.kind not in ("paid", "refunded"):
+            return "ignored", None
+        if event.currency != order.currency:
+            return "currency_mismatch", None
+        if event.kind == "refunded" and event.amount_minor is None:
+            # No amount: a guess at a full refund could be wrong, so nothing is written.
+            return "ignored", None
+        if event.kind == "paid" and self._paid_by(conn, order, found, provider):
+            # A hosted page is paid once: this is the same money told again.
+            return "ignored", None
+        amount = found.amount_minor if event.amount_minor is None else event.amount_minor
+        payment = self.store.insert_payment(
+            conn,
+            order.id,
+            amount_minor=amount if event.kind == "paid" else -amount,
+            method=provider,
+            reference=event.provider_ref,
+            received_at=None,
+            notes="",
+            provider=provider,
+            payment_request_id=found.id,
+        )
+        self._event(
+            conn,
+            order,
+            by,
+            "payment.added",
+            payment_id=payment.id,
+            payment_request_id=found.id,
+            provider=provider,
+        )
+        if event.kind == "refunded":
+            return "recorded", payment
+        # A request already paid keeps the payment that paid it first.
+        if found.status != "paid":
+            payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
+        self._close_balance(conn, order, payment)
+        if event.fee_minor:
+            # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
+            fee, _ = self.store.insert_cost_entry(
+                conn,
+                order.id,
+                CostEntryInput(
+                    kind="payment_fee",
+                    amount_minor=event.fee_minor,
+                    source=f"payment:{payment.id}",
+                    note=f"{provider} fee",
+                ),
+                created_by=by,
+            )
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=fee.id,
+                item_id=None,
+                entry_kind=fee.kind,
+                amount_minor=fee.amount_minor,
+            )
+        return "recorded", payment
 
     # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
     # A record of what the job took, allowed in every status, ended and on hold included:
@@ -849,8 +1181,9 @@ class Lifecycle:
         return accepted
 
     def cancel_order(self, order_id: str, by: Actor, reason: str | None = None) -> Order:
-        """§3.5: from any state before `shipped`; cancels the open items and keeps every
-        fulfilled one's attempts. Allowed on hold (Ruling 14)."""
+        """§3.5: from any state before `shipped`; cancels the open items and the open
+        payment requests, and keeps every fulfilled one's attempts. Allowed on hold
+        (Ruling 14)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if order.status in ("shipped", *ENDED):
@@ -866,6 +1199,12 @@ class Lifecycle:
             # §3.4: cancelling the order releases every quote's sliced file.
             change.released = self._quote_ids(conn, (item.id for item in every))
             change.ended = True
+            # No one pays a cancelled order: its open requests end with it.
+            for open_request in payments.open_requests_for_order(conn, order.id):
+                payments.set_request_status(conn, open_request.id, "cancelled")
+                self._event(
+                    conn, order, by, "payment_request.cancelled", request_id=open_request.id
+                )
             cancelled = self.store.set_order_status(conn, order.id, "cancelled")
             self._event(
                 conn,
@@ -1418,45 +1757,15 @@ class Lifecycle:
         """A model item. With ``after_acceptance`` (#5349) the order must be past
         `quoted` (:meth:`_takes_item`); the item starts `draft` with no quote either way,
         and the order's accepted prices and charges stay as they are."""
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            self._takes_item(order, after_acceptance)
-            item = self.store.insert_item(
-                conn,
-                order.id,
-                reference=resolved.reference,
-                colours=resolved.colours,
-                output_id=output_id,
-                quantity=quantity,
-                title=title,
-                notes=notes,
-                sku=sku,
-            )
-            self._added(conn, order, item, by, after_acceptance)
-            item, _ = self._revise(
-                conn,
-                order,
-                item,
-                by,
-                reference=resolved.reference,
-                colours=resolved.colours,
-                output_id=output_id,
-            )
-            rule = self.parts.rule(resolved.reference.slug, conn=conn)
-            given = rule_parts(rule.lines, resolved.colours)
-            if given:
-                self.parts.set_item_parts(conn, item.id, given)
-                self._event(
-                    conn,
-                    order,
-                    by,
-                    "item.parts_set",
-                    item_id=item.id,
-                    parts=_parts_detail(given),
-                    from_rule=True,
-                )
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+        entry = NewModelItem(
+            resolved=resolved,
+            output_id=output_id,
+            quantity=quantity,
+            title=title,
+            notes=notes,
+            sku=sku,
+        )
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
     def add_request_item(
@@ -1473,25 +1782,8 @@ class Lifecycle:
         """A request: what a customer wants made, before any design exists. It has no
         reference, and is approved design first; its first revision (`add_revision`
         with a resolved reference) gives it one. ``after_acceptance`` as `add_item`'s."""
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            self._takes_item(order, after_acceptance)
-            item = self.store.insert_item(
-                conn,
-                order.id,
-                kind="request",
-                reference=None,
-                colours=[],
-                output_id=None,
-                quantity=quantity,
-                title=title,
-                notes=notes,
-                sku=sku,
-                approval="design_first",
-            )
-            self._added(conn, order, item, by, after_acceptance, item_kind="request")
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+        entry = NewRequestItem(title=title, quantity=quantity, notes=notes, sku=sku)
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
     def add_library_item(
@@ -1511,29 +1803,8 @@ class Lifecycle:
         no design to approve first), and takes a slice quote of the file or a manual one.
         The caller has read the file from the library that serves. ``after_acceptance``
         as `add_item`'s."""
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            self._takes_item(order, after_acceptance)
-            item = self.store.insert_library_item(
-                conn,
-                order.id,
-                file=file,
-                quantity=quantity,
-                title=title,
-                notes=notes,
-                sku=sku,
-            )
-            self._added(
-                conn,
-                order,
-                item,
-                by,
-                after_acceptance,
-                item_kind="library_file",
-                library_file_id=file.id,
-            )
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+        entry = NewLibraryItem(file=file, quantity=quantity, title=title, notes=notes, sku=sku)
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
     def add_custom_item(
@@ -1557,30 +1828,143 @@ class Lifecycle:
         accepts nothing) the item is `quoted`, for `accept_quote` to pin. With
         ``after_acceptance`` (#5349) the price is never accepted as it is saved: the item
         is `quoted`, and ``accept`` is refused (422)."""
-        if after_acceptance and accept:
-            raise LifecycleError(
-                "accept",
-                "accept: an item added after acceptance needs its quote accepted on its own",
-                unprocessable=True,
-            )
+        entry = NewCustomItem(
+            title=title,
+            quantity=quantity,
+            unit_price_minor=unit_price_minor,
+            notes=notes,
+            sku=sku,
+            requires_printing=requires_printing,
+            accept=accept,
+        )
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
+        return item
+
+    def add_items(
+        self,
+        order_id: str,
+        by: Actor,
+        entries: Sequence[NewItem],
+        *,
+        after_acceptance: bool = False,
+    ) -> list[OrderItem]:
+        """Each entry added as its single add adds it, in order, in one transaction (#4777,
+        order operations spec §3.1): a refusal of any adds none. ``after_acceptance`` as
+        `add_item`'s, for every entry."""
+        for entry in entries:
+            if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept:
+                raise LifecycleError(
+                    "accept",
+                    "accept: an item added after acceptance needs its quote accepted on its own",
+                    unprocessable=True,
+                )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._takes_item(order, after_acceptance)
-            if accept:
+            if any(isinstance(entry, NewCustomItem) and entry.accept for entry in entries):
                 self._not_on_hold(order)
+            items = [
+                self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
+            ]
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None) for item in items]))
+        return items
+
+    def _insert_new(
+        self, conn: Conn, order: Order, by: Actor, entry: NewItem, after_acceptance: bool
+    ) -> OrderItem:
+        """One entry's rows and audit, inside `add_items`' transaction."""
+        if isinstance(entry, NewModelItem):
+            return self._insert_model(conn, order, by, entry, after_acceptance)
+        if isinstance(entry, NewLibraryItem):
+            item = self.store.insert_library_item(
+                conn,
+                order.id,
+                file=entry.file,
+                quantity=entry.quantity,
+                title=entry.title,
+                notes=entry.notes,
+                sku=entry.sku,
+            )
+            self._added(
+                conn,
+                order,
+                item,
+                by,
+                after_acceptance,
+                item_kind="library_file",
+                library_file_id=entry.file.id,
+            )
+            return item
+        if isinstance(entry, NewCustomItem):
             item = self.store.insert_custom_item(
                 conn,
                 order.id,
-                title=title,
-                quantity=quantity,
-                notes=notes,
-                sku=sku,
-                requires_printing=requires_printing,
+                title=entry.title,
+                quantity=entry.quantity,
+                notes=entry.notes,
+                sku=entry.sku,
+                requires_printing=entry.requires_printing,
             )
             self._added(conn, order, item, by, after_acceptance, item_kind="custom")
-            item = self._custom_price(conn, order, item, unit_price_minor, by, accept=accept)
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+            return self._custom_price(
+                conn, order, item, entry.unit_price_minor, by, accept=entry.accept
+            )
+        assert isinstance(entry, NewRequestItem)
+        item = self.store.insert_item(
+            conn,
+            order.id,
+            kind="request",
+            reference=None,
+            colours=[],
+            output_id=None,
+            quantity=entry.quantity,
+            title=entry.title,
+            notes=entry.notes,
+            sku=entry.sku,
+            approval="design_first",
+        )
+        self._added(conn, order, item, by, after_acceptance, item_kind="request")
+        return item
+
+    def _insert_model(
+        self, conn: Conn, order: Order, by: Actor, entry: NewModelItem, after_acceptance: bool
+    ) -> OrderItem:
+        resolved = entry.resolved
+        item = self.store.insert_item(
+            conn,
+            order.id,
+            reference=resolved.reference,
+            colours=resolved.colours,
+            output_id=entry.output_id,
+            quantity=entry.quantity,
+            title=entry.title,
+            notes=entry.notes,
+            sku=entry.sku,
+        )
+        self._added(conn, order, item, by, after_acceptance)
+        item, _ = self._revise(
+            conn,
+            order,
+            item,
+            by,
+            reference=resolved.reference,
+            colours=resolved.colours,
+            output_id=entry.output_id,
+        )
+        rule = self.parts.rule(resolved.reference.slug, conn=conn)
+        given = rule_parts(rule.lines, resolved.colours)
+        if given:
+            self.parts.set_item_parts(conn, item.id, given)
+            self._event(
+                conn,
+                order,
+                by,
+                "item.parts_set",
+                item_id=item.id,
+                parts=_parts_detail(given),
+                from_rule=True,
+            )
         return item
 
     def _custom_price(

@@ -281,3 +281,15 @@ def test_a_personal_token_takes_a_flow_host_route_as_an_api_one() -> None:
 
 def test_no_header_is_needed_where_none_can_be_sent() -> None:
     assert would_refuse("api", _person(), request_header=False, header_needed=False) is None
+
+
+def test_only_the_webhook_is_public_among_payments_routes() -> None:
+    classes = {endpoint_name(r): route_class(r) for r in ROUTES if "payment" in r.path}
+    assert [n for n, c in classes.items() if c == "public"] == [
+        "scadbuddy.api.payment_webhooks.receive_webhook"
+    ]
+    assert {n for n, c in classes.items() if c == "person"} == {
+        "scadbuddy.api.payments.connect_provider",
+        "scadbuddy.api.payments.disconnect_provider",
+        "scadbuddy.api.payments.default_provider",
+    }

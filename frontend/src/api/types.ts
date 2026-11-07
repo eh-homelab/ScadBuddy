@@ -91,6 +91,20 @@ export type RenderAccepted = Schemas['RenderAccepted']
 export type CommandAccepting = Schemas['CommandAccepting']
 
 export type Output = Schemas['OutputDetail']
+/** #4777 — the filters of `GET /outputs`, every model's saved outputs. */
+export interface RecentOutputsQuery {
+  /** Saved at or after this ISO time. */
+  from?: string
+  /** Saved before this ISO time. */
+  to?: string
+  slug?: string[]
+  /** A model's catalogue tag. */
+  tag?: string
+  /** Text in the output's name or its parameters that differ from the defaults. */
+  q?: string
+  /** `yes`: only outputs an order item names; `no`: only the others. */
+  ordered?: 'yes' | 'no'
+}
 export type ArrangeRequest = Schemas['ArrangeRequest']
 /** #3637 — one object of an arrange, maybe in other colours. */
 export type ArrangeObject = Schemas['ArrangeObject']

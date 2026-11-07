@@ -1640,14 +1640,26 @@ def _check_written(
     part of a slot in ``wanted`` carries each of that slot's settings once, and every
     other key a slot sets keeps the values it had. So a part the patterns read as
     another slot than ElementTree does is refused, whether it lacks its settings or
-    took another slot's (#5646)."""
+    took another slot's (#5646). A file with a part that is not in exactly one object
+    (a nested object, or a part outside any object) is refused too, because the parts
+    of ``after`` and ``before`` could not be paired (#5656)."""
     keys = {key for settings in wanted.values() for key, _ in settings}
 
     def values(element: ET.Element, key: str) -> list[str | None]:
         return [m.get("value") for m in element.findall("metadata") if m.get("key") == key]
 
     parts = list(_each_part_slot(after))
-    if len(parts) != sum(1 for _ in before.iter("part")):
+    # `_each_part_slot` walks object by object; `iter("part")` walks in document order.
+    # They give the same parts in the same order only while each part sits in exactly
+    # one object (no nested object, no part outside an object). A count alone can miss
+    # that, because the two shapes can cancel out, so the walk is compared part by part
+    # with the document order, and only then zipped with `before`'s parts.
+    in_order = list(after.iter("part"))
+    if len(parts) != len(in_order) or any(
+        element is not ordered for (element, _, _), ordered in zip(parts, in_order, strict=True)
+    ):
+        raise PartSettingsUnwritableError("a part is not in exactly one object")
+    if len(in_order) != sum(1 for _ in before.iter("part")):
         raise PartSettingsUnwritableError("the parts changed in the write")
     for (element, slot, printed), old in zip(parts, before.iter("part"), strict=True):
         own = dict(wanted.get(slot, ())) if printed and slot is not None else {}

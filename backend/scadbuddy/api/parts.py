@@ -17,7 +17,7 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Query, status
 
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.api.orders import _path, _run
+from scadbuddy.api.orders import _run, check_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.orders.actor import current_actor
@@ -110,7 +110,7 @@ async def create_part(
     ),
 )
 async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> InventoryPart:
-    _path(part_id)
+    check_path(part_id)
     try:
         return await asyncio.to_thread(orders.lifecycle.parts.update, part_id, body)
     except PartNotFoundError as error:
@@ -133,7 +133,7 @@ async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> Invent
     ),
 )
 async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> InventoryPart:
-    _path(part_id)
+    check_path(part_id)
     by = current_actor()
     try:
         return await asyncio.to_thread(orders.lifecycle.parts.add_stock, part_id, body, by)
@@ -157,7 +157,7 @@ async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> Inventor
     ),
 )
 async def adjust_stock(part_id: str, body: StockAdjust, orders: OrdersDep) -> InventoryPart:
-    _path(part_id)
+    check_path(part_id)
     by = current_actor()
     try:
         return await asyncio.to_thread(orders.lifecycle.parts.adjust, part_id, body, by)
@@ -174,7 +174,7 @@ async def adjust_stock(part_id: str, body: StockAdjust, orders: OrdersDep) -> In
 async def part_moves(
     part_id: str, orders: OrdersDep, limit: Annotated[int, Query(ge=1, le=500)] = 200
 ) -> list[StockMove]:
-    _path(part_id)
+    check_path(part_id)
     part = await asyncio.to_thread(orders.lifecycle.parts.part, part_id)
     if part is None:
         raise _not_found(PartNotFoundError(part_id))
@@ -222,7 +222,7 @@ async def put_rule(slug: Slug, body: PartRuleInput, orders: OrdersDep) -> PartRu
     ),
 )
 async def get_order_parts(order_id: str, orders: OrdersDep) -> OrderParts:
-    _path(order_id)
+    check_path(order_id)
     found = await asyncio.to_thread(order_parts, orders.store, orders.lifecycle.parts, order_id)
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
@@ -244,6 +244,6 @@ async def get_order_parts(order_id: str, orders: OrdersDep) -> OrderParts:
 async def set_item_parts(
     order_id: str, item_id: str, body: ItemPartsInput, orders: OrdersDep
 ) -> list[ItemPartRow]:
-    _path(order_id, item_id)
+    check_path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.set_item_parts(order_id, item_id, body.parts, by))

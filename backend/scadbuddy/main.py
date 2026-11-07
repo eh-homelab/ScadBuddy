@@ -517,6 +517,19 @@ async def _backfill_store_logged(
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
+async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's pass over the saved outputs (#4777, `OutputIndex.sync`), best effort:
+    a failure is logged, and the next start runs it again."""
+    index = state.outputs.index
+    if index is None:
+        return
+    try:
+        added, dropped = await asyncio.to_thread(index.sync, state.outputs, stop)
+        logger.info("indexed the saved outputs", extra={"added": added, "dropped": dropped})
+    except Exception:
+        logger.exception("could not index the saved outputs; the next start retries")
+
+
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
@@ -1894,6 +1907,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _attach_backfills_logged(state, reraise=False, stop=stop_background),
             name="attach backfills",
         )
+        # #4777: every saved output with no row in the index gets one, and a row whose
+        # output is gone goes; in the background, as an output with no row is only
+        # missing from the cross-model list meanwhile.
+        index_now = asyncio.create_task(
+            _index_outputs_logged(state, stop=stop_background), name="index outputs"
+        )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
         adopt_now = asyncio.create_task(
@@ -1945,7 +1964,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now, adopt_now)
+        await _join_background(stop_background, backfill, attach_now, adopt_now, index_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")

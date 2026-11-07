@@ -15,6 +15,48 @@ const failure = (promise: Promise<unknown>) => promise.then(() => undefined, (e:
 describe('orders mock (#4249)', () => {
   beforeEach(() => resetMockState())
 
+  it('adds a batch of items all or none, naming the refused one (#4777)', async () => {
+    const before = state.items.length
+    const added = await api.addOrderItems(ORDER_DRAFT, [
+      { output_id: 'c'.repeat(32), quantity: 2 },
+      { kind: 'custom', title: 'Box', quantity: 1, unit_price_minor: 100 },
+    ])
+    expect(added.map((i) => [i.kind, i.quantity])).toEqual([
+      ['model', 2],
+      ['custom', 1],
+    ])
+    expect(state.items).toHaveLength(before + 2)
+    const refused = await failure(
+      api.addOrderItems(ORDER_DRAFT, [
+        { output_id: 'c'.repeat(32), quantity: 1 },
+        { output_id: 'f'.repeat(32), quantity: 1 },
+      ]),
+    )
+    expect(refused?.problem.status).toBe(422)
+    expect(refused?.problem['item_index']).toBe(1)
+    expect(state.items).toHaveLength(before + 2)
+    expect((await failure(api.addOrderItems(ORDER_DRAFT, [])))?.problem.status).toBe(422)
+    // The plain batch is refused on an accepted order; its own route takes it.
+    expect((await failure(api.addOrderItems(ORDER_ACCEPTED, [{ output_id: OUTPUT_REAGAN, quantity: 1 }])))?.problem.status).toBe(409)
+    const after = await api.addOrderItemsAfterAcceptance(ORDER_ACCEPTED, [{ output_id: OUTPUT_REAGAN, quantity: 1 }])
+    expect(after).toHaveLength(1)
+  })
+
+  it('lists every model\'s outputs newest first with their filters (#4777)', async () => {
+    const all = await api.listRecentOutputs({})
+    expect(all.items.map((o) => o.name)).toEqual(['Reagan', 'Nova', 'Workshop'])
+    expect(all.total).toBe(3)
+    expect((await api.listRecentOutputs({ ordered: 'yes' })).items.map((o) => o.id)).toEqual([OUTPUT_REAGAN])
+    expect((await api.listRecentOutputs({ q: 'NOVA' })).items.map((o) => o.name)).toEqual(['Nova'])
+    expect((await api.listRecentOutputs({ from: '2026-09-21T00:00:00Z' })).items.map((o) => o.name)).toEqual(['Reagan'])
+    expect((await api.listRecentOutputs({ to: '2026-09-19T00:00:00Z' })).items.map((o) => o.name)).toEqual(['Workshop'])
+    expect((await api.listRecentOutputs({ slug: [MAZE_SLUG] })).items).toEqual([])
+    const page = await api.listRecentOutputs({}, { limit: 2 })
+    expect(page.items).toHaveLength(2)
+    const next = await api.listRecentOutputs({}, { limit: 2, after: page.items[1]!.id })
+    expect(next.items.map((o) => o.name)).toEqual(['Workshop'])
+  })
+
   it('adds a library file item and refuses any other source as the backend does (#5544)', async () => {
     const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 2 })
     expect(added).toMatchObject({

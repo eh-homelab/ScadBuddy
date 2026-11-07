@@ -72,6 +72,7 @@ from scadbuddy.render.bambu3mf import (
     MAX_UNCOMPRESSED_BYTES,
     FilamentMap,
     PartOverrides,
+    PartSettingsUnwritableError,
     part_settings_slots,
     plates_of,
     stl_3mf,
@@ -395,6 +396,10 @@ class PrintPipeline:
     #: :meth:`part_slots`, once read (#5626 review).
     _part_slots: set[int] | None = field(default=None, init=False, repr=False, compare=False)
     _part_slots_read: bool = field(default=False, init=False, repr=False, compare=False)
+    #: The refusal :meth:`part_slots` read, kept and raised again on each call (#5656).
+    _part_slots_refused: PartSettingsUnwritableError | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     async def _fetch(self: _Fetching, client: BambuddyClient | None) -> _Fetched:
         """:meth:`fetch_3mf`, made once per source and shared. Any failure is kept as its
@@ -474,13 +479,21 @@ class PrintPipeline:
     async def part_slots(self, client: BambuddyClient | None) -> set[int] | None:
         """``part_settings_slots`` of :meth:`fetched_3mf` (``None`` for no 3MF), read
         once per source: the request's refusal and the template's settings (#5626) on
-        one source (the dialog's background slice) share it."""
+        one source (the dialog's background slice) share it. A refusal
+        (``PartSettingsUnwritableError``) is kept too and raised again, not read again."""
         if not self._part_slots_read:
             payload = await self.fetched_3mf(client)  # type: ignore[misc]
-            self._part_slots = (
-                None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
-            )
+            try:
+                self._part_slots = (
+                    None
+                    if payload is None
+                    else await asyncio.to_thread(part_settings_slots, payload)
+                )
+            except PartSettingsUnwritableError as refused:
+                self._part_slots_refused = refused
             self._part_slots_read = True
+        if self._part_slots_refused is not None:
+            raise self._part_slots_refused.with_traceback(None)
         return self._part_slots
 
     async def recorded_slice(

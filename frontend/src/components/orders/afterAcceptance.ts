@@ -95,6 +95,15 @@ export function addItem(orderId: string, body: OrderItemCreate, mode: AddMode): 
   return api.addOrderItemAfterAcceptance(orderId, body.kind === 'custom' ? { ...body, accept: false } : body)
 }
 
+/** Several items in one request (#4777), on the route `mode` names, as `addItem`. */
+export function addItems(orderId: string, items: OrderItemCreate[], mode: AddMode): Promise<OrderItem[]> {
+  if (mode === 'open') return api.addOrderItems(orderId, items)
+  return api.addOrderItemsAfterAcceptance(
+    orderId,
+    items.map((body) => (body.kind === 'custom' ? { ...body, accept: false } : body)),
+  )
+}
+
 /** What the confirm says before the charges of an accepted order change (#5351): the
  * order's own status, as `afterAcceptanceWarning` names it. */
 export function chargesWarning(order: Pick<Order, 'number' | 'status'>): string {
