@@ -58,8 +58,12 @@ ContactKind = Literal[
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
 QuoteSource = Literal["slice", "manual"]
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
-#: ``custom`` item is a title, a quantity and a typed price with nothing behind it.
-ItemKind = Literal["model", "custom", "request"]
+#: ``custom`` item is a title, a quantity and a typed price with nothing behind it; a
+#: ``library_file`` item (#5544) names a file of the library (its ``library_file``).
+ItemKind = Literal["model", "custom", "request", "library_file"]
+#: Which library a ``library_file`` item's file is in (#5544): Bambuddy's, or
+#: ScadBuddy's own (``library_backend=native``). The file's id says which.
+ItemLibrary = Literal["bambuddy", "native"]
 #: When the customer approves a design (storefront spec §4): ``design_first`` waits for the
 #: design to be accepted before the item is quoted or printed; ``together`` approves it
 #: with the quote.
@@ -331,6 +335,18 @@ class ColourSlot(BaseModel):
     filament_id: str | None = None
 
 
+class LibraryFileRef(BaseModel):
+    """The library file a ``library_file`` item prints (#5544): its id, its name when the
+    item was added (for display after a delete or a rename), and which library it is
+    in. It has no template commit and no customizer inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(ge=1)
+    filename: str
+    library: ItemLibrary
+
+
 class OrderItem(BaseModel):
     id: str
     order_id: str
@@ -340,11 +356,13 @@ class OrderItem(BaseModel):
     title: str
     notes: str
     kind: ItemKind = "model"
-    #: What to make; None for a ``custom`` item, which names nothing (#4954), and for a
-    #: ``request`` item until its first design.
+    #: What to make; None for a ``custom`` item, which names nothing (#4954), for a
+    #: ``request`` item until its first design, and for a ``library_file`` item.
     reference: Reference | None
+    #: A ``library_file`` item's file (#5544); None for every other kind.
+    library_file: LibraryFileRef | None = None
     #: A ``custom`` item's own flag: False skips the print path (it is marked done by
-    #: hand). Always True for a ``model`` item.
+    #: hand). Always True for a ``model`` or ``library_file`` item.
     requires_printing: bool = True
     #: The shop's stock code, when it keeps one.
     sku: str | None = None

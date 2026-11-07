@@ -89,8 +89,17 @@ const reference = z
 // order_item_add and order_item_add_after_acceptance take one body (#5349).
 const itemAddInput = z.object({
   order_id: orderId,
-  kind: z.enum(['model', 'custom', 'request']).optional().describe('`model` (the default), `custom` or `request`'),
+  kind: z
+    .enum(['model', 'custom', 'request', 'library_file'])
+    .optional()
+    .describe('`model` (the default), `custom`, `request` or `library_file`'),
   output_id: ID.optional(),
+  library_file_id: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe('A file of the library (from search_library or list_library), as print_output takes it: the item prints it'),
   ...reference.shape,
   quantity: z.number().int().min(1).default(1),
   title: z
@@ -104,8 +113,28 @@ const itemAddInput = z.object({
   requires_printing: z.boolean().optional().describe('A custom item\'s only'),
 })
 
-function itemAddTitle({ order_id, slug, output_id, kind, title }: { order_id: string; slug?: string; output_id?: string; kind?: string; title?: string }): string {
-  return `Add ${kind === 'custom' || kind === 'request' ? (title ?? `a ${kind} item`) : (slug ?? output_id ?? 'an item')} to order ${order_id}`
+function itemAddTitle({
+  order_id,
+  slug,
+  output_id,
+  library_file_id,
+  kind,
+  title,
+}: {
+  order_id: string
+  slug?: string
+  output_id?: string
+  library_file_id?: number
+  kind?: string
+  title?: string
+}): string {
+  const what =
+    kind === 'custom' || kind === 'request'
+      ? (title ?? `a ${kind} item`)
+      : library_file_id !== undefined
+        ? (title ?? `library file ${library_file_id}`)
+        : (slug ?? output_id ?? 'an item')
+  return `Add ${what} to order ${order_id}`
 }
 
 const attempt = z
@@ -654,7 +683,12 @@ export const orderTools: Tool[] = [
       '`requires_printing` (default ' +
       'false) marks one that still has to be made. ' +
       '`kind: "request"` adds a design request: a `title` and `notes` only, no source and no price; its first ' +
-      'revision (order_item_revision_add) gives it its design. `sku` is the shop\'s stock code, on any kind. ' +
+      'revision (order_item_revision_add) gives it its design. `library_file_id` adds a library file instead ' +
+      '(#5544): a file of the library that serves (from search_library), with no `output_id`, `slug`, `commit` ' +
+      'or `inputs`; the item names the file (no template), defaults its title to the file\'s name, is priced by ' +
+      'order_item_quote (a slice of the file, or `manual`), prints the file, and has no revisions. A file the ' +
+      'library does not have or does not print is 422; one deleted later is 409 `library_file_gone` on quote ' +
+      'and print. `sku` is the shop\'s stock code, on any kind. ' +
       'An accepted, in-production or ready order answers 409 `item_locked`: use order_item_add_after_acceptance.',
     input: itemAddInput,
     risk: 'write',

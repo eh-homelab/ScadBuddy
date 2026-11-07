@@ -20,10 +20,16 @@ from typing import Any
 
 from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
-from scadbuddy.bambuddy.models import FINISH_PHOTO_PREFIX, ArchiveDetail, SliceJob, Spool
+from scadbuddy.bambuddy.models import (
+    FINISH_PHOTO_PREFIX,
+    ArchiveDetail,
+    LibraryFile,
+    SliceJob,
+    Spool,
+)
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.print_source import PrintSource
+from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
@@ -36,6 +42,8 @@ from scadbuddy.orders.integrations import (
     ShelfSpool,
     SpoolGroup,
 )
+from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
 
 
 def _colour(rgba: str | None) -> str | None:
@@ -257,6 +265,36 @@ async def start_quote_preview(
         return await start_preview_plates(client, source, settings, uploads, request, **kwargs)
 
 
+async def start_library_quote_preview(
+    file_id: int,
+    settings: StoredSettings,
+    uploads: BambuddyUploadStore,
+    request: PrintRunRequest,
+    *,
+    lan: bool,
+    native_reads: NativeCopies | None,
+    **kwargs: Any,
+) -> list[PreviewStarted]:
+    """A library file item's slice (#5544): :func:`start_quote_preview` of the file, read
+    as the dialog's background slice of a library file reads it (``bambuddy/operations.py``
+    ``preview_run``): its slots from the download it uploads (#2550), and a native run's
+    copy into the native library. A sliced file is refused there (422): it has nothing to
+    slice."""
+    async with maybe_client(settings, native=lan) as client:
+        source = await LibrarySource.load(
+            client,
+            file_id,
+            uploads=uploads,
+            settings=settings,
+            read_own=True,
+            files=reads_for(file_id, client, native_reads),
+            native=native_reads if lan else None,
+        )
+        return await start_preview_plates(
+            client, source, settings, uploads, request, native_reads=native_reads, **kwargs
+        )
+
+
 async def quote_preview_job(
     settings: StoredSettings, uploads: BambuddyUploadStore, job_id: int, subject: str
 ) -> SliceJob:
@@ -277,3 +315,47 @@ async def download_sliced(settings: StoredSettings, file_id: int, limit: int) ->
             if len(data) > limit:
                 return None
     return bytes(data)
+
+
+# -- a library file item's file (#5544) --------------------------------------------------
+
+
+class ServedLibrary:
+    """``orders/quote.py`` ``LibraryFiles`` over the library that serves (#5544), read as
+    ``POST /print/library/{file_id}/run`` reads it (``check_served``, ``served_reads``):
+    ScadBuddy's own on ``library_backend=native``, else Bambuddy's. A file of the other
+    library is not there, as that route's 404 says."""
+
+    def __init__(self, settings: SettingsStore, native: NativeReads) -> None:
+        self.settings = settings
+        self.native = native
+
+    async def file(self, file_id: int) -> LibraryFile | None:
+        """The file, or None when the library that serves does not have it (deleted,
+        trashed, or the other library's). Any other failure raises."""
+        native = await self.native()
+        if is_native_id(file_id) != (native is not None):
+            return None
+        stored = await asyncio.to_thread(self.settings.load)
+        async with maybe_client(stored, native=native is not None) as client:
+            try:
+                return await served_reads(file_id, client, native).library_file(file_id)
+            except ApiError as error:
+                if error.status == 404:
+                    return None
+                raise
+
+    async def exists(self, file_id: int) -> bool:
+        return await self.file(file_id) is not None
+
+    async def colours(self, file_id: int) -> dict[int, str]:
+        """The file's slot colours by slot id (from 1), as its filament requirements name
+        them; empty when they cannot be read (the slots are then grey)."""
+        native = await self.native()
+        stored = await asyncio.to_thread(self.settings.load)
+        try:
+            async with maybe_client(stored, native=native is not None) as client:
+                needs = await served_reads(file_id, client, native).filament_requirements(file_id)
+        except ApiError:
+            return {}
+        return {slot.slot_id: slot.color for slot in needs.filaments if slot.color}

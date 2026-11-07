@@ -162,6 +162,12 @@ class FakeSlicer:
         self.subjects.append(subject)
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
+    async def start_library(
+        self, file_id: int, request: SliceQuoteRequest, subject: str
+    ) -> list[PreviewStarted]:
+        self.subjects.append(f"{subject} file {file_id}")
+        return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
+
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
         return SlicedPlate(plate_id=started.plate_id, slicer="bambuddy", file_id=started.job_id)
 
