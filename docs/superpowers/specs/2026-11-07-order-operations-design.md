@@ -246,6 +246,9 @@ Actuals (logged maintenance or replaced parts feeding back). A later issue.
 - scadify is changing `orders/lifecycle.py`, `models.py`, `store.py` and `api/orders.py`
   for payments and deposits; it lands first and this work rebases. Each PR's files are
   sent to scadify before it opens.
+- After scadify's #5281 (B1) is on main, every new transaction here that changes items
+  or charges (the batch add, duplicate, bulk fulfil) calls `self._retax(conn, order)`,
+  and totals come from `orders/totals.py` (moved out of `api/orders.py`).
 
 ## 8. Order of work
 
