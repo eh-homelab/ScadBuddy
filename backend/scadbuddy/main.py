@@ -137,6 +137,7 @@ from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activit
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import spool_activities
 from scadbuddy.spools.component import SPOOLS
+from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -1448,6 +1449,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         rack=state.components.get(RACK_USAGE),
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
+        native_spools=NativeSpoolStore(state.settings_store.pool),
     )
     activities = [
         *PrintActivities(deps).all(),

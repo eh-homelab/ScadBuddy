@@ -11,7 +11,10 @@ client of a stand-in API that answers fixed store settings and serves no job rou
 test of the worker that renders nothing. `threaded_render_crud` is a render worker's
 blocking client of the render routes served on a thread of their own, for a test that
 calls them from its event loop or a sync test; `threaded_render_index` is the worker's
-`RemoteBlobIndex` over it. `FakeClock` is a
+`RemoteBlobIndex` over it. `print_crud_app` serves the print routes over the API's
+settings store, `threaded_print_crud` is a blocking client of them on a thread of their
+own, and `static_print_crud` is a print worker's client of a stand-in API that answers
+fixed settings. `FakeClock` is a
 client clock that moves only by the client's own waits, so a test's count of tries does
 not depend on wall time."""
 
@@ -33,7 +36,7 @@ import uvicorn
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
-from scadbuddy.api import crud_areas, crud_projects, crud_render, service_token
+from scadbuddy.api import crud_areas, crud_print, crud_projects, crud_render, service_token
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.exchange import BootstrapVerifier
@@ -41,6 +44,7 @@ from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.service_credentials import (
     InProcessProvider,
     ServiceAuth,
+    ServiceCaller,
     ServiceCredentialStore,
 )
 from scadbuddy.core.config import INSTALL_CONCURRENCY
@@ -62,7 +66,7 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
-from scadbuddy.library.settings_store import RenderStoreSettings, SettingsStore
+from scadbuddy.library.settings_store import PrintSettings, RenderStoreSettings, SettingsStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
@@ -400,6 +404,71 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
 
     return CrudClient(
         "http://api", "render", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
+    )
+
+
+def print_crud_app(store: SettingsStore, credentials: ServiceCredentialStore) -> FastAPI:
+    """The print routes, reading the settings through the API's ``store``."""
+    app = FastAPI(dependencies=[Depends(auth_check)])
+    parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
+    app.state.scadbuddy = SimpleNamespace(
+        settings=SimpleNamespace(auth_mode="enforce"),
+        settings_store=store,
+        components=SimpleNamespace(get=lambda key: parts[key]),
+    )
+    app.include_router(crud_print.router, prefix="/api/v1")
+    app.include_router(crud_areas.router, prefix="/api/v1")
+    install_problem_handlers(app)
+    app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
+    return app
+
+
+@contextmanager
+def threaded_print_crud(
+    store: SettingsStore, caller: ServiceCaller = "print"
+) -> Iterator[CrudSyncClient]:
+    """A `CrudSyncClient` of the print routes over ``store``, with ``caller``'s credential,
+    served on a thread of its own, so a blocking call from the test's loop is answered."""
+    credentials = ServiceCredentialStore(store.pool)
+    app = print_crud_app(store, credentials)
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
+    )
+    thread = threading.Thread(target=server.run, name="crud print routes", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 30
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
+        time.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    client = CrudSyncClient(
+        f"http://127.0.0.1:{port}",
+        "print",
+        ServiceAuth(InProcessProvider(caller, lambda: credentials)),
+        unavailable_budget=0.5,
+    )
+    try:
+        yield client
+    finally:
+        client.close()
+        server.should_exit = True
+        thread.join(30)
+
+
+def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
+    """A print worker's client of an API that lists the ``settings`` area and answers
+    ``current`` (the defaults) as the settings."""
+    body = (current or PrintSettings()).model_dump(mode="json")
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/print/areas"):
+            return httpx.Response(200, json={"areas": ["settings"]}, headers=CRUD_HEADERS)
+        if request.url.path.endswith("/print/settings"):
+            return httpx.Response(200, json=body, headers=CRUD_HEADERS)
+        return httpx.Response(404, headers=CRUD_HEADERS)
+
+    return CrudClient(
+        "http://api", "print", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
     )
 
 

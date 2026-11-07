@@ -70,7 +70,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
-from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.library.settings_store import SettingsReader, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
@@ -145,7 +145,7 @@ async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error:
 
 @dataclass
 class PrintDeps:
-    settings_store: SettingsStore
+    settings_store: SettingsReader
     #: The outputs, on the volume or through the API (#1060).
     outputs: OutputReader
     #: Where a print records the output's last print (#1060).
@@ -192,13 +192,13 @@ def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
     return [LanPlateSend(plate_id=plate_id, copies=copies) for plate_id, copies in counts.items()]
 
 
-def plate_clear_of(planned: PlannedRun, settings: SettingsStore) -> PlannedRun:
+def plate_clear_of(planned: PlannedRun, settings: SettingsReader) -> PlannedRun:
     """``planned`` with ``lan_require_plate_clear`` as it is now (#4939), for a native run
     of several prints: the run keeps it, so a change applies from the next run. Any
     other run has no print to wait between, and reads nothing."""
     if not planned.lan_start or planned.copies * len(planned.plates) < 2:
         return planned
-    required = settings.snapshot().runtime.lan_require_plate_clear
+    required = settings.plate_clear_required()
     return planned.model_copy(update={"plate_clear": required})
 
 
