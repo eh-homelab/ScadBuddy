@@ -52,7 +52,7 @@ _DETAILS: dict[Reason, str] = {
 def refusal(route_cls: RouteClass, reason: Reason, *, bearer: bool) -> ApiError:
     """``enforce``'s answer to a request :func:`would_refuse` refuses (§8.2)."""
     if reason in UNAUTHENTICATED:
-        service_only = route_cls.startswith(("internal.", "crud.")) or route_cls == "flow.host"
+        service_only = route_cls.startswith(("internal.", "crud."))
         wants_bearer = bearer or service_only
         return ApiError(
             401,

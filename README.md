@@ -981,7 +981,11 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   flow's payloads are sealed per run, and the worker refuses to start without it),
   `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and `SCADBUDDY_API_INTERNAL_URL`: a flow's
   `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
-  (`workflows/flow_routes.py`). No data volume
+  (`workflows/flow_routes.py`). Its service credential holds `flow.host` and
+  `crud.projects`, not `api` (#5298). So in `SCADBUDDY_AUTH_MODE=enforce` it reaches only
+  the public routes those calls, its grant checks and its printer reads use
+  (`auth/routes.py` `FLOW_HOST_ENDPOINTS`); those routes still take everyone an `api`
+  route takes. No data volume
   and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
 - **Scripts are git** (#2503): each flow version is one commit in `/data/flows`
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data

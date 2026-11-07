@@ -28,6 +28,8 @@ PUBLIC = "https://scadbuddy.test"
 HEADER = {"X-ScadBuddy-Request": "1"}
 ISSUER = "https://idp.test"
 AUTHOR = {"X-ScadBuddy-Agent-Author": "token:abc"}
+#: A flow host route (#5298): the projects worker's credential reaches it.
+FLOW_HOST = "/api/v1/settings/print-options"
 
 
 @pytest.fixture
@@ -102,23 +104,28 @@ def test_only_the_agent_names_anyone(client: TestClient, app: FastAPI, settings:
     assert _count(app, "api", "author_header") == 2
 
 
-def test_the_print_worker_has_no_public_routes(
+def test_the_print_and_projects_workers_have_no_api_routes(
     client: TestClient, app: FastAPI, settings: Settings
 ) -> None:
     client.get("/api/v1/models", headers=_bearer(app, settings, "print"))
     assert _count(app, "api", "out_of_scope") == 1
     client.get("/api/v1/models", headers=_bearer(app, settings, "projects"))
-    assert _count(app, "api", "out_of_scope") == 1
+    assert _count(app, "api", "out_of_scope") == 2
+    # #5298: the projects credential's `flow.host` reaches the flow host routes only.
+    client.get(FLOW_HOST, headers=_bearer(app, settings, "projects"))
+    assert _count(app, "flow.host", "out_of_scope") == 0
+    client.get(FLOW_HOST, headers=_bearer(app, settings, "print"))
+    assert _count(app, "flow.host", "out_of_scope") == 1
 
 
 def test_the_projects_worker_needs_the_run_s_token(
     client: TestClient, app: FastAPI, settings: Settings
 ) -> None:
-    client.get("/api/v1/models", headers={**AUTHOR, **_bearer(app, settings, "projects")})
-    assert _count(app, "api", "wrong_author") == 1
+    client.get(FLOW_HOST, headers={**AUTHOR, **_bearer(app, settings, "projects")})
+    assert _count(app, "flow.host", "wrong_author") == 1
     forged = {"X-ScadBuddy-Run-Token": "some-run.AAAA"}
-    client.get("/api/v1/models", headers={**AUTHOR, **forged, **_bearer(app, settings, "projects")})
-    assert _count(app, "api", "wrong_author") == 2
+    client.get(FLOW_HOST, headers={**AUTHOR, **forged, **_bearer(app, settings, "projects")})
+    assert _count(app, "flow.host", "wrong_author") == 2
 
 
 @pytest.mark.parametrize("caller", ["agent", "projects"])

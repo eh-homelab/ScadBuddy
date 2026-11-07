@@ -260,6 +260,7 @@ def test_a_refused_author_is_refused_and_records_nothing(
     response = enforced.post("/api/v1/customers", json=ADA, headers=headers)
     if refused:
         assert response.status_code == 403, response.text
+        assert "run's starter" in response.json()["detail"]
     else:
         assert response.status_code == 201, response.text
     _sign_in(enforced)
@@ -267,3 +268,41 @@ def test_a_refused_author_is_refused_and_records_nothing(
     assert listed.status_code == 200
     names = [customer["display_name"] for customer in listed.json()]
     assert names == ([] if refused else [ADA["display_name"]])
+
+
+# The flow host routes (#5298): the projects credential holds `flow.host`, not `api`.
+
+FLOW_HOST = "/api/v1/settings/print-options"
+API = "/api/v1/models"
+
+
+def test_a_flow_host_route_answers_everyone_as_an_api_route(
+    enforced: TestClient, settings: Settings
+) -> None:
+    """A person, a personal token and the agent get the answer an `api` route gives them;
+    the projects credential is let through only on the flow host routes."""
+    _sign_in(enforced)
+    minted = enforced.post(
+        "/api/v1/auth/access-tokens",
+        json={"name": "fs", "scope": "read", "expires_in_days": 1},
+        headers=HEADER,
+    )
+    assert minted.status_code in (200, 201), minted.text
+    token = {"Authorization": f"Bearer {minted.json()['token']}"}
+    for path in (FLOW_HOST, API):
+        assert enforced.get(path, headers=HEADER).status_code == 200, path
+        no_header = enforced.get(path)
+        assert no_header.status_code == 403, path
+        assert no_header.json()["reason"] == "no_request_header", path
+    enforced.cookies.clear()
+    for path in (FLOW_HOST, API):
+        assert enforced.get(path).status_code == 401, path
+        assert enforced.get(path, headers=token).status_code == 200, path
+        agent = _bearer(enforced, settings, "agent")
+        assert enforced.get(path, headers=agent).status_code == 200, path
+    projects = _bearer(enforced, settings, "projects")
+    assert enforced.get(FLOW_HOST, headers=projects).status_code == 200
+    refused = enforced.get(API, headers=projects)
+    assert refused.status_code == 403
+    assert refused.json()["type"] == FORBIDDEN
+    assert refused.json()["reason"] == "out_of_scope"

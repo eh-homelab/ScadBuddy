@@ -362,7 +362,7 @@ handed its token (§7.2) without a plaintext secret in Postgres or its backups.
 |---|---|---|
 | `agent` | `api` (every public `/api/v1` route), `internal.workspace` | yes, any principal (§7.3) |
 | `print` | `internal.outputs`, `internal.library` | no |
-| `projects` | the flow host routes (`render`, `outputs` create, the print queue, `arrange`, `operations` reads) | yes, only the run's `started_by` (§7.3) |
+| `projects` | the flow host routes, class `flow.host` (#5298): the 11 routes in `backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`: render, the job and operation reads, outputs create, read and arrange, print runs create (output and library) and read, the print options read, and the printer read of `flow_decide` | yes, only the run's `started_by` (§7.3) |
 
 The Rust slicer keeps its transfer tokens (C6), which are already a credential per request
 and need no caller identity.

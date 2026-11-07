@@ -63,13 +63,13 @@ Proof = Literal["legacy", "k8s", "bootstrap", "inprocess"]
 ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 
 #: What each caller may reach, as route classes (§7.1, `auth/routes.py`). The projects
-#: worker's flow host routes are `api` routes; phase 5 narrows what it may assert. The
-#: `crud.<caller>` classes are the CRUD routes under `/internal/crud/<caller>/` (#5298); the
-#: render worker has no other class.
+#: worker reaches only the public routes its flow host functions call (`flow.host`, #5298),
+#: not `api`. The `crud.<caller>` classes are the CRUD routes under
+#: `/internal/crud/<caller>/` (#5298); the render worker has no other class.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
-    "projects": frozenset({"api", "crud.projects"}),
+    "projects": frozenset({"flow.host", "crud.projects"}),
     "render": frozenset({"crud.render"}),
 }
 #: The Postgres role of each caller, granted its view when the deployment made it.
