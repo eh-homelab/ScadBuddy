@@ -28,7 +28,6 @@ from pydantic import (
     StrictStr,
     StringConstraints,
     ValidationError,
-    field_serializer,
     field_validator,
     model_validator,
 )
@@ -475,7 +474,9 @@ class ModelMeta(BaseModel):
     #: parameter of its source, each value the settings for the parts of that colour,
     #: with the keys and limits of a print's ``part_settings``
     #: (``bambuddy/part_settings.py`` ``PartSettings``). Not in `ModelPatch` either.
-    part_print_settings: dict[ColourParameter, PartSettings] = Field(
+    #: Stored as plain dicts of the settings set, so a plain ``model_dump`` is the
+    #: model.json shape (an operation's stored result is sent as it is).
+    part_print_settings: dict[ColourParameter, dict[str, int | str]] = Field(
         default_factory=dict,
         description=(
             "The template's own slicer settings per colour part, from its model.json: each"
@@ -486,19 +487,27 @@ class ModelMeta(BaseModel):
         ),
     )
 
-    @field_validator("part_print_settings")
+    @field_validator("part_print_settings", mode="before")
     @classmethod
-    def _set_part_print_settings(cls, value: dict[str, PartSettings]) -> dict[str, PartSettings]:
-        """A parameter that sets nothing is dropped. An unknown key or a value out of
-        range is refused by ``PartSettings``, as an unknown print setting is."""
-        return {name: settings for name, settings in value.items() if settings.metadata()}
-
-    @field_serializer("part_print_settings")
-    def _dump_part_print_settings(
-        self, value: dict[str, PartSettings]
-    ) -> dict[str, dict[str, Any]]:
-        # As a model.json states them: only the settings set.
-        return {name: settings.model_dump(exclude_none=True) for name, settings in value.items()}
+    def _set_part_print_settings(cls, value: Any) -> Any:
+        """Each parameter's settings checked by ``PartSettings``: an unknown key or a
+        value out of range is refused, as an unknown print setting is. Only the settings
+        set are kept, and a parameter that sets nothing is dropped."""
+        if not isinstance(value, dict):
+            return value  # the field's own type check refuses it
+        kept: dict[Any, dict[str, Any]] = {}
+        for name, raw in value.items():
+            try:
+                settings = PartSettings.model_validate(raw)
+            except ValidationError as error:
+                problems = "; ".join(
+                    f"{name}.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                    for detail in error.errors()
+                )
+                raise ValueError(problems) from None
+            if settings.metadata():
+                kept[name] = settings.model_dump(exclude_none=True)
+        return kept
 
     @field_validator("media", mode="before")
     @classmethod
@@ -998,7 +1007,8 @@ class Catalogue:
     def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
         """The template's ``part_print_settings`` as its model.json has them now
         (#5626), by colour parameter; read and refused as :meth:`print_settings`."""
-        return self._meta(slug, self.read_raw_meta(slug)).part_print_settings
+        declared = self._meta(slug, self.read_raw_meta(slug)).part_print_settings
+        return {name: PartSettings.model_validate(raw) for name, raw in declared.items()}
 
     def _record(
         self,

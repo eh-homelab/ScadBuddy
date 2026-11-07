@@ -31,8 +31,11 @@ def test_settings_are_read_by_colour_parameter() -> None:
     )
 
     assert meta.part_print_settings == {
-        "letter_color": PartSettings(top_shell_layers=8, ironing_type="top")
+        "letter_color": {"top_shell_layers": 8, "ironing_type": "top"}
     }
+    # A plain dump is the model.json shape: no serializer (an operation's stored result
+    # is sent as it is, tests/api/test_operations.py).
+    assert meta.model_dump()["part_print_settings"] == meta.part_print_settings
 
 
 def test_none_is_empty_and_a_parameter_that_sets_nothing_is_dropped() -> None:
@@ -68,7 +71,7 @@ def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path) -> None:
         tmp_path, {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": 2000}}}
     )
 
-    with pytest.raises(InvalidModelMetaError, match=r"part_print_settings\.base_color\.wall_loops"):
+    with pytest.raises(InvalidModelMetaError, match=r"part_print_settings.*base_color\.wall_loops"):
         catalogue.part_print_settings("demo")
     with pytest.raises(InvalidModelMetaError, match="part_print_settings"):
         catalogue.print_settings("demo")
