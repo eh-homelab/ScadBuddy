@@ -993,7 +993,7 @@ export const orderTools: Tool[] = [
     description:
       "Caption or re-role an attachment (order_get lists them under `attachments`), in any state of the order. " +
       "A file of a design revision sent to the customer, or answered, keeps its role and caption (refused, " +
-      "`revision_sent`); a `render` never becomes a `test_print`. " +
+      "`revision_sent`); no file is re-roled to `test_print` (upload the photo of a test print). " +
       "`delivered` with the attachment's `item_id`: true marks this image as what the item delivered (its picture " +
       "from then on; refused unless it is one of that item's images), false clears the item's delivered mark.",
     input: z.object({

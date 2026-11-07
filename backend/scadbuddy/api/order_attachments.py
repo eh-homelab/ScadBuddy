@@ -469,8 +469,8 @@ async def get_attachment_thumbnail(
     summary="Caption or re-role an attachment",
     description=(
         "A field left out stays; each change is on the audit line. 422 `role` for a "
-        "`render` or a `test_print` outside a design revision, or for a `render` re-roled to "
-        "`test_print`. 409 `revision_sent` for a "
+        "`render` or a `test_print` outside a design revision, or for any file re-roled to "
+        "`test_print` (a test print's photo only arrives by upload). 409 `revision_sent` for a "
         "file of a design revision sent to the customer or answered: it is the record of "
         "what they saw."
     ),

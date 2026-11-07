@@ -122,10 +122,15 @@ export async function upload(request: Request, orderId: string, itemId: string |
   return HttpResponse.json(attachment)
 }
 
+function sentRevision(attachment: OrderAttachment) {
+  const revision = state.revisions.find((r) => r.id === attachment.revision_id)
+  return revision && (revision.sent_at != null || revision.answer != null) ? revision : null
+}
+
 /** A file of a revision sent to the customer, or answered, is the record of what they saw. */
 function refuseSentRevision(attachment: OrderAttachment) {
-  const revision = state.revisions.find((r) => r.id === attachment.revision_id)
-  if (revision && (revision.sent_at != null || revision.answer != null)) {
+  const revision = sentRevision(attachment)
+  if (revision) {
     throw new Refused('revision_sent', `revision ${revision.number} was sent to the customer: its files are the record of what they saw`)
   }
 }
@@ -175,12 +180,13 @@ export const handlers = [
     const body = (await request.json()) as OrderAttachmentPatch
     if (body.role != null && !ROLES.has(body.role)) return fieldProblem(request, 'role', 'not a role')
     const target = state.attachments.find((a) => a.id === String(params.a) && a.order_id === String(params.id))
-    if (target && body.role != null && body.role !== target.role) {
+    // As the backend: a sent revision's file is refused (`revision_sent`, below) before its role is checked.
+    if (target && !sentRevision(target) && body.role != null && body.role !== target.role) {
       if (!target.revision_id && REVISION_ROLES.has(body.role)) {
         return fieldProblem(request, 'role', `a ${body.role} file is a design revision's: attach it to the revision`)
       }
-      if (target.role === 'render' && body.role === 'test_print') {
-        return fieldProblem(request, 'role', 'a render is not the photo of a test print: upload that photo')
+      if (body.role === 'test_print') {
+        return fieldProblem(request, 'role', 'only an upload is the photo of a test print: upload that photo')
       }
     }
     return transition(request, () => {
