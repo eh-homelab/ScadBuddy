@@ -9,11 +9,12 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import { addItem, addRevision, afterAcceptanceWarning, reviseWarning, type AddMode } from './afterAcceptance'
+import { addItem, addItems, addRevision, afterAcceptanceWarning, reviseWarning, type AddMode } from './afterAcceptance'
 import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
 import { LibraryFilePicker } from './LibraryFilePicker'
+import { RecentRendersPicker, type RenderPick } from './RecentRendersPicker'
 
 /** The radio value of "the current version with its default settings". */
 const CURRENT = 'current'
@@ -74,7 +75,8 @@ function revisionBody(current: Pinned | null, choice: string, note: string): Rev
  * `mode` `after_acceptance` (#5349), `accepted`, `in_production` or `ready`, where the add
  * asks the person to confirm that it changes an accepted order first. It also takes a "Design request" (#5280): a title and the
  * customer's words, whose design a revision supplies later, and a "Library file" (#5544): a
- * file of the library, found as the Library page's search finds it, which the item prints. With `revise` it is the
+ * file of the library, found as the Library page's search finds it, which the item prints, and "Recent renders"
+ * (#4777): saved outputs of every model, several picked at once, each with a quantity, added in one request. With `revise` it is the
  * design picker of an item's new revision instead (`slug`: the item's template, if any); with
  * `mode` `after_acceptance` that revision changes an accepted item (#5350), after a confirm.
  */
@@ -100,8 +102,10 @@ export function AddItemDialog({
   const models = useAsync(() => (open ? api.listModels() : Promise.resolve([] as ModelSummary[])), [open])
   const [query, setQuery] = useState('')
   const [slug, setSlug] = useState<string | null>(revise?.slug ?? null)
-  // What the item is made from: a template, a design request (#5280) or a library file (#5544).
-  const [source, setSource] = useState<'template' | 'request' | 'library'>('template')
+  // What the item is made from: a template, a design request (#5280), a library file (#5544)
+  // or recent renders of any model (#4777).
+  const [source, setSource] = useState<'template' | 'request' | 'library' | 'recent'>('template')
+  const [renders, setRenders] = useState<Map<string, RenderPick>>(new Map())
   const request = source === 'request'
   const [file, setFile] = useState<LibrarySearchHit | null>(null)
   const [note, setNote] = useState('')
@@ -135,6 +139,7 @@ export function AddItemDialog({
       setSlug(revise?.slug ?? null)
       setSource('template')
       setFile(null)
+      setRenders(new Map())
       setNote('')
       setPicked('')
       setQuantity('1')
@@ -145,7 +150,7 @@ export function AddItemDialog({
     }
   }, [open, revise?.slug])
   // A new pick asks again: the confirm names what was picked when it was armed.
-  useEffect(() => setConfirming(false), [source, file, slug, choice, quantity, title, note])
+  useEffect(() => setConfirming(false), [source, file, renders, slug, choice, quantity, title, note])
   /** Another template, or none, starting from its own default pick in the same render. */
   function pickTemplate(next: string | null) {
     setSlug(next)
@@ -160,6 +165,34 @@ export function AddItemDialog({
   }
 
   async function add() {
+    if (source === 'recent') {
+      if (renders.size === 0) {
+        setError('Pick at least one render.')
+        return
+      }
+      const items = []
+      for (const { output, quantity: typed } of renders.values()) {
+        const count = parseQuantity(typed)
+        if (count === null) {
+          setError(`${output.name || 'Untitled output'}: ${QUANTITY_HINT}`)
+          return
+        }
+        items.push({ output_id: output.id, quantity: count })
+      }
+      if (!confirmed()) return
+      setBusy(true)
+      setError(null)
+      try {
+        await addItems(orderId, items, mode)
+        onAdded()
+        onClose()
+      } catch (err) {
+        setError(refusalText(err))
+        setConfirming(false)
+        setBusy(false)
+      }
+      return
+    }
     if (source === 'library') {
       if (!file) {
         setError('Pick a library file.')
@@ -238,7 +271,7 @@ export function AddItemDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && !busy && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className={source === 'recent' ? 'sm:max-w-2xl' : 'sm:max-w-lg'}>
         <DialogHeader>
           <DialogTitle>{revise ? 'New revision' : 'Add item'}</DialogTitle>
           <DialogDescription>
@@ -248,7 +281,9 @@ export function AddItemDialog({
                 ? "A request for a design: the customer's words now, its designs as revisions later."
                 : source === 'library'
                   ? 'A file of the library becomes a line item of this order. The item prints that file.'
-                  : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
+                  : source === 'recent'
+                    ? 'Saved renders of any model become line items of this order, each with its exact settings and colours.'
+                    : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
           </DialogDescription>
         </DialogHeader>
         <div className="flex min-w-0 flex-col gap-3">
@@ -256,6 +291,9 @@ export function AddItemDialog({
             <div className="flex gap-2" role="group" aria-label="Kind of item">
               <Button type="button" size="sm" variant={source === 'template' ? 'secondary' : 'outline'} aria-pressed={source === 'template'} onClick={() => pickSource('template')}>
                 From a template
+              </Button>
+              <Button type="button" size="sm" variant={source === 'recent' ? 'secondary' : 'outline'} aria-pressed={source === 'recent'} onClick={() => pickSource('recent')}>
+                Recent renders
               </Button>
               <Button type="button" size="sm" variant={source === 'library' ? 'secondary' : 'outline'} aria-pressed={source === 'library'} onClick={() => pickSource('library')}>
                 Library file
@@ -280,6 +318,12 @@ export function AddItemDialog({
                 <Input id="add-request-quantity" inputMode="numeric" className="w-24" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
               </div>
             </>
+          )}
+          {source === 'recent' && (
+            <RecentRendersPicker open={open} models={models.data ?? []} picks={renders} disabled={busy} onPicks={(next) => {
+              setRenders(next)
+              setError(null)
+            }} />
           )}
           {source === 'library' && (
             <>
@@ -413,8 +457,18 @@ export function AddItemDialog({
           <Button type="button" variant="outline" disabled={busy} onClick={confirming ? () => setConfirming(false) : onClose}>
             {confirming ? 'Back' : 'Cancel'}
           </Button>
-          <Button type="button" disabled={busy || (request ? !title.trim() : source === 'library' ? !file : !model || !choice)} onClick={() => void add()}>
-            {confirming ? 'Change the accepted order' : revise ? 'Add revision' : 'Add item'}
+          <Button
+            type="button"
+            disabled={busy || (request ? !title.trim() : source === 'library' ? !file : source === 'recent' ? renders.size === 0 : !model || !choice)}
+            onClick={() => void add()}
+          >
+            {confirming
+              ? 'Change the accepted order'
+              : revise
+                ? 'Add revision'
+                : source === 'recent' && renders.size > 0
+                  ? `Add ${renders.size} item${renders.size === 1 ? '' : 's'}`
+                  : 'Add item'}
           </Button>
         </DialogFooter>
       </DialogContent>

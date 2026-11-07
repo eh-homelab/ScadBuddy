@@ -93,6 +93,7 @@ import type {
   ReadmeImage,
   ModelVersion,
   Output,
+  RecentOutputsQuery,
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
@@ -1849,6 +1850,32 @@ export const api = {
     return { items, total }
   },
 
+  /**
+   * #4777 — one page of every model's saved outputs, newest first (`GET /outputs`), with
+   * its filters: `from`/`to` (ISO times), models, a catalogue tag, text in the name or
+   * the changed parameters, and whether an order names the output.
+   */
+  listRecentOutputs: async (
+    filters: RecentOutputsQuery,
+    page: { limit?: number; after?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: Output[]; total: number }> => {
+    const query = new URLSearchParams()
+    if (filters.from) query.set('from', filters.from)
+    if (filters.to) query.set('to', filters.to)
+    for (const slug of filters.slug ?? []) query.append('slug', slug)
+    if (filters.tag) query.set('tag', filters.tag)
+    if (filters.q) query.set('q', filters.q)
+    if (filters.ordered) query.set('ordered', filters.ordered)
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/outputs?${query}`, { headers: { Accept: 'application/json' }, signal })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as Output[]
+    const header = response.headers.get('X-Total-Count')
+    return { items, total: header !== null ? Number(header) : items.length }
+  },
+
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
@@ -2392,6 +2419,12 @@ export const api = {
   /** #5349 — an item added to an accepted, in-production or ready order: it starts unpriced. */
   addOrderItemAfterAcceptance: (orderId: string, body: OrderItemCreate) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/after-acceptance`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #4777 — up to 50 items in one request, all or none (`POST /orders/{id}/items/batch`). */
+  addOrderItems: (orderId: string, items: OrderItemCreate[]) =>
+    request<OrderItem[]>(`/orders/${seg(orderId)}/items/batch`, { method: 'POST', body: JSON.stringify({ items }) }),
+  /** #4777 — the batch on an accepted, in-production or ready order (#5349's rules). */
+  addOrderItemsAfterAcceptance: (orderId: string, items: OrderItemCreate[]) =>
+    request<OrderItem[]>(`/orders/${seg(orderId)}/items/after-acceptance/batch`, { method: 'POST', body: JSON.stringify({ items }) }),
   updateOrderItem: (orderId: string, itemId: string, body: OrderItemPatch) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderItem: (orderId: string, itemId: string) =>

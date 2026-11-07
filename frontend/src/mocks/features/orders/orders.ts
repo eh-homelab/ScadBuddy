@@ -23,7 +23,7 @@ import { versionIds } from '../../fixtures'
 import { printersState } from '../printers'
 import { mockLibraryFile } from '../library'
 import { byCreated } from '../../../components/orders/price'
-import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, revisionsOf, state, UNKNOWN_PARAMETER } from './state'
+import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, revisionsOf, seedOrders, state, UNKNOWN_PARAMETER } from './state'
 import { pushRevision } from './revisions'
 import { orderRow } from './costs'
 import { productOf } from './report'
@@ -486,6 +486,41 @@ function addLibraryItem(request: Request, order: Order, body: OrderItemCreate & 
     return HttpResponse.json(created, { status: 201 })
   } catch (error) {
     return refused(request, error)
+  }
+}
+
+/** `MAX_BATCH_ITEMS` of `api/orders.py` (#4777). */
+const MAX_BATCH_ITEMS = 50
+
+/**
+ * `POST /orders/:id/items/batch` and its after-acceptance route (#4777): each item through
+ * the single add, in order; a refusal puts the orders' state back as it was and answers
+ * that refusal, naming the item's place (`item_index`) as the route does.
+ */
+function addItems(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
+  const single = addItem(afterAcceptance)
+  return async (info) => {
+    const { request } = info
+    const body = (await request.json()) as { items?: unknown }
+    if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > MAX_BATCH_ITEMS) {
+      return fieldProblem(request, 'items', `List should have at least 1 and at most ${MAX_BATCH_ITEMS} items`)
+    }
+    const saved = structuredClone(state)
+    const created: unknown[] = []
+    for (const [index, item] of body.items.entries()) {
+      const one = new Request(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify(item) })
+      const answer = (await single({ ...info, request: one } as never)) as Response
+      if (answer.status !== 201) {
+        seedOrders(saved)
+        const problem = (await answer.json()) as Record<string, unknown>
+        return HttpResponse.json(
+          { ...problem, detail: `items[${index}]: ${String(problem['detail'])}`, item_index: index },
+          { status: answer.status, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }
+      created.push(await answer.json())
+    }
+    return HttpResponse.json(created, { status: 201 })
   }
 }
 
@@ -956,6 +991,8 @@ export const handlers = [
 
   http.post('/api/v1/orders/:id/items', addItem(false)),
   http.post('/api/v1/orders/:id/items/after-acceptance', addItem(true)),
+  http.post('/api/v1/orders/:id/items/batch', addItems(false)),
+  http.post('/api/v1/orders/:id/items/after-acceptance/batch', addItems(true)),
   http.patch('/api/v1/orders/:id/items/:item', async ({ request, params }) => {
     const body = (await request.json()) as OrderItemPatch & Record<string, unknown>
     const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments', 'sku', 'unit_price_minor', 'requires_printing', 'accept', 'approval'])

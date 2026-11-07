@@ -75,6 +75,11 @@ from scadbuddy.orders.lifecycle import (
     LabourRate,
     LifecycleError,
     ManualQuoteInput,
+    NewCustomItem,
+    NewItem,
+    NewLibraryItem,
+    NewModelItem,
+    NewRequestItem,
     OrderEdit,
     ShipmentEdit,
     ShipmentInput,
@@ -335,6 +340,19 @@ class ItemCreate(ReferenceBody):
             if named:
                 raise ValueError(f"only a custom item takes {', '.join(named)}")
         return self
+
+
+#: How many items `POST /orders/{id}/items/batch` adds at most (#4777).
+MAX_BATCH_ITEMS = 50
+
+
+class ItemBatch(BaseModel):
+    """`POST /orders/{id}/items/batch` (#4777, order operations spec 2026-11-07 §3.1):
+    the items of `POST /orders/{id}/items`, added in order, all or none."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ItemCreate] = Field(min_length=1, max_length=MAX_BATCH_ITEMS)
 
 
 class ItemPatch(BaseModel):
@@ -1451,6 +1469,87 @@ async def add_item_after_acceptance(
     )
 
 
+@router.post(
+    "/{order_id}/items/batch",
+    response_model=list[OrderItem],
+    status_code=status.HTTP_201_CREATED,
+    summary="Add several line items",
+)
+async def add_items(
+    order_id: str,
+    body: ItemBatch,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStoreDep,
+    library: PrintLibraryDep,
+) -> list[OrderItem]:
+    """#4777 (order operations spec 2026-11-07 §3.1): up to 50 items, each the body of
+    `POST /orders/{id}/items` and added as that route adds it, in order, in one
+    transaction: any refusal adds none. A body that is refused before the add (a bad
+    reference, a library file the library lacks) is a problem that names its place,
+    `item_index`, and says `items[<i>]` in its detail. Only while the order is `draft`
+    or `quoted`, as the single add; past that use
+    `POST /orders/{id}/items/after-acceptance/batch`."""
+    return await _add_items(
+        order_id,
+        body.items,
+        orders,
+        after_acceptance=False,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+        settings=settings,
+        library=library,
+        batch=True,
+    )
+
+
+@router.post(
+    "/{order_id}/items/after-acceptance/batch",
+    response_model=list[OrderItem],
+    status_code=status.HTTP_201_CREATED,
+    summary="Add several line items to an accepted order",
+)
+async def add_items_after_acceptance(
+    order_id: str,
+    body: ItemBatch,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStoreDep,
+    library: PrintLibraryDep,
+) -> list[OrderItem]:
+    """`POST /orders/{id}/items/batch` with the rules of
+    `POST /orders/{id}/items/after-acceptance` (#5349) for every item."""
+    return await _add_items(
+        order_id,
+        body.items,
+        orders,
+        after_acceptance=True,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+        settings=settings,
+        library=library,
+        batch=True,
+    )
+
+
 async def _add_item(
     order_id: str,
     body: ItemCreate,
@@ -1466,57 +1565,118 @@ async def _add_item(
     settings: SettingsStore,
     library: PrintLibrary,
 ) -> OrderItem:
+    [item] = await _add_items(
+        order_id,
+        [body],
+        orders,
+        after_acceptance=after_acceptance,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+        settings=settings,
+        library=library,
+        batch=False,
+    )
+    return item
+
+
+async def _add_items(
+    order_id: str,
+    bodies: list[ItemCreate],
+    orders: OrdersComponent,
+    *,
+    after_acceptance: bool,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStore,
+    library: PrintLibrary,
+    batch: bool,
+) -> list[OrderItem]:
+    """Each body read as `POST /orders/{id}/items` reads it, then all added in one
+    transaction. In a batch a refused body's problem names its place, ``item_index``."""
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     by = current_actor()
+    entries: list[NewItem] = []
+    for index, body in enumerate(bodies):
+        try:
+            entries.append(
+                await _new_item(
+                    body,
+                    after_acceptance=after_acceptance,
+                    catalogue=catalogue,
+                    history=history,
+                    outputs=outputs,
+                    paths=paths,
+                    config=config,
+                    fetcher=fetcher,
+                    settings=settings,
+                    library=library,
+                )
+            )
+        except ApiError as error:
+            if not batch:
+                raise
+            raise ApiError(
+                error.status,
+                f"items[{index}]: {error.detail}",
+                title=error.title,
+                type_=error.type,
+                headers=error.headers,
+                **error.extensions,
+                item_index=index,
+            ) from None
+    return await _run(
+        lambda: orders.lifecycle.add_items(order_id, by, entries, after_acceptance=after_acceptance)
+    )
+
+
+async def _new_item(
+    body: ItemCreate,
+    *,
+    after_acceptance: bool,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStore,
+    library: PrintLibrary,
+) -> NewItem:
+    """What one body adds: a library file read from the library that serves, a model
+    item's reference resolved."""
     if body.kind == "library_file":
         assert body.library_file_id is not None
         file = await _library_file(body.library_file_id, settings, library)
-        return await _run(
-            lambda: orders.lifecycle.add_library_item(
-                order_id,
-                by,
-                file,
-                quantity=body.quantity,
-                title=body.title,
-                notes=body.notes,
-                sku=body.sku,
-                after_acceptance=after_acceptance,
-            )
+        return NewLibraryItem(
+            file=file, quantity=body.quantity, title=body.title, notes=body.notes, sku=body.sku
         )
     if body.kind == "custom":
         assert body.title is not None and body.unit_price_minor is not None
-        title, price = body.title.strip(), body.unit_price_minor
         # After acceptance an unset accept means false: the price waits for its own accept.
         accept = body.accept is True if after_acceptance else body.accept is not False
-        return await _run(
-            lambda: orders.lifecycle.add_custom_item(
-                order_id,
-                by,
-                title=title,
-                quantity=body.quantity,
-                unit_price_minor=price,
-                notes=body.notes,
-                sku=body.sku,
-                requires_printing=bool(body.requires_printing),
-                accept=accept,
-                after_acceptance=after_acceptance,
-            )
+        return NewCustomItem(
+            title=body.title.strip(),
+            quantity=body.quantity,
+            unit_price_minor=body.unit_price_minor,
+            notes=body.notes,
+            sku=body.sku,
+            requires_printing=bool(body.requires_printing),
+            accept=accept,
         )
     if body.kind == "request":
         assert body.title is not None
-        request_title = body.title.strip()
-        return await _run(
-            lambda: orders.lifecycle.add_request_item(
-                order_id,
-                by,
-                title=request_title,
-                quantity=body.quantity,
-                notes=body.notes,
-                sku=body.sku,
-                after_acceptance=after_acceptance,
-            )
+        return NewRequestItem(
+            title=body.title.strip(), quantity=body.quantity, notes=body.notes, sku=body.sku
         )
     resolved = await _resolved(
         body,
@@ -1528,18 +1688,13 @@ async def _add_item(
         config=config,
         fetcher=fetcher,
     )
-    return await _run(
-        lambda: orders.lifecycle.add_item(
-            order_id,
-            by,
-            resolved,
-            output_id=body.output_id,
-            quantity=body.quantity,
-            title=body.title,
-            notes=body.notes,
-            sku=body.sku,
-            after_acceptance=after_acceptance,
-        )
+    return NewModelItem(
+        resolved=resolved,
+        output_id=body.output_id,
+        quantity=body.quantity,
+        title=body.title,
+        notes=body.notes,
+        sku=body.sku,
     )
 
 

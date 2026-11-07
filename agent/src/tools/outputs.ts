@@ -30,6 +30,39 @@ export const outputTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'list_recent_outputs',
+    label: "List every model's recent outputs",
+    description:
+      "Recent renders (#4777): every model's saved outputs, newest first, as list_outputs gives one model's. " +
+      'Filters: `from` and `to` (ISO times: saved at or after `from`, before `to`), `slug` (models), `tag` (a ' +
+      "model's catalogue tag; outputs have none), `q` (text in the output's name or in its parameters that differ " +
+      'from the template\'s defaults, written `name=value`), and `ordered` (`yes`: only outputs an order item names; ' +
+      '`no`: only the others). Use it to find outputs to add to an order (order_item_add with `items`).' +
+      PAGED,
+    input: z.object({
+      from: z.string().datetime({ offset: true }).optional().describe('Only outputs saved at or after this time'),
+      to: z.string().datetime({ offset: true }).optional().describe('Only outputs saved before this time'),
+      slug: z.array(slug).max(100).optional().describe("Only these models' outputs"),
+      tag: z.string().min(1).max(200).optional(),
+      q: z.string().min(1).max(256).optional(),
+      ordered: z.enum(['yes', 'no']).optional(),
+      ...pageInput,
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/outputs'],
+    handler: async (args, { backend }) =>
+      json(
+        await backendPage(args, (o: { id: string }) => o.id, 'list_recent_outputs', async (window) => {
+          const { from, to, slug: slugs, tag, q, ordered } = args
+          const pending = backend.GET('/api/v1/outputs', {
+            params: { query: { from, to, slug: slugs, tag, q, ordered, ...window } },
+          })
+          return { items: await ok(pending, 'list recent outputs'), total: totalCount((await pending).response) }
+        }),
+      ),
+  }),
+
+  defineTool({
     name: 'save_output',
     label: 'Keep a render as an output',
     description: 'Keep a finished render job as an output. render_model does this itself with `save_output: true`.',
