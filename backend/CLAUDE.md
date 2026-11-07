@@ -324,7 +324,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   native run refuses a request whose own `options` ask a calibration value the LAN start
   cannot honour (`options.lan_calibration_refusal`, 422): it sends `flow_cali` false and no
   field for the other three, so `flow_cali` `"off"` and `bed_levelling`/`nozzle_offset_cali`
-  `"auto"` pass (`LAN_CALIBRATIONS`), and any `vibration_cali` is refused. An order print
+  `"auto"` pass (`LAN_CALIBRATIONS`), and any `vibration_cali` is refused. Its type is
+  `LAN_CALIBRATION_PROBLEM`, with `bambuddy_linked`; for a caller that is not the page
+  (`api/printing.py` `asked_by_api`; an order print's operation records it as `api`), on
+  a row that links a Bambuddy printer, the print route adds `LAN_CALIBRATION_API_HINT`,
+  which names `path` (#5602). An order print
   with `path` `bambuddy` of a quote sliced over the LAN slices again (orders spec §5.4). A
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded

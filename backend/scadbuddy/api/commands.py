@@ -15,7 +15,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import PrintRunsDep, RenderDep
 from scadbuddy.api.jobs import RenderAccepted, submit_problems
 from scadbuddy.api.operations import ACTIVITY_LOCATION, activity_location, follow_operation
-from scadbuddy.api.printing import follow_run
+from scadbuddy.api.printing import asked_by_api, follow_run
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationsDep
@@ -107,7 +107,7 @@ async def follow_command(
         return JSONResponse(result, headers=headers)
     if workflow_id.startswith(PRINT_PREFIX):
         try:
-            run = await follow_run(runs, workflow_id, update_id)
+            run = await follow_run(runs, workflow_id, update_id, api=asked_by_api(request))
         except CommandStillAcceptingError:
             return accepting(request, workflow_id, update_id)
         except CommandResendError:

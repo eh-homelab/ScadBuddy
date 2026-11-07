@@ -651,6 +651,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     budget=budget_of(core.settings),
                     downloads=core.store.downloads,
                     native=await components.get(PRINT_LIBRARY).serving_native(),
+                    # #5602: as the output's run below.
+                    api=True if request.get("api") else None,
                 )
                 assert isinstance(started, PrintRun)
                 return started
@@ -662,6 +664,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 request=print_body(request, copies, projects[0], plan),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
+                # #5602: the route's `asked_by_api`; else the run's author tells.
+                api=True if request.get("api") else None,
             )
             # A follow URL (a `JSONResponse`) answers only a request that asked for one.
             assert isinstance(run, PrintRun)

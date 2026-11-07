@@ -5448,6 +5448,35 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     expect(runs.bodies[0]?.options).toEqual({ timelapse: true })
   })
 
+  it('says which value the LAN cleared and puts it back on a Bambuddy printer (#5602)', async () => {
+    setHotPath(true)
+    server.use(hybridChoices(0))
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByText(/sends it to the printer over the LAN/)).toBeInTheDocument())
+    const bambuddy = new RegExp(`^${otherPrinter().name}`)
+    const lan = new RegExp(`^${choicesView.printers![0]!.name}`)
+    await choose(user, await screen.findByRole('combobox', { name: 'Printer' }), bambuddy)
+    await waitFor(() => expect(screen.queryByText(/sends it to the printer over the LAN/)).not.toBeInTheDocument())
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(await screen.findByText('Options'))
+    await choose(user, await screen.findByRole('combobox', { name: 'Flow calibration' }), 'On')
+    expect(screen.queryByTestId('print-lan-cleared')).not.toBeInTheDocument()
+
+    await choose(user, screen.getByRole('combobox', { name: 'Printer' }), lan)
+    expect(await screen.findByTestId('print-lan-cleared')).toHaveTextContent(
+      'Flow calibration On was cleared: the LAN cannot set it.',
+    )
+
+    await choose(user, screen.getByRole('combobox', { name: 'Printer' }), bambuddy)
+    await waitFor(() => expect(screen.queryByTestId('print-lan-cleared')).not.toBeInTheDocument())
+    expect(screen.getByRole('combobox', { name: 'Flow calibration' })).toHaveTextContent('On')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]?.options).toEqual({ flow_cali: 'on' })
+  })
+
   it('offers the folders, not projects, in Advanced', async () => {
     setHotPath(true)
     const { user } = renderPicker()
