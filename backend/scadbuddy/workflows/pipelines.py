@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.template import Blob, Part
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
+        ACCEPT_ATTEMPTS,
         ACCEPT_TRANSIENT,
         ARRANGE_VERSION,
         CLAIMS_ACTIVITY,
@@ -144,11 +145,18 @@ LOOKUP_RETRY = RetryPolicy(
 #: (`command-still-accepting`, and the client sends the request again): the API out of
 #: reach, its database out of reach (503 `database-unavailable`), or the worker's
 #: credential refused, as inside the exchange's hold-off; a suspended render caller is
-#: answered so until it is resumed, by design. A 5xx of the route or a read timeout
-#: spends these attempts in the run, so an API too slow to answer within the bound is
-#: answered render-unstartable.
+#: answered so until it is resumed, by design. A 5xx of the route spends these attempts
+#: in the run. A read timeout (the write may have run) fails the first attempts, which
+#: retry in this run and find the row by its workflow ids; on the last it passes too, so
+#: a persistently slow API is answered still-accepting, not render-unstartable. Its cost,
+#: accepted: a row the API committed after the client stopped waiting on that last
+#: attempt stays pending under this run, which completes, until the unsettled sweep
+#: (`RenderService.settle_closed`, every housekeeping prune) fails it as closed; until
+#: then it counts against `max_pending`.
 ACCEPT_RETRY = RetryPolicy(
-    maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
+    maximum_attempts=ACCEPT_ATTEMPTS,
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
 )
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")

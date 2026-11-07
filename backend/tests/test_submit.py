@@ -44,6 +44,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import use_traceparent
+from scadbuddy.crud import render as crud_render_module
 from scadbuddy.crud.client import CrudSyncClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.render import RemoteJobProjection
@@ -1852,6 +1853,66 @@ async def test_a_database_outage_at_the_accept_route_is_still_accepting_not_a_50
 
     monkeypatch.setattr(projection, "accept", unreachable)
     assert await _still_accepting(make_service, deps) >= ACCEPT_RETRY.maximum_attempts
+
+
+def _slow_accepts(
+    projection: JobProjection, monkeypatch: pytest.MonkeyPatch, slow: int
+) -> list[float]:
+    """The API's accept answers past the worker's wait (`ACCEPT_TIMEOUT`, and with it
+    `ACCEPT_BUDGET`, scaled down: no try follows a timed-out one in the same call) its
+    first ``slow`` times, then at once; each still writes. The calls' times."""
+    monkeypatch.setattr(crud_render_module, "ACCEPT_TIMEOUT", 0.5)
+    monkeypatch.setattr(crud_render_module, "ACCEPT_BUDGET", 0.25)
+    accept = projection.accept
+    calls: list[float] = []
+
+    def slowly(*args: Any, **kwargs: Any) -> Job:
+        calls.append(time.monotonic())
+        if len(calls) <= slow:
+            time.sleep(1.0)
+        return accept(*args, **kwargs)
+
+    monkeypatch.setattr(projection, "accept", slowly)
+    return calls
+
+
+async def test_an_api_slow_on_every_accept_is_still_accepting_not_a_500(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read timeout fails the first attempts but passes on the last: a persistently
+    slow API is a state that passes (`pipelines.ACCEPT_RETRY`)."""
+    calls = _slow_accepts(projection, monkeypatch, slow=ACCEPT_RETRY.maximum_attempts)
+    assert await _still_accepting(make_service, deps) == ACCEPT_RETRY.maximum_attempts
+    assert len(calls) == ACCEPT_RETRY.maximum_attempts
+
+
+async def test_a_slow_first_accept_is_retried_in_the_same_run(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry finds the row the slow attempt committed, by its workflow ids."""
+    _slow_accepts(projection, monkeypatch, slow=1)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            job = await service.submit(SLUG, {"width": _w()})
+            await _settled(projection, job.id)
+        await service.aclose()
+
+    assert acts.accepts == 2
+    with projection.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id, workflow_run_id FROM render_jobs WHERE workflow_id = %s",
+            (job.workflow_id,),
+        ).fetchall()
+    assert [(r["id"], r["workflow_run_id"]) for r in rows] == [(job.id, job.workflow_run_id)]
 
 
 async def test_a_500_from_the_accept_route_is_answered_unstartable(

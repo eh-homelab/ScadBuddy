@@ -69,6 +69,7 @@ from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
+    ACCEPT_ATTEMPTS,
     ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
     QUEUE_FULL,
@@ -905,10 +906,12 @@ class RenderActivities:
         except CrudUnavailableError as error:
             # A state that passes passes here too: the API out of reach, its database out
             # of reach, a credential refused until the exchange's hold-off ends (or the
-            # caller is resumed). A 5xx of the route (an unexpected SQL error there) or a
-            # read timeout (the write may have run) fails the attempt: `ACCEPT_RETRY`
-            # retries it in this run, where the row is found by its workflow ids.
-            if not error.passes:
+            # caller is resumed). A 5xx of the route (an unexpected SQL error there) fails
+            # the attempt. So does a read timeout (the write may have run) but on the last
+            # attempt, where a slow API passes too (`pipelines.ACCEPT_RETRY`): the others
+            # retry in this run, where the row is found by its workflow ids.
+            slow = error.failure == "transport" and activity.info().attempt >= ACCEPT_ATTEMPTS
+            if not (error.passes or slow):
                 raise
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
