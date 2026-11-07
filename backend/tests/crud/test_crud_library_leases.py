@@ -23,7 +23,9 @@ import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -119,18 +121,54 @@ async def test_a_lease_taken_while_the_apis_removal_holds_the_lock_waits(
     assert await asyncio.to_thread(api.leased, checkout) == []
 
 
-async def test_a_renewed_lease_survives_its_first_ttl(
+def _expires(pool: Pool, token: uuid.UUID) -> datetime:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT max(expires_at) AS at FROM library_leases WHERE token = %s", (token,)
+        ).fetchone()
+    assert row is not None and row["at"] is not None
+    return cast(datetime, row["at"])
+
+
+def test_a_renew_moves_the_leases_expiry(
     pool: Pool, client: CrudSyncClient, tmp_path: Path
 ) -> None:
-    ttl = 1.0
-    api = _api(pool, tmp_path)
-    worker = CheckoutGate(RemoteCheckoutLeases(client, ttl=ttl))
-    checkout = _checkout(tmp_path)
+    """Checked on the row, not on wall-clock timing: a renew sets a fresh TTL from the
+    database's now, past the take's."""
+    leases = RemoteCheckoutLeases(client, ttl=1.0)
+    token = leases.take(JOB, [_checkout(tmp_path)])
+    with pool.connection() as conn:
+        # Its TTL spent, as if a second had passed: a renew must move it forward.
+        conn.execute(
+            "UPDATE library_leases SET expires_at = expires_at - interval '1 second'"
+            " WHERE token = %s",
+            (token,),
+        )
+    spent = _expires(pool, token)
+    leases.renew(token)
+    assert _expires(pool, token) >= spent + timedelta(seconds=1)
 
-    async with worker.rendering(JOB, [checkout]):
-        await asyncio.sleep(2.5 * ttl)
-        assert await asyncio.to_thread(api.leased, checkout) == [JOB]
-    assert await asyncio.to_thread(api.leased, checkout) == []
+
+async def test_a_rendering_gate_renews_its_lease(
+    pool: Pool, client: CrudSyncClient, tmp_path: Path
+) -> None:
+    """The gate renews through the routes while the render runs: waited for on the row,
+    with a wide margin, not at a wall-clock time."""
+    worker = CheckoutGate(RemoteCheckoutLeases(client, ttl=1.0))
+
+    def expiry() -> datetime:
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT max(expires_at) AS at FROM library_leases WHERE holder = %s", (JOB,)
+            ).fetchone()
+        assert row is not None and row["at"] is not None
+        return cast(datetime, row["at"])
+
+    async with worker.rendering(JOB, [_checkout(tmp_path)]):
+        first = await asyncio.to_thread(expiry)
+        async with asyncio.timeout(20):
+            while await asyncio.to_thread(expiry) <= first:
+                await asyncio.sleep(0.05)
 
 
 async def test_a_lease_never_renewed_lapses(

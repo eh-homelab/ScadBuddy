@@ -100,8 +100,8 @@ FOLDER_LOCKED = "folder-locked"
 #: `api/crud_render.py` `REMOVAL_RUNNING`: a lease or pin hold the API's removal kept
 #: waiting for its `LEASE_LOCK_WAIT`, sent again.
 REMOVAL_RUNNING = "removal-running"
-#: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (10 s) and a pool wait.
-TAKE_TIMEOUT = 10.0 + PROJECT_POOL_TIMEOUT
+#: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait.
+TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
 #: A problem's RFC 9457 members; every other member is an extension of the `ApiError`.
 _PROBLEM_MEMBERS = frozenset({"type", "title", "status", "detail", "instance"})
 #: How many activity attempts `WriteKeys` counts writes for at once; the oldest is

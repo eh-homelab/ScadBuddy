@@ -483,6 +483,9 @@ def test_the_worker_waits_for_migrations_then_grants(
             # Migrated, not yet granted: the ledger is the one relation the role reads
             # (#5298; everything else goes through the API's CRUD routes).
             assert missing_privileges(conn) == ["scadbuddy_migrations: SELECT"]
+        # Waits for that grant, rather than failing on the ledger it cannot read.
+        with pytest.raises(WorkerStoppedError):
+            wait_until_ready(pool, stopping=lambda: True, poll=0.01)
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             grant_render_role(conn, role)
         with pool.connection() as conn:

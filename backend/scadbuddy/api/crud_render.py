@@ -115,8 +115,10 @@ FOLDER_LOCKED = "folder-locked"
 #: Seconds a lease or pin hold waits for a removal's `REMOVAL_LOCK` before the route
 #: answers a 423 ``removal-running``, which the worker sends again: the take keeps
 #: waiting as long as the removal runs, as the SQL take did, and no request holds a
-#: thread here past this. `crud/render.py` `REMOVAL_RUNNING`.
-LEASE_LOCK_WAIT = 10.0
+#: thread here past this: a waiting take holds an API pool connection and an executor
+#: thread for at most 2 s, at the cost of more 423 rounds while a removal runs.
+#: `crud/render.py` `REMOVAL_RUNNING`.
+LEASE_LOCK_WAIT = 2.0
 REMOVAL_RUNNING = "removal-running"
 #: A lease taken under a token that holds another lease: `crud/render.py` `TOKEN_TAKEN`.
 TOKEN_TAKEN = "token-taken"

@@ -197,6 +197,19 @@ def _current_schema(conn: Connection[Any]) -> str:
     return str(row[0])
 
 
+def _ledger_unreadable(conn: Connection[Any]) -> bool:
+    """Whether the migrations ledger exists and this role may not read it."""
+    row = (
+        conn.cursor(row_factory=tuple_row)
+        .execute(
+            "SELECT CASE WHEN to_regclass('scadbuddy_migrations') IS NULL THEN false"
+            " ELSE NOT has_table_privilege('scadbuddy_migrations', 'SELECT') END"
+        )
+        .fetchone()
+    )
+    return bool(row and row[0])
+
+
 def pending_migrations(
     conn: Connection[Any], migrations: tuple[Migration, ...] = MIGRATIONS
 ) -> list[str]:
@@ -244,12 +257,16 @@ def wait_until_ready(
     holds `RENDER_GRANTS`; until then log what is missing and look again every
     ``poll`` seconds. A worker never migrates: in a rollout it may start before the
     API, and its role may not create anything. ``stopping`` ends the wait with
-    `WorkerStoppedError`."""
+    `WorkerStoppedError`. A ledger the role may not read yet (migrated, not yet
+    granted) is a missing grant, waited for, never an error."""
     last: tuple[list[str], list[str]] | None = None
     while True:
         with pool.connection() as conn:
-            pending = pending_migrations(conn)
-            missing = [] if pending else missing_privileges(conn, grants)
+            if _ledger_unreadable(conn):
+                pending, missing = [], missing_privileges(conn, grants)
+            else:
+                pending = pending_migrations(conn)
+                missing = [] if pending else missing_privileges(conn, grants)
         if not pending and not missing:
             return
         if (pending, missing) != last:

@@ -806,9 +806,8 @@ class InstallSlotRows:
 
     def claim(self, token: uuid.UUID) -> int | None:
         """The slot ``token`` holds, or a free or lapsed one, taken; None when all
-        ``limit`` are held. The table's lock (it conflicts only with itself and
-        stronger) keeps two claims of one token from taking two slots; an older
-        process's claim, under a token of its own, takes none of it."""
+        ``limit`` are held. The table's lock conflicts with itself and with every row
+        write, so a claim runs alone: two claims of one token never take two slots."""
         with self.pool.connection() as conn, conn.transaction():
             conn.execute("LOCK TABLE library_install_slots IN SHARE ROW EXCLUSIVE MODE")
             held = conn.execute(
