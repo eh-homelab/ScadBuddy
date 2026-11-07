@@ -32,6 +32,9 @@ export function LibraryFilePicker({
   const [found, setFound] = useState<{ query: string; result: LibrarySearch } | null>(null)
   // Keyed to its query, as `found` is: a failed search's message shows only while that query is asked.
   const [error, setError] = useState<{ query: string; message: string } | null>(null)
+  // #5633: Retry counts up, so the search runs again for the same query. Editing the query
+  // and putting it back within the debounce leaves `asked` as it was, and runs nothing.
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     if (!open) setQuery('')
@@ -51,7 +54,7 @@ export function LibraryFilePicker({
         setError({ query: asked, message: err instanceof Error ? err.message : String(err) })
       })
     return () => controller.abort()
-  }, [open, picked, asked])
+  }, [open, picked, asked, attempt])
 
   if (picked) {
     return (
@@ -84,9 +87,23 @@ export function LibraryFilePicker({
         onChange={(e) => setQuery(e.target.value)}
       />
       {failed !== null ? (
-        <p role="alert" className="text-[13px] text-warn">
-          Could not search the library: {failed}
-        </p>
+        <div className="flex items-center justify-between gap-2">
+          <p role="alert" className="text-[13px] text-warn">
+            Could not search the library: {failed}
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled}
+            onClick={() => {
+              setError(null)
+              setAttempt((n) => n + 1)
+            }}
+          >
+            Retry
+          </Button>
+        </div>
       ) : !asked ? (
         <p className="text-[13px] text-muted-foreground">Type part of a file or folder name.</p>
       ) : current === null ? (
