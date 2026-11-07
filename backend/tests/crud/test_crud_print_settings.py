@@ -17,6 +17,8 @@ from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient
 from scadbuddy.crud.print import BASE, RemoteSettingsStore
 from scadbuddy.library.settings_store import (
     PRINT_SECRETS,
+    PRINT_UNREAD,
+    S3_FIELDS,
     SettingsPatch,
     SettingsStore,
     StoredSettings,
@@ -96,6 +98,15 @@ def test_the_bambuddy_key_is_opened_and_every_other_sealed_field_is_null(
     assert current.bambuddy_api_key == FULL_KEY
     for name in SECRET_FIELDS & StoredSettings.model_fields.keys() - PRINT_SECRETS:
         assert getattr(current, name) is None, name
+    # The S3 store's connection is not the print worker's: null, or the default where
+    # the field takes no null; the backend flag stays.
+    assert set(S3_FIELDS) <= set(PRINT_UNREAD) | SECRET_FIELDS
+    defaults = StoredSettings()
+    for name in PRINT_UNREAD:
+        assert getattr(current, name) == getattr(defaults, name), name
+    for name in ("store_s3_endpoint", "store_s3_bucket", "store_s3_access_key_id"):
+        assert getattr(current, name) is None, name
+    assert "GK1-123456" not in current.model_dump_json()
     # Everything else is the API's own read.
     assert current == print_projection(store.snapshot())
     assert (current.bambuddy_url, current.store_backend) == ("http://bambuddy.test", "s3")
@@ -117,15 +128,27 @@ def test_the_answer_is_never_cached(crud: CrudSyncClient, store: SettingsStore) 
 def test_the_log_names_the_secrets_released_never_their_values(
     crud: CrudSyncClient, store: SettingsStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.INFO, logger="scadbuddy.api.crud_print")
+    caplog.set_level(logging.DEBUG, logger="scadbuddy.api.crud_print")
     _save_secrets(store)
+    # Read on every use: INFO once per credential, DEBUG after.
     crud.request("GET", f"{BASE}/settings")
-    released = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.api.crud_print"]
+    crud.request("GET", f"{BASE}/settings")
+    released = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "scadbuddy.api.crud_print" and r.levelno == logging.INFO
+    ]
     [credential] = [c for c in ServiceCredentialStore(store.pool).list() if c.caller == "print"]
     assert released == [
         f"released the print settings to service credential {credential.id},"
         " secrets: bambuddy_api_key"
     ]
+    debug = [
+        r
+        for r in caplog.records
+        if r.name == "scadbuddy.api.crud_print" and r.levelno == logging.DEBUG
+    ]
+    assert len(debug) == 1
     for secret in (FULL_KEY, RENDER_KEY, S3_SECRET):
         assert secret not in caplog.text
 

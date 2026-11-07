@@ -1378,6 +1378,17 @@ class SettingsReader(Protocol):
 #: which is also the Bambuddy spool provider's key (`bambuddy/spool_providers.py`). No
 #: other spool provider has a key. `print_projection` leaves every other sealed field null.
 PRINT_SECRETS = frozenset({"bambuddy_api_key"})
+#: The S3 store's connection, which the print worker never reads (it reaches blobs
+#: through the API's routes): `print_projection` answers each as null, or as its default
+#: where the field takes no null. ``store_backend`` stays: a native run reads it.
+PRINT_UNREAD = (
+    "store_s3_endpoint",
+    "store_s3_region",
+    "store_s3_bucket",
+    "store_s3_prefix",
+    "store_s3_access_key_id",
+    "store_s3_path_style",
+)
 
 
 class PrintSettings(StoredSettings):
@@ -1388,13 +1399,18 @@ class PrintSettings(StoredSettings):
 
 
 def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
-    """``snapshot``'s settings with every sealed field null but `PRINT_SECRETS`. A sealed
-    field added later is null here until it is named in `PRINT_SECRETS`."""
-    blanked = {
+    """``snapshot``'s settings with every sealed field null but `PRINT_SECRETS`, and the
+    `PRINT_UNREAD` fields null or default. A sealed field added later is null here until
+    it is named in `PRINT_SECRETS`."""
+    blanked: dict[str, Any] = {
         name: None
         for name in SECRET_FIELDS & StoredSettings.model_fields.keys()
         if name not in PRINT_SECRETS
     }
+    for name in PRINT_UNREAD:
+        field = StoredSettings.model_fields[name]
+        nullable = type(None) in get_args(field.annotation)
+        blanked[name] = None if nullable else field.get_default(call_default_factory=True)
     return PrintSettings.model_validate(
         {
             **snapshot.stored.model_dump(),

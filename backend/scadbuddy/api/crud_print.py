@@ -5,7 +5,8 @@ The settings answer holds secrets in plaintext, released only to ``crud.print`` 
 the Bambuddy key, which the Bambuddy spool provider also uses (`PRINT_SECRETS`). Every
 other sealed field is null (`print_projection`). The CRUD router answers
 ``Cache-Control: no-store``, and each answer is logged with the secrets it released and
-the credential it released them to, never their values.
+the credential it released them to, never their values: at INFO the first time per
+credential in this process, then at DEBUG, since the worker reads them on every use.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 router = crud_router("print")
 
+#: The credentials this process has released the settings to, logged at INFO.
+_released_to: set[str | None] = set()
+
 
 def released(current: PrintSettings) -> list[str]:
     """The names of the secrets in ``current``, for the log."""
@@ -38,7 +42,11 @@ async def print_settings(request: Request, state: StateDep) -> PrintSettings:
     # The guard admitted only a print `Service`.
     principal = caller_of(request.scope)
     assert isinstance(principal, Service)
-    logger.info(
+    # The worker reads them on every use: INFO once per credential in this process.
+    first = principal.credential_id not in _released_to
+    _released_to.add(principal.credential_id)
+    logger.log(
+        logging.INFO if first else logging.DEBUG,
         "released the print settings to service credential %s, secrets: %s",
         principal.credential_id,
         ", ".join(released(current)) or "none",
