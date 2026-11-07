@@ -162,8 +162,8 @@ def lan_calibration_refusal(options: PrintOptions) -> str | None:
     return (
         f"A print over the LAN cannot set {', '.join(asked)}: it sends flow calibration off"
         " and leaves bed levelling, nozzle offset and vibration calibration to the printer."
-        " Leave them at the default, or print through Bambuddy's queue: choose Bambuddy as the"
-        " printer's path in Settings > Printers."
+        " Leave them at the default, or print through Bambuddy's queue: in Settings > Printers,"
+        ' set how the printer prints to "Through Bambuddy" (it must link a Bambuddy printer).'
     )
 
 

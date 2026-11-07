@@ -135,6 +135,13 @@ def test_what_the_lan_does_passes(options: dict[str, object]) -> None:
 def test_what_the_lan_cannot_honour_is_refused(name: str, value: object, named: str) -> None:
     refusal = lan_calibration_refusal(PrintOptions.model_validate({name: value}))
     assert refusal is not None and refusal.startswith(f"A print over the LAN cannot set {named}:")
+    # The control a person has: Settings > Printers' "How <name> prints" select, whose
+    # `bambuddy` choice is labelled "Through Bambuddy" (frontend
+    # `components/settings/Printers.tsx` `PATHS`); `run_path` takes it as set.
+    assert refusal.endswith(
+        'in Settings > Printers, set how the printer prints to "Through Bambuddy" (it must'
+        " link a Bambuddy printer)."
+    )
 
 
 def test_the_lan_values_are_what_the_lan_start_sends() -> None:
