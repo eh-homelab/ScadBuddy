@@ -1038,10 +1038,10 @@ async def _housekeep_periodically(deps: WorkerDeps, interval: float) -> None:
 
 
 def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task[None] | None:
-    """Housekeep on a timer whenever the worker's blobs are a piece cache (the bambuddy
-    store; a local-store worker shares the API's volume, whose sweeps are the API's):
-    every SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
-    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops eviction."""
+    """Housekeep the worker's piece cache on a timer: every SCADBUDDY_ASSET_SWEEP_INTERVAL
+    when that is on, else every `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep
+    off never stops eviction. A render worker's blobs are always a `CachedBlobStore` (it
+    runs only on `bambuddy` or `s3`, #5298 plan D11); other blobs get None."""
     if not isinstance(deps.blobs, CachedBlobStore):
         return None
     interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL

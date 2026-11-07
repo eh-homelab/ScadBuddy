@@ -107,7 +107,9 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def _from_a_pool() -> bool:
-    """Whether a `psycopg_pool` frame is on the caller's stack: a pool growing."""
+    """Whether a `psycopg_pool` frame is on the caller's stack: a pool growing. Only the
+    API side's pools get here: the patched `ConnectionPool.__init__` refuses every pool
+    the worker would make. Loosen one only with the other."""
     frame = sys._getframe(2)
     while frame is not None:
         if frame.f_globals.get("__name__", "").startswith("psycopg_pool"):
