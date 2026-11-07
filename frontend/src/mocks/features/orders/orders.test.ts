@@ -51,6 +51,16 @@ describe('orders mock (#4249)', () => {
     expect(long?.status).toBe(422)
     await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [{ ...post, label: '\u{1F4E6}'.repeat(200), amount_minor: '500' as unknown as number }])
     expect((await api.order(ORDER_ACCEPTED)).charges.map((c) => c.amount_minor)).toEqual([500])
+    // The rest of the lax int (#5573): booleans, `_` separators and a zero fraction pass;
+    // a fraction or an exponent does not.
+    const as = (v: unknown) => [{ ...post, amount_minor: v as number }]
+    for (const [sent, stored] of [[true, 1], [false, 0], ['1_000', 1000], ['5.0', 5], [' +4 ', 4]] as const) {
+      await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, as(sent))
+      expect((await api.order(ORDER_ACCEPTED)).charges.map((c) => c.amount_minor)).toEqual([stored])
+    }
+    for (const sent of ['5.5', '1e3']) {
+      expect((await failure(api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, as(sent))))?.status).toBe(422)
+    }
   })
 
   it('changes the charges after acceptance as the backend does (#5351)', async () => {
