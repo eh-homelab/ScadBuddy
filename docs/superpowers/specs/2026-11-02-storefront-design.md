@@ -205,8 +205,8 @@ page bundle. The back-office routes are not mounted in it.
 
 **No direct SQL (amended 2026-11-07, the owner; CLAUDE.md "Database access (#5295)").**
 The storefront holds no database secret and opens no Postgres pool. It is an HTTP client
-of the CRUD service (today's API process), as the render worker is since #5298: every read
-and write goes to routes under `/api/v1/internal/storefront/*`, sent with the storefront's
+of the CRUD service (today's API process), as every worker will be once #5298 lands
+(CLAUDE.md "Database access (#5295)"): every read and write goes to routes under `/api/v1/internal/storefront/*`, sent with the storefront's
 own short-lived service credential: a projected ServiceAccount token exchanged at the CRUD
 service for a 15-minute credential scoped to the storefront's routes, as
 [the service-credentials spec](2026-11-05-service-credentials-without-db-design.md) (#5325)
@@ -230,9 +230,11 @@ not a boundary (the review of PR #5287).
 
 ### 5.2 Visitors, accounts and the order link
 
-- **Visitor.** The first request sets a random token in a `Secure`, `HttpOnly`,
-  `SameSite=Lax` cookie. `storefront_visitors` stores its sha256, created and last-seen
-  times, and the account it belongs to, if any. A draft order names its visitor
+- **Visitor.** The first request sets a random visitor id in a `Secure`, `HttpOnly`,
+  `SameSite=Lax` cookie, signed (HMAC) with the storefront's own key (§10), so the
+  storefront drops a forged or garbled cookie before it calls the CRUD service. The
+  storefront sends the verified id to the CRUD service in a header (§6.4).
+  `storefront_visitors` stores the id's sha256, created and last-seen times, and the account it belongs to, if any. A draft order names its visitor
   (`orders.storefront_visitor_id`).
 - **Account.** "Sign up to save" asks for an email and sends a six-digit code **(call:
   passwordless, no passwords to store or reset)**. `storefront_accounts`: email
@@ -322,9 +324,11 @@ shipment and its tracking text.
 
 ### 5.7 Mail
 
-The storefront sends its own transactional mail **(call)**: the sign-in code, the order
-link, "a revision is ready", "your price is ready", "payment requested", "shipped".
-Settings: SMTP host, port, user, sender, and the password sealed under the KEK. Every
+The CRUD service sends the storefront's transactional mail **(call)**: the sign-in code,
+the order link, "a revision is ready", "your price is ready", "payment requested",
+"shipped". It sends each one when the storefront calls the route that needs it, or when
+the back office makes the change. Settings: SMTP host, port, user, sender, and the
+password sealed under the CRUD service's KEK; the storefront never holds them. Every
 other customer notification stays a plugin's job (orders spec §12).
 
 ### 5.8 Abuse
@@ -362,7 +366,9 @@ accepted), `revision_not_found` (404), `order_not_submitted`, `order_submitted`
 ### 6.4 The customer actor
 
 `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and the visitor's
-or account's id. `orders/actor.py` takes it from the storefront's session, never a body.
+or account's id. The CRUD service builds it from the visitor id (and, once signed in, the
+account) that the storefront sends in request headers. It takes those headers only from a
+call made with the storefront's service credential, and never from a request body.
 
 ## 7. Payments: what the storefront needs from #4957
 

@@ -331,6 +331,7 @@ differs.
 | agent worker | `scadbuddy-agent-worker` | `agent` | the agent |
 | agent sidecar | `scadbuddy` (the API pod's) | `agent` | the `agent` container only |
 | agent-durable | none: `automountServiceAccountToken: false`, no projected token | — | — |
+| storefront (#5282, added 2026-11-07) | `scadbuddy-storefront` | `storefront` (new), scope `crud.storefront` only | the storefront container |
 | slicer | none, unchanged (transfer tokens) | — | — |
 
 The CRUD service keeps a fixed map from `system:serviceaccount:<namespace>:<name>` to the
