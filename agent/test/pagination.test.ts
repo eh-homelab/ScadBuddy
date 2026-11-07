@@ -160,6 +160,7 @@ describe('the paged list tools', () => {
   const PAGED = [
     'list_models',
     'list_outputs',
+    'list_recent_outputs',
     'list_plates',
     'list_presets',
     'list_libraries',

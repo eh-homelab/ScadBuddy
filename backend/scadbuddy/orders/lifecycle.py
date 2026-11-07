@@ -283,6 +283,40 @@ class LabourRate:
     currency: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class NewItem:
+    """One item to add (`Lifecycle.add_items`): what every kind has."""
+
+    quantity: int
+    title: str | None = None
+    notes: str = ""
+    sku: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewModelItem(NewItem):
+    resolved: ResolvedReference
+    output_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewLibraryItem(NewItem):
+    file: LibraryFileRef
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewCustomItem(NewItem):
+    title: str
+    unit_price_minor: int
+    requires_printing: bool = False
+    accept: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewRequestItem(NewItem):
+    title: str
+
+
 @dataclass
 class _Change:
     """What one transition did, told after commit."""
@@ -1723,45 +1757,15 @@ class Lifecycle:
         """A model item. With ``after_acceptance`` (#5349) the order must be past
         `quoted` (:meth:`_takes_item`); the item starts `draft` with no quote either way,
         and the order's accepted prices and charges stay as they are."""
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            self._takes_item(order, after_acceptance)
-            item = self.store.insert_item(
-                conn,
-                order.id,
-                reference=resolved.reference,
-                colours=resolved.colours,
-                output_id=output_id,
-                quantity=quantity,
-                title=title,
-                notes=notes,
-                sku=sku,
-            )
-            self._added(conn, order, item, by, after_acceptance)
-            item, _ = self._revise(
-                conn,
-                order,
-                item,
-                by,
-                reference=resolved.reference,
-                colours=resolved.colours,
-                output_id=output_id,
-            )
-            rule = self.parts.rule(resolved.reference.slug, conn=conn)
-            given = rule_parts(rule.lines, resolved.colours)
-            if given:
-                self.parts.set_item_parts(conn, item.id, given)
-                self._event(
-                    conn,
-                    order,
-                    by,
-                    "item.parts_set",
-                    item_id=item.id,
-                    parts=_parts_detail(given),
-                    from_rule=True,
-                )
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+        entry = NewModelItem(
+            resolved=resolved,
+            output_id=output_id,
+            quantity=quantity,
+            title=title,
+            notes=notes,
+            sku=sku,
+        )
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
     def add_request_item(
@@ -1778,25 +1782,8 @@ class Lifecycle:
         """A request: what a customer wants made, before any design exists. It has no
         reference, and is approved design first; its first revision (`add_revision`
         with a resolved reference) gives it one. ``after_acceptance`` as `add_item`'s."""
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            self._takes_item(order, after_acceptance)
-            item = self.store.insert_item(
-                conn,
-                order.id,
-                kind="request",
-                reference=None,
-                colours=[],
-                output_id=None,
-                quantity=quantity,
-                title=title,
-                notes=notes,
-                sku=sku,
-                approval="design_first",
-            )
-            self._added(conn, order, item, by, after_acceptance, item_kind="request")
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+        entry = NewRequestItem(title=title, quantity=quantity, notes=notes, sku=sku)
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
     def add_library_item(
@@ -1816,29 +1803,8 @@ class Lifecycle:
         no design to approve first), and takes a slice quote of the file or a manual one.
         The caller has read the file from the library that serves. ``after_acceptance``
         as `add_item`'s."""
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            self._takes_item(order, after_acceptance)
-            item = self.store.insert_library_item(
-                conn,
-                order.id,
-                file=file,
-                quantity=quantity,
-                title=title,
-                notes=notes,
-                sku=sku,
-            )
-            self._added(
-                conn,
-                order,
-                item,
-                by,
-                after_acceptance,
-                item_kind="library_file",
-                library_file_id=file.id,
-            )
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+        entry = NewLibraryItem(file=file, quantity=quantity, title=title, notes=notes, sku=sku)
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
     def add_custom_item(
@@ -1862,30 +1828,143 @@ class Lifecycle:
         accepts nothing) the item is `quoted`, for `accept_quote` to pin. With
         ``after_acceptance`` (#5349) the price is never accepted as it is saved: the item
         is `quoted`, and ``accept`` is refused (422)."""
-        if after_acceptance and accept:
-            raise LifecycleError(
-                "accept",
-                "accept: an item added after acceptance needs its quote accepted on its own",
-                unprocessable=True,
-            )
+        entry = NewCustomItem(
+            title=title,
+            quantity=quantity,
+            unit_price_minor=unit_price_minor,
+            notes=notes,
+            sku=sku,
+            requires_printing=requires_printing,
+            accept=accept,
+        )
+        [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
+        return item
+
+    def add_items(
+        self,
+        order_id: str,
+        by: Actor,
+        entries: Sequence[NewItem],
+        *,
+        after_acceptance: bool = False,
+    ) -> list[OrderItem]:
+        """Each entry added as its single add adds it, in order, in one transaction (#4777,
+        order operations spec §3.1): a refusal of any adds none. ``after_acceptance`` as
+        `add_item`'s, for every entry."""
+        for entry in entries:
+            if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept:
+                raise LifecycleError(
+                    "accept",
+                    "accept: an item added after acceptance needs its quote accepted on its own",
+                    unprocessable=True,
+                )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._takes_item(order, after_acceptance)
-            if accept:
+            if any(isinstance(entry, NewCustomItem) and entry.accept for entry in entries):
                 self._not_on_hold(order)
+            items = [
+                self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
+            ]
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None) for item in items]))
+        return items
+
+    def _insert_new(
+        self, conn: Conn, order: Order, by: Actor, entry: NewItem, after_acceptance: bool
+    ) -> OrderItem:
+        """One entry's rows and audit, inside `add_items`' transaction."""
+        if isinstance(entry, NewModelItem):
+            return self._insert_model(conn, order, by, entry, after_acceptance)
+        if isinstance(entry, NewLibraryItem):
+            item = self.store.insert_library_item(
+                conn,
+                order.id,
+                file=entry.file,
+                quantity=entry.quantity,
+                title=entry.title,
+                notes=entry.notes,
+                sku=entry.sku,
+            )
+            self._added(
+                conn,
+                order,
+                item,
+                by,
+                after_acceptance,
+                item_kind="library_file",
+                library_file_id=entry.file.id,
+            )
+            return item
+        if isinstance(entry, NewCustomItem):
             item = self.store.insert_custom_item(
                 conn,
                 order.id,
-                title=title,
-                quantity=quantity,
-                notes=notes,
-                sku=sku,
-                requires_printing=requires_printing,
+                title=entry.title,
+                quantity=entry.quantity,
+                notes=entry.notes,
+                sku=entry.sku,
+                requires_printing=entry.requires_printing,
             )
             self._added(conn, order, item, by, after_acceptance, item_kind="custom")
-            item = self._custom_price(conn, order, item, unit_price_minor, by, accept=accept)
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+            return self._custom_price(
+                conn, order, item, entry.unit_price_minor, by, accept=entry.accept
+            )
+        assert isinstance(entry, NewRequestItem)
+        item = self.store.insert_item(
+            conn,
+            order.id,
+            kind="request",
+            reference=None,
+            colours=[],
+            output_id=None,
+            quantity=entry.quantity,
+            title=entry.title,
+            notes=entry.notes,
+            sku=entry.sku,
+            approval="design_first",
+        )
+        self._added(conn, order, item, by, after_acceptance, item_kind="request")
+        return item
+
+    def _insert_model(
+        self, conn: Conn, order: Order, by: Actor, entry: NewModelItem, after_acceptance: bool
+    ) -> OrderItem:
+        resolved = entry.resolved
+        item = self.store.insert_item(
+            conn,
+            order.id,
+            reference=resolved.reference,
+            colours=resolved.colours,
+            output_id=entry.output_id,
+            quantity=entry.quantity,
+            title=entry.title,
+            notes=entry.notes,
+            sku=entry.sku,
+        )
+        self._added(conn, order, item, by, after_acceptance)
+        item, _ = self._revise(
+            conn,
+            order,
+            item,
+            by,
+            reference=resolved.reference,
+            colours=resolved.colours,
+            output_id=entry.output_id,
+        )
+        rule = self.parts.rule(resolved.reference.slug, conn=conn)
+        given = rule_parts(rule.lines, resolved.colours)
+        if given:
+            self.parts.set_item_parts(conn, item.id, given)
+            self._event(
+                conn,
+                order,
+                by,
+                "item.parts_set",
+                item_id=item.id,
+                parts=_parts_detail(given),
+                from_rule=True,
+            )
         return item
 
     def _custom_price(

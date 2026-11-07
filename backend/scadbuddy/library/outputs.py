@@ -43,6 +43,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 
 if TYPE_CHECKING:
+    from scadbuddy.library.output_index import OutputIndex
     from scadbuddy.library.output_prints import LastPrint, OutputPrintStore
     from scadbuddy.store.refs import BlobRefs
 
@@ -272,6 +273,9 @@ class OutputStore:
         self.paths = paths
         #: The last print of each output (#1060), laid over what ``meta.json`` says.
         self.prints = prints
+        #: Every model's outputs as rows (#4777), written as an output is saved, renamed
+        #: or deleted; ``None`` where nothing lists them across models.
+        self.index: OutputIndex | None = None
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
         # listing, so it is done once per state of the model's outputs.
@@ -555,6 +559,13 @@ class OutputStore:
             libraries=list(result.libraries),
         )
         self._write_meta(directory, meta)
+        if self.index is not None:
+            # The save stands without its row: a failure is logged, and the next start's
+            # `OutputIndex.sync` adds the row.
+            try:
+                self.index.record(meta, job.params)
+            except Exception:
+                logger.exception("could not index a saved output", extra={"id": output_id})
         # After the record is complete: a lookup racing the writes above may have
         # resolved against a half-written output.
         self.forget_plate_cover(job.slug)
@@ -684,10 +695,16 @@ class OutputStore:
         _replace(
             directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
         )
+        if self.index is not None:
+            # After the file: a failure fails the rename, which a retry writes again.
+            self.index.rename(output_id, renamed.name)
         return self.get(output_id)
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
+        if self.index is not None:
+            # Before the files: a failure leaves the output whole, for a retry.
+            self.index.forget(output_id)
         shutil.rmtree(directory, ignore_errors=True)
         # A long-lived process would otherwise keep every deleted id's entry (#2909).
         self._dirs.pop(output_id, None)
