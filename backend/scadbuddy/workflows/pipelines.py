@@ -103,7 +103,8 @@ SHORT = timedelta(seconds=60)
 #: moves the row's state back (`projection.py` settles only from pending or running),
 #: but a late `steps` write is last-writer-wins while the row is open: it can show
 #: older progress until the next progress write or the final projection replaces it.
-#: Its statements wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection.
+#: Its statements wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection; on the
+#: render worker each request to the API's CRUD routes waits as long (`crud/render.py`).
 PROJECT_TIMEOUT = timedelta(seconds=10)
 #: A row write's attempts as a local activity, before it goes to Temporal's own retries
 #: as a regular activity (`_row_write`). A local activity's retries run inside the

@@ -32,17 +32,12 @@ RENDER_ROLE = "scadbuddy_render"
 #: the worker reads or writes changes this list in the same PR;
 #: `tests/test_render_worker_role.py` renders as a role holding exactly this.
 RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
-    # The job's row (`render/projection.py`: accept, claims, project).
-    "render_jobs": ("SELECT", "INSERT", "UPDATE"),
-    # A finished job's blobs (`store/refs.py` `add`, `JobProjection.accept`).
+    # No `render_jobs`, `events` or `activity`: the job's row, its job.* events and its
+    # activity row go through the API's CRUD routes (#5298, `crud/render.py`
+    # `RemoteJobProjection`). A role granted them before keeps them until #5298 Task 22
+    # revokes them.
+    # A finished job's blobs (`store/refs.py` `add`).
     "blob_refs": ("INSERT",),
-    # The job.* events, written in the row's transaction (`core/pg_events.py`
-    # `write_event`; RETURNING seq reads).
-    "events": ("SELECT", "INSERT"),
-    # The job's activity row (`render/projection.py` `_announce` through
-    # `activity/index.py` `upsert_in`; ON CONFLICT and RETURNING principal read it).
-    # Only `render:` rows: `RENDER_ROWS` holds the role to them.
-    "activity": ("SELECT", "INSERT", "UPDATE"),
     # A finished piece's geometry (`store/geometry.py`): read before rendering, written
     # by `finish_piece`, and forgotten when the piece it names is gone.
     "piece_geometry": ("SELECT", "INSERT", "UPDATE", "DELETE"),
@@ -68,7 +63,9 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
 #: for the role beside a permissive one for everyone else, so every other role reads
 #: and writes as before (the owner, which migrates, bypasses row security anyway).
 RENDER_ROWS: Mapping[str, str] = {
-    # Every principal's jobs are listed there; the worker writes its renders' rows only.
+    # Every principal's jobs are listed there. The worker no longer writes there (#5298),
+    # but a role granted `activity` before keeps it until Task 22 revokes it; until then
+    # this still holds that role to its renders' rows.
     "activity": "id LIKE 'render:%'",
 }
 

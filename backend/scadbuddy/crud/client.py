@@ -22,6 +22,9 @@ A render, print or projects worker holds no database secret: it calls
   the same on every attempt of one Temporal activity.
 - ``timeout`` on a request replaces the client's per-request timeout for a route that
   answers later by design (a flow Reset waits on Temporal under the run's lock).
+  ``budget`` replaces ``unavailable_budget`` for a call that must end inside a bound of
+  its own (a render `project` write's 10 s attempt).
+- `CrudClient.blocking` is a `CrudSyncClient` on the same API, credential and options.
 - `wait_for_areas` is a worker's start gate (plan "Rolling deploy"): it polls
   ``GET …/<caller>/areas`` until the API lists every area the worker needs.
 """
@@ -94,10 +97,10 @@ def _problem(response: httpx.Response) -> dict[str, Any]:
 class _Call:
     """One request's retry state, shared by the async and the sync client."""
 
-    def __init__(self, owner: _Base, path: str) -> None:
+    def __init__(self, owner: _Base, path: str, budget: float | None) -> None:
         self._owner = owner
         self._area = _area(path)
-        self._deadline = owner._clock() + owner._budget
+        self._deadline = owner._clock() + (owner._budget if budget is None else budget)
         self._attempt = 0
         self.refresh = False
         self.fresh_connection = False
@@ -215,6 +218,22 @@ class CrudClient(_Base):
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    def blocking(self) -> CrudSyncClient:
+        """A `CrudSyncClient` with this client's API, credential and options. A test's
+        transport is kept when it also serves blocking requests (`httpx.MockTransport`)."""
+        transport = self._transport if isinstance(self._transport, httpx.BaseTransport) else None
+        return CrudSyncClient(
+            self._base_url,
+            self._caller,
+            self._auth,
+            transport=transport,
+            timeout=self._timeout,
+            metrics=self._metrics,
+            unavailable_budget=self._budget,
+            backoff=self._backoff,
+            clock=self._clock,
+        )
+
     async def request(
         self,
         method: str,
@@ -223,8 +242,9 @@ class CrudClient(_Base):
         json: Any = None,
         idempotency_key: str | None = None,
         timeout: float | None = None,
+        budget: float | None = None,
     ) -> httpx.Response:
-        call = _Call(self, path)
+        call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
             fresh = self._build() if call.take_fresh_connection() else None
@@ -285,8 +305,9 @@ class CrudSyncClient(_Base):
         json: Any = None,
         idempotency_key: str | None = None,
         timeout: float | None = None,
+        budget: float | None = None,
     ) -> httpx.Response:
-        call = _Call(self, path)
+        call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
             fresh = self._build() if call.take_fresh_connection() else None

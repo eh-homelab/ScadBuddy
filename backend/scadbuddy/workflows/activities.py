@@ -18,7 +18,7 @@ from concurrent.futures import Executor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Concatenate
+from typing import TYPE_CHECKING, Any, Concatenate
 
 import psycopg
 from temporalio import activity
@@ -81,6 +81,9 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
 )
 
+if TYPE_CHECKING:
+    from scadbuddy.crud.render import RemoteJobProjection
+
 logger = logging.getLogger(__name__)
 
 #: The finished piece, written last: a blob that has it is never rendered again.
@@ -94,7 +97,8 @@ class WorkerDeps:
     assets: AssetStore
     blobs: BlobStore
     refs: BlobRefs
-    projection: JobProjection
+    #: The render worker's is the API's CRUD routes (#5298); the in-process worker's, SQL.
+    projection: JobProjection | RemoteJobProjection
     history: ModelHistory | None = None
     checkouts: CheckoutGate | None = None
     fetcher: CheckoutFetcher | None = None
@@ -877,6 +881,9 @@ class RenderActivities:
             created_at=now(),
             traceparent=start.traceparent,
         )
+        # Here, not at the top: `crud.client` imports the API, which imports this module.
+        from scadbuddy.crud.client import CrudUnavailableError
+
         try:
             return await asyncio.to_thread(
                 self.deps.projection.accept,
@@ -891,9 +898,9 @@ class RenderActivities:
             raise ApplicationError(
                 str(error), error.depth, type=QUEUE_FULL, non_retryable=True
             ) from None
-        except psycopg.OperationalError as error:
-            # Postgres out of reach (a pool timeout is one too): a state that passes
-            # (review #1066 (11)).
+        except (psycopg.OperationalError, CrudUnavailableError) as error:
+            # Postgres or the API out of reach (a pool timeout is one too): a state that
+            # passes (review #1066 (11)).
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)

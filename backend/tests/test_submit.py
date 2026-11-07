@@ -104,6 +104,7 @@ from scadbuddy.workflows.pipelines import (
     RenderPreview,
     TemplatePipeline,
 )
+from tests.crud.crud_support import served_render_jobs
 from tests.support.pipelines import FakeWorld
 from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
@@ -237,16 +238,19 @@ async def projection(pg_conninfo: str) -> AsyncIterator[JobProjection]:
 
 
 @pytest.fixture
-def deps(projection: JobProjection, paths: DataPaths) -> WorkerDeps:
+async def deps(projection: JobProjection, paths: DataPaths) -> AsyncIterator[WorkerDeps]:
+    """The render worker's: its job rows through the API's CRUD routes on ``projection``
+    (#5298), whose outage it gives up on after a second."""
     config = replace(load_config({}), data_dir=paths.root)
-    return WorkerDeps(
-        config=config,
-        paths=paths,
-        assets=AssetStore(paths.assets),
-        blobs=LocalBlobStore(paths.blobs),
-        refs=BlobRefs(projection.pool),
-        projection=projection,
-    )
+    async with served_render_jobs(projection, unavailable_budget=1.0) as jobs:
+        yield WorkerDeps(
+            config=config,
+            paths=paths,
+            assets=AssetStore(paths.assets),
+            blobs=LocalBlobStore(paths.blobs),
+            refs=BlobRefs(projection.pool),
+            projection=jobs,
+        )
 
 
 ServiceFactory = Callable[..., RenderService]
