@@ -391,7 +391,8 @@ def _tower_value(value: float) -> str:
 def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
     reach moved beside that plate's objects, by #105's rule (:func:`tower_beside`),
-    else unchanged (#4014).
+    else unchanged (#4014). The brim judged round each tower is the one the slicer
+    draws for its plate's height (:func:`tower_brim`, #5545).
 
     An author's file keeps the tower where its printer put it: library file 2440, laid
     out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
@@ -415,6 +416,8 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
     except (TypeError, ValueError):
         side = PRIME_TOWER_SIDE
+    # The widest brim first (#5545): a tower that clears the plate's edges with it
+    # needs no read of the objects. The rest are judged by their plate's height below.
     unreachable = [
         index
         for index, tower in enumerate(towers, start=1)
@@ -439,10 +442,14 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         if index > count or index not in boxes:
             continue
         low, high = boxes[index]
+        height = float(high[2] - low[2])
+        if tower_reaches(towers[index - 1], plate, side, height):
+            continue
         ox, oy = plate_origin(index, count, source)
         corner = tower_beside(
             Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)),
             plate,
+            height,
         )
         if corner is not None:
             moved[index - 1] = corner

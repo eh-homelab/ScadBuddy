@@ -206,6 +206,30 @@ async fn an_empty_plate_says_why_from_the_clis_log() {
 }
 
 #[tokio::test]
+async fn a_refused_plate_says_why_from_the_clis_result_first() {
+    // The CLI's "[error]" lines for a tower brim past the bed do not say why; the
+    // `result.json` it writes in its working directory does (#5545).
+    let (base, _seen) = serve().await;
+    let env = ActivityEnvironment::builder()
+        .register_activities(activities("gcode-outside"))
+        .build();
+    let err = env
+        .run(SlicerActivities::slice_plate, input(&base))
+        .await
+        .unwrap_err();
+    let (type_name, _, details) = details(err);
+    assert_eq!(type_name, SLICER_ERROR);
+    let details = details.expect("details");
+    assert_eq!(details["exit_code"], 152);
+    assert_eq!(
+        details["errors"],
+        "Found G-code outside of the printable area. (return code -104)\n\
+         Invalid T command (T65535).\n\
+         plate 1: found gcode unprintable! gcode_result->gcode_check_result.error_code = 4"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_slice_still_records_its_stage_time() {
     let (base, _seen) = serve().await;
     let acts = activities("exit-1");

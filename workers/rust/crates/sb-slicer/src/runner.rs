@@ -59,8 +59,10 @@ pub struct RunOutcome {
     pub exit_code: i32,
     pub warnings: Vec<String>,
     pub stderr_tail: String,
-    /// The CLI's `[error]` log lines from its stdout ([`cli_errors`]): where it says why a
-    /// plate failed when stderr is empty, as for an empty plate (exit 206, #4638).
+    /// Why the CLI failed: the reason in the `result.json` it writes in its working
+    /// directory ([`cli_result`], #5545), then its `[error]` log lines from its stdout
+    /// ([`cli_errors`]), where it says why a plate failed when stderr is empty, as for an
+    /// empty plate (exit 206, #4638).
     pub errors: String,
     pub elapsed: Duration,
 }
@@ -184,6 +186,8 @@ pub async fn run(
     let started = Instant::now();
     let mut child = Command::new(req.cli)
         .args(command_line(&req, &fifo))
+        // With no `--outputdir`, `record_exit_reson` writes `result.json` here.
+        .current_dir(dir.path())
         .env_clear()
         .envs(cli_env(|name| std::env::var_os(name), dir.path()))
         .process_group(0)
@@ -255,9 +259,15 @@ pub async fn run(
     stderr_task.abort();
     stdout_task.abort();
     let stderr_tail = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
-    let errors = cli_errors(&String::from_utf8_lossy(
+    let log_errors = cli_errors(&String::from_utf8_lossy(
         &stdout.lock().expect("stdout lock"),
     ));
+    let result = std::fs::read(dir.path().join(RESULT_FILE)).unwrap_or_default();
+    let errors = match cli_result(&result) {
+        Some(reason) if log_errors.is_empty() => reason,
+        Some(reason) => format!("{reason}\n{log_errors}"),
+        None => log_errors,
+    };
 
     let exit_code = status
         .code()
@@ -269,6 +279,26 @@ pub async fn run(
         errors,
         elapsed,
     })
+}
+
+/// The file the CLI states its outcome in, in its working directory (`BambuStudio.cpp`
+/// `record_exit_reson`).
+const RESULT_FILE: &str = "result.json";
+
+/// The reason a failed run's `result.json` gives: its `error_string`, then its
+/// `return_code` (`"... (return code -104)"`). `None` for a success (`return_code` 0),
+/// or a file that is missing, does not parse or has no message.
+///
+/// The CLI's `[error]` lines often do not say why: a plate with G-code outside the bed
+/// logs only `found gcode unprintable! ... error_code = 4`, after `Invalid T command`
+/// lines that successful slices log too, while `result.json` says "Found G-code outside
+/// of the printable area. ..." (#5545). The exit code is the return code modulo 256
+/// (-104 exits 152).
+pub fn cli_result(json: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let code = value.get("return_code")?.as_i64()?;
+    let message = value.get("error_string")?.as_str()?.trim();
+    (code != 0 && !message.is_empty()).then(|| format!("{message} (return code {code})"))
 }
 
 /// The messages of the last [`ERROR_LINES`] `[error]` lines of the CLI's log, one a line.
@@ -451,6 +481,25 @@ mod tests {
             .collect::<String>();
         assert_eq!(cli_errors(&many), "e3\ne4\ne5");
         assert_eq!(cli_errors("[t] [x] [info]    fine\n"), "");
+    }
+
+    #[test]
+    fn a_failed_runs_result_names_its_reason_and_return_code() {
+        let failed = br#"{"error_string": "Found G-code outside of the printable area.", "plate_index": 1, "return_code": -104}"#;
+        assert_eq!(
+            cli_result(failed).as_deref(),
+            Some("Found G-code outside of the printable area. (return code -104)")
+        );
+        assert_eq!(
+            cli_result(br#"{"error_string": "Success.", "return_code": 0}"#),
+            None
+        );
+        assert_eq!(
+            cli_result(br#"{"error_string": " ", "return_code": -50}"#),
+            None
+        );
+        assert_eq!(cli_result(b"not json"), None);
+        assert_eq!(cli_result(b""), None);
     }
 
     #[test]

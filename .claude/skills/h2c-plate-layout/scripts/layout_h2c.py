@@ -18,7 +18,15 @@ import zipfile
 
 BED = (330.0, 320.0)
 USABLE_X = (25.0, 325.0)        # both nozzles reach it
-TOWER_SIDE, BRIM, CLEAR, EDGE = 60.0, 3.0, 5.0, 2.0
+TOWER_SIDE, CLEAR, EDGE = 60.0, 5.0, 2.0
+# The tower's brim: the larger of prime_tower_brim_width's 3 mm default and Bambu
+# Studio's auto brim (-1, the H2C presets'), height / 100 * 8 mm up to 8 mm
+# (WipeTower::get_auto_brim_by_height; backend/scadbuddy/render/plate.py tower_brim, #5545).
+BRIM_MIN, AUTO_BRIM_MAX, AUTO_BRIM_FULL_HEIGHT = 3.0, 8.0, 100.0
+
+
+def tower_brim(height: float) -> float:
+    return max(BRIM_MIN, AUTO_BRIM_MAX * min(max(height, 0.0), AUTO_BRIM_FULL_HEIGHT) / AUTO_BRIM_FULL_HEIGHT)
 WRAP_X, WRAP_Y = (145.0, 251.0), (310.0, 326.0)
 NO_SPARSE_RADIUS, NOZZLE_HEIGHT = 96.0, 4.0
 H2C_PROCESS, H2C_PRINTER = "0.20mm Standard @BBL H2C", "Bambu Lab H2C 0.4 nozzle"
@@ -136,15 +144,16 @@ def report(settings, objects, items, no_sparse: bool) -> bool:
     if t is None:
         print("tower: none declared (a default-pipeline file; the slicer will place one)")
         return ok
-    print(f"tower: x {t[0]:.0f}..{t[2]:.0f} y {t[1]:.0f}..{t[3]:.0f} (+{BRIM:.0f} brim)")
-    if t[0] - BRIM < USABLE_X[0] + EDGE or t[2] + BRIM > USABLE_X[1] - EDGE or t[1] - BRIM < EDGE or t[3] + BRIM > BED[1] - EDGE:
+    brim = tower_brim(g[5] - g[2])
+    print(f"tower: x {t[0]:.0f}..{t[2]:.0f} y {t[1]:.0f}..{t[3]:.0f} (+{brim:.1f} brim)")
+    if t[0] - brim < USABLE_X[0] + EDGE or t[2] + brim > USABLE_X[1] - EDGE or t[1] - brim < EDGE or t[3] + brim > BED[1] - EDGE:
         print("FAIL tower outside the dual-nozzle area (with brim and edge margin)"); ok = False
     if overlaps(t, (WRAP_X[0], WRAP_Y[0], WRAP_X[1], WRAP_Y[1])):
         print("FAIL tower inside the wrapping exclusion area"); ok = False
     gxy = (g[0], g[1], g[3], g[4])
     d = gap(t, gxy)
-    if overlaps(t, gxy, BRIM + CLEAR):
-        print(f"FAIL tower within {BRIM + CLEAR:.0f} mm of an object (gap {d:.1f} mm)"); ok = False
+    if overlaps(t, gxy, brim + CLEAR):
+        print(f"FAIL tower within {brim + CLEAR:.0f} mm of an object (gap {d:.1f} mm)"); ok = False
     else:
         print(f"ok tower clear of objects (gap {d:.1f} mm)")
     if no_sparse and g[5] - g[2] > NOZZLE_HEIGHT:

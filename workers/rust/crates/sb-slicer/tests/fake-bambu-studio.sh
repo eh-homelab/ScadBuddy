@@ -7,8 +7,17 @@
 # the group's reach) holding stderr open, its pid in holder.pid beside the output (the CLI's environment
 # is cleared, so no variable can name the file). FAKE_EMPTY_PLATE=1 does what the real CLI does with an empty
 # plate (#4638): its reason in an "[error]" log line on stdout, nothing on stderr, exit 206.
+# FAKE_GCODE_OUTSIDE=1 does what Bambu Studio 02.08.02.61 does with a tower brim past the bed (#5545):
+# "[error]" lines that do not say why, the reason in result.json in its working directory, exit 152.
 pipe=""; out=""
 while [ $# -gt 0 ]; do case "$1" in --pipe) pipe="$2"; shift;; --export-3mf) out="$2"; shift;; esac; shift; done
+if [ -n "$FAKE_GCODE_OUTSIDE" ]; then
+  echo "[2026-11-07 01:50:05.560173] [0x00007913c0250540] [error]   Invalid T command (T65535)."
+  echo "[2026-11-07 01:50:06.300318] [0x00007913c0250540] [error]   plate 1: found gcode unprintable! gcode_result->gcode_check_result.error_code = 4"
+  printf '{\n    "error_string": "Found G-code outside of the printable area.",\n    "plate_index": 1,\n    "return_code": -104\n}\n' > result.json
+  echo "run found error, return -104, exit..."
+  exit 152
+fi
 if [ -n "$FAKE_EMPTY_PLATE" ]; then
   echo "[2026-10-24 20:00:29.080527] [0x0000785ffa373540] [trace]   Initializing StaticPrintConfigs"
   echo "[2026-10-24 20:00:29.080527] [0x0000785ffa373540] [error]   plate 2: Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply."
