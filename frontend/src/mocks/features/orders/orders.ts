@@ -1115,7 +1115,8 @@ export const handlers = [
       if (found.kind === 'custom') {
         throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field (PATCH the item's unit_price_minor)`, [found.id])
       }
-      if (found.reference === null) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`, [found.id])
+      // `lifecycle.py` `has_design`: a template reference, or a library file (#5544).
+      if (found.reference === null && !found.library_file) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`, [found.id])
       const price = body.unit_price_minor as number
       const quote: Quote = {
         id: newId('q'),
@@ -1260,7 +1261,11 @@ export const handlers = [
       if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
       notOnHold(order)
       const found = itemOf(order, String(params.item))
-      if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      // `quote.py` `reference_of`, skipped for a library file item (#5544), which names its file.
+      if (found.reference === null && !found.library_file) {
+        if (found.kind === 'request') throw new Refused('item_has_no_design', `item ${found.id} is a request with no design yet: add a revision first`, [found.id])
+        throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      }
       if (!FULFILLABLE.has(found.status)) {
         throw new Refused(SETTLED.has(found.status) ? 'item_not_open' : 'item_not_approved', `item ${found.id} is ${found.status}`, [found.id])
       }
@@ -1270,8 +1275,12 @@ export const handlers = [
       const copies = found.quantity - productionOf(found.id).filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
       if (copies < 1) throw new Refused('item_made', `item ${found.id}'s attempts made its ${found.quantity} already: accept them`, [found.id])
       const quote = quotesOf(found.id).find((q) => q.accepted)
-      if (!quote || found.output_id === null) {
+      if (!quote || (!found.library_file && found.output_id === null)) {
         throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
+      }
+      // `printing.py` `_library_stands`: the file must still be in the library that serves.
+      if (found.library_file && !mockLibraryFile(found.library_file.id)) {
+        throw new Refused('library_file_gone', `item ${found.id}'s library file ${found.library_file.filename} (id ${found.library_file.id}) is no longer in the library`, [found.id])
       }
       // §8.4: the registry printer the run used (`run.printer`), as it was named then. The run
       // has one only when the body names a row that is still there (`print_run.py`

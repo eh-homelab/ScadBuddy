@@ -116,6 +116,12 @@ export function AddItemDialog({
   // #5349, #5350: a change to an accepted order waits for a second click on the confirm.
   const [confirming, setConfirming] = useState(false)
   const confirm = mode === 'after_acceptance'
+  // Each source has its own title: one typed for another source is not sent unseen.
+  const pickSource = (next: typeof source) => {
+    if (next === source) return
+    setSource(next)
+    setTitle('')
+  }
 
   const found = useMemo(() => (models.data ?? []).filter((m) => matches(m, query)), [models.data, query])
   const saved = useMemo(() => [...(outputs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)), [outputs.data])
@@ -248,13 +254,13 @@ export function AddItemDialog({
         <div className="flex min-w-0 flex-col gap-3">
           {!revise && (
             <div className="flex gap-2" role="group" aria-label="Kind of item">
-              <Button type="button" size="sm" variant={source === 'template' ? 'secondary' : 'outline'} aria-pressed={source === 'template'} onClick={() => setSource('template')}>
+              <Button type="button" size="sm" variant={source === 'template' ? 'secondary' : 'outline'} aria-pressed={source === 'template'} onClick={() => pickSource('template')}>
                 From a template
               </Button>
-              <Button type="button" size="sm" variant={source === 'library' ? 'secondary' : 'outline'} aria-pressed={source === 'library'} onClick={() => setSource('library')}>
+              <Button type="button" size="sm" variant={source === 'library' ? 'secondary' : 'outline'} aria-pressed={source === 'library'} onClick={() => pickSource('library')}>
                 Library file
               </Button>
-              <Button type="button" size="sm" variant={request ? 'secondary' : 'outline'} aria-pressed={request} onClick={() => setSource('request')}>
+              <Button type="button" size="sm" variant={request ? 'secondary' : 'outline'} aria-pressed={request} onClick={() => pickSource('request')}>
                 Design request
               </Button>
             </div>

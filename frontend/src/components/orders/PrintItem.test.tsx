@@ -53,6 +53,33 @@ describe('PrintItem', () => {
     await waitFor(() => expect(screen.queryByTestId('print-item')).toBeNull())
   })
 
+  // #5544 — a library file item prints its file: the dialog opens on the file, not an output.
+  it('prints an approved library file item on its file', async () => {
+    Object.assign(state.items.find((i) => i.id === ITEM_APPROVED)!, {
+      kind: 'library_file',
+      reference: null,
+      output_id: null,
+      colours: [],
+      library_file: { id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' },
+    })
+    const printed = vi.spyOn(api, 'printItem')
+    const plates = vi.spyOn(api, 'getLibraryPlates')
+    const outputPlates = vi.spyOn(api, 'getOutputPlates')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    await waitFor(() => expect(plates).toHaveBeenCalledWith(120))
+    expect(outputPlates).not.toHaveBeenCalled()
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print the line item' })).toBeNull())
+    expect(printed).toHaveBeenCalledTimes(1)
+    expect(printed.mock.calls[0]!.slice(0, 2)).toEqual([ORDER_ACCEPTED, ITEM_APPROVED])
+    await waitFor(() => expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('queued'))
+    expect(state.fulfilments.filter((f) => f.order_item_id === ITEM_APPROVED)).toHaveLength(1)
+  })
+
   it("keeps the dialog open with the server's refusal", async () => {
     const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
     await user.click(await screen.findByTestId('print-item'))

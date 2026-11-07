@@ -68,6 +68,22 @@ describe('AddItemDialog (#4251)', () => {
     expect(order.items.find((i) => i.kind === 'library_file')?.library_file).toEqual({ id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' })
   })
 
+  it("does not send a design request's title as a library file's (#5544)", async () => {
+    const add = vi.spyOn(api, 'addOrderItem')
+    const onClose = vi.fn()
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={onClose} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Design request' }))
+    await user.type(within(dialog).getByLabelText('Title'), 'A lamp shade')
+    await user.click(within(dialog).getByRole('button', { name: 'Library file' }))
+    await user.type(within(dialog).getByLabelText('Library file'), 'drawer')
+    await user.click(await within(dialog).findByRole('button', { name: /drawer-label\.3mf/ }))
+    expect(within(dialog).getByLabelText('Title (optional)')).toHaveValue('')
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { library_file_id: 120, quantity: 1 })
+  })
+
   it('asks before it adds a library file to an accepted order (#5544)', async () => {
     const add = vi.spyOn(api, 'addOrderItemAfterAcceptance')
     const onClose = vi.fn()

@@ -45,6 +45,34 @@ describe('orders mock (#4249)', () => {
     expect((await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { library_file_id: 120, quantity: 1 })).status).toBe('draft')
   })
 
+  it('prints a library file item as printing.py does, and refuses one whose file is not in the library (#5544)', async () => {
+    const item = state.items.find((i) => i.id === ITEM_APPROVED)!
+    Object.assign(item, {
+      kind: 'library_file',
+      reference: null,
+      output_id: null,
+      colours: [],
+      library_file: { id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' },
+    })
+    const body = {
+      printer_id: 1,
+      filament_plan: { force_colour_match: false },
+      choices: { nozzles: [{ size: '0.4' as const, flow: 'standard' as const }], tier: 'standard' as const, bed_type: 'Textured PEI Plate' },
+    }
+    const attempt = await api.printItem(ORDER_ACCEPTED, ITEM_APPROVED, body)
+    expect(attempt).toMatchObject({ order_item_id: ITEM_APPROVED, purpose: 'production', copies: 2 })
+    expect(item.status).toBe('queued')
+    // The same item again, its file no longer in the library.
+    state.fulfilments = state.fulfilments.filter((f) => f.order_item_id !== ITEM_APPROVED)
+    item.status = 'approved'
+    item.library_file = { id: 999_999, filename: 'deleted.3mf', library: 'bambuddy' }
+    const missing = await failure(api.printItem(ORDER_ACCEPTED, ITEM_APPROVED, body))
+    expect(missing?.problem.type).toBe(`${PROBLEMS}library_file_gone`)
+    // A custom item is still refused as one.
+    Object.assign(item, { kind: 'custom', library_file: null })
+    expect((await failure(api.printItem(ORDER_ACCEPTED, ITEM_APPROVED, body)))?.problem.type).toBe(`${PROBLEMS}item_custom`)
+  })
+
   it('adds an item after acceptance as the backend does (#5349)', async () => {
     const custom = { kind: 'custom' as const, title: 'Tag 49', quantity: 2, unit_price_minor: 300 }
     const plain = await failure(api.addOrderItem(ORDER_ACCEPTED, custom))
