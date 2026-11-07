@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changedCount, samePartSettings, sentPartSettings, withSetting } from './partSettings'
+import { changedCount, samePartSettings, sentPartSettings, withSetting, withoutProcessValues } from './partSettings'
 
 describe('partSettings (#5627)', () => {
   it('sends only the slots and settings that are set, in slot order', () => {
@@ -23,5 +23,15 @@ describe('partSettings (#5627)', () => {
     ).toBe(true)
     expect(samePartSettings({}, null)).toBe(true)
     expect(samePartSettings({ '1': { wall_loops: 3 } }, null)).toBe(false)
+  })
+
+  it("drops the settings equal to the process's own", () => {
+    expect(
+      withoutProcessValues(
+        { '1': { top_shell_layers: 5, wall_loops: 4 }, '2': { wall_loops: 2 } },
+        { top_shell_layers: 5, wall_loops: 2 },
+      ),
+    ).toEqual({ '1': { wall_loops: 4 } })
+    expect(withoutProcessValues({ '1': { wall_loops: 4 } }, null)).toEqual({ '1': { wall_loops: 4 } })
   })
 })

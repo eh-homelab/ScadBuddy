@@ -64,7 +64,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
-from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -252,10 +252,11 @@ class BambuddyIds(BaseModel):
 
 
 def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
-    """A choices entry as stored and answered: no ``part_settings`` key for none (#5627)."""
+    """A choices entry as stored and answered: no ``part_settings`` key for none, and only
+    the settings set in each slot (#5627, ``parts_set_only``)."""
     if dumped.get("part_settings") is None:
         dumped.pop("part_settings", None)
-    return dumped
+    return parts_set_only(dumped, maps=("part_settings",))
 
 
 class ModelPrintChoices(BaseModel):

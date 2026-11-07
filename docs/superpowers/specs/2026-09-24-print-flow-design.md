@@ -336,9 +336,11 @@ on the newest slice quote's) and sends none while they are unchanged. Other sett
 print what was not priced, so Print waits until they are put back. An item print that sends
 `{}` also prints with the quote's (`print_body` reads it as none sent). The run's result
 records them (`PrintRunResult.part_settings`), and `GET /prints/{archive_id}` lists them as
-`part_settings`, found through the queue item's send and its run. Every answer gives a
-slot's settings with only what is set (`PartSettings` leaves an unset one out), so a reprint
-can send them again as they are.
+`part_settings`, found through the queue item's send and its run. A print started over
+the LAN has no queue item, so its record lists none. Every answer gives a slot's settings
+with only what is set (`part_settings.parts_set_only`, on the read models: the run result,
+the print record, the remembered choices and the check), so a reprint can send them again as
+they are. A request's own dump keeps every key, so `run_key` is what it was before #5627.
 
 Bambu Studio honours them. Its 3MF loader reads every `<part>` metadata key that is not
 one of its own (name, subtype, source, matrix …) into the volume's config

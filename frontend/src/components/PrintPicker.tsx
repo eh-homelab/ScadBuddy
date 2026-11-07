@@ -45,7 +45,7 @@ import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, single
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
-import { samePartSettings, sentPartSettings } from '../lib/partSettings'
+import { samePartSettings, sentPartSettings, withoutProcessValues } from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
@@ -529,8 +529,6 @@ export function PrintPicker({
    */
   const [partsOpened, setPartsOpened] = useState(false)
   const sentParts = takesParts ? sentPartSettings(picker.partSettings) : null
-  /** #5627 — an item's print with settings other than its accepted quote's. */
-  const partsUnquoted = itemPrint !== undefined && takesParts && !samePartSettings(picker.partSettings, itemPrint.quoted)
   const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
@@ -1141,6 +1139,30 @@ export function PrintPicker({
         }
       : null
   const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
+  const processParts = check.verdict?.process_part_settings ?? null
+  /**
+   * #5627 — an item's print with settings other than its accepted quote's. A setting equal
+   * to the process's changes nothing, so it is left out on both sides.
+   */
+  const partsUnquoted =
+    itemPrint !== undefined &&
+    takesParts &&
+    !samePartSettings(
+      withoutProcessValues(picker.partSettings, processParts),
+      withoutProcessValues(itemPrint.quoted, processParts),
+    )
+  /**
+   * #5627 — once the process's values are read, a remembered or quoted setting equal to
+   * the process's own is dropped: it changes nothing, so it is not shown as changed.
+   */
+  const { setPartSettings: dropProcessValues } = picker
+  useEffect(() => {
+    if (processParts === null) return
+    dropProcessValues((current) => {
+      const next = withoutProcessValues(current, processParts)
+      return samePartSettings(next, current) ? current : next
+    })
+  }, [processParts, dropProcessValues])
   /**
    * #2169 — the choices on screen, sliced in the background once the check finds nothing
    * the run would refuse. A run of the same choices queues that slice.

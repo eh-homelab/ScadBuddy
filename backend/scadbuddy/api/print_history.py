@@ -29,7 +29,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from scadbuddy.api.deps import (
     ConfigDep,
@@ -65,7 +65,7 @@ from scadbuddy.bambuddy.models import (
     PrinterMedia,
     TimelapseInfo,
 )
-from scadbuddy.bambuddy.part_settings import PartSettingsMap
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
 from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLinkStore
 from scadbuddy.bambuddy.print_source import is_sliced, printable
 from scadbuddy.bambuddy.runs import PrintRunStore
@@ -483,6 +483,10 @@ class PrintDetail(PrintSummary):
     #: the ScadBuddy run that queued it (``PrintRunResult.part_settings``): a reprint
     #: sends them again. None for none, or for a print no recorded run queued.
     part_settings: PartSettingsMap | None = None
+
+    _parts_set_only = model_serializer(mode="wrap")(
+        lambda self, handler: parts_set_only(handler(self), maps=("part_settings",))
+    )
 
 
 async def _part_settings(
@@ -1211,7 +1215,6 @@ async def get_print(
     printer_media: bool = False,
 ) -> PrintDetail:
     link = await _require_print(links, archive_id)
-    part_settings = await _part_settings(links, print_runs.store, link)
     output = None
     if link.output_id is not None:
         output = await asyncio.to_thread(_read_output, outputs, link.output_id)
@@ -1224,7 +1227,9 @@ async def get_print(
     meta = output.meta if output is not None else None
 
     async with client_for(store.load()) as client:
-        archive = await cache.archive(client, archive_id)
+        archive, part_settings = await asyncio.gather(
+            cache.archive(client, archive_id), _part_settings(links, print_runs.store, link)
+        )
         diff = await defaults.diff(output) if output is not None else None
         file = await _LibraryFiles(cache, client).file(link.library_file_id)
         summary = _summary(link, meta, archive, diff, file.filename if file else None)

@@ -107,8 +107,9 @@ export function usePrintChoices(
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
   /**
    * #5627 — the slicer settings per filament slot, by slot id: only what is changed from
-   * the process. Only an output takes them (a library or sliced file prints its own
-   * parts), so only an output's open seeds them; the dialog shows no controls otherwise.
+   * the process. An output or a library file (#5628) takes them, and its open seeds them
+   * from the quote's or the remembered ones. A sliced file prints as it was sliced, so it
+   * takes none and the dialog shows no controls for it.
    */
   const [partSettings, setPartSettings] = useState<PartSettingsMap>({})
   // Read when the first read lands, as the other seeds are.

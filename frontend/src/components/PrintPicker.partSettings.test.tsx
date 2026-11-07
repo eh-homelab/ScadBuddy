@@ -106,6 +106,26 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { wall_loops: 4 } } })
   })
 
+  it("drops a remembered setting equal to the process's once the process is read", async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          model_choices: {
+            printer_id: null,
+            filament_plan: [],
+            part_settings: { '1': { top_shell_layers: 5, wall_loops: 4 } },
+          },
+        }),
+      ),
+    )
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    expect(await screen.findByTestId('part-settings-toggle-1')).toHaveTextContent('(2 changed)')
+    await openSlot(1)
+    await waitFor(() => expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)'))
+  })
+
   it('offers the controls for a library file too (#5628)', async () => {
     renderPage(
       <PrintPicker

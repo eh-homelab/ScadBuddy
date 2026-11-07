@@ -21,7 +21,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 
 from fastapi import status
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from scadbuddy.bambuddy.catalogue import Catalogue, ReadCatalogue
 from scadbuddy.bambuddy.clearance import (
@@ -109,6 +109,7 @@ from scadbuddy.bambuddy.part_settings import (
     laid_under,
     normalised,
     overrides_of,
+    parts_set_only,
     process_part_settings,
     unknown_slots,
 )
@@ -504,6 +505,10 @@ class PrintRunResult(BaseModel):
     #: The print record (``GET /prints/{archive_id}``) lists them, so a reprint is exact.
     part_settings: PartSettingsMap | None = None
 
+    _parts_set_only = model_serializer(mode="wrap")(
+        lambda self, handler: parts_set_only(handler(self), maps=("part_settings",))
+    )
+
 
 async def known_slots(
     source: PrintSource,
@@ -847,6 +852,10 @@ class PrintCheck(BaseModel):
     #: (``process_values``), a sliced file, which takes no part settings, or a preset
     #: whose values cannot be read.
     process_part_settings: PartSettings | None = None
+
+    _parts_set_only = model_serializer(mode="wrap")(
+        lambda self, handler: parts_set_only(handler(self), single=("process_part_settings",))
+    )
 
 
 ChooseRack = Callable[[int], Awaitable[RackChoice | None]]

@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.render.bambu3mf import PartOverrides
 from scadbuddy.render.colours import colour_hex
@@ -63,6 +63,32 @@ def without_unset(dumped: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in dumped.items() if value is not None}
 
 
+def parts_set_only(
+    dumped: dict[str, Any], *, maps: Collection[str] = (), single: Collection[str] = ()
+) -> dict[str, Any]:
+    """A read model's dump (#5627) with only the settings set in each field of ``maps``
+    (a dumped :data:`PartSettingsMap`) and ``single`` (a dumped :class:`PartSettings`):
+    an unset one is the process's, so what a read gives back (``get_print``,
+    ``model_choices``, a check) is a value a request takes again, the agent's strict
+    ``part_settings`` among them. Only read models strip them: a request's own dump stays
+    as it was, since ``runs.run_key`` digests it, and a changed key would start a second
+    print for a retry that spans the deploy. Called from a lambda ``model_serializer``,
+    which has no return annotation: with one, pydantic gives the answer a schema of its
+    own (``-Output``), and the API's request and answer types would part."""
+    for field in maps:
+        value = dumped.get(field)
+        if isinstance(value, dict):
+            dumped[field] = {
+                slot: without_unset(inner) if isinstance(inner, dict) else inner
+                for slot, inner in value.items()
+            }
+    for field in single:
+        value = dumped.get(field)
+        if isinstance(value, dict):
+            dumped[field] = without_unset(value)
+    return dumped
+
+
 class PartSettings(BaseModel):
     """The process settings for the parts of one slot; each omitted one is the
     process's."""
@@ -76,13 +102,6 @@ class PartSettings(BaseModel):
     sparse_infill_density: int | None = Field(default=None, ge=0, le=100)
     sparse_infill_pattern: SparseInfillPattern | None = None
     ironing_type: IroningType | None = None
-
-    # Only the settings set (#5627): an unset one is the process's, and is left out, so
-    # what a read gives back (`get_print`, `model_choices`) is a value a request takes
-    # again, the agent's strict `part_settings` among them. A lambda, so the serializer
-    # has no return annotation: with one, pydantic gives the answer a schema of its own
-    # (`PartSettings-Output`), and the API's request and answer types would part.
-    _set_only = model_serializer(mode="wrap")(lambda self, handler: without_unset(handler(self)))
 
     def metadata(self) -> tuple[tuple[str, str], ...]:
         """Each setting sent, as the 3MF stores it, sorted by key."""

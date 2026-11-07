@@ -76,6 +76,29 @@ export function sentPartSettings(value: PartSettingsMap | null | undefined): Par
   return kept.length > 0 ? Object.fromEntries(kept) : null
 }
 
+/**
+ * `value` without the settings that equal the process's own (`process`, the check's
+ * `process_part_settings`): such a setting changes nothing, so a remembered or quoted one
+ * is not counted as changed. Each slot keeps only what it sets.
+ */
+export function withoutProcessValues(
+  value: PartSettingsMap | null | undefined,
+  process: PartSettings | null | undefined,
+): PartSettingsMap {
+  const kept = Object.entries(sentPartSettings(value) ?? {})
+    .map(
+      ([slot, settings]) =>
+        [
+          slot,
+          Object.fromEntries(
+            Object.entries(settings).filter(([key, setting]) => process?.[key as PartSettingKey] !== setting),
+          ) as PartSettings,
+        ] as const,
+    )
+    .filter(([, settings]) => Object.keys(settings).length > 0)
+  return Object.fromEntries(kept)
+}
+
 /** Whether two maps set the same, slots that set nothing aside. */
 export function samePartSettings(a: PartSettingsMap | null | undefined, b: PartSettingsMap | null | undefined): boolean {
   return JSON.stringify(sortedKeys(sentPartSettings(a))) === JSON.stringify(sortedKeys(sentPartSettings(b)))

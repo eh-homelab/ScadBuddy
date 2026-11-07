@@ -87,6 +87,20 @@ def test_the_printer_is_part_of_the_key_only_without_a_bambuddy_id() -> None:
     assert len({plain, alone, other}) == 3
 
 
+def test_a_part_settings_requests_key_is_what_it_was_before_5627() -> None:
+    """#5627 review: a read leaves unset part settings out, but a request's dump keeps
+    them, so a retry that spans the deploy joins its run. The hash was computed on main
+    at b8e23b24c, before #5627."""
+    sent = request(
+        printer_id=1,
+        part_settings={"2": {"top_shell_layers": 8, "sparse_infill_density": 20}},
+    )
+    assert (
+        run_key("o" * 32, sent)
+        == "3c3db79c76bb5c29227a3696c3354f884f20e88d2bfb1f2eff8650493bc81d56"
+    )
+
+
 def test_a_printer_that_is_not_a_registry_id_is_refused() -> None:
     with pytest.raises(ValidationError):
         request(printer="garage")
