@@ -98,6 +98,8 @@ export function LibraryFilePicker({
             disabled={disabled}
             onClick={() => {
               setError(null)
+              // An earlier answer for this query would show again with no "Searching…" (#5635).
+              setFound((prior) => (prior !== null && prior.query === asked ? null : prior))
               setAttempt((n) => n + 1)
             }}
           >
