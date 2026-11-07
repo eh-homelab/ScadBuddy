@@ -363,6 +363,10 @@ A template declares its own (#5626) in `model.json` as `part_print_settings`, be
 `print_settings`, with the same keys and limits (`PartSettings`). An unknown key or a
 value out of range fails the load (`InvalidModelMetaError`), as `PRINT_SETTING_VALUES`
 does, and a print of the template is then refused (409), as for a bad `print_settings`.
+The dialog's background slice and the slice quote refuse it too, with the same 409, so
+neither shows or prices a copy without the template's settings that the run would then
+refuse (#5649). The dialog's check (`POST /print/outputs/{id}/check`) puts that refusal
+first in its `errors`, so the person sees why before Print.
 A template names the part by its `// color` parameter, never by slot:
 `{"letter_color": {"top_shell_layers": 8}}`. The decision: a slot is a position in the
 colours a render used (`layout.colours`, slot N is colour N-1). It moves when two colour
@@ -380,7 +384,8 @@ reaches through the internal naming route. The naming turns them into the output
 (`OutputNaming.part_settings`, `part_settings.by_colour`): each parameter's value in the
 output's `params.json` (else the template's default from its cached schema, for an
 output from before #4774) is matched, by `colour_hex`, to the slot of that colour in the
-output's `colors`. A parameter with no value, or whose colour no slot is, sets nothing.
+output's `colors`. A parameter with no value, or whose colour no slot is, sets nothing;
+nor does a colour past slot 64 (`MAX_SLOT`, the bound of `SlotId`, #5649).
 Two parameters of one colour share its slot; for a key both set, the first declared
 wins. An arranged output (`OutputStore.arranged_from` not empty) takes none: its parts
 come from other outputs or library files, it has no params, and it may be filed under

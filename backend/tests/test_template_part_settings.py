@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from scadbuddy.bambuddy.output_reader import LocalOutputs
-from scadbuddy.bambuddy.part_settings import PartSettings, by_colour, laid_under
+from scadbuddy.bambuddy.part_settings import MAX_SLOT, PartSettings, by_colour, laid_under
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError, meta_from_raw
 from scadbuddy.library.outputs import PARAMS_NAME, OutputStore
@@ -145,6 +145,18 @@ def test_a_parameter_with_no_value_or_no_slot_sets_nothing() -> None:
     assert by_colour(declared, {}, ["#FFFFFF"]) is None
     assert by_colour(declared, {"letter_color": "#123456"}, ["#FFFFFF"]) is None
     assert by_colour(declared, {"letter_color": 3}, ["#FFFFFF"]) is None
+
+
+def test_a_colour_past_the_last_slot_sets_nothing() -> None:
+    """#5649: ``SlotId`` stops at 64, so a 65th colour's settings would fail the naming."""
+    declared = {
+        "letter_color": PartSettings(top_shell_layers=8),
+        "border_color": PartSettings(wall_loops=3),
+    }
+    colours = [f"#0000{index:02X}" for index in range(MAX_SLOT)] + ["#800080"]
+    params = {"letter_color": "#800080", "border_color": colours[MAX_SLOT - 1]}
+
+    assert by_colour(declared, params, colours) == {MAX_SLOT: PartSettings(wall_loops=3)}
 
 
 def test_two_parameters_of_one_colour_share_its_slot_and_the_first_wins() -> None:

@@ -52,8 +52,9 @@ class OutputNaming(BaseModel):
     #: The template's ``part_print_settings`` as its model.json has them now (#5626),
     #: as this output's slots (``part_settings.by_colour``); ``None`` for none.
     part_settings: PartSettingsMap | None = None
-    #: The model.json's refusal of its print settings, when it has one: a print refuses
-    #: on it (409 "Invalid Model Metadata"), a project file only names.
+    #: The model.json's refusal of its print settings, when it has one: a print, the
+    #: dialog's background slice and a quote refuse on it (409 "Invalid Model
+    #: Metadata", #5649), a project file only names.
     invalid_meta: str | None = None
     #: The template's display name (`template_title`): the folder a native run files its
     #: copy under (#3818 tier A, plan 2026-10-18 D6), as the output's filing does.
