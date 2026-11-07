@@ -21,6 +21,7 @@ import type {
 import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
 import { printersState } from '../printers'
+import { mockLibraryFile } from '../library'
 import { byCreated } from '../../../components/orders/price'
 import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, revisionsOf, state, UNKNOWN_PARAMETER } from './state'
 import { pushRevision } from './revisions'
@@ -435,15 +436,69 @@ export function sameDesign(a: OrderItem['reference'], b: OrderItem['reference'])
   return a.slug === b.slug && a.commit === b.commit && JSON.stringify(a.inputs) === JSON.stringify(b.inputs)
 }
 
+/** `print_library/ids.py` `NATIVE_ID_BASE`: a native library file's id is at least this. */
+const NATIVE_ID_BASE = 1_000_000_000
+
+/**
+ * #5544 — a library file item, as `ItemCreate._shape` and `api/orders.py` `_library_file`
+ * answer: the file only (any other source, kind or custom field is 422), and a file the
+ * library does not have or does not print is 422 on `library_file_id`.
+ */
+function addLibraryItem(request: Request, order: Order, body: OrderItemCreate & Record<string, unknown>, afterAcceptance: boolean) {
+  if ('kind' in body && body.kind !== 'library_file') return fieldProblem(request, 'body', `library_file_id names a library file item: drop kind '${String(body.kind)}'`)
+  const fileId = body.library_file_id
+  if (fileId == null) return fieldProblem(request, 'body', 'a library_file item needs a library_file_id')
+  if (!Number.isInteger(fileId) || fileId < 1) return fieldProblem(request, 'library_file_id', 'Input should be greater than or equal to 1')
+  const named = (['slug', 'commit', 'inputs', 'output_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
+  if (named.length) return fieldProblem(request, 'body', `a library file item names its file only: drop ${named.join(', ')}`)
+  const file = mockLibraryFile(fileId)
+  if (!file) return fieldProblem(request, 'library_file_id', `no library file ${fileId} in the library that serves`)
+  if (!['3mf', 'gcode.3mf', 'stl'].includes((file.file_type ?? '').toLowerCase())) {
+    return fieldProblem(request, 'library_file_id', `library file ${file.filename} is a ${file.file_type ?? 'file of unknown type'}: ScadBuddy prints only 3MF and STL files`)
+  }
+  try {
+    takesItem(order, afterAcceptance)
+    const at = now()
+    const created: OrderItem = {
+      id: newId('i'),
+      order_id: order.id,
+      position: itemsOf(order.id).length,
+      status: 'draft',
+      quantity: body.quantity as number,
+      title: body.title?.trim() || file.filename,
+      notes: body.notes ?? '',
+      kind: 'library_file',
+      requires_printing: true,
+      sku: body.sku ?? null,
+      reference: null,
+      library_file: { id: file.id, filename: file.filename, library: file.id >= NATIVE_ID_BASE ? 'native' : 'bambuddy' },
+      colours: [],
+      output_id: null,
+      approval: 'together',
+      current_revision_id: null,
+      revised_after_acceptance: false,
+      created_at: at,
+      updated_at: at,
+    }
+    state.items.push(created)
+    added(order, created, afterAcceptance, { item_kind: 'library_file', library_file_id: file.id })
+    rederive(order)
+    return HttpResponse.json(created, { status: 201 })
+  } catch (error) {
+    return refused(request, error)
+  }
+}
+
 /** `POST /orders/:id/items` and, with `afterAcceptance`, `…/items/after-acceptance` (#5349). */
 function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
   return async ({ request, params }) => {
     const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
+    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'library_file_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
     if (extra) return extra
     if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
     const order = state.orders.find((o) => o.id === params.id)
     if (!order) return problem(request, 404, `no order '${String(params.id)}'`)
+    if (body.library_file_id != null || body.kind === 'library_file') return addLibraryItem(request, order, body, afterAcceptance)
     if (body.kind === 'custom') {
       // `ItemCreate._shape` and `Lifecycle.add_custom_item` (#4954).
       const named = (['slug', 'commit', 'inputs', 'output_id'] as const).filter((name) => body[name] != null)
@@ -1060,7 +1115,8 @@ export const handlers = [
       if (found.kind === 'custom') {
         throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field (PATCH the item's unit_price_minor)`, [found.id])
       }
-      if (found.reference === null) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`, [found.id])
+      // `lifecycle.py` `has_design`: a template reference, or a library file (#5544).
+      if (found.reference === null && !found.library_file) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`, [found.id])
       const price = body.unit_price_minor as number
       const quote: Quote = {
         id: newId('q'),
@@ -1205,7 +1261,11 @@ export const handlers = [
       if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
       notOnHold(order)
       const found = itemOf(order, String(params.item))
-      if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      // `quote.py` `reference_of`, skipped for a library file item (#5544), which names its file.
+      if (found.reference === null && !found.library_file) {
+        if (found.kind === 'request') throw new Refused('item_has_no_design', `item ${found.id} is a request with no design yet: add a revision first`, [found.id])
+        throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      }
       if (!FULFILLABLE.has(found.status)) {
         throw new Refused(SETTLED.has(found.status) ? 'item_not_open' : 'item_not_approved', `item ${found.id} is ${found.status}`, [found.id])
       }
@@ -1215,8 +1275,12 @@ export const handlers = [
       const copies = found.quantity - productionOf(found.id).filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
       if (copies < 1) throw new Refused('item_made', `item ${found.id}'s attempts made its ${found.quantity} already: accept them`, [found.id])
       const quote = quotesOf(found.id).find((q) => q.accepted)
-      if (!quote || found.output_id === null) {
+      if (!quote || (!found.library_file && found.output_id === null)) {
         throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
+      }
+      // `printing.py` `_library_stands`: the file must still be in the library that serves.
+      if (found.library_file && !mockLibraryFile(found.library_file.id)) {
+        throw new Refused('library_file_gone', `item ${found.id}'s library file ${found.library_file.filename} (id ${found.library_file.id}) is no longer in the library`, [found.id])
       }
       // §8.4: the registry printer the run used (`run.printer`), as it was named then. The run
       // has one only when the body names a row that is still there (`print_run.py`

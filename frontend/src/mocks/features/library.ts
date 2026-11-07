@@ -796,6 +796,11 @@ function listedFiles(): LibraryEntry[] {
     }))
 }
 
+/** #5544 — a file of the mocked library by id, as an order's library file item reads it. */
+export function mockLibraryFile(fileId: number): LibraryEntry | undefined {
+  return listedFiles().find((file) => file.id === fileId)
+}
+
 // #3651 — the default destination reads which folder a file is in.
 export function mockLibraryFileFolder(fileId: number): number | null {
   return listedFiles().find((file) => file.id === fileId)?.folder_id ?? null

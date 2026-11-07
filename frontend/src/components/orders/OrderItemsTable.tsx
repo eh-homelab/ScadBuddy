@@ -90,6 +90,12 @@ export function OrderItemsTable({
           <Button variant="link" className="h-auto p-0 text-left font-medium whitespace-normal text-foreground" onClick={open}>
             {item.title}
           </Button>
+          {/* #5544 — a library file item names its file, by its name when it was added. */}
+          {item.library_file && (
+            <span className="text-[11px] break-all text-muted-foreground" data-testid="item-library-file">
+              Library file{item.library_file.library === 'native' ? '' : ' in Bambuddy'}: {item.library_file.filename}
+            </span>
+          )}
           {item.sku && <span className="font-mono text-[11px] text-muted-foreground">SKU {item.sku}</span>}
         </span>
       ),

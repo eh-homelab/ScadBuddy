@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api/client'
-import type { ModelSummary, Order, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
+import type { LibrarySearchHit, ModelSummary, Order, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -13,6 +13,7 @@ import { addItem, addRevision, afterAcceptanceWarning, reviseWarning, type AddMo
 import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
+import { LibraryFilePicker } from './LibraryFilePicker'
 
 /** The radio value of "the current version with its default settings". */
 const CURRENT = 'current'
@@ -72,7 +73,8 @@ function revisionBody(current: Pinned | null, choice: string, note: string): Rev
  * The order page shows it while the order takes items: `draft` or `quoted`, or, with
  * `mode` `after_acceptance` (#5349), `accepted`, `in_production` or `ready`, where the add
  * asks the person to confirm that it changes an accepted order first. It also takes a "Design request" (#5280): a title and the
- * customer's words, whose design a revision supplies later. With `revise` it is the
+ * customer's words, whose design a revision supplies later, and a "Library file" (#5544): a
+ * file of the library, found as the Library page's search finds it, which the item prints. With `revise` it is the
  * design picker of an item's new revision instead (`slug`: the item's template, if any); with
  * `mode` `after_acceptance` that revision changes an accepted item (#5350), after a confirm.
  */
@@ -98,7 +100,10 @@ export function AddItemDialog({
   const models = useAsync(() => (open ? api.listModels() : Promise.resolve([] as ModelSummary[])), [open])
   const [query, setQuery] = useState('')
   const [slug, setSlug] = useState<string | null>(revise?.slug ?? null)
-  const [request, setRequest] = useState(false)
+  // What the item is made from: a template, a design request (#5280) or a library file (#5544).
+  const [source, setSource] = useState<'template' | 'request' | 'library'>('template')
+  const request = source === 'request'
+  const [file, setFile] = useState<LibrarySearchHit | null>(null)
   const [note, setNote] = useState('')
   const model = (models.data ?? []).find((m) => m.slug === slug) ?? null
   const outputs = useAsync(() => (slug ? api.listOutputs(slug) : Promise.resolve([] as Output[])), [slug])
@@ -111,6 +116,12 @@ export function AddItemDialog({
   // #5349, #5350: a change to an accepted order waits for a second click on the confirm.
   const [confirming, setConfirming] = useState(false)
   const confirm = mode === 'after_acceptance'
+  // Each source has its own title: one typed for another source is not sent unseen.
+  const pickSource = (next: typeof source) => {
+    if (next === source) return
+    setSource(next)
+    setTitle('')
+  }
 
   const found = useMemo(() => (models.data ?? []).filter((m) => matches(m, query)), [models.data, query])
   const saved = useMemo(() => [...(outputs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)), [outputs.data])
@@ -122,7 +133,8 @@ export function AddItemDialog({
     if (!open) {
       setQuery('')
       setSlug(revise?.slug ?? null)
-      setRequest(false)
+      setSource('template')
+      setFile(null)
       setNote('')
       setPicked('')
       setQuantity('1')
@@ -133,7 +145,7 @@ export function AddItemDialog({
     }
   }, [open, revise?.slug])
   // A new pick asks again: the confirm names what was picked when it was armed.
-  useEffect(() => setConfirming(false), [request, slug, choice, quantity, title, note])
+  useEffect(() => setConfirming(false), [source, file, slug, choice, quantity, title, note])
   /** Another template, or none, starting from its own default pick in the same render. */
   function pickTemplate(next: string | null) {
     setSlug(next)
@@ -148,6 +160,30 @@ export function AddItemDialog({
   }
 
   async function add() {
+    if (source === 'library') {
+      if (!file) {
+        setError('Pick a library file.')
+        return
+      }
+      const count = parseQuantity(quantity)
+      if (count === null) {
+        setError(QUANTITY_HINT)
+        return
+      }
+      if (!confirmed()) return
+      setBusy(true)
+      setError(null)
+      try {
+        await addItem(orderId, { library_file_id: file.id, quantity: count, ...(title.trim() ? { title: title.trim() } : {}) }, mode)
+        onAdded()
+        onClose()
+      } catch (err) {
+        setError(refusalText(err))
+        setConfirming(false)
+        setBusy(false)
+      }
+      return
+    }
     if (request) {
       if (!title.trim()) {
         setError('Type a title for the request.')
@@ -210,16 +246,21 @@ export function AddItemDialog({
               ? "Pick the design this revision shows: a template's current version or one of its saved outputs."
               : request
                 ? "A request for a design: the customer's words now, its designs as revisions later."
-                : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
+                : source === 'library'
+                  ? 'A file of the library becomes a line item of this order. The item prints that file.'
+                  : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
           </DialogDescription>
         </DialogHeader>
         <div className="flex min-w-0 flex-col gap-3">
           {!revise && (
             <div className="flex gap-2" role="group" aria-label="Kind of item">
-              <Button type="button" size="sm" variant={request ? 'outline' : 'secondary'} aria-pressed={!request} onClick={() => setRequest(false)}>
+              <Button type="button" size="sm" variant={source === 'template' ? 'secondary' : 'outline'} aria-pressed={source === 'template'} onClick={() => pickSource('template')}>
                 From a template
               </Button>
-              <Button type="button" size="sm" variant={request ? 'secondary' : 'outline'} aria-pressed={request} onClick={() => setRequest(true)}>
+              <Button type="button" size="sm" variant={source === 'library' ? 'secondary' : 'outline'} aria-pressed={source === 'library'} onClick={() => pickSource('library')}>
+                Library file
+              </Button>
+              <Button type="button" size="sm" variant={request ? 'secondary' : 'outline'} aria-pressed={request} onClick={() => pickSource('request')}>
                 Design request
               </Button>
             </div>
@@ -240,7 +281,27 @@ export function AddItemDialog({
               </div>
             </>
           )}
-          {!request && (model ? (
+          {source === 'library' && (
+            <>
+              <LibraryFilePicker open={open} picked={file} disabled={busy} onPick={(next) => {
+                setFile(next)
+                setError(null)
+              }} />
+              {file && (
+                <div className="flex flex-wrap gap-3">
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="add-file-quantity">Quantity</Label>
+                    <Input id="add-file-quantity" inputMode="numeric" className="w-24" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+                  </div>
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <Label htmlFor="add-file-title">Title (optional)</Label>
+                    <Input id="add-file-title" maxLength={200} placeholder={file.filename} value={title} onChange={(e) => setTitle(e.target.value)} />
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          {source === 'template' && (model ? (
             <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2" data-testid="add-item-template">
               <span className="min-w-0 truncate text-sm font-medium">{model.name}</span>
               <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => pickTemplate(null)}>
@@ -278,7 +339,7 @@ export function AddItemDialog({
             </div>
           ))}
 
-          {!request && model && (
+          {source === 'template' && model && (
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium" id="add-item-what">
                 What to order
@@ -315,14 +376,14 @@ export function AddItemDialog({
             </div>
           )}
 
-          {!request && model && revise && (
+          {source === 'template' && model && revise && (
             <div className="flex flex-col gap-1">
               <Label htmlFor="add-revision-note">Note</Label>
               <Textarea id="add-revision-note" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
             </div>
           )}
 
-          {!request && model && !revise && (
+          {source === 'template' && model && !revise && (
             <div className="flex flex-wrap gap-3">
               <div className="flex flex-col gap-1">
                 <Label htmlFor="add-item-quantity">Quantity</Label>
@@ -335,7 +396,7 @@ export function AddItemDialog({
             </div>
           )}
 
-          {!request && model && choice && choice !== CURRENT && !revise && <RoughEstimate outputId={choice} idPrefix="add-item-estimate" />}
+          {source === 'template' && model && choice && choice !== CURRENT && !revise && <RoughEstimate outputId={choice} idPrefix="add-item-estimate" />}
 
           {confirm && confirming && (
             <p role="alert" aria-label="Confirm the change" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px]">
@@ -352,7 +413,7 @@ export function AddItemDialog({
           <Button type="button" variant="outline" disabled={busy} onClick={confirming ? () => setConfirming(false) : onClose}>
             {confirming ? 'Back' : 'Cancel'}
           </Button>
-          <Button type="button" disabled={busy || (request ? !title.trim() : !model || !choice)} onClick={() => void add()}>
+          <Button type="button" disabled={busy || (request ? !title.trim() : source === 'library' ? !file : !model || !choice)} onClick={() => void add()}>
             {confirming ? 'Change the accepted order' : revise ? 'Add revision' : 'Add item'}
           </Button>
         </DialogFooter>

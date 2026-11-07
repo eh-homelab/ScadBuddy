@@ -417,3 +417,18 @@ describe('OrderItemsTable · row menu', () => {
     expect(await openMenu()).not.toHaveAttribute('data-disabled')
   })
 })
+
+// #5544 — a library file item names its file under its title, by its name when it was added.
+describe('OrderItemsTable · library file items', () => {
+  beforeEach(() => resetMockState())
+
+  it('shows the library file an item prints', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 1, title: 'Drawer label' })
+    render(ORDER_DRAFT)
+    const source = await screen.findByTestId('item-library-file')
+    expect(source).toHaveTextContent('Library file in Bambuddy: drawer-label.3mf')
+    expect(within(row(added.id)).getByRole('button', { name: 'Drawer label' })).toBeInTheDocument()
+    // A template's item names no file.
+    expect(within(row(ITEM_DRAFT)).queryByTestId('item-library-file')).toBeNull()
+  })
+})
