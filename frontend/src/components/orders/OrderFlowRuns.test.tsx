@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { FlowRun } from '../../api/types'
 import { flowRequests, setFlowRuns } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
-import { OrderFlowRuns } from './OrderFlowRuns'
+import { ORDER_RUNS_LIMIT, OrderFlowRuns } from './OrderFlowRuns'
 
 // #4252 (orders spec §7.4) — the order's page shows the runs it is for, and each run's
 // parked calls with the decide controls the run's own page has.
@@ -27,6 +27,15 @@ describe('OrderFlowRuns', () => {
       path: '/api/v1/workflow-runs/run-print/decide',
       body: { call_id: 'call-1', approved: true },
     })
+  })
+
+  it('says when older runs are not shown (review of #5668)', async () => {
+    const [done] = await runsNamed('run-done')
+    setFlowRuns(
+      Array.from({ length: ORDER_RUNS_LIMIT }, (_, i) => ({ ...done!, id: `run-${i}`, order_id: 'ord-1' })),
+    )
+    renderPage(<OrderFlowRuns orderId="ord-1" />)
+    expect(await screen.findByText(/older ones are on the/)).toBeInTheDocument()
   })
 
   it('shows nothing for an order no run is for', async () => {

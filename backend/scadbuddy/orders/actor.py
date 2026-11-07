@@ -17,6 +17,8 @@ def current_actor() -> Actor:
         kind="agent",
         principal=author.principal,
         session=author.session,
-        # The flow run it was made from (#4252, §7.4): the audit line says so.
+        # The flow run it was made from (#4252, §7.4): the audit line says so. As
+        # trusted as the principal beside it: the agent's credential vouches for both
+        # (`auth/authorship_rule.py`); the projects worker's is checked against its token.
         run_id=author.flow_run,
     )

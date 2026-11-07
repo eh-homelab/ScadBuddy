@@ -21,8 +21,15 @@ import { useAsync } from '../../lib/useAsync'
  * #4252 (orders spec §7.4) — the flow runs an order is for (`GET /workflow-runs?order_id=`),
  * and each run's parked calls with the decide controls its own page has.
  */
+/** The most `GET /workflow-runs` lists at once (`api/flows.py`). */
+export const ORDER_RUNS_LIMIT = 200
+
 export function OrderFlowRuns({ orderId }: { orderId: string }) {
-  const runs = useAsync(() => api.listFlowRuns({ order_id: orderId }), [orderId], [FLOW_RUNS_TOPIC])
+  const runs = useAsync(
+    () => api.listFlowRuns({ order_id: orderId, limit: ORDER_RUNS_LIMIT }),
+    [orderId],
+    [FLOW_RUNS_TOPIC],
+  )
   if (runs.error) {
     return (
       <p role="alert" className="text-[13px] text-destructive">
@@ -40,6 +47,16 @@ export function OrderFlowRuns({ orderId }: { orderId: string }) {
           <OrderRun key={run.id} run={run} onChanged={() => runs.refresh()} />
         ))}
       </ul>
+      {runs.data.length >= ORDER_RUNS_LIMIT && (
+        // Never hide older runs without a sign (review of #5668).
+        <p className="text-[12.5px] text-muted-foreground">
+          The newest {ORDER_RUNS_LIMIT} runs are shown; older ones are on the{' '}
+          <Link to="/workflows" className="text-primary hover:underline">
+            Flows
+          </Link>{' '}
+          page.
+        </p>
+      )}
     </section>
   )
 }

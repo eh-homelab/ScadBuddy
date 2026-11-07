@@ -98,7 +98,7 @@ from scadbuddy.flows.operations import (
     seal_answer,
 )
 from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
-from scadbuddy.flows.store import GrantStateError
+from scadbuddy.flows.store import GrantStateError, author_principal
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.component import OperationsDep
@@ -357,12 +357,30 @@ async def _parent_run(flows: Flows) -> Run | None:
     if author is None or author.flow_run is None:
         return None
     parent = await flows.store.get_run(author.flow_run)
-    if parent is None or parent.started_by.get("principal") != author.principal:
+    if parent is None or not await _runs_as(flows, parent.started_by, author.principal):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             "The calling flow run is not a run started by this principal.",
         )
     return parent
+
+
+async def _runs_as(flows: Flows, started_by: dict[str, Any], principal: str | None) -> bool:
+    """Whether a run's calls are made as `principal`, as the agent derives it from the
+    run's `started_by` (agent `temporal/flowRuns.ts` `startedBy`, review of #5668): the
+    browser's signed-in person, else `browser`; an agent's starter session's owner (the
+    read `parent_tiers` already makes), else its own principal."""
+    if principal is None:
+        return False
+    by = started_by.get("principal")
+    if started_by.get("kind") == "browser":
+        return author_principal(by if isinstance(by, str) else "browser") == principal
+    if started_by.get("kind") != "agent" or not isinstance(by, str):
+        return False
+    session = started_by.get("session")
+    if isinstance(session, str) and await flows.store.parent_tiers(session, principal):
+        return True
+    return by == principal
 
 
 def _started_by() -> dict[str, Any]:

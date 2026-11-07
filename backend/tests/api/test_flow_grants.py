@@ -319,6 +319,30 @@ def test_a_start_that_failed_leaves_no_grant_for_its_retry(
     assert view_grant(client, bare) is None
 
 
+def test_a_browser_started_runs_call_starts_a_linked_run(client: TestClient) -> None:
+    """Review of #5668: a run the anonymous browser user started (`started_by` with no
+    principal) makes its calls as `browser`, as the agent derives it; its
+    `start_flow_run` starts a linked child, never a 409."""
+    parent = started(client, "bp", {"grant": grant({"fn": "queue_print"})})
+    from_parent = {"X-ScadBuddy-Agent-Author": "browser", "X-ScadBuddy-Flow-Run": parent}
+    child = started(client, "bc", {}, **from_parent)
+    view = client.get(f"/api/v1/workflow-runs/{child}").json()
+    assert view["run"]["parent_run_id"] == parent
+    assert view["grant"]["status"] == "requested"
+    # Another principal still cannot name it.
+    definition = register(client, WAITS)
+    refused = client.post(
+        f"/api/v1/workflows/{definition['id']}/runs",
+        headers={
+            "Idempotency-Key": "bc-other",
+            "X-ScadBuddy-Agent-Author": "token:t9",
+            "X-ScadBuddy-Flow-Run": parent,
+        },
+        json={},
+    )
+    assert refused.status_code == 409, refused.text
+
+
 def test_an_agents_run_from_a_run_is_linked_and_only_requests_its_grant(
     client: TestClient,
 ) -> None:
