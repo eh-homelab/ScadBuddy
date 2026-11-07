@@ -8,6 +8,8 @@ pool, or a bigger one, changes a number here on purpose rather than quietly.
 from __future__ import annotations
 
 import ast
+import asyncio
+import contextlib
 import gc
 import re
 import time
@@ -22,6 +24,7 @@ from prometheus_client.parser import text_string_to_metric_families
 import scadbuddy
 from scadbuddy.api.deps import build_state
 from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.pg_pool import IDLE_SECONDS, pools, row_pool
 from scadbuddy.core.settings import Settings
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
@@ -74,14 +77,59 @@ def test_no_module_makes_a_pool_of_its_own() -> None:
     for path in sorted(root.rglob("*.py")):
         if path == root / "core" / "pg_pool.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call):
-                func = node.func
-                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-                http = isinstance(func, ast.Attribute) and ast.unparse(func.value) == "httpcore"
-                if not http and name in POOL_CLASSES:
-                    found.append(f"{path.relative_to(root)}:{node.lineno}")
+        found += _pool_calls(path.read_text(encoding="utf-8"), str(path.relative_to(root)))
     assert found == []
+
+
+def _pool_calls(source: str, where: str) -> list[str]:
+    """Each call that makes a psycopg_pool pool: by its name, by an alias imported from
+    ``psycopg_pool``, or through the module (httpcore's ``AsyncConnectionPool`` is not one)."""
+    tree = ast.parse(source)
+    names = set(POOL_CLASSES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("psycopg_pool"):
+            names |= {a.asname or a.name for a in node.names if a.name in POOL_CLASSES}
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            pool = func.attr in POOL_CLASSES and ast.unparse(func.value) != "httpcore"
+        else:
+            pool = isinstance(func, ast.Name) and func.id in names
+        if pool:
+            calls.append(f"{where}:{node.lineno}")
+    return calls
+
+
+def test_the_pool_check_sees_an_alias_and_the_module() -> None:
+    source = (
+        "import psycopg_pool\n"
+        "from psycopg_pool import ConnectionPool as P\n"
+        "import httpcore\n"
+        "P('x')\n"
+        "psycopg_pool.AsyncConnectionPool('x')\n"
+        "httpcore.AsyncConnectionPool()\n"
+    )
+    assert _pool_calls(source, "m.py") == ["m.py:4", "m.py:5"]
+
+
+async def test_a_stopped_listener_counts_no_connection() -> None:
+    url = f"postgresql://nobody@127.0.0.1:1/listener_{uuid.uuid4().hex}"
+    listener = PgListener(url, backoff=0.01, max_backoff=0.01)
+
+    def most() -> int:
+        return sum(use.max_size for use in pools() if use.conninfo == url)
+
+    assert most() == 1
+    run = asyncio.create_task(listener.run())
+    await asyncio.sleep(0.05)
+    assert most() == 1
+    run.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run
+    assert most() == 0
 
 
 @pytest.mark.requires_postgres

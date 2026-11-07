@@ -65,7 +65,6 @@ class PgListener:
 
     #: As a pool in `core/pg_pool.py`'s registry: one connection, under this name.
     name = LISTENER_APPLICATION_NAME
-    max_size = 1
 
     def __init__(
         self,
@@ -89,7 +88,15 @@ class PgListener:
         self._state_callbacks: list[Callable[[bool], None]] = []
         self._task: asyncio.Task[None] | None = None
         self._runners = 0
+        #: Set once its last runner stopped: then it holds no connection, as a pool
+        #: closed for good, until it runs again.
+        self._stopped = False
         record_connection(self)
+
+    @property
+    def max_size(self) -> int:
+        """At most one connection; none once stopped (`core/pg_pool.py`'s registry)."""
+        return 0 if self._stopped else 1
 
     def open_connections(self) -> int:
         return 0 if self.backend_pid is None else 1
@@ -125,6 +132,7 @@ class PgListener:
         Shared: the connection is opened by the first caller and closed when the
         last one is cancelled."""
         self._runners += 1
+        self._stopped = False
         if self._task is None:
             self._task = asyncio.create_task(self._supervise())
         try:
@@ -136,6 +144,7 @@ class PgListener:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+                self._stopped = True
 
     async def _supervise(self) -> None:
         delay = self.backoff
