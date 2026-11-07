@@ -1324,3 +1324,31 @@ async def test_a_fresh_output_sources_slots_are_read_from_its_own_3mf(
         plate: [f.slot_id for f in known(plate).filaments if f.used_in_plate] for plate in (1, 2)
     }
     assert used == {1: [1], 2: [2]}
+
+
+async def test_a_refused_part_slots_read_is_kept_and_raised_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5656 (the review of PR #5647): ``part_slots`` keeps an unwritable read's refusal,
+    so a second call raises it again without parsing the file again."""
+    from scadbuddy.render.bambu3mf import PartSettingsUnwritableError
+
+    async def own_3mf(store: object, meta: object) -> bytes:
+        return b"not read"
+
+    reads: list[bytes] = []
+
+    def refuse(payload: bytes) -> set[int] | None:
+        reads.append(payload)
+        raise PartSettingsUnwritableError("unreadable")
+
+    monkeypatch.setattr(print_source, "read_3mf", own_3mf)
+    monkeypatch.setattr(print_source, "part_settings_slots", refuse)
+    meta: Any = _Meta()
+    unused: Any = object()
+    source = OutputSource(store=unused, uploads=unused, meta=meta, settings=StoredSettings())
+
+    for _ in range(2):
+        with pytest.raises(PartSettingsUnwritableError):
+            await source.part_slots(None)
+    assert len(reads) == 1

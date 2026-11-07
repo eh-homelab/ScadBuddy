@@ -100,13 +100,29 @@ class LocalOutputs:
         title = await asyncio.to_thread(
             template_title, self.catalogue.paths.model_source(meta.slug).parent, meta.slug
         )
+        settings, declared, refusal = await self._settings(meta)
+        if refusal is not None:
+            return OutputNaming(stem=stem, invalid_meta=refusal, title=title)
+        parts = await asyncio.to_thread(self._part_settings, meta, declared) if declared else None
+        return OutputNaming(stem=stem, print_settings=settings, part_settings=parts, title=title)
+
+    async def print_settings(self, meta: OutputMeta) -> tuple[dict[str, str], str | None]:
+        """`naming`'s ``print_settings`` and ``invalid_meta`` only (#5662): the dialog's
+        check reads no stem, title or part slots."""
+        settings, _, refusal = await self._settings(meta)
+        return settings, refusal
+
+    async def _settings(
+        self, meta: OutputMeta
+    ) -> tuple[dict[str, str], dict[str, PartSettings], str | None]:
+        """The template's print settings, its declared part settings and the model.json's
+        refusal of either; with a refusal, both are empty."""
         try:
             settings = await asyncio.to_thread(self.catalogue.print_settings, meta.slug)
             declared = await asyncio.to_thread(self.catalogue.part_print_settings, meta.slug)
         except InvalidModelMetaError as error:
-            return OutputNaming(stem=stem, invalid_meta=str(error), title=title)
-        parts = await asyncio.to_thread(self._part_settings, meta, declared) if declared else None
-        return OutputNaming(stem=stem, print_settings=settings, part_settings=parts, title=title)
+            return {}, {}, str(error)
+        return settings, declared, None
 
     def _part_settings(
         self, meta: OutputMeta, declared: dict[str, PartSettings]

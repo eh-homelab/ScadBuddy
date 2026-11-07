@@ -1378,11 +1378,10 @@ async def post_check(
     meta = require_output(outputs, output_id)
     settings = store.load()
     # The template's defaults, by-object printing among them (#2976), and the run's
-    # 409 for a model.json that refuses them, from the run's own naming (#5649,
-    # #5653); with a refusal the rest of the check judges the request alone.
-    naming = await LocalOutputs(outputs, library_catalogue).naming(meta)
-    print_settings = naming.print_settings
-    refusal = naming.invalid_meta
+    # 409 for a model.json that refuses them, from the reads the run's naming makes
+    # (#5649, #5653, #5662); with a refusal the rest of the check judges the request
+    # alone.
+    print_settings, refusal = await LocalOutputs(outputs, library_catalogue).print_settings(meta)
     # The path first (D2): a native run's check builds no client (D3), so it answers
     # with no Bambuddy configured at all (AC2).
     route = await dialog_route(
