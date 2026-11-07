@@ -51,6 +51,21 @@ const FULFILLABLE = new Set(['approved', 'failed'])
 /** #4719 — the print path's states: an attempt is edited, or accepted once printed, in them. */
 const PRINTING = new Set(['queued', 'printing', 'printed'])
 
+const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax'])
+const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor'])
+
+/** The backend's `ChargeInput` 422: known kind, label 1..200, integer amount, no other keys. */
+function chargeProblem(c: unknown): string | null {
+  if (typeof c !== 'object' || c === null) return 'Input should be an object'
+  const row = c as Record<string, unknown>
+  const extra = Object.keys(row).find((k) => !CHARGE_KEYS.has(k))
+  if (extra) return `${extra}: Extra inputs are not permitted`
+  if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee' or 'tax'"
+  if (typeof row.label !== 'string' || row.label.length < 1 || row.label.length > 200) return 'label: String should have 1 to 200 characters'
+  if (typeof row.amount_minor !== 'number' || !Number.isInteger(row.amount_minor)) return 'amount_minor: Input should be a valid integer'
+  return null
+}
+
 /** `Lifecycle._after`: the status the item's latest attempt gives it. */
 function after(latest: Fulfilment, current: string): OrderItem['status'] {
   if (latest.outcome === 'failed') return 'failed'
@@ -662,6 +677,10 @@ export const handlers = [
     if (extra) return extra
     if (!Array.isArray(body.charges)) return fieldProblem(request, 'charges', 'Field required')
     const charges = body.charges
+    for (const [i, c] of charges.entries()) {
+      const bad = chargeProblem(c)
+      if (bad) return fieldProblem(request, `charges.${i}`, bad)
+    }
     try {
       const order = lock(String(params.id))
       notEnded(order)
