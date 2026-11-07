@@ -1,8 +1,10 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, OPERATION_UNFINISHED, UNANSWERED } from '../../api/client'
 import type { Activity, OperationAccepted, OrderItemDetail, Quote, SliceQuoteRequest } from '../../api/types'
 import { seedActivity } from '../../mocks/features/activity'
+import { server } from '../../mocks/server'
 import { useSliceQuotes } from './useSliceQuotes'
 
 const BODY: SliceQuoteRequest = {
@@ -385,6 +387,32 @@ describe('useSliceQuotes (#4693)', () => {
     const url = new URL(String(fetched.mock.calls[0]![0]), 'http://localhost')
     expect(url.searchParams.getAll('subject')).toEqual(['order_item:item-1', 'order_item:item-2', 'order_item:item-3'])
     expect(url.searchParams.get('since')).toBe('2026-11-06T08:00:00Z')
+  })
+
+  // #5599 — the review follow-ups of #5597.
+  it('keeps the other chunks’ failures when one chunk’s read fails (#5599)', async () => {
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [], next_cursor: null })
+    const followed = vi.spyOn(api, 'followQuote').mockRejectedValue(new ApiError(422, 'No printer takes this plate.'))
+    vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    seedActivity([
+      { ...FAILED, id: 'operation:op-first', subject: 'order_item:item-0' },
+      { ...FAILED, id: 'operation:op-second', subject: 'order_item:item-200' },
+    ])
+    // The second chunk (items 200 and on) answers 500; the first falls through to the mock.
+    server.use(
+      http.get('/api/v1/activity', ({ request }) => {
+        if (new URL(request.url).searchParams.getAll('subject').includes('order_item:item-200')) {
+          return HttpResponse.json({ detail: 'down' }, { status: 500 })
+        }
+      }),
+    )
+    const items = Array.from({ length: 201 }, (_, n) => ({ ...ITEM, id: `item-${n}` })) as unknown as OrderItemDetail[]
+    const page = await api.failedQuotes(items)
+    expect([...page.keys()]).toEqual(['item-0'])
+    const { result } = renderHook(() => useSliceQuotes('order-1', items, vi.fn()))
+    await waitFor(() => expect(result.current.runs.get('item-0')?.error).toContain('No printer takes this plate.'))
+    expect(followed).toHaveBeenCalledWith('op-first', expect.any(AbortSignal))
+    expect(result.current.runs.has('item-200')).toBe(false)
   })
 
   it('makes one failure read per reload of an order, however many items it has (#5596)', async () => {

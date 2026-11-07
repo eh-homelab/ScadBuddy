@@ -490,7 +490,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `activity_subject_key`), with `subject_cursors` to page one subject (#5596). The `housekeeping_activity` sweep (last in
   `SWEEPS`, behind `workflow.patched("housekeeping-activity")`) repairs, then prunes, on the
   prune Schedule (settings `activity_ttl_seconds`, `activity_repair_window_seconds`,
-  `activity_follow`). The agent: `src/activity/kinds.ts` (its kinds) and `tools/activity.ts`
+  `activity_follow`). Table size (#5599): the prune (`ActivityIndex._prune`) deletes a row
+  `activity_ttl_seconds` after its `finished_at` (default `ACTIVITY_TTL_DEFAULT`, 30 days;
+  the setting is at least one day, `library/settings_store.py`) and a placeholder after
+  the repair window (default one day), every `PRUNE_INTERVAL` (300 s,
+  `workflows/housekeeping.py` `PRUNE_SWEEPS`). So the table holds about 30 days of
+  finished jobs plus the jobs still running: one row per job, never one per event. An
+  operator who raises the TTL makes the table grow by the same factor. The migration
+  `20261107T0625Z_activity_subject_key.sql` builds its index with a plain `CREATE INDEX`.
+  That takes a `SHARE` lock: reads go on, but every insert, update and delete of
+  `activity` waits until the index is built
+  ([PostgreSQL docs](https://www.postgresql.org/docs/18/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY)).
+  `render/pg_store.py` `migrate` runs all pending files in one transaction, so the lock
+  holds until they all commit, and `CONCURRENTLY` cannot run there. On a table
+  bounded to 30 days the build is short. A new index on `activity` with a much larger
+  TTL needs another plan; never edit a merged migration. The agent: `src/activity/kinds.ts` (its kinds) and `tools/activity.ts`
   (`activity_list`, `activity_get`, `activity_watch`), the tier boundary: a caller without
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and

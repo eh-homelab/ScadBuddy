@@ -2516,8 +2516,9 @@ export const api = {
    * start and end. The rows carry no error; `followQuote` reads it. #5585 — filtered by
    * each item's subject, so no other order's failures push one off the page. #5596 — one
    * request per `ACTIVITY_SUBJECTS` items (the route's bound), since the oldest item's
-   * `created_at`, one row per subject. A failed quote whose row stayed `running` is not
-   * here; `useSliceQuotes` finds it.
+   * `created_at`, one row per subject. #5599 — a request that fails drops its own items
+   * only: the map holds the other requests' rows. A failed quote whose row stayed
+   * `running` is not here; `useSliceQuotes` finds it.
    */
   failedQuotes: async (items: readonly { id: string; created_at: string }[]) => {
     const newest = new Map<string, Activity>()
@@ -2526,7 +2527,14 @@ export const api = {
       const since = chunk.reduce((a, b) => (Date.parse(b.created_at) < Date.parse(a) ? b.created_at : a), chunk[0]!.created_at)
       const query = new URLSearchParams({ kind: 'operation.order_item_quote', status: 'failed', since, limit: '1' })
       for (const item of chunk) query.append('subject', `${ORDER_ITEM}${item.id}`)
-      const page = await request<ActivityPage>(`/activity?${query}`)
+      // #5599 — a failed chunk loses its own items' failures only, not the other chunks'.
+      let page: ActivityPage
+      try {
+        page = await request<ActivityPage>(`/activity?${query}`)
+      } catch (cause) {
+        console.debug('could not read the failed slice quotes of some items; they show none', cause)
+        continue
+      }
       for (const row of page.items) {
         if (row.subject.startsWith(ORDER_ITEM)) newest.set(row.subject.slice(ORDER_ITEM.length), row)
       }
