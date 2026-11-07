@@ -328,7 +328,7 @@ class PrintActivities:
             native = route.native
             # #5352: a request that asked for the LAN and would not go over it, or that
             # sets a calibration the LAN cannot, refused before anything is recorded.
-            refusal = asked_path_problem(request, native)
+            refusal = asked_path_problem(request, native, linked=route.printer_id is not None)
             if refusal is not None:
                 raise refusal
             if native:

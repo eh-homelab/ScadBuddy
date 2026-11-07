@@ -36,7 +36,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.printers.component import PRINTERS, Printers
-from scadbuddy.printers.models import LanLink, PrinterPatch
+from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import FAILED, SliceRunInput
 from scadbuddy.workflows.printing import HEARTBEAT, PLAN_TIMEOUT
@@ -786,6 +786,7 @@ def test_a_calibration_over_the_lan_is_refused_in_words_for_its_caller(
         )
         assert api.status_code == 422, api.text
         assert api.json()["type"] == LAN_CALIBRATION_PROBLEM
+        assert api.json()["bambuddy_linked"] is True
         assert api.json()["detail"] == refusal + LAN_CALIBRATION_API_HINT
         assert 'path "bambuddy"' in api.json()["detail"]
 
@@ -798,10 +799,9 @@ def test_a_calibration_over_the_lan_is_refused_in_words_for_its_caller(
         assert page.json()["detail"] == refusal
         assert "path" not in page.json()["detail"]
 
+        # The background slice is the dialog's: the plain refusal, for an API caller too.
         sliced = client.post(
-            f"/api/v1/print/outputs/{output_id}/preview-slice",
-            json=asked,
-            headers={**press(), "X-ScadBuddy-Request": "1"},
+            f"/api/v1/print/outputs/{output_id}/preview-slice", json=asked, headers=press()
         )
         if sliced.status_code == 202:
             op = follow_operation(client, sliced.json(), timeout=60, poll=0.1)
@@ -811,3 +811,35 @@ def test_a_calibration_over_the_lan_is_refused_in_words_for_its_caller(
             problem = sliced.json()
         assert (problem["status"], problem["detail"]) == (422, refusal), problem
         assert library.sliced_names == []
+
+
+def test_a_calibration_on_a_lan_only_printer_names_no_bambuddy_path(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,
+    tmp_path: Path,
+    library: FakeLibrary,
+) -> None:
+    """#5602 review: a row that links no Bambuddy printer refuses `path: "bambuddy"` too
+    (`_not_on_bambuddy`), so an API caller's refusal does not name that path."""
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        output_id = prepared(client, model)
+        printers: Printers = _state(client).components.get(PRINTERS)
+        row = printers.store.create(
+            PrinterCreate(serial="0938AB0000000C3", name="Shed", model="H2C")
+        )
+        printers.store.link_lan(
+            row.id, LanLink(host="10.0.0.10", access_code="12345678"), cert_sha256="ce" * 32
+        )
+        printers.store.patch(row.id, PrinterPatch.model_validate({"preferred_path": "native"}))
+        printers.reports.put(row.id, LAN_REPORT["print"], datetime.now(UTC))
+        request = {k: v for k, v in body().items() if k != "printer_id"}
+        asked = {**request, "printer": row.id, "options": {"flow_cali": "on"}}
+        refusal = lan_calibration_refusal(PrintOptions.model_validate(asked["options"]))
+
+        api = client.post(f"/api/v1/print/outputs/{output_id}/run", json=asked)
+        assert api.status_code == 422, api.text
+        problem = api.json()
+        assert (problem["type"], problem["detail"]) == (LAN_CALIBRATION_PROBLEM, refusal)
+        assert problem["bambuddy_linked"] is False

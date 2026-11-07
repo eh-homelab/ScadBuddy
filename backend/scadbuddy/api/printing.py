@@ -1142,12 +1142,18 @@ def asked_by_api(http: Request | None) -> bool:
 
 def _answered(answer: AcceptAnswer, *, api: bool) -> PrintRun:
     """The run the `accepted` Update answered, or its refusal raised as its problem.
-    For a caller of the API or the agent (``api``), a LAN calibration refusal also names
-    the request's ``path`` (#5602, `LAN_CALIBRATION_API_HINT`); the dialog's text stays."""
+    For a caller of the API or the agent (``api``), a LAN calibration refusal on a row
+    that links a Bambuddy printer (``bambuddy_linked``) also names the request's ``path``
+    (#5602, `LAN_CALIBRATION_API_HINT`); the dialog's text stays, and a row Bambuddy does
+    not reach would refuse that path too."""
     if answer.refusal is not None:
         refusal = answer.refusal
         detail = refusal.detail
-        if api and refusal.type == LAN_CALIBRATION_PROBLEM:
+        if (
+            api
+            and refusal.type == LAN_CALIBRATION_PROBLEM
+            and refusal.extensions.get("bambuddy_linked") is True
+        ):
             detail += LAN_CALIBRATION_API_HINT
         raise ApiError(
             refusal.status,

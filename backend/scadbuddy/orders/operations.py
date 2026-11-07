@@ -585,6 +585,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 request=print_body(request, copies, projects[0], plan),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
+                # #5602: the route's `asked_by_api`; else the run's author tells.
+                api=True if request.get("api") else None,
             )
             # A follow URL (a `JSONResponse`) answers only a request that asked for one.
             assert isinstance(run, PrintRun)

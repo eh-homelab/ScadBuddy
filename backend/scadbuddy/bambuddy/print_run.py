@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -719,8 +719,8 @@ class RunRefusalError(ApiError):
     through as an :class:`ApiError` of the same status: the check says this one before
     Print, and lets that one fail the check as an outage."""
 
-    def __init__(self, detail: str, *, type_: str = "about:blank") -> None:
-        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail, type_=type_)
+    def __init__(self, detail: str, *, type_: str = "about:blank", **extensions: Any) -> None:
+        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail, type_=type_, **extensions)
 
 
 class PrintCheck(BaseModel):
@@ -2011,15 +2011,27 @@ LAN_PATH_REFUSAL = (
 )
 
 
-def asked_path_problem(request: PrintRunRequest, native: bool) -> RunRefusalError | None:
+def asked_path_problem(
+    request: PrintRunRequest, native: bool, *, linked: bool = False
+) -> RunRefusalError | None:
     """Why a run whose route is ``native`` (or not) refuses ``request`` (#5352): it asked
     for the LAN and would not go over it, or it goes over the LAN and its own options set
-    a calibration only Bambuddy's queue takes (``LAN_CALIBRATION_PROBLEM``, #5602).
-    ``None`` when neither."""
+    a calibration only Bambuddy's queue takes (:func:`lan_calibration_problem`, #5602).
+    ``linked`` is whether the route's row links a Bambuddy printer. ``None`` when
+    neither."""
     if request.path == "native" and not native:
         return RunRefusalError(LAN_PATH_REFUSAL)
     refusal = lan_calibration_refusal(request.options) if native else None
-    return None if refusal is None else RunRefusalError(refusal, type_=LAN_CALIBRATION_PROBLEM)
+    return None if refusal is None else lan_calibration_problem(refusal, linked=linked)
+
+
+def lan_calibration_problem(refusal: str, *, linked: bool) -> RunRefusalError:
+    """The 422 of :func:`~scadbuddy.bambuddy.options.lan_calibration_refusal`, typed
+    ``LAN_CALIBRATION_PROBLEM`` (#5602). ``bambuddy_linked`` says whether the row links a
+    Bambuddy printer, so `path: "bambuddy"` could take the print: the print route names
+    that path to a caller of the API only then. A row Bambuddy does not reach refuses it
+    (`_not_on_bambuddy`)."""
+    return RunRefusalError(refusal, type_=LAN_CALIBRATION_PROBLEM, bambuddy_linked=linked)
 
 
 def asked_path_refusal(request: PrintRunRequest, native: bool) -> str | None:
@@ -2202,7 +2214,9 @@ async def prepare_run(
             raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
         refusal = lan_calibration_refusal(request.options)
         if refusal is not None:
-            raise RunRefusalError(refusal, type_=LAN_CALIBRATION_PROBLEM)
+            raise lan_calibration_problem(
+                refusal, linked=route is not None and route.printer_id is not None
+            )
         if request.folder_id is not None:
             await require_native_folder(native, request.folder_id)
     elif request.folder_id is not None:

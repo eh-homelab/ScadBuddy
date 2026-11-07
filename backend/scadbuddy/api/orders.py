@@ -47,6 +47,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
+from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.problems import ApiError
@@ -1831,6 +1832,7 @@ async def print_item(
     item_id: str,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Fulfilment | JSONResponse:
@@ -1864,6 +1866,8 @@ async def print_item(
             "request_id": print_request_id(item_id, idempotency_key or ""),
             # Ruling 12: who it is for comes from the author header, never the body.
             "by": current_actor().model_dump(mode="json"),
+            # #5602: a caller other than the page is told of `path` in a refusal.
+            **({"api": True} if asked_by_api(http) else {}),
         },
         idempotency_key=idempotency_key,
     )
@@ -1882,6 +1886,7 @@ async def test_print_item(
     revision_id: str,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Fulfilment | JSONResponse:
@@ -1912,6 +1917,7 @@ async def test_print_item(
             "request": body.model_dump(mode="json", exclude_unset=True),
             "request_id": print_request_id(item_id, idempotency_key or ""),
             "by": current_actor().model_dump(mode="json"),
+            **({"api": True} if asked_by_api(http) else {}),
         },
         idempotency_key=idempotency_key,
     )

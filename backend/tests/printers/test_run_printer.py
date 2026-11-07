@@ -800,6 +800,7 @@ async def test_a_calibration_over_the_lan_is_refused_not_dropped(
     assert asked_path_refusal(run_request(options={"timelapse": True}), True) is None
     assert asked_path_refusal(request, False) is None
     assert refused.value.type == LAN_CALIBRATION_PROBLEM
+    assert refused.value.extensions == {"bambuddy_linked": True}
     assert not status.called
 
 
@@ -863,7 +864,11 @@ def test_a_lan_calibration_refusal_names_path_only_for_a_caller_of_the_api() -> 
     refusal = lan_calibration_refusal(PrintOptions.model_validate({"flow_cali": "on"}))
     assert refusal is not None
     problem = PrintRunError(
-        type=LAN_CALIBRATION_PROBLEM, status=422, title="Unprocessable Content", detail=refusal
+        type=LAN_CALIBRATION_PROBLEM,
+        status=422,
+        title="Unprocessable Content",
+        detail=refusal,
+        extensions={"bambuddy_linked": True},
     )
     answer = AcceptAnswer(refusal=problem)
 
@@ -877,6 +882,11 @@ def test_a_lan_calibration_refusal_names_path_only_for_a_caller_of_the_api() -> 
     assert 'path "bambuddy"' in api.value.detail
     assert api.value.type == LAN_CALIBRATION_PROBLEM
 
+    # A row that links no Bambuddy printer would refuse `path: "bambuddy"` too.
+    unlinked = AcceptAnswer(refusal=problem.model_copy(update={"extensions": {}}))
+    with pytest.raises(ApiError) as lan_only:
+        printing_api._answered(unlinked, api=True)
+    assert lan_only.value.detail == refusal
     # Every other refusal reads the same for both.
     other = AcceptAnswer(refusal=problem.model_copy(update={"type": "about:blank"}))
     with pytest.raises(ApiError) as plain:
@@ -928,6 +938,7 @@ async def test_the_check_activity_refuses_a_calibration_over_the_lan(
     assert "cannot set bed_levelling" in raised.value.details[0].detail
     # #5602: typed, so the print route words it for its caller.
     assert raised.value.details[0].type == LAN_CALIBRATION_PROBLEM
+    assert raised.value.details[0].extensions == {"bambuddy_linked": True}
 
 
 def test_the_path_keys_the_run_only_when_sent() -> None:
