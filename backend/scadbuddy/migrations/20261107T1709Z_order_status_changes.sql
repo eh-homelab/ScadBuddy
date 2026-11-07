@@ -32,7 +32,7 @@ CREATE TRIGGER orders_status_changed AFTER INSERT OR UPDATE OF status ON orders
 CREATE TRIGGER order_items_status_changed AFTER INSERT OR UPDATE OF status ON order_items
   FOR EACH ROW EXECUTE FUNCTION order_status_changed();
 
--- Since when a trigger has listened (made, last edited, or last resumed): a change
+-- Since when a trigger has listened (made, its event last edited, or last resumed): a change
 -- before it is not one it heard, so it never fires for it. Both clocks are this
 -- database's.
 ALTER TABLE flow_triggers ADD COLUMN live_since timestamptz NOT NULL DEFAULT now();

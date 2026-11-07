@@ -896,16 +896,19 @@ orders kinds are not, and the trigger amendment (10-11 §12.3) gains:
 
 | Trigger event | Bus event | Event key | Subject |
 |---|---|---|---|
-| `order.changed` | `order.changed` | `order:<id>:<status>` | an order |
-| `order_item.changed` | `order_item.changed` | `order_item:<id>:<status>:<attempt>` | an order item |
+| `order.changed` | `order.changed` | `order:<id>:<status>:<change>` | an order |
+| `order_item.changed` | `order_item.changed` | `order_item:<id>:<status>:<change>` | an order item |
 
 What narrows a trigger is a **filter**, not a kind: `EventTiming` gains `match`, an
 object of the event's own fields and the values each may take (`{"status":
 ["accepted"]}`), checked against the event at fire time; an event matching no entry
 starts nothing. So "when an order is accepted" is `{kind: "order.changed", match:
 {status: ["accepted"]}}`, and "when an item's print settles" is `{kind:
-"order_item.changed", match: {status: ["printed", "failed"]}}`. The key carries the
-status, so one trigger fires once per transition, not once per order.
+"order_item.changed", match: {status: ["printed", "failed"]}}`. The key names the
+`order_status_changes` row (as built, #4252: one row per status change, written by the
+tables' own trigger), so one trigger fires once per transition, not once per order or
+per event: a plain edit, a hold or a release writes no row and fires nothing, and a
+return to a status is a row of its own.
 
 `EventTiming.slug` becomes `subject: {kind, id?}` with `kind` one of `template`,
 `order`, `order_item` (the slug form stays accepted and is read as

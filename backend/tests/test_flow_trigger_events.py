@@ -335,6 +335,43 @@ async def test_changes_made_before_their_events_are_heard_each_fire(
 
 
 @pg
+async def test_a_burst_heard_late_gives_no_fire_a_wrong_attempt(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """Review of #5644: `printed` (attempt 1), `queued`, `printed` (attempt 2) before the
+    first event is heard: two fires on `printed`, neither given attempt 1, which is only
+    one of theirs. Heard in time, the change keeps its event's attempt."""
+    await on(triggers, {"kind": "order_item.changed", "match": {"status": ["printed"]}})
+    new_order(jobs, item=True)
+    client = _Client()
+    set_status(jobs, "printed", "order_items", "i1")
+    event = OrderItemChanged(order_id="o1", item_id="i1", status="printed", attempt=1)
+    claim(triggers, await fire_event(client, "library", triggers, event))  # type: ignore[arg-type]
+    assert [args[1]["attempt"] for _, args in client.started] == [1]
+    for status in ("queued", "printed", "queued", "printed"):
+        set_status(jobs, status, "order_items", "i1")
+    late = _Client()
+    event = OrderItemChanged(order_id="o1", item_id="i1", status="printed", attempt=2)
+    assert len(await fire_event(late, "library", triggers, event)) == 2  # type: ignore[arg-type]
+    assert [args[1]["attempt"] for _, args in late.started] == [None, None]
+
+
+@pg
+async def test_a_rename_keeps_what_the_trigger_heard(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """Review of #5644: only an edit of its event listens anew; a change made just before
+    a rename, not yet heard, still fires."""
+    trigger_id = await on(triggers, {"kind": "order.changed", "match": {"status": ["accepted"]}})
+    new_order(jobs)
+    set_status(jobs, "accepted")
+    await triggers.update(trigger_id, {"name": "renamed"}, {"kind": "browser"}, "browser")
+    client = _Client()
+    event = OrderChanged(order_id="o1", status="accepted")
+    assert len(await fire_event(client, "library", triggers, event)) == 1  # type: ignore[arg-type]
+
+
+@pg
 async def test_an_item_gone_since_fires_nothing(
     triggers: TriggerStore, jobs: JobProjection
 ) -> None:

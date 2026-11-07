@@ -101,7 +101,7 @@ async def _change_fires(
     """An order event's fires (§7.1): one per trigger and status change recorded
     (`order_status_changes`), keyed by the change, never by the event. A plain edit, a
     hold or a release records none, so it fires nothing new; a return to a status is a
-    change of its own; changes made before a trigger listened (`live_since`: made, last
+    change of its own; changes made before a trigger listened (`live_since`: made, its event last
     edited or last resumed) and fires recorded already are skipped. The facts are the
     row's now: none when it is gone."""
     kind, subjects, key, facts = found
@@ -122,6 +122,7 @@ async def _change_fires(
         ):
             change_facts["attempt"] = None  # the event's attempt is its own change's
         each.append(change_facts)
+    attempt = facts.get("attempt") if kind == "order_item.changed" else None
     # One read of the triggers for every change.
     heard = await store.event_triggers_each(kind, subjects, each)
     planned: list[tuple[str, str, dict[str, Any], StatusChange]] = []
@@ -133,13 +134,25 @@ async def _change_fires(
         return []
     since = await store.live_since({p[0] for p in planned})
     fired = await store.fired({(p[0], p[1]) for p in planned})
-    return [
-        (trigger_id, fire_key, change_facts)
+    kept = [
+        (trigger_id, fire_key, change_facts, change)
         for trigger_id, fire_key, change_facts, change in planned
         if trigger_id in since
         and change.at >= since[trigger_id]
         and (trigger_id, fire_key) not in fired
     ]
+    if attempt is not None:
+        # A burst (`printed` attempt 1, `queued`, `printed` attempt 2) heard late leaves
+        # a trigger two unfired changes to the event's status; which attempt each was
+        # is not recorded, so neither is given one, never a wrong one.
+        unfired: dict[str, int] = {}
+        for trigger_id, _, _, change in kept:
+            if change.status == facts["status"]:
+                unfired[trigger_id] = unfired.get(trigger_id, 0) + 1
+        kept = [
+            (t, k, {**f, "attempt": None} if unfired.get(t, 0) > 1 else f, c) for t, k, f, c in kept
+        ]
+    return [(trigger_id, fire_key, change_facts) for trigger_id, fire_key, change_facts, _ in kept]
 
 
 def fire_workflow_id(trigger_id: str, key: str) -> str:

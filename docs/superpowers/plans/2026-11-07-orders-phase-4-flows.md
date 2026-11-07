@@ -45,7 +45,7 @@
 
 **Files:** Modify `backend/scadbuddy/flow_triggers/events.py`, `flow_triggers/store.py`; Test `backend/tests/test_flow_trigger_events.py` (new), `test_flow_trigger_store.py`.
 
-- [ ] Tests: `trigger_event(OrderChanged(order_id="o1", status="accepted"))` gives kind `order.changed`, key `order:o1:accepted`; an item event gives `order_item:i1:printed:2` (`-` for no attempt); `event_triggers` returns a trigger whose subject is the event's order (and, for an item event, the item's order), a legacy `{"kind", "slug"}` row still matches its slug, and a trigger whose `match` excludes the status is not returned; `order_facts` adds the order row's `customer_id`.
+- [ ] Tests: `trigger_event(OrderChanged(order_id="o1", status="accepted"))` gives kind `order.changed`, key `order:o1`; an item event gives `order_item:i1` (each fire then adds `:<status>:<change>`, the `order_status_changes` row, as built; no attempt is in the key); `event_triggers` returns a trigger whose subject is the event's order (and, for an item event, the item's order), a legacy `{"kind", "slug"}` row still matches its slug, and a trigger whose `match` excludes the status is not returned; `order_facts` adds the order row's `customer_id`.
 - [ ] Implement: `event_triggers(kind, subjects: dict[str,str], facts)`; `fire_event` reads the order row's `customer_id` through `TriggerStore.order_facts` and skips an order that is gone.
 
 ### Task 3: `trigger()` models

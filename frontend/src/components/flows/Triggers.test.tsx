@@ -196,6 +196,22 @@ describe('FlowTriggers', () => {
     expect(await row(/When a line item's status changes \(order o1\): printed, failed/)).toBeInTheDocument()
   })
 
+  it('forgets an item id once the subject is an order (review of #5644)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'New trigger…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New trigger' })
+    await user.click(within(dialog).getByLabelText('On an event'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "A line item's status changes")
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Narrow by' }), 'The item itself')
+    await user.type(within(dialog).getByLabelText('Only for item id (optional)'), 'i1')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "An order's status changes")
+    expect(within(dialog).getByLabelText('Only for order id (optional)')).toHaveValue('')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), "A line item's status changes")
+    await user.type(within(dialog).getByLabelText('Only for item id (optional)'), 'i2')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Narrow by' }), 'Its order')
+    expect(within(dialog).getByLabelText('Only for order id (optional)')).toHaveValue('')
+  })
+
   // The browser bridge acts in the person's tab as the browser user: everything but
   // Pause is the person's own.
   it('refuses the person-only controls to the browser bridge', async () => {

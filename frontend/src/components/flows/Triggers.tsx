@@ -413,11 +413,20 @@ function NewTrigger({
     }
   }
 
+  // What the typed subject names: a model, an order or a line item.
+  const subjectOf = (ev: string, by: 'order' | 'order_item') =>
+    !isOrderEvent(ev) ? 'model' : ev === 'order.changed' || by === 'order' ? 'order' : 'order_item'
+
   function chooseEvent(next: string) {
-    // A subject typed for one kind of event (a model, an order) is not the other's.
-    if (isOrderEvent(next) !== isOrderEvent(event)) setSlug('')
+    // A subject typed for one kind of thing (a model, an order, an item) is not another's.
+    if (subjectOf(next, subjectKind) !== subjectOf(event, subjectKind)) setSlug('')
     setEvent(next)
     setStatuses([])
+  }
+
+  function chooseSubjectKind(next: 'order' | 'order_item') {
+    if (subjectOf(event, next) !== subjectOf(event, subjectKind)) setSlug('')
+    setSubjectKind(next)
   }
 
   async function submit(e: FormEvent) {
@@ -534,7 +543,7 @@ function NewTrigger({
               {event === 'order_item.changed' && (
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor={id('subject-kind')}>Narrow by</Label>
-                  <Select value={subjectKind} onValueChange={(next) => setSubjectKind(next as 'order' | 'order_item')}>
+                  <Select value={subjectKind} onValueChange={(next) => chooseSubjectKind(next as 'order' | 'order_item')}>
                     <SelectTrigger id={id('subject-kind')} className="w-full">
                       <SelectValue />
                     </SelectTrigger>

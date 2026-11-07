@@ -186,7 +186,7 @@ class TriggerStore:
         return await self._call(self._event_triggers_each, kind, subjects, each)
 
     async def live_since(self, trigger_ids: Collection[str]) -> dict[str, datetime]:
-        """When each trigger began to listen (made, last edited, or last resumed): it
+        """When each trigger began to listen (made, its event last edited, or last resumed): it
         never fires for a status change before then."""
         return await self._call(self._live_since, list(trigger_ids))
 
@@ -338,13 +338,15 @@ class TriggerStore:
             for key, value in fields.items()
         }
         sets = "".join(f", {column} = %({column})s" for column in columns)
+        anew = bool({"kind", "event"} & set(fields))
         with self._pool.connection() as conn, conn.transaction():
             # The row lock an approval checks what it saw under.
             row = conn.execute(
-                # An edit listens anew (#4252): a status change made before it, which
-                # its old event did not match, never fires on its new one.
-                "UPDATE flow_triggers SET updated_by = %(by)s, updated_at = now(),"
-                f" live_since = now(){sets}"
+                # An edit of what it listens for listens anew (#4252): a status change
+                # made before it, which its old event did not match, never fires on its
+                # new one. A rename or an inputs edit keeps what it heard.
+                "UPDATE flow_triggers SET updated_by = %(by)s, updated_at = now()"
+                f"{', live_since = now()' if anew else ''}{sets}"
                 f" WHERE id = %(id)s RETURNING {_TRIGGER}",
                 {**columns, "by": Jsonb(by), "id": trigger_id},
             ).fetchone()

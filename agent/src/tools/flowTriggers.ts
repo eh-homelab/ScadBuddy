@@ -29,7 +29,7 @@ const event = z
         "The bus event's name. A print that was cancelled fires neither print event. `order.changed` fires once " +
           "each time an order's status changes; `order_item.changed` once each time a line item's status " +
           'changes (never for a plain edit, a hold or a release, nor for a change made before the trigger ' +
-          'existed, before its last edit or while it was paused)',
+          'existed, before its event was last edited or while it was paused)',
       ),
     slug: z
       .string()

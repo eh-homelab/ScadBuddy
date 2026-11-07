@@ -258,7 +258,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_item:<id>:<status>:<change>`), never per event: an event reads the newest
   `CHANGES_HEARD` rows of its order or item (`events.py` `_change_fires`), so a plain edit,
   a hold or a release fires nothing, a return to a status fires again, and a change before
-  the trigger's `live_since` (made, last edited, or last resumed) or already fired is
+  the trigger's `live_since` (made, its event last edited, or last resumed) or already fired is
   skipped. An item
   attempt recorded with no status change fires nothing. `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
   or sent `slug` reads as a template subject; no migration) and `match` (`status` only,
