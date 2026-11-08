@@ -115,11 +115,12 @@ def test_the_registry_offers_paypal() -> None:
 
 
 def test_paypal_asks_for_the_app_the_webhook_and_the_environment() -> None:
-    assert [(f.name, f.secret) for f in PAYPAL.fields] == [
-        ("environment", False),
-        ("client_id", False),
-        ("webhook_id", False),
-        ("client_secret", True),
+    assert [(f.name, f.secret, f.choices) for f in PAYPAL.fields] == [
+        ("environment", False, ["sandbox", "live"]),
+        ("client_id", False, None),
+        ("webhook_id", False, None),
+        ("venmo", False, ["off", "on"]),
+        ("client_secret", True, None),
     ]
 
 
@@ -697,6 +698,32 @@ async def test_a_completed_capture_is_paid_with_its_fee(paypal: PayPalProvider, 
         amount_minor=700, currency="USD", fee_minor=69,
         created_at=datetime(2026, 11, 7, 10, 0, 6, 355000, tzinfo=UTC),
     )  # fmt: skip
+    assert pp["order"].called
+
+
+async def test_a_capture_funded_by_venmo_names_venmo(paypal: PayPalProvider, pp: Any) -> None:
+    """The capture does not name its funding source; the order's ``payment_source``
+    does (#4960)."""
+    pp["order"].respond(json=payload("api.order.completed.venmo.json"))
+    event = await parse(paypal, "payment.capture.completed.json")
+    assert (event.kind, event.method, event.amount_minor) == ("paid", "venmo", 700)
+
+
+async def test_a_funding_source_scadbuddy_does_not_know_names_no_method(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    order = payload("api.order.completed.venmo.json") | {"payment_source": {"card": {}}}
+    pp["order"].respond(json=order)
+    event = await parse(paypal, "payment.capture.completed.json")
+    assert (event.kind, event.method) == ("paid", None)
+
+
+async def test_paypal_not_answering_for_the_funding_source_is_unavailable(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    pp["order"].respond(500, json={})
+    with pytest.raises(ProviderUnavailableError):
+        await parse(paypal, "payment.capture.completed.json")
 
 
 async def test_a_fee_in_another_currency_is_not_recorded(paypal: PayPalProvider, pp: Any) -> None:

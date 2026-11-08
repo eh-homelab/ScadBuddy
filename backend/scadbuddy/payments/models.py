@@ -32,6 +32,9 @@ ProviderEventKind = Literal[
 #: ``capture_request``'s answer: the money is captured (or was already), or the provider
 #: declined the customer's method, so the request reads ``failed``.
 CaptureOutcome = Literal["captured", "declined"]
+#: A method a provider can name for its payment, other than itself (#4960: a PayPal
+#: capture funded by Venmo). A payment's ``method`` is this, or the provider's id.
+ProviderEventMethod = Literal["venmo"]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]
@@ -78,6 +81,8 @@ class ProviderEvent(BaseModel):
     amount_minor: Money | None = Field(default=None, ge=1)
     currency: str | None = None
     fee_minor: Money | None = Field(default=None, ge=0)
+    #: How the customer paid, when the provider names a method of its own (#4960).
+    method: ProviderEventMethod | None = None
     #: When the provider made the event (#4958): how long a ``fee`` that arrived
     #: before its payment is sent back for a retry (``Lifecycle._late_fee``).
     created_at: datetime | None = None

@@ -11,6 +11,7 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.proxies import parse_cidr_list
+from scadbuddy.core.urls import https_origin
 
 #: The edge refuses to start when any of these is set: it must never hold a database
 #: secret or the KEK's file.
@@ -68,19 +69,7 @@ class StorefrontSettings(BaseSettings):
     @field_validator("storefront_public_url")
     @classmethod
     def _public_url_is_an_https_origin(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if (
-            parts.scheme != "https"
-            or not parts.netloc
-            or parts.path
-            or parts.query
-            or parts.fragment
-        ):
-            raise ValueError(
-                f"SCADBUDDY_STOREFRONT_PUBLIC_URL must be an https:// origin with no path,"
-                f" not {value!r}"
-            )
-        return value
+        return https_origin(value, "SCADBUDDY_STOREFRONT_PUBLIC_URL")
 
     @field_validator("trusted_proxies")
     @classmethod

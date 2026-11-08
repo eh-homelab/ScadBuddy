@@ -411,7 +411,7 @@ export function OrderPage() {
                   {payments.map((p) => (
                     <li key={p.id} className="flex justify-between gap-2">
                       <span>
-                        {p.provider ? `Paid by ${providerLabel(p.provider)}` : (p.method ? methodLabel(p.method) : 'Payment')} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
+                        {p.provider ? (p.method && p.method !== p.provider ? `Paid by ${methodLabel(p.method)} via ${providerLabel(p.provider)}` : `Paid by ${providerLabel(p.provider)}`) : p.method ? methodLabel(p.method) : 'Payment'} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
                       </span>
                       <span className="sb-num">{formatMoney(p.amount_minor, order.currency, order.minor_exponent)}</span>
                     </li>

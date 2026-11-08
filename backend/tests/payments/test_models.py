@@ -30,6 +30,16 @@ def test_a_provider_event_refuses_out_of_range_values(bad: dict[str, object]) ->
         ProviderEvent.model_validate(fields)
 
 
+def test_a_secret_field_with_choices_fails_an_assertion() -> None:
+    """#4960: choices are offered in a list; a secret is typed and never shown."""
+    from scadbuddy.payments.provider import ProviderField
+
+    with pytest.raises((AssertionError, ValidationError)):
+        ProviderField(name="key", label="Key", secret=True, choices=["a", "b"])
+    field = ProviderField(name="mode", label="Mode", secret=False, choices=["a", "b"])
+    assert field.choices == ["a", "b"]
+
+
 def test_a_provider_event_takes_the_edges() -> None:
     event = ProviderEvent(event_id="e" * 200, kind="paid", amount_minor=1, fee_minor=0)
     assert (event.amount_minor, event.fee_minor) == (1, 0)

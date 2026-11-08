@@ -110,11 +110,15 @@ def set_request_status(
     A request with a page that is cancelled, or paid by a payment that is not its own
     provider's (by hand, or a payment on another request that cleared the balance), is
     marked. Its own provider's payment clears the mark: the page was paid. A new mark, or
-    a cleared one, starts the close over: no tries and no give-up (#5728 review)."""
+    a cleared one, starts the close over: no tries and no give-up (#5728 review). A
+    request that leaves for ``paid``, ``cancelled`` or ``expired`` drops its pay token
+    (#4960) in the same write."""
     row = conn.execute(
         "UPDATE payment_requests r SET status = %(status)s,"
         " paid_at = CASE WHEN %(status)s = 'paid' THEN clock_timestamp() END,"
         " payment_id = COALESCE(%(payment)s, r.payment_id),"
+        " pay_token_hash = CASE WHEN %(status)s IN ('paid', 'cancelled', 'expired')"
+        "  THEN NULL ELSE r.pay_token_hash END,"
         " close_pending_at = CASE WHEN m.mark THEN clock_timestamp()"
         "  WHEN %(status)s = 'paid' THEN NULL ELSE r.close_pending_at END,"
         " close_abandoned_at = CASE WHEN m.mark OR %(status)s = 'paid' THEN NULL"
@@ -204,14 +208,17 @@ def set_request_link(
     hosted_url: str | None,
     link_error: str | None,
     close_pending: bool = False,
+    pay_token_hash: str | None = None,
 ) -> PaymentRequestView:
     """``close_pending`` (#5700): the page was made after the request closed, so it is
-    kept only as a page to close, marked as `set_request_status` marks one."""
+    kept only as a page to close, marked as `set_request_status` marks one.
+    ``pay_token_hash`` (#4960) is written when given; a link without one keeps any it had."""
     row = conn.execute(
         "UPDATE payment_requests SET provider_ref = %s, hosted_url = %s, link_error = %s,"
-        " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END"
+        " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END,"
+        " pay_token_hash = COALESCE(%s, pay_token_hash)"
         f" WHERE id = %s RETURNING {_VIEW}",
-        (provider_ref, hosted_url, link_error, close_pending, request_id),
+        (provider_ref, hosted_url, link_error, close_pending, pay_token_hash, request_id),
     ).fetchone()
     assert row is not None
     return PaymentRequestView.model_validate(row)

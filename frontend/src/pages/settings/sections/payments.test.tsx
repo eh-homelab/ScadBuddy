@@ -1,7 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { HttpResponse, http } from 'msw'
 import { api } from '../../../api/client'
 import { mockSettings, resetMockState } from '../../../mocks/handlers'
+import { server } from '../../../mocks/server'
+import { choose, optionsOf } from '../../../test/select'
 import { FAKE_PROVIDER, mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
 import { ORDER_ACCEPTED } from '../../../mocks/features/orders/state'
 import { enter, region, renderSettingsSection } from '../testing'
@@ -124,6 +127,33 @@ describe('Settings → Payments (#4957)', () => {
     FAKE_PROVIDER.reports_currency = true
     resetMockState()
     expect(FAKE_PROVIDER.reports_currency).toBe(false)
+  })
+
+  it('offers a field with choices as a list and sends the chosen one (#4960)', async () => {
+    const withChoices = {
+      id: 'picky',
+      label: 'Picky',
+      fields: [{ name: 'mode', label: 'Mode', secret: false, choices: ['sandbox', 'live'] }],
+      connected: false,
+      account_label: null,
+      is_default: false,
+      connected_at: null,
+      last_webhook_at: null,
+    }
+    let sent: unknown = null
+    server.use(
+      http.get('/api/v1/payments/providers', () => HttpResponse.json([withChoices])),
+      http.put('/api/v1/payments/providers/picky', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ ...withChoices, connected: true, account_label: 'Picky (live)' })
+      }),
+    )
+    const { user } = renderSettingsSection(<Payments />, { route })
+    const mode = await screen.findByRole('combobox', { name: 'Mode' })
+    expect(await optionsOf(user, mode)).toEqual(['sandbox', 'live'])
+    await choose(user, mode, 'live')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(sent).toEqual({ settings: { mode: 'live' }, secrets: {} }))
   })
 
   it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {

@@ -56,6 +56,7 @@ from scadbuddy.core.config import (
     StoreBackend,
 )
 from scadbuddy.core.proxies import Network, parse_cidr_list
+from scadbuddy.core.urls import https_origin
 from scadbuddy.orders.currency import NO_MINOR_UNIT
 
 #: SCADBUDDY_AUTH_MODE's values (spec 2026-11-01 §9.1).
@@ -257,6 +258,9 @@ class Settings(BaseSettings):
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
+    # SCADBUDDY_STOREFRONT_PUBLIC_URL (#4960): the storefront edge's origin, the same
+    # variable the edge reads. A Venmo-eligible PayPal request's link is its pay page.
+    storefront_public_url: str | None = None
     # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
     # besides the public URL's — the LAN hostname when the public URL is an SSO
     # proxy, say. A browser's `Origin` on the realtime socket (`api/realtime.py`, #266)
@@ -374,6 +378,11 @@ class Settings(BaseSettings):
         # Keys are `<prefix>/<kind>/<sha>`: "p/" would make `p//piece/<sha>`. An empty
         # prefix stays empty, and a start on S3 refuses it (`store.backends`).
         return prefix.strip("/")
+
+    @field_validator("storefront_public_url")
+    @classmethod
+    def _storefront_is_an_https_origin(cls, value: str | None) -> str | None:
+        return None if value is None else https_origin(value, "SCADBUDDY_STOREFRONT_PUBLIC_URL")
 
     @field_validator("trusted_proxies")
     @classmethod
@@ -865,6 +874,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "download_cache_max_bytes": (
             "Paired with the download cache's directory: a budget of the volume the"
             " deployment mounts it from."
+        ),
+        "storefront_public_url": (
+            "The storefront edge's origin (#4960), set on its Deployment beside the edge's own"
+            " copy; a stored value could point customers' pay links anywhere."
         ),
         "payments_fake_provider": (
             "Whether the fake payment provider is offered. A dev and test aid: a stored value"

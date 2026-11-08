@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from scadbuddy.payments.models import (
     CaptureOutcome,
@@ -29,11 +29,18 @@ class Credential:
 
 
 class ProviderField(BaseModel):
-    """One input the connect form asks for."""
+    """One input the connect form asks for. A field with ``choices`` takes one of them, and
+    the form offers them as a list (#4960); a secret field has no choices."""
 
     name: str
     label: str
     secret: bool
+    choices: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _no_choices_for_a_secret(self) -> ProviderField:
+        assert not (self.secret and self.choices), "a secret field has no choices"
+        return self
 
 
 class Verified(BaseModel):

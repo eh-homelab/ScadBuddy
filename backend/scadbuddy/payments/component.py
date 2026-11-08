@@ -35,6 +35,7 @@ class PaymentsComponent:
                 providers(fake=settings.payments_fake_provider),
                 # Live (#322): read on each call.
                 lambda: self.core.settings.public_url,
+                lambda: self.core.settings.storefront_public_url,
             )
         return self._service
 

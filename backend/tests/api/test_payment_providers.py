@@ -57,11 +57,12 @@ def test_stripe_is_offered_with_its_two_secrets(client: TestClient) -> None:
 def test_paypal_is_offered_with_its_environment_and_one_secret(client: TestClient) -> None:
     [paypal] = [s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "paypal"]
     assert (paypal["label"], paypal["connected"]) == ("PayPal", False)
-    assert [(f["name"], f["secret"]) for f in paypal["fields"]] == [
-        ("environment", False),
-        ("client_id", False),
-        ("webhook_id", False),
-        ("client_secret", True),
+    assert [(f["name"], f["secret"], f["choices"]) for f in paypal["fields"]] == [
+        ("environment", False, ["sandbox", "live"]),
+        ("client_id", False, None),
+        ("webhook_id", False, None),
+        ("venmo", False, ["off", "on"]),
+        ("client_secret", True, None),
     ]
 
 
@@ -75,6 +76,37 @@ def test_square_is_offered_with_its_location_webhook_and_two_secrets(client: Tes
         ("access_token", True),
         ("signature_key", True),
     ]
+
+
+def test_a_value_outside_a_field_s_choices_is_422_on_that_field(client: TestClient) -> None:
+    body = {
+        "settings": {
+            "environment": "production",
+            "client_id": "c",
+            "webhook_id": "W1",
+            "venmo": "off",
+        },
+        "secrets": {"client_secret": "s"},
+    }
+    refused = client.put("/api/v1/payments/providers/paypal", json=body)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == ["body", "settings", "environment"]
+
+
+def test_venmo_on_without_the_storefront_url_is_422(client: TestClient) -> None:
+    body = {
+        "settings": {
+            "environment": "sandbox",
+            "client_id": "c",
+            "webhook_id": "W1",
+            "venmo": "on",
+        },
+        "secrets": {"client_secret": "s"},
+    }
+    refused = client.put("/api/v1/payments/providers/paypal", json=body)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == ["body", "settings", "venmo"]
+    assert "SCADBUDDY_STOREFRONT_PUBLIC_URL" in refused.text
 
 
 def test_the_page_never_sees_a_secret(client: TestClient) -> None:

@@ -84,6 +84,7 @@ from scadbuddy.payments.models import (
     PaymentRequestView,
     ProviderEvent,
     ProviderEventKind,
+    ProviderEventMethod,
 )
 from scadbuddy.payments.provider import (
     BadSignatureError,
@@ -136,6 +137,9 @@ _CAPTURE_KINDS: Final[Mapping[str, ProviderEventKind]] = {
     "PAYMENT.CAPTURE.DECLINED": "failed",
     "PAYMENT.CAPTURE.DENIED": "failed",
 }
+#: The funding sources under an order's ``payment_source`` that a payment names as its
+#: method; any other (``paypal``, ``card``) is recorded as ``paypal``.
+_METHODS: Final[Mapping[str, ProviderEventMethod]] = {"venmo": "venmo"}
 #: A PayPal object id (order, capture, refund); nothing else goes in a path.
 _PAYPAL_ID: Final = re.compile(r"[A-Z0-9]{1,36}")
 #: The verify call's own pattern for a webhook id.
@@ -191,9 +195,13 @@ class PayPalProvider:
     #: The wallet under ``payment_source``; Venmo (#4960) is the same order with ``venmo``.
     funding_source = "paypal"
     fields: Sequence[ProviderField] = (
-        ProviderField(name="environment", label="Environment (sandbox or live)", secret=False),
+        ProviderField(
+            name="environment", label="Environment", secret=False, choices=["sandbox", "live"]
+        ),
         ProviderField(name="client_id", label="Client ID", secret=False),
         ProviderField(name="webhook_id", label="Webhook ID", secret=False),
+        # #4960: Venmo on the storefront's pay page, for USD requests (`venmo.py`).
+        ProviderField(name="venmo", label="Venmo (USD)", secret=False, choices=["off", "on"]),
         ProviderField(name="client_secret", label="Secret", secret=True),
     )
 
@@ -519,7 +527,12 @@ class PayPalProvider:
         if kind == "CHECKOUT.ORDER.APPROVED":
             return await self._approved(credential, event_id, resource)
         if kind in _CAPTURE_KINDS:
-            return _capture_event(event_id, _CAPTURE_KINDS[kind], resource)
+            found = _capture_event(event_id, _CAPTURE_KINDS[kind], resource)
+            if found.kind == "paid" and found.provider_ref is not None:
+                found = found.model_copy(
+                    update={"method": await self._funding(credential, found.provider_ref)}
+                )
+            return found
         if kind == "PAYMENT.CAPTURE.REFUNDED":
             return await self._refund(credential, event_id, resource)
         return ProviderEvent(event_id=event_id, kind="other")
@@ -568,6 +581,15 @@ class PayPalProvider:
             if refused.status == 422 and refused.issue in _DECLINED:
                 return "declined"
             raise _shown(refused) from None
+
+    async def _funding(self, credential: Credential, order_id: str) -> ProviderEventMethod | None:
+        """The method the order was paid with when it is one ScadBuddy names (#4960): the
+        capture does not say, the order's ``payment_source`` does."""
+        order = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        source = order.get("payment_source")
+        if not isinstance(source, dict):
+            return None
+        return next((_METHODS[key] for key in source if key in _METHODS), None)
 
     async def _refund(
         self, credential: Credential, event_id: str, refund: dict[str, Any]

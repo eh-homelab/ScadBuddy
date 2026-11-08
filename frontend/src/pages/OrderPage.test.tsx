@@ -330,6 +330,14 @@ describe('OrderPage payment requests (#4957)', () => {
     expect(within(await screen.findByRole('list', { name: 'Payments' })).getByText(/Paid by Fake/)).toBeInTheDocument()
   })
 
+  it('names the method a provider paid by, such as Venmo through PayPal (#4960)', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'paid', 'venmo')
+    render(ORDER_ACCEPTED)
+    expect(within(await screen.findByRole('list', { name: 'Payments' })).getByText(/Paid by Venmo via Fake/)).toBeInTheDocument()
+  })
+
   it('offers the manual methods in a list and records the chosen one (#4960)', async () => {
     const { user } = render(ORDER_ACCEPTED)
     const method = await screen.findByRole('combobox', { name: 'Method' })

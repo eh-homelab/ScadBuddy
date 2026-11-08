@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAsync } from '../../../lib/useAsync'
 import { useSettingsCache } from '../cache'
 import { Section } from '../controls'
@@ -205,6 +206,21 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
           {provider.fields.map((field) => (
             <div key={field.name} className="flex flex-col gap-1">
               <Label htmlFor={`${provider.id}-${field.name}`}>{field.label}</Label>
+              {/* #4960 — a field with choices takes one of them. */}
+              {field.choices ? (
+                <Select value={values[field.name] ?? ''} onValueChange={(v) => setValues({ ...values, [field.name]: v })}>
+                  <SelectTrigger id={`${provider.id}-${field.name}`} aria-label={field.label} className="w-56">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    {field.choices.map((choice) => (
+                      <SelectItem key={choice} value={choice}>
+                        {choice}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
               <Input
                 id={`${provider.id}-${field.name}`}
                 type={field.secret ? 'password' : 'text'}
@@ -213,6 +229,7 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
                 value={values[field.name] ?? ''}
                 onChange={(e) => setValues({ ...values, [field.name]: e.target.value })}
               />
+              )}
             </div>
           ))}
           <Button type="submit" size="sm" disabled={busy} {...USER_ONLY}>

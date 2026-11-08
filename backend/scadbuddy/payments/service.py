@@ -45,6 +45,12 @@ from scadbuddy.payments.provider import (
     ProviderField,
     ProviderUnavailableError,
 )
+from scadbuddy.payments.venmo import (
+    pay_link,
+    pay_token,
+    venmo_eligible,
+    venmo_setting_error,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.orders.component import OrdersComponent
@@ -169,11 +175,14 @@ class Payments:
         credentials: PaymentCredentials,
         registry: Mapping[str, PaymentProvider],
         public_url: Callable[[], str | None],
+        storefront_url: Callable[[], str | None] = lambda: None,
     ) -> None:
         self._orders = orders
         self._credentials = credentials
         self._registry = registry
         self._public_url = public_url
+        #: The storefront's origin (#4960): a Venmo-eligible request's link is its pay page.
+        self._storefront_url = storefront_url
 
     # -- requests ---------------------------------------------------------------------
 
@@ -223,6 +232,7 @@ class Payments:
         assert order is not None and order.number is not None
         hosted: HostedRequest | None = None
         error: str | None = None
+        token_digest: str | None = None
         try:
             adapter, credential = await asyncio.to_thread(self._connected, found.provider)
             hosted = await adapter.create_request(
@@ -232,6 +242,15 @@ class Payments:
                 idempotency_key=found.id,
                 order_number=order.number,
             )
+            storefront = self._storefront_url()
+            if storefront and venmo_eligible(
+                found.provider, credential.settings, found.currency, storefront
+            ):
+                # #4960: the storefront's pay page offers Venmo for the same order.
+                token, token_digest = pay_token()
+                hosted = HostedRequest.model_validate(
+                    {"provider_ref": hosted.provider_ref, "hosted_url": pay_link(storefront, token)}
+                )
         except (
             ProviderNotFoundError,
             ProviderError,
@@ -242,7 +261,9 @@ class Payments:
             error = str(failed)
             logger.warning("payment request %s was not linked: %s", found.id, error)
         linked = await asyncio.to_thread(
-            lambda: self._orders.lifecycle.set_request_link(found.id, hosted=hosted, error=error)
+            lambda: self._orders.lifecycle.set_request_link(
+                found.id, hosted=hosted, error=error, pay_token_hash=token_digest
+            )
         )
         if (
             hosted is not None
@@ -573,6 +594,15 @@ class Payments:
                 raise FieldError(
                     (part, missing[0]), f"{provider} needs the {part} field {missing[0]!r}"
                 )
+        for field in adapter.fields:
+            value = body.settings.get(field.name)
+            if field.choices is not None and value not in field.choices:
+                raise FieldError(
+                    ("settings", field.name),
+                    f"{provider}'s {field.name} is one of {', '.join(field.choices)}",
+                )
+        if venmo := venmo_setting_error(provider, body.settings, self._storefront_url()):
+            raise FieldError(("settings", "venmo"), venmo)
         if not self._credentials.can_seal:
             raise KekMissingError()
         verified = await adapter.verify(
