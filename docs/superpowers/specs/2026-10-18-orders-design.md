@@ -1077,7 +1077,8 @@ What this relies on, and what the design adds for it:
   `notify` and `settle_hours`), registered at start only when its name never had a version
   (`FlowDefinitions.register_new`), so a person's edit or delete stands;
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
-  and on a refusal (`order_on_hold`, `requote_needed`, any other) asks a person with
+  and on a refusal (`order_on_hold`, `requote_needed`, any other), or print choices it
+  cannot read (no output, or one gone), asks a person with
   `wait_for_human` to fix it and answer `print`; an unanswered or skipped item is
   passed over, never the run's end. It does not re-quote, unlike the sketch above:
   `quote_check` refuses a new quote for an item whose accepted quote stands on an

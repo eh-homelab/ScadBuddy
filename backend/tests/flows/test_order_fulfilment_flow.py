@@ -71,12 +71,15 @@ class _Host:
         later: list[tuple[list[dict[str, Any]], str]] | None = None,
         notify: bool = False,
         settle_hours: int = 48,
+        choices: dict[str, Any] | None = None,
     ) -> None:
         self.items = items
         self.prints = prints
         self.answers = answers
         self.later = later or [(items, "in_production")]
         self.settings = {"notify": notify, "settle_hours": settle_hours}
+        self.choices = choices or {"default_nozzles": [], "bed_type": "pei"}
+        self.requests: list[dict[str, Any]] = []
         self.reads = 0
         self.calls: list[str] = []
         self.printed: list[str] = []
@@ -98,13 +101,17 @@ class _Host:
             order = {"id": "o1", "number": "ORD-1", "status": status}
             return json.dumps({"order": order, "items": items})
         if name == "get_print_choices":
-            return json.dumps({"default_nozzles": [], "bed_type": "pei"})
+            if args.get("output_id") is None:
+                # The tool's own failure (`ToolFailedError` in a real run).
+                raise RuntimeError("no such output")
+            return json.dumps(self.choices)
         if name == "order_notify_customer":
             return json.dumps({"text": "Order ORD-1 is ready.", "sent": False})
         raise AssertionError(f"unexpected tool {name}")
 
     async def queue_print(self, source: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
         self.printed.append(source["order_item_id"])
+        self.requests.append(request)
         return self.prints.pop(0)
 
     async def wait_for_human(self, question: str, timeout: int) -> dict[str, Any]:
@@ -213,3 +220,26 @@ def test_no_ready_message_for_an_order_that_is_not_ready() -> None:
     result = host.run()
     assert "agent" in host.calls and "order_notify_customer" not in host.calls
     assert result["message"] is None
+
+
+def test_print_choices_that_cannot_be_read_ask_a_person_and_the_next_item_prints() -> None:
+    """Review of #5682: an item with no output (a manual quote) or one gone since makes
+    `get_print_choices` fail; the flow asks, and the items after it still print."""
+    missing = {**_item("a"), "output_id": None}
+    host = _Host([missing, _item("b")], [_OK], ["skip"])
+    result = host.run()
+    assert host.printed == ["b"] and result["skipped"] == ["a"]
+    assert "could not be read" in host.questions[0]
+
+
+def test_a_lan_only_printer_the_model_remembers_is_named() -> None:
+    choices = {"default_nozzles": [], "bed_type": "pei", "model_choices": {"printer": "p-lan"}}
+    host = _Host([_item("a")], [_OK], [], choices=choices)
+    host.run()
+    assert host.requests[0]["printer"] == "p-lan" and "printer_id" not in host.requests[0]
+
+
+def test_only_a_timeout_counts_as_nobody_answering() -> None:
+    host = _Host([_item("a")], [_refused("x")], [ValueError("bad timeout")])
+    with pytest.raises(ValueError, match="bad timeout"):
+        host.run()

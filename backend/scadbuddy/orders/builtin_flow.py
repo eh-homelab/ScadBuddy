@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.flows.typecheck import check_script
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ async def ask(question):
     unanswered item never ends the run."""
     try:
         answer = await wait_for_human(question, ASK_TIMEOUT_S)
-    except Exception:
+    except TimeoutError:
         return None
     return answer["answer"].strip().lower()
 
@@ -116,14 +117,28 @@ async def print_request(item):
     request = {"filament_plan": {"slots": []}, "choices": choices}
     if view.get("printer_id") is not None:
         request["printer_id"] = view["printer_id"]
+    elif remembered.get("printer"):
+        # A LAN-only printer, kept by its registry id (#4971).
+        request["printer"] = remembered["printer"]
     return request
 
 
 async def print_item(order, item):
     """Print `item`, asking a person each time it does not start; whether it started."""
     source = {"order_id": order["id"], "order_item_id": item["id"]}
-    request = await print_request(item)
     while True:
+        try:
+            request = await print_request(item)
+        except Exception as error:
+            # No output (a manual quote), one gone since, or the print choices not read
+            # (review of #5682): a person's to fix, never the run's end.
+            question = (
+                f"{item['title']}'s print choices could not be read ({error}): its output "
+                "may be gone or missing. Fix it, then answer print, or skip."
+            )
+            if await ask(question) != "print":
+                return False
+            continue
         out = await queue_print(source, request)
         if out["status"] == "succeeded":
             return True
@@ -225,6 +240,15 @@ async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
     did. A failure is logged: the app starts either way, and the next start tries again.
     Without the flows' repository there is nowhere to put it."""
     if not definitions.history.available:
+        return False
+    # The check a registration route applies (review of #5682): a build whose script no
+    # longer type-checks registers nothing.
+    if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
+        logger.error(
+            "the built-in %s flow does not type-check; not registered",
+            NAME,
+            extra={"problems": len(problems)},
+        )
         return False
     try:
         made = await definitions.register_new(

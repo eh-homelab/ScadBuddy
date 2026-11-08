@@ -619,12 +619,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
   settings) switches it. It prints each approved or failed item through `queue_print`
   with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
-  other) asks a person to fix it and answer `print`, and an unanswered or skipped item
+  other) or print choices it cannot read (no output, or one gone) asks a person to fix it and answer `print`, and an unanswered or skipped item
   is passed over, never the run's end. It never re-quotes: on an accepted order a new
   quote opens only after a person's revision after acceptance. A print run ends once
   its plates are queued, so it then reads `order_get` every `POLL_S` (`sleep`) until no
   printed item is `queued` or `printing`, for at most the input `settle_hours` (default
-  48; past it the run ends with a summary and no check). Only then does it ask
+  48; past it the run ends with a summary and no check). `ensure_builtin_flow` runs
+  `check_script` first and registers nothing that fails it. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
   once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
   through a plugin is #5660).
