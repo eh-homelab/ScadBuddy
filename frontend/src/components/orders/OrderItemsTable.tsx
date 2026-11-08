@@ -110,7 +110,13 @@ export function OrderItemsTable({
   // #4955 step 3 — the rows picked for a bulk action; none on a visitor's cart or an ended order.
   const selectable = !isCart(order) && order.status !== 'closed' && order.status !== 'cancelled'
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
-  // An order that stops taking a selection (cancelled, closed) drops it.
+  // An order that stops taking a selection (cancelled, closed) drops it, so a reopen starts
+  // with nothing picked. Reset while rendering, as React's "adjusting state" pattern does.
+  const [selectableWas, setSelectableWas] = useState(selectable)
+  if (selectableWas !== selectable) {
+    setSelectableWas(selectable)
+    if (!selectable) setPicked(new Set())
+  }
   const chosen = selectable ? items.filter((item) => picked.has(item.id)) : []
   const pick = (ids: string[], on: boolean) => {
     const next = new Set(picked)
