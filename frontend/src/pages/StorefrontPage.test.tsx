@@ -16,6 +16,30 @@ async function seed(title: string) {
   return api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title })
 }
 
+/** Requests of `method` to `path` wait until the returned function is called, then fall through. */
+function hold(method: 'post' | 'put' | 'delete', path: string): () => void {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  server.use(
+    http[method](path, async () => {
+      await gate
+      return undefined
+    }),
+  )
+  return release
+}
+
+/** Each request the page sends, as `METHOD path`. */
+function recordRequests(): string[] {
+  const seen: string[] = []
+  server.events.on('request:start', ({ request }) => {
+    seen.push(`${request.method} ${new URL(request.url).pathname}`)
+  })
+  return seen
+}
+
 describe('StorefrontPage (#5282)', () => {
   beforeEach(() => resetMockState())
 
@@ -124,5 +148,93 @@ describe('StorefrontPage (#5282)', () => {
     await user.type(title, '!')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('changed since it was read')
+  })
+
+  it('keeps the listing opened while a publish of another was running', async () => {
+    const user = userEvent.setup()
+    await seed('First')
+    await seed('Second')
+    const release = hold('post', '/api/v1/storefront/listings/:id/publish')
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'Edit First' }))
+    await user.click(await screen.findByRole('button', { name: 'Publish' }))
+    await user.click(screen.getByRole('button', { name: 'Edit Second' }))
+    expect(await screen.findByLabelText('Title')).toHaveValue('Second')
+    release()
+    await waitFor(async () => expect((await api.storefrontListings()).find((l) => l.title === 'First')?.published).toBe(true))
+    await waitFor(() => expect(screen.getAllByText('Published')).toHaveLength(1))
+    expect(screen.getByLabelText('Title')).toHaveValue('Second')
+  })
+
+  it('keeps the listing opened while a delete of another was running', async () => {
+    const user = userEvent.setup()
+    await seed('First')
+    await seed('Second')
+    const release = hold('delete', '/api/v1/storefront/listings/:id')
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'Edit First' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Edit Second' }))
+    release()
+    await waitFor(async () => expect(await api.storefrontListings()).toHaveLength(1))
+    await waitFor(() => expect(screen.getAllByTestId('storefront-listing')).toHaveLength(1))
+    expect(screen.getByLabelText('Title')).toHaveValue('Second')
+  })
+
+  it('shows the stored design-request switch when the save fails', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.put('/api/v1/settings', () =>
+        HttpResponse.json({ title: 'Forbidden', status: 403, detail: 'not allowed' }, { status: 403, headers: { 'Content-Type': 'application/problem+json' } }),
+      ),
+    )
+    renderPage(<StorefrontPage />)
+    const toggle = await screen.findByRole('switch', { name: 'Ask for a design' })
+    await waitFor(() => expect(toggle).toBeEnabled())
+    await user.click(toggle)
+    expect(await screen.findByRole('alert')).toHaveTextContent('not allowed')
+    expect(toggle).not.toBeChecked()
+  })
+
+  it('says to choose a filament for a colour parameter left with none', async () => {
+    const user = userEvent.setup()
+    const seen = recordRequests()
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'New listing' }))
+    const plate = await screen.findByRole('group', { name: /body_color/ })
+    const pla = await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' })
+    await user.click(pla)
+    await user.click(within(plate).getByRole('radio', { name: 'Customer may change' }))
+    await user.click(pla)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/body_color.*choose at least one filament/)
+    expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
+  })
+
+  it('publishes again, unchanged, without saving first', async () => {
+    const user = userEvent.setup()
+    const seen = recordRequests()
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'New listing' }))
+    await within(screen.getByTestId('listing-preview')).findByLabelText('Text size')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByText('Published')).toBeInTheDocument()
+    const [listing] = await api.storefrontListings()
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    await waitFor(() => expect(seen.filter((r) => r === `POST /api/v1/storefront/listings/${listing?.id}/publish`)).toHaveLength(2))
+    expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
+  })
+
+  it('publishes an unchanged published listing again without taking it down first', async () => {
+    const user = userEvent.setup()
+    const listing = await seed('Live')
+    await api.publishStorefrontListing(listing.id)
+    const seen = recordRequests()
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'Edit Live' }))
+    await within(screen.getByTestId('listing-preview')).findByText('Live')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    await waitFor(() => expect(seen).toContain(`POST /api/v1/storefront/listings/${listing.id}/publish`))
+    expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
   })
 })

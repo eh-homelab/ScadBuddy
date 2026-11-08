@@ -102,6 +102,39 @@ export function listingInput(draft: ListingDraft, schema: CustomizerSchema | und
   return { ...draft, params }
 }
 
+/** `value` as JSON with every object's keys sorted, so two equal bodies compare equal whatever order the server wrote their keys in. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    item !== null && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : item,
+  )
+}
+
+/** What a saved body is compared by, to tell whether a draft needs saving. */
+export function savedKey(body: StorefrontListingInput): string {
+  return canonical(body)
+}
+
+/** The stored listing's body, as `savedKey` compares it. */
+export function storedKey(listing: StorefrontListing): string {
+  return canonical(draftOf(listing))
+}
+
+/**
+ * Why `body` cannot be saved, or null: a parameter offered with nothing to choose (most
+ * often a colour parameter with every filament unchecked), which the backend refuses as
+ * 422 `listing_choice_empty`.
+ */
+export function unsaveable(body: StorefrontListingInput): string | null {
+  for (const [name, bound] of Object.entries(body.params ?? {})) {
+    if (bound.kind === 'choice' && bound.choices.length === 0) {
+      return `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`
+    }
+  }
+  return null
+}
+
 /** The listing as a visitor would see it now, for the live preview. */
 export function previewListing(
   draft: ListingDraft,

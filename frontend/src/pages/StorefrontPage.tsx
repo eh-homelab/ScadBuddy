@@ -3,7 +3,7 @@ import { ArrowDownIcon, ArrowUpIcon, GripVerticalIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
-import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, startingValues, type ListingDraft } from '../components/storefront/listingDraft'
+import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, startingValues, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
 import { useAsync } from '../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
@@ -13,21 +13,27 @@ import { Switch } from '@/components/ui/switch'
 
 /** The listing open in the editor: a saved one (its id and the `updated_at` it was read at) or a new one. */
 interface Open {
+  /**
+   * Which opening of a listing this is: kept through its edits, saves and publishes,
+   * new each time a listing is opened. An answer is applied only while its opening is
+   * still the open one, so a slow publish never puts back a listing the user left.
+   */
+  key: symbol
   id: string | null
   updatedAt: string | null
   published: boolean
   draft: ListingDraft
-  /** What was last saved, to tell whether the draft needs saving before a publish. */
+  /** What was last saved (`savedKey`), to tell whether the draft needs saving before a publish. */
   saved: string | null
 }
 
 function fresh(): Open {
-  return { id: null, updatedAt: null, published: false, draft: emptyDraft(), saved: null }
+  return { key: Symbol('listing'), id: null, updatedAt: null, published: false, draft: emptyDraft(), saved: null }
 }
 
-function opened(listing: StorefrontListing): Open {
+function opened(listing: StorefrontListing, key: symbol = Symbol('listing')): Open {
   const draft = draftOf(listing)
-  return { id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: null }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing) }
 }
 
 function message(error: unknown): string {
@@ -87,7 +93,7 @@ export function StorefrontPage() {
     if (current) setOpen({ ...open, draft: { ...open.draft, commit: current.commit } })
   }, [open, versions.data])
   useEffect(() => {
-    if (!open || !schema.data) return
+    if (!open || open.id !== null || !schema.data) return
     const { params, fixed } = open.draft
     if (Object.keys(params).length > 0 || Object.keys(fixed).length > 0) return
     const defaults = defaultsFor(schema.data)
@@ -118,16 +124,23 @@ export function StorefrontPage() {
     }
   }
 
-  /** The open listing saved if it changed; the saved listing. */
+  /** `next(cur)` applied while `key`'s opening is still the open listing; otherwise the open one is left alone. */
+  function whileOpen(key: symbol, next: (cur: Open) => Open | null) {
+    setOpen((cur) => (cur?.key === key ? next(cur) : cur))
+  }
+
+  /** The open listing saved if it changed; the saved listing, or null when nothing changed. */
   async function save(current: Open): Promise<StorefrontListing | null> {
     const body: StorefrontListingInput = listingInput(current.draft, schema.data, filaments)
-    const text = JSON.stringify(body)
+    const text = savedKey(body)
     if (current.id !== null && current.saved === text) return null
+    const why = unsaveable(body)
+    if (why) throw new Error(why)
     const saved =
       current.id === null || current.updatedAt === null
         ? await api.createStorefrontListing(body)
         : await api.updateStorefrontListing(current.id, body, current.updatedAt)
-    setOpen({ ...opened(saved), draft: current.draft, saved: text })
+    whileOpen(current.key, (cur) => ({ ...opened(saved, cur.key), draft: cur.draft, saved: text }))
     return saved
   }
 
@@ -146,32 +159,36 @@ export function StorefrontPage() {
 
   async function onPublish() {
     if (!open) return
+    const current = open
     await act(async () => {
-      const saved = await save(open)
-      const id = saved?.id ?? open.id
+      const saved = await save(current)
+      const id = saved?.id ?? current.id
       if (id === null) return
       const published = await api.publishStorefrontListing(id)
-      setOpen({ ...opened(published), draft: open.draft, saved: JSON.stringify(listingInput(open.draft, schema.data, filaments)) })
+      // The draft just published, not the row: publish fixes every unnamed parameter at
+      // its default, so the row's `fixed` holds more than the draft does.
+      const text = savedKey(listingInput(current.draft, schema.data, filaments))
+      whileOpen(current.key, (cur) => ({ ...opened(published, cur.key), draft: cur.draft, saved: text }))
       refresh()
     })
   }
 
   async function onUnpublish() {
     if (!open?.id) return
-    const id = open.id
+    const { id, key } = open
     await act(async () => {
       const unpublished = await api.unpublishStorefrontListing(id)
-      setOpen({ ...opened(unpublished), draft: open.draft, saved: open.saved })
+      whileOpen(key, (cur) => ({ ...opened(unpublished, key), draft: cur.draft, saved: cur.saved }))
       refresh()
     })
   }
 
   async function onDelete() {
     if (!open?.id) return
-    const id = open.id
+    const { id, key } = open
     await act(async () => {
       await api.deleteStorefrontListing(id)
-      setOpen(null)
+      whileOpen(key, () => null)
       refresh()
     })
   }
@@ -187,8 +204,14 @@ export function StorefrontPage() {
   async function setRequestsEnabled(on: boolean) {
     setRequests(on)
     await act(async () => {
-      const next = await api.putSettings({ storefront_requests_enabled: on })
-      setRequests(next.storefront_requests_enabled)
+      try {
+        const next = await api.putSettings({ storefront_requests_enabled: on })
+        setRequests(next.storefront_requests_enabled)
+      } catch (caught) {
+        // The stored value again, not the one that was refused.
+        setRequests(null)
+        throw caught
+      }
     })
   }
 
