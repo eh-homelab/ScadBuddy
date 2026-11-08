@@ -17,6 +17,8 @@ type PrintCheck struct {
 	nozzle_plan NozzlePlanable
 	// The objects property
 	objects PrintCheck_PrintCheck_objectsable
+	// The process_inexact property
+	process_inexact []string
 	// The process_part_settings property
 	process_part_settings PartSettingsable
 	// The rack property
@@ -186,6 +188,22 @@ func (m *PrintCheck) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["process_inexact"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("string")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]string, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*string))
+				}
+			}
+			m.SetProcessInexact(res)
+		}
+		return nil
+	}
 	res["process_part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePartSettingsFromDiscriminatorValue)
 		if err != nil {
@@ -247,6 +265,12 @@ func (m *PrintCheck) GetObjects() PrintCheck_PrintCheck_objectsable {
 	return m.objects
 }
 
+// GetProcessInexact gets the process_inexact property value. The process_inexact property
+// returns a []string when successful
+func (m *PrintCheck) GetProcessInexact() []string {
+	return m.process_inexact
+}
+
 // GetProcessPartSettings gets the process_part_settings property value. The process_part_settings property
 // returns a PartSettingsable when successful
 func (m *PrintCheck) GetProcessPartSettings() PartSettingsable {
@@ -287,6 +311,12 @@ func (m *PrintCheck) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteObjectValue("objects", m.GetObjects())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetProcessInexact() != nil {
+		err := writer.WriteCollectionOfStringValues("process_inexact", m.GetProcessInexact())
 		if err != nil {
 			return err
 		}
@@ -350,6 +380,11 @@ func (m *PrintCheck) SetObjects(value PrintCheck_PrintCheck_objectsable) {
 	m.objects = value
 }
 
+// SetProcessInexact sets the process_inexact property value. The process_inexact property
+func (m *PrintCheck) SetProcessInexact(value []string) {
+	m.process_inexact = value
+}
+
 // SetProcessPartSettings sets the process_part_settings property value. The process_part_settings property
 func (m *PrintCheck) SetProcessPartSettings(value PartSettingsable) {
 	m.process_part_settings = value
@@ -376,6 +411,7 @@ type PrintCheckable interface {
 	GetErrors() []string
 	GetNozzlePlan() NozzlePlanable
 	GetObjects() PrintCheck_PrintCheck_objectsable
+	GetProcessInexact() []string
 	GetProcessPartSettings() PartSettingsable
 	GetRack() RackPickViewable
 	GetSlotPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
@@ -383,6 +419,7 @@ type PrintCheckable interface {
 	SetErrors(value []string)
 	SetNozzlePlan(value NozzlePlanable)
 	SetObjects(value PrintCheck_PrintCheck_objectsable)
+	SetProcessInexact(value []string)
 	SetProcessPartSettings(value PartSettingsable)
 	SetRack(value RackPickViewable)
 	SetSlotPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
