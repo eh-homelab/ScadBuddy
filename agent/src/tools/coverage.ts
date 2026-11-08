@@ -193,6 +193,16 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   ...(
     [
+      'GET /api/v1/orders/{order_id}/bank-deposits',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/record',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/dismiss',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "The order page's suggested bank deposits (#4961): a suggestion is never recorded by itself, and only the shop confirms or dismisses one there.",
+  })),
+  ...(
+    [
       'POST /api/v1/orders/{order_id}/payment-requests/{request_id}/cancel',
       'POST /api/v1/orders/{order_id}/payment-requests/{request_id}/link',
     ] as const

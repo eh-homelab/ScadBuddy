@@ -260,6 +260,7 @@ import type {
   BankLinkCreate,
   BankStatus,
   BankUnlinked,
+  DepositSuggestion,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2455,6 +2456,11 @@ export const api = {
   bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
   linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
   unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
+  orderBankDeposits: (orderId: string) => request<DepositSuggestion[]>(`/orders/${seg(orderId)}/bank-deposits`),
+  recordOrderBankDeposit: (orderId: string, transactionId: string) =>
+    request<Payment>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/record`, { method: 'POST' }),
+  dismissOrderBankDeposit: (orderId: string, transactionId: string) =>
+    request<void>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/dismiss`, { method: 'POST' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the

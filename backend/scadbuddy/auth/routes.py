@@ -114,6 +114,9 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.bank_link.create_bank_link_token",
         "scadbuddy.api.bank_link.create_bank_link",
         "scadbuddy.api.bank_link.delete_bank_link",
+        # A suggested deposit is recorded or dismissed by the shop on the order (#4961).
+        "scadbuddy.api.order_bank_deposits.record_order_bank_deposit",
+        "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit",
     }
 )
 #: The public routes the projects worker's flow host functions and grant checks call

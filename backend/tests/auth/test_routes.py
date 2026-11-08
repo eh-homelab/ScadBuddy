@@ -300,3 +300,13 @@ def test_only_the_webhook_is_public_among_payments_routes() -> None:
         "scadbuddy.api.bank_link.create_bank_link",
         "scadbuddy.api.bank_link.delete_bank_link",
     }
+
+
+def test_only_a_person_confirms_or_dismisses_a_suggested_deposit() -> None:
+    """#4961: a suggestion is never recorded by itself; reading them is any api caller's."""
+    classes = {endpoint_name(r): route_class(r) for r in ROUTES if "/bank-deposits" in r.path}
+    assert classes == {
+        "scadbuddy.api.order_bank_deposits.list_order_bank_deposits": "api",
+        "scadbuddy.api.order_bank_deposits.record_order_bank_deposit": "person",
+        "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit": "person",
+    }

@@ -1217,3 +1217,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
   deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
   `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits.
+  The order page (`api/order_bank_deposits.py`, `GET /orders/{id}/bank-deposits`; frontend
+  `components/orders/DepositSuggestions.tsx`, mocks `src/mocks/features/orders/bankDeposits.ts`)
+  lists an order's suggestions; "Record this deposit as payment" (`…/{tx}/record`,
+  `deposits.record_deposit`) is `Lifecycle.add_payment` through `Payments.add_payment`,
+  method `bank_transfer`, reference the transaction id, under the deposit's row lock, so a
+  deposit is recorded once on any order (`deposit_recorded`; `deposit_currency` for another
+  currency); "Not this order" (`…/{tx}/dismiss`) sets `dismissed_at`, which a later sync
+  keeps. Both are in `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and
+  its reference) is never suggested again, after a new link too.
