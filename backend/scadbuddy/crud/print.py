@@ -105,6 +105,10 @@ class RemotePrinterStore(PrinterStore):
         answer = self._client.request("POST", f"{BASE}/printers/ensure-bambuddy", json=body).json()
         return PrinterRow.model_validate(answer["row"]), bool(answer["written"])
 
+    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
+        """The API's alone: its merge rewrites tables the worker's role cannot."""
+        raise NotImplementedError("link_bambuddy runs on the API, not in a worker")
+
 
 def _no_such_run(error: CrudRefusedError) -> bool:
     return error.status == 404 and error.problem.get("reason") == NO_SUCH_RUN

@@ -312,7 +312,7 @@ def quote_check(
 
 
 def support_check(store: OrderStore, item_id: str, request: SliceQuoteRequest) -> None:
-    """422 ``filaments`` for a support slot that is a colour slot of the item (its
+    """422 ``support_filaments`` for a support slot that is a colour slot of the item (its
     filament is the slot's own), or below 0, or a support filament unknown or archived
     (§6.3). Blocking; writes nothing."""
     item = store.item(item_id)

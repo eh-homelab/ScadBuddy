@@ -34,7 +34,7 @@ from typing import Annotated, Literal, Self
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -383,14 +383,8 @@ class MachineRateStore:
         assert key is not None
         profile = body.profile
         with self._pool.connection() as conn, conn.transaction():
-            read = {
-                r["task"]: (r["interval_hours"], r["interval_read_at"])
-                for r in conn.execute(
-                    "SELECT task, interval_hours, interval_read_at FROM printer_maintenance_costs"
-                    " WHERE printer = %s AND interval_read_at IS NOT NULL",
-                    (key,),
-                ).fetchall()
-            }
+            # The profile row first: its lock orders this with remember_intervals, so the
+            # intervals read below are not overtaken by a live read meanwhile.
             conn.execute(
                 "INSERT INTO printer_cost_profiles (printer, purchase_price, life_hours, watts,"
                 " kwh_price, labour_rate_per_hour) VALUES (%s, %s, %s, %s, %s, %s)"
@@ -407,6 +401,14 @@ class MachineRateStore:
                     profile.labour_rate_per_hour,
                 ),
             )
+            read = {
+                r["task"]: (r["interval_hours"], r["interval_read_at"])
+                for r in conn.execute(
+                    "SELECT task, interval_hours, interval_read_at FROM printer_maintenance_costs"
+                    " WHERE printer = %s AND interval_read_at IS NOT NULL",
+                    (key,),
+                ).fetchall()
+            }
             conn.execute("DELETE FROM printer_wear_parts WHERE printer = %s", (key,))
             for position, part in enumerate(body.wear_parts):
                 conn.execute(
@@ -449,6 +451,10 @@ class MachineRateStore:
             if task.enabled and task.interval_type == "hours" and task.interval_hours > 0
         ]
         with self._pool.connection() as conn, conn.transaction():
+            # Waits for a replace of the same printer, which rewrites these rows.
+            conn.execute(
+                "SELECT 1 FROM printer_cost_profiles WHERE printer = %s FOR UPDATE", (key,)
+            )
             for task in counted:
                 conn.execute(
                     "UPDATE printer_maintenance_costs SET interval_hours = %s,"
@@ -512,8 +518,9 @@ class MachineRates:
             if live and self.integrations.linked:
                 try:
                     tasks = await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
-                except (ApiError, NotLinkedError, ValidationError):
-                    # A reply that does not validate is Bambuddy not answering usefully.
+                except (ApiError, NotLinkedError, ValueError):
+                    # A reply that does not validate (ValidationError is a ValueError) or
+                    # is not JSON is Bambuddy not answering usefully.
                     logger.warning(
                         "Bambuddy's maintenance tasks could not be read; the stored"
                         " intervals price the machine rate",
@@ -630,6 +637,9 @@ class MachineRates:
         row = await asyncio.to_thread(self.printers.get, printer)
         if row is None:
             return None
+        # The breakdown first: its live read keeps Bambuddy's intervals, which the
+        # inputs then show.
+        breakdown = await self.breakdown(row)
         stored = await asyncio.to_thread(self.store.stored, row.id)
         inputs = None
         if stored.profile is not None:
@@ -641,5 +651,5 @@ class MachineRates:
             printer_name=row.name,
             bambuddy_printer_id=row.bambuddy_printer_id,
             inputs=inputs,
-            breakdown=await self.breakdown(row),
+            breakdown=breakdown,
         )

@@ -6,6 +6,7 @@ never the worker's. The worker's store sends the call and runs no SQL for it."""
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
@@ -92,3 +93,20 @@ def test_the_route_is_the_print_callers_alone(store: SettingsStore, printers: Pr
             worker.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
     assert refused.value.status == 403
     assert refused.value.problem.get("reason") == "wrong_caller"
+
+
+def test_the_worker_store_overrides_every_method_that_merges_rows() -> None:
+    """A row merge moves another service's rows (#4625): a worker reaching one through the
+    SQL store fails on the role. Each PrinterStore method that merges is the API's, so the
+    worker's store overrides it."""
+    merging = {
+        name
+        for name, method in inspect.getmembers(PrinterStore, inspect.isfunction)
+        if not name.startswith("_")
+        and (
+            "self._merge(" in inspect.getsource(method)
+            or "self._ensure_locked(" in inspect.getsource(method)
+        )
+    }
+    assert merging >= {"ensure_bambuddy_written", "link_bambuddy"}
+    assert merging <= set(vars(RemotePrinterStore))

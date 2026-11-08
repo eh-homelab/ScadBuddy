@@ -4,6 +4,9 @@ not answer, and the printer a quote is priced for."""
 
 from __future__ import annotations
 
+import json
+import threading
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -44,9 +47,12 @@ INPUTS = MachineRateInputs(
 
 
 class FakeBambuddy:
-    def __init__(self, tasks: list[MaintenanceTask] | None, *, garbled: bool = False) -> None:
+    def __init__(
+        self, tasks: list[MaintenanceTask] | None, *, garbled: bool = False, not_json: bool = False
+    ) -> None:
         self.tasks = tasks
         self.garbled = garbled
+        self.not_json = not_json
         self.asked: list[int] = []
 
     @property
@@ -60,6 +66,9 @@ class FakeBambuddy:
         if self.garbled:
             # A reply that does not validate, as the client's model_validate raises.
             MaintenanceTask.model_validate({})
+        if self.not_json:
+            # A 200 whose body is not JSON, as ``response.json()`` raises.
+            json.loads("<html>")
         return self.tasks
 
 
@@ -254,6 +263,64 @@ async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals
     assert garbled.asked == [7]
     assert rate.intervals == "stored"
     assert rate.maintenance_per_hour == "0.24"
+
+
+async def test_a_reply_that_is_not_json_falls_back_to_the_stored_intervals(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    broken = FakeBambuddy([], not_json=True)
+    rate = await rates(store, printers, settings_store, broken).breakdown(printer)
+    assert broken.asked == [7]
+    assert rate.intervals == "stored"
+    assert rate.maintenance_per_hour == "0.24"
+
+
+async def test_the_views_inputs_are_from_the_same_read_as_its_breakdown(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    view = await rates(store, printers, settings_store, live).view(printer.id)
+    assert view is not None and view.inputs is not None
+    assert view.breakdown.intervals == "bambuddy"
+    assert view.inputs.maintenance[0].interval_hours == "50"
+
+
+def test_keeping_intervals_waits_for_a_replace_of_the_same_printer(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    done = threading.Event()
+
+    def remember() -> None:
+        store.remember_intervals(
+            printer.id,
+            [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")],
+        )
+        done.set()
+
+    with pg_pool.connection() as conn, conn.transaction():
+        # The lock a replace holds on the profile row while it rewrites the tasks.
+        conn.execute(
+            "SELECT 1 FROM printer_cost_profiles WHERE printer = %s FOR UPDATE",
+            (uuid.UUID(printer.id),),
+        )
+        thread = threading.Thread(target=remember)
+        thread.start()
+        assert not done.wait(1.0)
+    thread.join(10)
+    assert done.is_set()
+    assert store.stored(printer.id).costs[0].interval_hours == "50"
 
 
 LINKED_INPUTS = MachineRateInputs(
