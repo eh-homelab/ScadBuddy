@@ -515,10 +515,16 @@ async def _part_settings(
     waits for it (#5733). The settings are None when nothing names a run exactly (a send
     recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
     under another name) or the run is pruned. A failed read of them is logged and gives
-    None, so the print record still loads."""
-    archive, named = await asyncio.gather(
-        cache.archive(client, link.archive_id), _guarded(_named_run(links, runs, link), link)
-    )
+    None, so the print record still loads. A failed fetch cancels the read."""
+    # A task group, so a failed fetch cancels the read and waits for it: the request's
+    # database read never outlives the request (#5739). The caller sees the error itself.
+    try:
+        async with asyncio.TaskGroup() as group:
+            fetch = group.create_task(cache.archive(client, link.archive_id))
+            read = group.create_task(_guarded(_named_run(links, runs, link), link))
+    except ExceptionGroup as failed:
+        raise failed.exceptions[0] from None
+    archive, named = fetch.result(), read.result()
     run: PrintRun | None = (
         await _guarded(_run_by_file(links, runs, link, archive), link)
         if isinstance(named, _ByFile)
