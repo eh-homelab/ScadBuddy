@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.service_credentials import InProcessProvider, ServiceCaller
+from tests.api.test_customers import create as create_customer
+from tests.api.test_orders import create_order
 from tests.api.test_orders_unfulfil import accepted_order
 
 pytestmark = pytest.mark.requires_git
@@ -89,3 +91,18 @@ def test_a_bad_report_is_refused(client: TestClient) -> None:
     )
     missing = report(client, "missing", {"session_id": SESSION, "cost_usd": "1"}, agent)
     assert missing.status_code == 404
+
+
+def test_an_order_in_a_currency_the_shop_left_is_a_final_refusal(client: TestClient) -> None:
+    """The shop's currency changed after the order was made: no stored rate reaches the
+    order's, so the route answers 409 ``currency_unconvertible`` with its CRUD header, which
+    the agent counts as final (`orderCosts.ts` `crudCostPoster`)."""
+    assert client.put("/api/v1/settings", json={"orders_currency": "EUR"}).status_code == 200
+    order = create_order(client, create_customer(client)["id"])
+    assert order["currency"] == "EUR"
+    assert client.put("/api/v1/settings", json={"orders_currency": "GBP"}).status_code == 200
+    answer = report(client, order["id"], {"session_id": SESSION, "cost_usd": "1"}, token(client))
+    assert answer.status_code == 409, answer.text
+    assert answer.json()["type"].endswith("/currency_unconvertible")
+    assert answer.headers["x-scadbuddy-crud"] == "1"
+    assert client.get(f"/api/v1/orders/{order['id']}/costs").json()["cost_entries"] == []
