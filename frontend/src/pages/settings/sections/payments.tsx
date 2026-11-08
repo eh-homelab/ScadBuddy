@@ -3,6 +3,7 @@ import { USER_ONLY } from '../../../agent/dom'
 import { api, ApiError } from '../../../api/client'
 import type { ProviderStatus } from '../../../api/types'
 import { When } from '../../../components/orders/When'
+import { WebhookError } from '../../../components/settings/WebhookError'
 import { refusalText } from '../../../components/orders/refusal'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -125,6 +126,7 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
           </span>
         </p>
       )}
+      {provider.connected && <WebhookError error={provider.last_webhook_error} at={provider.last_webhook_error_at} />}
       {form && (
         <form
           className="flex flex-wrap items-end gap-2"

@@ -15,7 +15,9 @@ PaymentRequestKind = Literal["deposit", "balance"]
 #: ``failed``: that payment did not settle. Neither records money.
 PaymentRequestStatus = Literal["open", "pending", "paid", "expired", "cancelled", "failed"]
 #: ``fee``: the provider's fee for a payment it already told, once it is known (#4958).
-ProviderEventKind = Literal["paid", "pending", "failed", "refunded", "expired", "fee", "other"]
+ProviderEventKind = Literal[
+    "paid", "pending", "failed", "refunded", "refund_failed", "expired", "fee", "other"
+]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]
@@ -57,6 +59,8 @@ class ProviderEvent(BaseModel):
     #: When the provider made the event (#4958): how long a ``fee`` that arrived
     #: before its payment is sent back for a retry (``Lifecycle._late_fee``).
     created_at: datetime | None = None
+    #: A ``refund_failed`` event's: the event id of the refund it reverses (#5681).
+    reverses: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class HostedRequest(BaseModel):

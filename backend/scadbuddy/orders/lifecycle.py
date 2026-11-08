@@ -1035,12 +1035,19 @@ class Lifecycle:
             return "recorded", None
         if event.kind == "fee":
             return self._late_fee(conn, order, found, provider, event, by)
+        if event.kind == "refund_failed":
+            return self._reverse_refund(conn, order, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
             return "currency_mismatch", None
         if event.kind == "refunded" and event.amount_minor is None:
             # No amount: a guess at a full refund could be wrong, so nothing is written.
+            return "ignored", None
+        if event.kind == "refunded" and payments.reversed_by_failure(
+            conn, provider, event.event_id
+        ):
+            # #5681: the refund's own failure was told first, so the money never left.
             return "ignored", None
         if event.kind == "paid" and self._paid_by(conn, order, found, provider):
             # A hosted page is paid once: this is the same money told again.
@@ -1075,6 +1082,51 @@ class Lifecycle:
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return "recorded", payment
+
+    def _reverse_refund(
+        self, conn: Conn, order: Order, provider: str, event: ProviderEvent, by: Actor
+    ) -> tuple[EventOutcome, Payment | None]:
+        """#5681: a refund that failed or was cancelled. When the refund was recorded, a
+        positive payment cancels its negative one, with its amount, provider, request and
+        reference taken from the refund's own row (in the order's currency), never from the
+        event, so the customer's page can pair them. A refund closes no request, so this
+        opens or closes none, and the balance follows from the payments sum. A refund not
+        told yet (it never succeeded, or its event comes later: the provider does not keep
+        order) is kept at once as ``ignored``: no payment, no retry and no order change
+        told, since nothing on the order moved. The event's row names the refund
+        (``payment_events.reverses``), so the refund told after it writes nothing
+        (``_apply_event``). A refund told without money (no amount) is ignored too."""
+        if event.reverses is None:
+            return "ignored", None
+        told, refund_id = payments.told_event(conn, provider, event.reverses)
+        if not told:
+            return "ignored", None
+        refund = next(
+            (p for p in self.store.payments(order.id, conn=conn) if p.id == refund_id), None
+        )
+        if refund is None or refund.amount_minor >= 0:
+            return "ignored", None
+        payment = self.store.insert_payment(
+            conn,
+            order.id,
+            amount_minor=-refund.amount_minor,
+            method=provider,
+            reference=refund.reference,
+            received_at=None,
+            notes="",
+            provider=refund.provider,
+            payment_request_id=refund.payment_request_id,
+        )
+        self._event(
+            conn,
+            order,
+            by,
+            "payment.added",
+            payment_id=payment.id,
+            payment_request_id=refund.payment_request_id,
+            provider=provider,
+        )
         return "recorded", payment
 
     def _write_fee(
