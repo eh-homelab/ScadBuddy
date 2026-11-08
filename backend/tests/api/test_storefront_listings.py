@@ -4,8 +4,10 @@ schema and holds the commit's source snapshot and the listing's media."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -354,3 +356,43 @@ def test_a_pipeline_template_is_not_listed_yet(
     assert refused.status_code == 422, refused.text
     assert refused.json()["type"] == STOREFRONT_PROBLEMS + "listing_pipeline_unsupported"
     assert listing_holds(client, listing["id"]) == set()
+
+
+def test_a_second_publish_of_a_listing_waits_for_none(
+    client: TestClient, template: dict[str, Any], pla_red: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two publishes of one listing at once: the second is refused while the first runs
+    (409 ``listing_publishing``) and touches no hold, so every blob the winner's row
+    names is still held."""
+    listing = create(client, listing_body(template, pla_red))
+    copy = listings_module._copy_media
+    started, release = threading.Event(), threading.Event()
+    calls = 0
+
+    async def held_up(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await asyncio.to_thread(release.wait, 30)
+        return await copy(*args, **kwargs)
+
+    monkeypatch.setattr(listings_module, "_copy_media", held_up)
+    answers: dict[str, Any] = {}
+    first = threading.Thread(
+        target=lambda: answers.update(first=client.post(f"{LISTINGS}/{listing['id']}/publish"))
+    )
+    first.start()
+    try:
+        assert started.wait(30)
+        second = client.post(f"{LISTINGS}/{listing['id']}/publish")
+    finally:
+        release.set()
+        first.join(60)
+    assert second.status_code == 409, second.text
+    assert second.json()["type"] == STOREFRONT_PROBLEMS + "listing_publishing"
+    won = answers["first"]
+    assert won.status_code == 200, won.text
+    row = won.json()
+    keys = {row["snapshot"]["snapshot_key"], *(m["blob_key"] for m in row["media"])}
+    assert listing_holds(client, listing["id"]) == keys

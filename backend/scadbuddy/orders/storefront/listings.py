@@ -13,14 +13,16 @@ which are all a listing can bound. It copies each chosen media file into the con
 store. The snapshot and the media are held in ``blob_refs`` under (:data:`HOLDER`,
 listing id) while the listing is published; unpublishing, an edit and a delete drop that
 hold in the same transaction as the row, and a failed publish drops every hold the row
-does not name.
+does not name. Publishes of one listing never overlap (``begin_publish``), so a failing
+one cannot drop the holds a running one took.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Collection, Mapping, Sequence
+import sys
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -55,6 +57,7 @@ from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Core
+    from scadbuddy.store.snapshots import SnapshotStore
 
 #: The ``blob_refs`` holder kind of a published listing's snapshot and media.
 HOLDER: Final = "storefront_listing"
@@ -295,6 +298,36 @@ class ListingStore:
                 keep = [row["snapshot"]["snapshot_key"], *(m["blob_key"] for m in row["media"])]
             _drop_holds(conn, listing_id, keep)
 
+    def begin_publish(self, listing_id: str) -> Callable[[], None]:
+        """Take the listing's publish lock, or 409 ``listing_publishing`` when another
+        publish of it runs: publishes of one listing never overlap, so a failing one
+        never drops the holds a running one took. The lock is a session advisory lock on
+        a pooled connection kept until the returned function is called."""
+        lease = self.pool.connection()
+        conn = lease.__enter__()
+        key = (f"{HOLDER}:{listing_id}",)
+        try:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", key
+            ).fetchone()
+            if row is None or not row["got"]:
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "listing_publishing",
+                    f"listing {listing_id!r} is being published; try again when it is done",
+                )
+        except BaseException:
+            lease.__exit__(*sys.exc_info())
+            raise
+
+        def end() -> None:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", key)
+            finally:
+                lease.__exit__(None, None, None)
+
+        return end
+
     def filament_colours(self) -> dict[str, str]:
         """Each price-book filament not archived, by id: its colour (``#RRGGBB``)."""
         with self.pool.connection() as conn:
@@ -321,7 +354,10 @@ def _takes(parameter: Parameter, value: ParamValue) -> bool:
 
 
 def _whole_multiple(step: float, of: float) -> bool:
-    """Whether ``step`` is a whole number of ``of``s, to a float's rounding."""
+    """Whether ``step`` is a whole number of ``of``s, to a float's rounding. A schema
+    step of 0 or less constrains nothing."""
+    if of <= 0:
+        return True
     times = step / of
     return times >= 1 - 1e-9 and abs(times - round(times)) < 1e-9
 
@@ -518,7 +554,8 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     ``listing_colour_unknown``, ``listing_media_unknown``, ``listing_reference`` or
     ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
     back; 409 ``listing_changed`` when it
-    was edited while it was being published."""
+    was edited while it was being published; 409 ``listing_publishing`` while another
+    publish of it runs (it is refused, not queued)."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise _not_found(listing_id)
@@ -529,6 +566,16 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
             "storefront_needs_s3",
             "the storefront needs store_backend s3: set it in Settings first",
         )
+    end = await asyncio.to_thread(store.begin_publish, listing.id)
+    try:
+        return await _publish(core, store, listing, snapshots)
+    finally:
+        await asyncio.to_thread(end)
+
+
+async def _publish(
+    core: Core, store: ListingStore, listing: Listing, snapshots: SnapshotStore
+) -> Listing:
     facts = await _commit_facts(core, listing.slug, listing.commit)
     colours = await asyncio.to_thread(store.filament_colours)
     fixed = checked_fixed(facts.schema_, listing, colours)

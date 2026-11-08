@@ -273,3 +273,29 @@ def test_a_failed_publish_keeps_only_the_published_holds(
         )
     store.release_unheld(published.id)
     assert holders(pg_pool, SNAPSHOT.snapshot_key) == []
+
+
+def test_a_schema_step_of_zero_is_no_step() -> None:
+    schema = CustomizerSchema.model_validate(
+        {
+            "parameters": [
+                {"name": "width", "type": "number", "initial": 5, "min": 0, "max": 9, "step": 0}
+            ]
+        }
+    )
+    listing = body(params={"width": {"kind": "number", "min": 1, "max": 8, "step": 0.5}})
+    assert checked_fixed(schema, listing, {}) == {}
+
+
+def test_one_publish_of_a_listing_at_a_time(store: ListingStore) -> None:
+    listing = store.create(body())
+    other = store.create(body(title="Other"))
+    end = store.begin_publish(listing.id)
+    try:
+        with refused_as("listing_publishing"):
+            store.begin_publish(listing.id)
+        # Another listing is not held up.
+        store.begin_publish(other.id)()
+    finally:
+        end()
+    store.begin_publish(listing.id)()
