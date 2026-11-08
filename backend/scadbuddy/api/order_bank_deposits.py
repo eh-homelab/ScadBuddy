@@ -93,7 +93,9 @@ async def record_order_bank_deposit(
     response_class=Response,
     summary="Dismiss a suggested deposit: not this order",
 )
-async def dismiss_order_bank_deposit(order_id: str, transaction_id: str, orders: OrdersDep) -> Response:
+async def dismiss_order_bank_deposit(
+    order_id: str, transaction_id: str, orders: OrdersDep
+) -> Response:
     check_path(order_id)
     check_path(transaction_id)
     try:
