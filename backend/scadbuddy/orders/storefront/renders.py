@@ -359,7 +359,8 @@ ANALYSIS_WORKERS: Final = 2
 ANALYSIS_QUEUE = 8
 _analyses: ThreadPoolExecutor | None = None
 #: Each job's analysis while its work is queued or running: its outcome, which every
-#: request for the job awaits. The work owns it, not a request (`_begin`).
+#: request for the job awaits. The work owns it, not a request (`_begin`). `_lock`
+#: guards it and `_held` in threads only, never around I/O; the loop only reads it.
 _flights: dict[str, Future[_Analysis]] = {}
 _held = 0
 _lock = threading.Lock()
@@ -419,10 +420,15 @@ def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
     assert result is not None
     with _lock:
         flying = _flights.get(job.id)
+    if flying is not None:
+        return flying
+    # Outside the lock: no I/O holds it. The work records before it ends its flight, so
+    # a flight that ended after the caller's look has left its record here.
+    stood = _recorded(state, job.id)
+    with _lock:
+        flying = _flights.get(job.id)
         if flying is not None:
             return flying
-        # A flight that ended between the caller's look and this one recorded first.
-        stood = _recorded(state, job.id)
         if stood is not None or _held >= ANALYSIS_QUEUE:
             answered: Future[_Analysis] = Future()
             answered.set_result(stood or BUSY)
@@ -500,8 +506,8 @@ async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
     """The job's part volumes: recorded, else analysed once per job (`_begin`)."""
     analysis = await asyncio.to_thread(_recorded, state, job.id)
     if analysis is None:
-        with _lock:
-            outcome = _flights.get(job.id)
+        # Lock-free: the loop never takes `_lock`. A miss only means `_begin` looks again.
+        outcome = _flights.get(job.id)
         if outcome is None:
             assert job.result is not None
             await materialize_result(state.store.blobs, job.result)

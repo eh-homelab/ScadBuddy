@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -828,3 +829,42 @@ def test_a_job_recorded_in_between_is_not_analysed_again(
     assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
     assert counted.calls == 0
     assert state is not None
+
+
+def test_a_slow_record_read_never_blocks_the_loop(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review 2: no I/O under `_lock`, and the loop never takes it. While one job's
+    record read hangs inside `_begin`, another job's estimate is answered."""
+    slow = render_until_done(crud, TOKEN_A, listing, {"width": 77})
+    other = render_until_done(crud, TOKEN_A, listing, {"width": 78})
+    real = renders_module._recorded
+    entered, gate = threading.Event(), threading.Event()
+    looks: list[str] = []
+
+    def hanging(state_: Any, job_id: str) -> Any:
+        looks.append(job_id)
+        if job_id == slow["id"] and looks.count(job_id) == 2:
+            entered.set()
+            gate.wait(30)
+        return real(state_, job_id)
+
+    monkeypatch.setattr(renders_module, "_recorded", hanging)
+    answers: dict[str, int] = {}
+
+    def estimate(job_id: str) -> None:
+        answers[job_id] = crud.get(f"/renders/{job_id}/estimate").status_code
+
+    first = threading.Thread(target=estimate, args=(slow["id"],))
+    first.start()
+    try:
+        assert entered.wait(30), "the slow read never ran"
+        second = threading.Thread(target=estimate, args=(other["id"],))
+        second.start()
+        second.join(10)
+        assert not second.is_alive(), "another estimate waited on the slow read"
+        assert answers[other["id"]] == 200
+    finally:
+        gate.set()
+        first.join(30)
+    assert answers[slow["id"]] == 200
