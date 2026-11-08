@@ -1024,6 +1024,12 @@ export const settingsDefaults = {
   library_backend: 'bambuddy',
   slicer_backend: 'bambuddy',
   orders_currency: 'USD',
+  // #5281 — auto tax, the deposit policy and the shipping options, at the backend's defaults.
+  orders_tax_percent: '0',
+  orders_tax_shipping: false,
+  orders_deposit_policy: [],
+  storefront_shipping_options: [],
+  storefront_payment_instructions: null,
   // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
   pricing_machine_rate_per_hour: '0',
   pricing_setup_fee: '0',

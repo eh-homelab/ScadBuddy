@@ -74,6 +74,7 @@ def test_every_route_has_a_class() -> None:
             "crud.render",
             "crud.print",
             "crud.storefront",
+            "crud.agent",
             "flow.host",
         )
 

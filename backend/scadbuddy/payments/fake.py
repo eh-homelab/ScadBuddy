@@ -23,11 +23,12 @@ from scadbuddy.payments.provider import (
     Credential,
     ProviderError,
     ProviderField,
+    Verified,
 )
 
 SIGNATURE_HEADER: Final = "x-fake-signature"
 _KINDS: Final[frozenset[str]] = frozenset(
-    {"paid", "pending", "failed", "refunded", "expired", "fee"}
+    {"paid", "pending", "failed", "refunded", "refund_failed", "expired", "fee"}
 )
 
 
@@ -53,8 +54,8 @@ class FakeProvider:
         #: Each ``provider_ref`` whose page was closed, in order, for tests to read.
         self.cancelled: list[str] = []
 
-    async def verify(self, credential: Credential) -> str:
-        return f"Fake account {credential.settings.get('account', '')}"
+    async def verify(self, credential: Credential) -> Verified:
+        return Verified(account_label=f"Fake account {credential.settings.get('account', '')}")
 
     async def create_request(
         self,
@@ -91,6 +92,7 @@ class FakeProvider:
                 currency=data.get("currency"),
                 fee_minor=data.get("fee_minor"),
                 created_at=data.get("created_at"),
+                reverses=data.get("reverses"),
             )
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError):
             raise ProviderError("the event body is malformed") from None

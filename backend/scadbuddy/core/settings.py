@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_PREVIEW_RENDERS: render a model with no thumbnail and no output at
     # its default parameters, in the background, and show that as its thumbnail.
     preview_renders: bool = True
+    # SCADBUDDY_ORDERS_BUILTIN_FLOW: register the built-in `order-fulfilment` flow at
+    # start when its name never had a version (orders spec §7.2, #4252).
+    orders_builtin_flow: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
@@ -189,13 +192,20 @@ class Settings(BaseSettings):
     pricing_rounding: Literal["to_minor_unit", "to_major"] = "to_minor_unit"
     # Job cost (spec 2026-11-05 §4.3, §4.4, §5, #5326), decimal strings in the shop's
     # `orders_currency`: the labour rate per hour a time entry copies when it is written
-    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which will
-    # convert the assistant's spend once it is recorded on a job (#5327 to #5330; nothing
-    # reads it yet; `SCADBUDDY_PRICING_USD_RATE`, more than 0), and the margin percent
+    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which
+    # converts the assistant's spend (in USD) into a job's cost for an order in the shop's
+    # currency (#5330, `orders/lifecycle.py` `UsdRate`; `SCADBUDDY_PRICING_USD_RATE`, more
+    # than 0), and the margin percent
     # below which a job is thin (`SCADBUDDY_ORDERS_THIN_MARGIN_PERCENT`).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
     orders_thin_margin_percent: str = "15"
+    # Auto tax (#5281, storefront spec §9): the percent of an open order's items (and its
+    # shipping charges, with `SCADBUDDY_ORDERS_TAX_SHIPPING`) added as one `tax` charge,
+    # a decimal string at least 0 and below 100 (`SCADBUDDY_ORDERS_TAX_PERCENT`); "0" adds
+    # none. A typed tax charge wins over it.
+    orders_tax_percent: str = "0"
+    orders_tax_shipping: bool = False
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
@@ -348,6 +358,14 @@ class Settings(BaseSettings):
         name = info.field_name or ""
         positive = name in {"rough_estimate_factor", "pricing_usd_rate"}
         return decimal_string(value, env_var(name), positive=positive)
+
+    @field_validator("orders_tax_percent")
+    @classmethod
+    def _tax_percent(cls, value: str) -> str:
+        text = decimal_string(value, env_var("orders_tax_percent"))
+        if Decimal(text) >= 100:
+            raise ValueError(f"{env_var('orders_tax_percent')} must be less than 100")
+        return text
 
     @field_validator("store_s3_prefix")
     @classmethod
@@ -747,6 +765,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "The callers' bootstrap secrets the API checks (#5494). Set in Settings, anyone"
             " who could write it could mint a service credential."
         ),
+        "orders_builtin_flow": (
+            "Whether the API registers the built-in order-fulfilment flow at its start"
+            " (#4252); the deployment's choice, read once, and nothing a running server"
+            " can undo."
+        ),
         "service_account_namespace": (
             "Whose ServiceAccounts may exchange for a service credential (#5494): the"
             " deployment's namespace, never a stored setting."
@@ -951,6 +974,9 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "pricing_labour_rate_per_hour": "live",
         "pricing_usd_rate": "live",
         "orders_thin_margin_percent": "live",
+        # Read from the store by each recompute of an order's auto tax (#5281).
+        "orders_tax_percent": "live",
+        "orders_tax_shipping": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.

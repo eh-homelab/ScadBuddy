@@ -69,7 +69,7 @@ function revisionBody(current: Pinned | null, choice: string, note: string): Rev
 }
 
 /**
- * "Add item" on the order page (spec 2026-10-18 §3.3, §9): pick a template from the
+ * The Add item dialog, opened by the items card's "Add product" (spec 2026-10-18 §3.3, §9; #4955): pick a template from the
  * catalogue, then what to make of it, either its current version with default settings or
  * one of its saved outputs (exact settings and colours), how many, and an optional title.
  * The order page shows it while the order takes items: `draft` or `quoted`, or, with

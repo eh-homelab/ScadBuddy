@@ -3,12 +3,14 @@ import { USER_ONLY } from '../../../agent/dom'
 import { api, ApiError } from '../../../api/client'
 import type { ProviderStatus } from '../../../api/types'
 import { When } from '../../../components/orders/When'
+import { WebhookError } from '../../../components/settings/WebhookError'
 import { refusalText } from '../../../components/orders/refusal'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAsync } from '../../../lib/useAsync'
+import { useSettingsCache } from '../cache'
 import { Section } from '../controls'
 import type { AreaId } from '../registry'
 
@@ -125,6 +127,8 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
           </span>
         </p>
       )}
+      {provider.connected && <WebhookError error={provider.last_webhook_error} at={provider.last_webhook_error_at} />}
+      {provider.connected && <CurrencyWarning currency={provider.currency ?? null} />}
       {form && (
         <form
           className="flex flex-wrap items-end gap-2"
@@ -157,5 +161,19 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
         </p>
       )}
     </section>
+  )
+}
+
+/**
+ * #5666 — an account that takes one currency (a Square location's) cannot take a link in
+ * another: when `orders_currency` moved away from it after the connect, say so here.
+ */
+function CurrencyWarning({ currency }: { currency: string | null }) {
+  const orders = useSettingsCache().settings?.orders_currency
+  if (!currency || !orders || currency === orders) return null
+  return (
+    <p role="status" className="text-[13px] text-warn">
+      Connected in {currency}; orders are in {orders}. New payment links will fail.
+    </p>
   )
 }

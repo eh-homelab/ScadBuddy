@@ -95,7 +95,8 @@ class FlowVersion(BaseModel):
     #: The commit message's body (#3186), without its trailers; None for none.
     body: str | None = None
     #: Who made it, from the commit's author: `{"kind": "agent", "principal",
-    #: "session"}` or `{"kind": "browser"}`.
+    #: "session"}`, `{"kind": "browser"}`, or `{"kind": "builtin", "name"}` for a version
+    #: the build registered (#4252).
     created_by: dict[str, Any]
     created_at: datetime
     #: The flow's newest version.

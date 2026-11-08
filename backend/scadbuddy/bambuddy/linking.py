@@ -18,6 +18,13 @@ A Bambuddy library file's print is linked the same way (#1755): its slices are r
 under its subject (``library:<file id>``) as an output's are under its id (#1882), so
 the same scan finds its reprints. It runs when one of the file's queue items is gone,
 as an output's does, and when the history is filtered to the file.
+
+A print started over the LAN (#3818) has no queue item, and a native slice is in no
+Bambuddy library, so neither way above finds it. Bambuddy still archives it from the
+3MF it downloads from the printer, with that file's SHA-256 as ``content_hash``: the
+hash of the native slice the run uploaded. `link_lan_starts` scans for it, by the
+starts' own days (#5724). The prints list runs it for each subject with a LAN start
+that no archive names yet (`print_history._link_lan_prints`).
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Collection
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import psycopg
 from fastapi import status
@@ -79,6 +86,19 @@ LIBRARY_LINK_BACKSTOP = timedelta(days=180)
 #: a file can be scanned once by each in one interval.
 LIBRARY_HASH_SCAN_INTERVAL = 600.0
 _last_library_scan: dict[int, float] = {}
+#: How long after it started a LAN start's archive is looked for (#5724,
+#: `link_lan_starts`): as long as an output's scan reaches past its last slice.
+LAN_LINK_WINDOW = SCAN_AFTER
+#: How many subjects with a LAN start no archive names yet one prints list reads at
+#: most, newest start first, and how many of them it scans at most, and how many at once.
+LAN_PENDING_LIMIT = 50
+LAN_SCANS_PER_CALL = 4
+LAN_SCAN_CONCURRENCY = 2
+#: How often one subject's LAN starts are looked for at most, per process, as a library
+#: file's are (`LIBRARY_HASH_SCAN_INTERVAL`): a start whose print never reached Bambuddy
+#: stays unnamed until `LAN_LINK_WINDOW` ends, and each scan pages the archive list.
+LAN_SCAN_INTERVAL = 600.0
+_last_lan_scan: dict[str, float] = {}
 #: The stages a queue item never leaves once it has no archive (#1705). On a
 #: library-file item Bambuddy creates the archive and commits ``archive_id`` before it
 #: uploads the file or sets ``printing``, so a run that got as far as the printer has
@@ -199,8 +219,21 @@ async def link_subject_by_hash(
             return []
         window = (made_at, made_at)
     first, last = window
-    since = (first - SCAN_BEFORE).date()
-    until = (last + SCAN_AFTER).date()
+    return await _scan(
+        client, links, subject, hashes, (first - SCAN_BEFORE).date(), (last + SCAN_AFTER).date()
+    )
+
+
+async def _scan(
+    client: BambuddyClient,
+    links: PrintLinkStore,
+    subject: PrintSubject,
+    hashes: set[str],
+    since: date,
+    until: date,
+) -> list[PrintLink]:
+    """Link every archive made from ``since`` to ``until`` whose ``content_hash`` is one
+    of ``hashes``. Returns the links it found, new or not."""
     found: list[PrintLink] = []
     seen: set[int] = set()
     for page in range(MAX_ARCHIVE_PAGES):
@@ -271,6 +304,53 @@ async def scan_library_by_hash(
         logger.exception(
             "could not scan a library file's prints by hash", extra={"library_file_id": file_id}
         )
+
+
+def claim_lan_scan(subject: str, now: float) -> bool:
+    """Claim a subject's LAN scan (`link_lan_starts`); False when one ran within
+    `LAN_SCAN_INTERVAL`. Entries past it are dropped here."""
+    last = _last_lan_scan.get(subject)
+    if last is not None and now - last < LAN_SCAN_INTERVAL:
+        return False
+    for stale in [key for key, at in _last_lan_scan.items() if now - at >= LAN_SCAN_INTERVAL]:
+        del _last_lan_scan[stale]
+    _last_lan_scan[subject] = now
+    return True
+
+
+def release_lan_scan(subject: str) -> None:
+    """Give back a claim whose scan failed, so the next read may try again."""
+    _last_lan_scan.pop(subject, None)
+
+
+async def link_lan_starts(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    links: PrintLinkStore,
+    subject: PrintSubject,
+    first: datetime,
+    last: datetime,
+) -> list[PrintLink]:
+    """Link the archives of a subject's LAN starts, made from ``first`` to ``last``
+    (#5724). A LAN start has no queue item, and a native run uploads its slice straight
+    to the printer, so no Bambuddy library file has the slice's hash. Bambuddy archives
+    a print it did not queue from the 3MF it downloads from the printer, and its
+    ``content_hash`` is the SHA-256 of that file (``services/archive.py``
+    ``archive_print``, ``compute_file_hash``, maziggy/bambuddy@2ce0d93). That file holds
+    the bytes the run uploaded (``lan_upload``), which are the slice's blob, and the
+    native library row of the slice holds their SHA-256 (``print_sliced_upload``). So
+    the hashes are the subject's native slices' (`BambuddyUploadStore.native_slice_hashes`)
+    and its Bambuddy slices' (a LAN start from a Bambuddy slice). The window is the
+    starts' days, with `SCAN_BEFORE` on each side for a date filter in another time zone:
+    Bambuddy makes the archive when the print starts. Returns the links it found, new
+    or not."""
+    owner = subject.run_subject
+    hashes = await uploads.native_slice_hashes(owner) | await _slice_hashes(client, uploads, owner)
+    if not hashes:
+        return []
+    return await _scan(
+        client, links, subject, hashes, (first - SCAN_BEFORE).date(), (last + SCAN_BEFORE).date()
+    )
 
 
 async def link_library_prints(

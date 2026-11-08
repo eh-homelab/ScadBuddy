@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { composeNotice } from '../src/tools/orders.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -70,6 +71,10 @@ describe('order tools (#4249)', () => {
       'order_reopen',
       'order_request_payment',
       'order_payment_requests',
+      'order_deposit_set',
+      'order_deposit_waive',
+      'order_balance_waive',
+      'order_shipping_option_set',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -99,6 +104,10 @@ describe('order tools (#4249)', () => {
       order_reopen: 'outward',
       order_request_payment: 'outward',
       order_payment_requests: 'read',
+      order_deposit_set: 'outward',
+      order_deposit_waive: 'write',
+      order_balance_waive: 'outward',
+      order_shipping_option_set: 'write',
     })
   })
 
@@ -136,6 +145,57 @@ describe('order tools (#4249)', () => {
       { method: 'ARCHIVE', body: null },
     ])
     await expect(tool('customer_upsert').execute({ archive: true }, ctx())).rejects.toThrow('customer_id')
+  })
+
+  it('composes a message to the customer and sends nothing (#4252 §7.3)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({
+          order: { number: 'ORD-2026-7', currency: 'USD', minor_exponent: 2, customer_id: CUSTOMER },
+          totals: { total_minor: 4250 },
+        }),
+      ),
+      http.get(`${BACKEND}/api/v1/customers/${CUSTOMER}`, () =>
+        HttpResponse.json({
+          display_name: 'Ada',
+          contacts: [
+            { kind: 'email', value: 'ada@example.com', primary: true },
+            { kind: 'phone', value: '555-0100', primary: false },
+          ],
+        }),
+      ),
+    )
+    expect(tool('order_notify_customer').risk).toBe('read')
+    const result = await tool('order_notify_customer').execute(
+      { order_id: ORDER, template: 'accepted', note: 'Thanks!' },
+      ctx(),
+    )
+    expect(firstText(result)).toEqual({
+      template: 'accepted',
+      to: [{ kind: 'email', value: 'ada@example.com' }],
+      subject: 'Order ORD-2026-7 accepted',
+      text: 'Hello Ada,\n\nWe have accepted order ORD-2026-7 (42.50 USD) and will start on it.\n\nThanks!',
+      sent: false,
+    })
+  })
+
+  it('writes the total from its integer, never through a float (review of #5682)', () => {
+    const order = (minor_exponent: number) => ({ number: 'ORD-1', currency: 'X', minor_exponent })
+    const text = (total_minor: number, exponent: number) =>
+      composeNotice('accepted', { order: order(exponent), totals: { total_minor } }, { display_name: 'Ada', contacts: [] })
+        .text
+    // 9007199254740001 / 100 is 90071992547400.02 as a float.
+    expect(text(9007199254740001, 2)).toContain('(90071992547400.01 X)')
+    expect(text(5, 3)).toContain('(0.005 X)')
+    expect(text(-250, 2)).toContain('(-2.50 X)')
+    expect(text(1200, 0)).toContain('(1200 X)')
+  })
+
+  it('says when a customer has no contacts to send a notice to (review of #5682)', () => {
+    const detail = { order: { number: 'ORD-1', currency: 'USD', minor_exponent: 2 }, totals: { total_minor: 100 } }
+    const notice = composeNotice('ready', detail, { display_name: 'Ada', contacts: [] })
+    expect(notice.to).toEqual([])
+    expect(notice.warning).toBe('Ada has no contacts to send it to.')
   })
 
   it('reads an order’s real cost (#4251 §6.4)', async () => {
@@ -307,6 +367,111 @@ describe('order tools (#4249)', () => {
     expect(firstText(await tool('order_payment_requests').execute({ order_id: ORDER }, ctx()))).toEqual([REQUEST])
     await tool('order_request_payment').execute({ order_id: ORDER, provider: null }, ctx())
     expect(sent).toEqual({ provider: null })
+  })
+
+  it('sets a deposit or applies the policy as an outward step, waives with a reason (#5281)', async () => {
+    const ORDER_ROW = { id: ORDER, deposit_minor: 2000 }
+    const calls: string[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/deposit`, async ({ request }) => {
+        calls.push(`DEPOSIT ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/deposit/policy`, async ({ request }) => {
+        calls.push(`POLICY ${await request.text()}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/deposit/waive`, async ({ request }) => {
+        calls.push(`WAIVE DEPOSIT ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/balance/waive`, async ({ request }) => {
+        calls.push(`WAIVE BALANCE ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+    )
+    expect(tool('order_deposit_set').risk).toBe('outward')
+    expect(tool('order_balance_waive').risk).toBe('outward')
+    expect(tool('order_deposit_waive').risk).toBe('write')
+    expect(tool('order_shipping_option_set').risk).toBe('write')
+    expect(firstText(await tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: 2000 }, ctx()))).toEqual(ORDER_ROW)
+    await tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: null }, ctx())
+    await tool('order_deposit_set').execute({ order_id: ORDER, policy: true }, ctx())
+    await tool('order_deposit_waive').execute({ order_id: ORDER, reason: 'trusted' }, ctx())
+    await tool('order_balance_waive').execute({ order_id: ORDER, reason: 'pays on pickup' }, ctx())
+    expect(calls).toEqual([
+      'DEPOSIT {"amount_minor":2000}',
+      'DEPOSIT {"amount_minor":null}',
+      'POLICY ',
+      'WAIVE DEPOSIT {"reason":"trusted"}',
+      'WAIVE BALANCE {"reason":"pays on pickup"}',
+    ])
+    await expect(tool('order_deposit_set').execute({ order_id: ORDER }, ctx())).rejects.toThrow(ToolError)
+    await expect(tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: 5, policy: true }, ctx())).rejects.toThrow(ToolError)
+    // The input schema refuses these before any call (a parse error, thrown at once).
+    expect(() => tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: 0 }, ctx())).toThrow('amount_minor')
+    expect(() => tool('order_deposit_waive').execute({ order_id: ORDER, reason: '' }, ctx())).toThrow('reason')
+    expect(() => tool('order_balance_waive').execute({ order_id: ORDER, reason: 'x'.repeat(501) }, ctx())).toThrow('reason')
+    expect(calls).toHaveLength(5)
+  })
+
+  it('keeps the shipping option of a charge and says the auto tax row is left out (#5281)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.patch(`${BACKEND}/api/v1/orders/${ORDER}`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER })
+      }),
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/charges/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER })
+      }),
+    )
+    const charges = [{ kind: 'shipping', label: 'Pick up', amount_minor: 0, shipping_option_id: 'pickup' }]
+    await tool('order_update').execute({ order_id: ORDER, charges }, ctx())
+    await tool('order_charges_update_after_acceptance').execute({ order_id: ORDER, charges }, ctx())
+    expect(sent).toEqual([{ charges }, { charges }])
+    for (const name of ['order_update', 'order_charges_update_after_acceptance']) {
+      expect(tool(name).description).toContain('auto tax row')
+      expect(tool(name).description).not.toContain('replaced whole')
+    }
+  })
+
+  it('sends a charge read back with its id and auto mark (#5281)', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/orders/${ORDER}`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: ORDER })
+      }),
+    )
+    const charges = [{ id: 'c1', kind: 'tax', label: 'Tax 10%', amount_minor: 100, auto: true, shipping_option_id: null }]
+    await tool('order_update').execute({ order_id: ORDER, charges }, ctx())
+    expect(sent).toEqual({ charges })
+    expect(tool('order_update').description).toContain('whatever its label, is a typed tax')
+  })
+
+  it('names the deposit and balance refusals and side effects (#5281)', () => {
+    expect(tool('order_accept').description).toMatch(/balance.*request/)
+    expect(tool('order_accept').description).toContain('payment_in_flight')
+    expect(tool('order_accept').description).toContain('order_not_submitted')
+    expect(tool('order_ship').description).toContain('balance_unpaid')
+    expect(tool('order_item_revision_send').description).toContain('deposit_unpaid')
+    expect(tool('order_item_print').description).toContain('deposit_unpaid')
+  })
+
+  it('sets or clears the shipping option, naming Settings → Orders (#5281)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/shipping-option`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER })
+      }),
+    )
+    expect(tool('order_shipping_option_set').description).toContain('Settings → Orders')
+    await tool('order_shipping_option_set').execute({ order_id: ORDER, option_id: 'pickup' }, ctx())
+    await tool('order_shipping_option_set').execute({ order_id: ORDER, option_id: null }, ctx())
+    expect(sent).toEqual([{ option_id: 'pickup' }, { option_id: null }])
   })
 
   it('records a payment that closes a request (#4957)', async () => {
@@ -760,6 +925,24 @@ describe('pricing tools (#4250)', () => {
     const part_settings = { '2': { top_shell_layers: 8 } }
     await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, part_settings } }, ctx())
     expect(body).toMatchObject({ part_settings })
+    // #4673: the quote slices with the tower, supports and sequence its print will use.
+    const setup = {
+      prime_tower: { enabled: true, no_sparse_layers: true },
+      supports: { enabled: true, type: 'tree', threshold_angle: 40 },
+      print_sequence: 'by object',
+    }
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, ...setup } }, ctx())
+    expect(body).toMatchObject(setup)
+    const input = z.object(tool('order_item_quote').shape)
+    const args = { order_id: ORDER, item_id: ITEM }
+    expect(input.safeParse({ ...args, slice: { ...SLICE, ...setup } }).success).toBe(true)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, print_sequence: 'by plate' } }).success).toBe(false)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, supports: { enabled: true, threshold_angle: 91 } } }).success).toBe(false)
+    // The call's line names them (#5720 review).
+    const title = tool('order_item_quote').title?.({ ...args, slice: { ...SLICE, ...setup } } as never)
+    expect(title).toContain('with tree supports at 40°')
+    expect(title).toContain('with a prime tower (no sparse layers)')
+    expect(title).toContain('by object')
   })
 
   it('answers a slice quote still running past the follow window', async () => {
@@ -811,6 +994,19 @@ describe('pricing tools (#4250)', () => {
     expect(
       tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings } as never),
     ).toContain("slot 1's parts at wall_loops 4")
+    // #4673: omitted, the quote's tower, supports and sequence print; sent, the backend
+    // compares them with the quote's, and the approval line names them.
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog }, ctx())
+    expect(body).not.toHaveProperty('prime_tower')
+    expect(body).not.toHaveProperty('supports')
+    expect(body).not.toHaveProperty('print_sequence')
+    const setup = { prime_tower: { enabled: false }, supports: { enabled: false }, print_sequence: 'by object' }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, ...setup }, ctx())
+    expect(body).toMatchObject(setup)
+    const line = tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, ...setup } as never)
+    expect(line).toContain('without supports')
+    expect(line).toContain('without a prime tower')
+    expect(line).toContain('by object')
   })
 
   it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {

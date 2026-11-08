@@ -28,7 +28,9 @@ export interface PrintCheckState {
    * #5627 — a check of this source read the process's part settings for the choices as
    * they stand now. Only the request's own `part_settings` may differ: they do not change
    * the process's values, and a field typed in must stay enabled. A later check that
-   * failed does not drop them (#5686); another process's values are never used.
+   * failed does not drop them (#5686); another process's values are never used. It is
+   * also true for an answer that asked and got no values (`process_part_settings: null`),
+   * so the controls turn on, empty; the next check asks again for that case (#5698).
    */
   processValuesRead: boolean
   /** #5627 — the process's part settings, only while `processValuesRead`; else `null`. */
@@ -58,7 +60,9 @@ function processKey(request: string | null): string | null {
  * has read them for this source and `processKey` (#5686): a settled edit of
  * `part_settings` alone does not read the preset again. A check that asked and got none
  * (`process_part_settings: null`: the preset could not be read, or the check refused
- * first) does not count, so the next check asks again.
+ * first) does not count, so the next check asks again. A dialog that stops asking
+ * (it closed, it has no source, its source takes no settings per part, or its choices
+ * are not loaded) drops what was read, so it reads the preset again when it asks again.
  */
 export function usePrintCheck(
   source: PrintSource | undefined,
@@ -72,6 +76,13 @@ export function usePrintCheck(
   // The newest answer to a check that asked for the process's values (#5686). Read
   // through a ref, so its arrival does not start another check.
   const [read, setRead] = useState<Answer | null>(null)
+  // #5698: no values are asked for while the dialog is closed (its controls are not
+  // shown), so what was read is dropped then, and the dialog reads the preset again
+  // when it opens again: a preset edited in Bambuddy meanwhile is picked up. The same
+  // happens while it is open, when it stops asking because the source takes no settings
+  // per part (a sliced file), it has no source, or its choices are not loaded yet
+  // (`PrintPicker` `takesParts`); the next check that asks reads the preset once more.
+  if (!processValues && read !== null) setRead(null)
   const readNow = useLatest(read)
   const state = useAsync<Answer | null>(async () => {
     const current = latest.current

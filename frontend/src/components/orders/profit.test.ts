@@ -1,17 +1,11 @@
-import { readFileSync } from 'node:fs'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_DAYS, periodOf, shownPeriod } from './profit'
+import { readSpec } from '../../test/spec'
 
 /** The server's default period length, from the exported spec (`ProfitReport.default_days`). */
 function specDefaultDays(): number {
-  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch (cause) {
-    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
-  }
-  const spec = JSON.parse(text) as { components?: { schemas?: { ProfitReport?: { properties?: { default_days?: { default?: unknown } } } } } }
+  const { json, path } = readSpec()
+  const spec = json as { components?: { schemas?: { ProfitReport?: { properties?: { default_days?: { default?: unknown } } } } } }
   const days = spec.components?.schemas?.ProfitReport?.properties?.default_days?.default
   if (typeof days !== 'number') throw new Error(`ProfitReport.default_days has no default in the spec at ${path}`)
   return days

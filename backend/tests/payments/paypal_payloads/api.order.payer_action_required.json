@@ -1,0 +1,15 @@
+{
+  "id": "5O190127TN364715T",
+  "intent": "CAPTURE",
+  "status": "PAYER_ACTION_REQUIRED",
+  "purchase_units": [
+    {
+      "reference_id": "default",
+      "custom_id": "req-1",
+      "amount": {
+        "currency_code": "USD",
+        "value": "7.00"
+      }
+    }
+  ]
+}

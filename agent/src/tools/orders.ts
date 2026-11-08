@@ -7,9 +7,13 @@ import {
   partSettings,
   partSettingsPhrase,
   presetRef,
+  primeTowerChoice,
   printOptionFields,
   printPath,
+  printSequence,
+  setupPhrase,
   slotChoice,
+  supportsChoice,
   tier,
 } from './print.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -44,9 +48,72 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 // customer nothing. Removing one is `outward` (AI spec §8.1, a delete): its bytes are
 // freed and no history brings them back. The list, the bytes and the thumbnail stay the
 // page's (coverage.ts): order_get carries the list.
+//
+// Deposits and the balance (#5281, storefront spec §9): setting a deposit asks the customer
+// for money and shipping without full payment lets goods go unpaid, so order_deposit_set
+// and order_balance_waive are `outward`; proceeding without the deposit and the shipping
+// option are records the shop keeps, `write`. None of them sees a provider's secret: the
+// backend links a request after the commit and answers with the order.
 
 const ID = z.string().min(1).max(100)
 const orderId = ID.describe('An order id, as order_list or order_create returns it')
+
+/** The messages `order_notify_customer` composes (#4252, orders spec §7.3). */
+const NOTIFY_TEMPLATES = ['quoted', 'accepted', 'ready', 'shipped'] as const
+type NotifyTemplate = (typeof NOTIFY_TEMPLATES)[number]
+
+interface NoticeOrder {
+  order: { number: string; currency: string; minor_exponent: number }
+  totals: { total_minor: number }
+}
+interface NoticeCustomer {
+  display_name: string
+  contacts: { kind: string; value: string; primary?: boolean }[]
+}
+
+/** `minor` integer units as a major amount with `exponent` places, from the integer's
+ *  digits: a division through a float misplaces the last digit of a large total
+ *  (review of #5682). */
+function majorText(minor: number, exponent: number): string {
+  const sign = minor < 0 ? '-' : ''
+  const digits = String(Math.abs(minor)).padStart(exponent + 1, '0')
+  if (exponent === 0) return `${sign}${digits}`
+  return `${sign}${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`
+}
+
+/** The message for `template`, addressed to the customer's primary contacts (every
+ *  contact when none is primary). Plain text, never sent from here. */
+export function composeNotice(
+  template: NotifyTemplate,
+  detail: NoticeOrder,
+  customer: NoticeCustomer,
+  note?: string,
+): {
+  template: NotifyTemplate
+  to: { kind: string; value: string }[]
+  subject: string
+  text: string
+  sent: false
+  warning?: string
+} {
+  const { number, currency, minor_exponent } = detail.order
+  const total = `${majorText(detail.totals.total_minor, minor_exponent)} ${currency}`
+  const lines: Record<NotifyTemplate, [string, string]> = {
+    quoted: [`Your quote for order ${number}`, `Your quote for order ${number} is ready: ${total}. Reply to accept it.`],
+    accepted: [`Order ${number} accepted`, `We have accepted order ${number} (${total}) and will start on it.`],
+    ready: [`Order ${number} is ready`, `Order ${number} is ready.`],
+    shipped: [`Order ${number} has shipped`, `Order ${number} has shipped.`],
+  }
+  const [subject, body] = lines[template]
+  const primary = customer.contacts.filter((c) => c.primary)
+  const to = (primary.length > 0 ? primary : customer.contacts).map(({ kind, value }) => ({ kind, value }))
+  const text = [`Hello ${customer.display_name},`, '', body, ...(note ? ['', note] : [])].join('\n')
+  // Review of #5682: an unaddressed message says so, so a sender (#5660) never sends it blind.
+  if (to.length === 0) {
+    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no contacts to send it to.` }
+  }
+  return { template, to, subject, text, sent: false }
+}
 const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
@@ -81,11 +148,23 @@ const address = z
     default_billing: z.boolean().default(false),
   })
   .strict()
+const AUTO_TAX =
+  'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
+  'and recomputes it. Sent back as read, with its `id` and `auto`, it stays the auto row and is recomputed, ' +
+  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
     label: z.string().min(1).max(200),
     amount_minor: money.describe('Signed: a discount is negative'),
+    shipping_option_id: z
+      .string()
+      .regex(/^[a-z0-9_-]{1,40}$/)
+      .nullable()
+      .optional()
+      .describe('A shipping charge chosen from a shipping option (#5281): send it back as read to keep the link'),
+    id: ID.nullable().optional().describe('The charge id as order_get read it; it marks the auto tax row'),
+    auto: z.boolean().nullable().optional().describe('As order_get read it: true marks the auto tax row, kept and recomputed'),
   })
   .strict()
 const reference = z
@@ -270,6 +349,10 @@ const sliceQuote = z
     path: printPath,
     // #5571: recorded with the quote; order_item_print prints with them when it sends none.
     part_settings: partSettings,
+    // #4673: print_output's own, sliced with and recorded as the quote's print setup.
+    prime_tower: primeTowerChoice,
+    supports: supportsChoice,
+    print_sequence: printSequence,
   })
   .strict()
 
@@ -534,6 +617,148 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_deposit_set',
+    label: "Set an order's deposit",
+    description:
+      "Set the order's deposit (#5281) while it is draft or quoted: `amount_minor` (null for none), or `policy: true` " +
+      "for the deposit the shop's policy asks of the order now; give exactly one. It cancels the open and failed " +
+      'deposit requests, clears a waiver, and asks the customer for what of the deposit is not paid yet on the ' +
+      'default provider, so it is outward: a person must approve it first (it returns a pending action). Until the ' +
+      'deposit is paid or waived, a revision is not sent and a test print is not claimed (`deposit_unpaid`). 409 ' +
+      '`payment_in_flight` while a deposit payment is pending; `order_not_submitted` on a storefront cart; ' +
+      "`deposit_policy_currency` when the only policy rules that apply are in the shop's currency and the order is " +
+      'not (set an amount instead).',
+    input: z.object({
+      order_id: orderId,
+      amount_minor: money.min(1).nullable().optional().describe("The deposit in the order's currency; null for none"),
+      policy: z.literal(true).optional().describe("Set the deposit the shop's policy asks instead of an amount"),
+    }),
+    risk: 'outward',
+    routes: ['PUT /api/v1/orders/{order_id}/deposit', 'POST /api/v1/orders/{order_id}/deposit/policy'],
+    summarize: ({ order_id, amount_minor, policy }) =>
+      policy
+        ? `Set the policy's deposit on order ${order_id}`
+        : amount_minor == null
+          ? `Clear the deposit of order ${order_id}`
+          : `Set a deposit of ${amount_minor} on order ${order_id}`,
+    handler: async ({ order_id, amount_minor, policy }, { backend }) => {
+      if ((amount_minor !== undefined) === (policy !== undefined)) {
+        throw new ToolError('give exactly one of amount_minor and policy')
+      }
+      return json(
+        policy
+          ? await ok(
+              backend.POST('/api/v1/orders/{order_id}/deposit/policy', { params: { path: { order_id } } }),
+              `apply the deposit policy to order ${order_id}`,
+            )
+          : await ok(
+              backend.PUT('/api/v1/orders/{order_id}/deposit', {
+                params: { path: { order_id } },
+                body: { amount_minor: amount_minor ?? null },
+              }),
+              `set the deposit of order ${order_id}`,
+            ),
+      )
+    },
+  }),
+  defineTool({
+    name: 'order_deposit_waive',
+    label: 'Proceed without the deposit',
+    description:
+      'Proceed without the deposit (#5281): the work goes on unpaid, for `reason`, which the order keeps. The deposit ' +
+      'request stays open. Nothing to waive, or the same reason again, changes nothing. `order_not_submitted` on a ' +
+      'storefront cart.',
+    input: z.object({ order_id: orderId, reason: z.string().min(1).max(500) }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/deposit/waive'],
+    summarize: ({ order_id, reason }) => `Proceed without the deposit of order ${order_id}: ${reason}`,
+    handler: async ({ order_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/deposit/waive', { params: { path: { order_id } }, body: { reason } }),
+          `waive the deposit of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_balance_waive',
+    label: 'Ship without full payment',
+    description:
+      'Ship without full payment (#5281): once the order is accepted, it ships with its balance unpaid, for `reason`. ' +
+      'Without it a shipment is refused (`balance_unpaid`) while a balance request stands and the balance is above ' +
+      'zero. The balance request stays open. It lets goods go unpaid, so it is outward: a person must approve it ' +
+      'first (it returns a pending action). `order_not_accepted` before acceptance; `order_not_submitted` on a cart.',
+    input: z.object({ order_id: orderId, reason: z.string().min(1).max(500) }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/balance/waive'],
+    summarize: ({ order_id, reason }) => `Ship order ${order_id} without full payment: ${reason}`,
+    handler: async ({ order_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/balance/waive', { params: { path: { order_id } }, body: { reason } }),
+          `waive the balance of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_shipping_option_set',
+    label: "Choose an order's shipping option",
+    description:
+      "Choose the order's shipping option (#5281) while it is draft or quoted: `option_id` is one of the shop's " +
+      'shipping options, kept in Settings → Orders (read them with get_settings, `storefront_shipping_options`); null ' +
+      "removes it. The option becomes the order's one `shipping` charge. An option that ships needs the order's " +
+      'shipping address (`shipping_address_required`); a pickup does not.',
+    input: z.object({
+      order_id: orderId,
+      option_id: z.string().min(1).max(100).nullable().describe('A shipping option id; null for none'),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/orders/{order_id}/shipping-option'],
+    summarize: ({ order_id, option_id }) =>
+      option_id === null ? `Remove the shipping option of order ${order_id}` : `Ship order ${order_id} by ${option_id}`,
+    handler: async ({ order_id, option_id }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/orders/{order_id}/shipping-option', { params: { path: { order_id } }, body: { option_id } }),
+          `set the shipping option of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_notify_customer',
+    label: 'Write a message to an order’s customer',
+    description:
+      "Compose a message to an order's customer from a template (`quoted`, `accepted`, `ready`, `shipped`), " +
+      "addressed to the customer's primary contacts, with an optional `note` added. It sends nothing: the " +
+      'answer is the text (`sent: false`) for a person to send. Sending through a messaging plugin is a ' +
+      'later change (#5660).',
+    input: z.object({
+      order_id: orderId,
+      template: z.enum(NOTIFY_TEMPLATES),
+      note: z.string().min(1).max(2000).optional().describe('A line added after the template’s text'),
+    }),
+    // It composes text and changes nothing; the person who sends it decides.
+    risk: 'read',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: ['GET /api/v1/orders/{order_id}', 'GET /api/v1/customers/{customer_id}'],
+    handler: async ({ order_id, template, note }, { backend }) => {
+      const detail = await ok(
+        backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }),
+        `get order ${order_id}`,
+      )
+      const { customer_id, number } = detail.order
+      // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
+      if (customer_id == null || number == null) {
+        throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+      }
+      const customer = await ok(
+        backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
+        `get customer ${customer_id}`,
+      )
+      return json(composeNotice(template, { order: { ...detail.order, number }, totals: detail.totals }, customer, note))
+    },
+  }),
+  defineTool({
     name: 'order_costs',
     label: "Read an order's real cost",
     description:
@@ -721,8 +946,8 @@ export const orderTools: Tool[] = [
     label: 'Edit an order',
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
-      'charges, replaced whole, while draft or quoted (past that, charges answer 409 `order_not_editable`: use ' +
-      'order_charges_update_after_acceptance). `hold` puts it on hold or releases it (true/false): on hold, ' +
+      'typed charges, as a whole list, while draft or quoted (past that, charges answer 409 `order_not_editable`: ' +
+      'use order_charges_update_after_acceptance). ' + AUTO_TAX + ' `hold` puts it on hold or releases it (true/false): on hold, ' +
       'every step that advances the order is refused until released. Releasing is a write, as holding is: it ' +
       'commits nothing to the customer, and every step that does (accepting, fulfilling, shipping, closing) stays ' +
       'outward. `payment` records money the shop already received, in any state but cancelled.',
@@ -869,8 +1094,8 @@ export const orderTools: Tool[] = [
     name: 'order_charges_update_after_acceptance',
     label: 'Change the charges of an accepted order',
     description:
-      'Replace the charges of an order that is accepted, in production or ready (#5351), whole, as order_update ' +
-      'takes them before that. It changes what the customer pays. Use it to keep an agreed total: when an item ' +
+      'Replace the typed charges of an order that is accepted, in production or ready (#5351), as a whole list, as ' +
+      'order_update takes them before that. ' + AUTO_TAX + ' It changes what the customer pays. Use it to keep an agreed total: when an item ' +
       'is added after acceptance, a `discount` (negative) or `fee` line absorbs its price. The audit row holds the ' +
       'charges before and after. Refused: `order_not_accepted` on a draft or quoted order (use order_update), ' +
       '`order_not_editable` once shipped, `order_closed`/`order_cancelled`, and `order_on_hold`.',
@@ -974,7 +1199,8 @@ export const orderTools: Tool[] = [
     label: 'Send a design revision to the customer',
     description:
       "Send a design revision to the customer for their answer. Outward: it commits the shop to the customer. The " +
-      "customer's answer is recorded by a person, never by an agent.",
+      "customer's answer is recorded by a person, never by an agent. Refused with `deposit_unpaid` while the " +
+      "order's deposit is set and neither paid nor waived (#5281), and `order_not_submitted` on a storefront cart.",
     input: z.object({ order_id: orderId, item_id: itemId, revision_id: ID.describe("A revision id, as order_get lists an item's `revisions`") }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/send'],
@@ -1048,7 +1274,9 @@ export const orderTools: Tool[] = [
     description:
       'Quote a line item, in one of three modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
       'it is now). `slice`: render the item if it has no matching output, slice every plate with the print ' +
-      "dialog's own choices (printer, a spool per slot, nozzles and quality, as print_output takes them) and price " +
+      "dialog's own choices (printer, a spool per slot, nozzles and quality, prime tower, supports and print " +
+      'sequence, as print_output takes them; the quote records them as its print setup, `choices` and ' +
+      '`filament_plan`, which order_get lists) and price ' +
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
@@ -1099,7 +1327,8 @@ export const orderTools: Tool[] = [
       'GET /api/v1/orders/history/unit-cost',
     ],
     title: ({ order_id, item_id, slice, archive }) =>
-      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}`,
+      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}` +
+      (slice ? setupPhrase(slice) : ''),
     handler: async ({ order_id, item_id, manual, slice, archive }, ctx) => {
       if ([manual, slice, archive].filter((mode) => mode !== undefined).length !== 1) {
         throw new ToolError(
@@ -1154,7 +1383,10 @@ export const orderTools: Tool[] = [
     label: 'Accept an order',
     description:
       'Accept an order: every open item must have an accepted quote (`items_not_quoted` names the rest). Copies ' +
-      "the customer's addresses onto the order and pins every item; the shop is committed to the customer.",
+      "the customer's addresses onto the order and pins every item; the shop is committed to the customer. An " +
+      'order that asked for money (a deposit, or a payment request) is left with one open `balance` request for ' +
+      'what is not paid, on the default provider: its other open or failed requests are cancelled (#5281). ' +
+      'Refused with `payment_in_flight` while a payment is pending and `order_not_submitted` on a storefront cart.',
     input: z.object({ order_id: orderId }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/accept'],
@@ -1239,7 +1471,8 @@ export const orderTools: Tool[] = [
       "filed under the item's project in the order's, and `options` sets the calibrations and timelapse. " +
       'Over the LAN the print files under no project, and a calibration value the LAN start cannot honour is refused ' +
       "(see `path` on print_output). A quote sliced over the LAN is sliced again when printed with `path: \"bambuddy\"`; " +
-      'quote with that `path` to print the quote\'s own slice. Outward: it prints.',
+      'quote with that `path` to print the quote\'s own slice. A test print of a revision is refused with ' +
+      "`deposit_unpaid` while the order's deposit is set and neither paid nor waived (#5281). Outward: it prints.",
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -1256,6 +1489,16 @@ export const orderTools: Tool[] = [
         "Omit to print with the accepted quote's own (order_item_quote's `slice.part_settings`), so the print slices " +
           'what was priced. Settings that differ from the quote\'s are refused `requote_needed`: quote with them first',
       ),
+      // #4673: each omitted is the accepted quote's own (its `choices`); one that differs is `requote_needed`.
+      prime_tower: primeTowerChoice.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.prime_tower`); another is refused `requote_needed`",
+      ),
+      supports: supportsChoice.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.supports`); others are refused `requote_needed`",
+      ),
+      print_sequence: printSequence.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.print_sequence`); another is refused `requote_needed`",
+      ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
           'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
@@ -1266,11 +1509,12 @@ export const orderTools: Tool[] = [
       'POST /api/v1/orders/{order_id}/items/{item_id}/print',
       'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
     ],
-    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings }) =>
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings, ...setup }) =>
       `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
       (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
       (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : '') +
-      partSettingsPhrase(part_settings),
+      partSettingsPhrase(part_settings) +
+      setupPhrase(setup),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined
@@ -1373,11 +1617,12 @@ export const orderTools: Tool[] = [
     label: 'Duplicate a line item',
     description:
       "Duplicate a line item (#4955): a new item with the item's kind, current design (template reference, colours and " +
-      'output, or library file), past print archives, quantity, title, notes and SKU. No quote is copied: price the copy ' +
+      'output, or library file), past print archives, quantity, title, notes, SKU and the parts one unit uses. No quote is copied: price the copy ' +
       "with order_item_quote. A custom item's price is its own, so the copy keeps it. On an accepted, in-production or " +
       'ready order set `after_acceptance`: the copy then changes what the customer gets, as ' +
       'order_item_add_after_acceptance does. Refused as an add is: `item_locked` (past `quoted` without ' +
-      '`after_acceptance`), `order_not_accepted`, `order_on_hold`. Outward, as an add after acceptance is.',
+      '`after_acceptance`), `order_not_accepted`, `order_on_hold`, `order_not_submitted` (a storefront visitor cart), and ' +
+      '`template_deleted` for a model item whose template was deleted since. Outward, as an add after acceptance is.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -1430,7 +1675,9 @@ export const orderTools: Tool[] = [
     description:
       'Record a shipment of fulfilled items (or edit one with `shipment_id`): carrier, service, tracking, when, the ' +
       "address (the order's shipping address when none is given) and which items in what quantity. The order is " +
-      'shipped once its shipments cover every fulfilled item.',
+      'shipped once its shipments cover every fulfilled item. Refused with `balance_unpaid` while a balance ' +
+      'request stands, the balance is above zero and no one waived it (order_balance_waive), as is an edit that ' +
+      'raises a quantity (#5281).',
     input: z.object({
       order_id: orderId,
       shipment_id: ID.optional(),

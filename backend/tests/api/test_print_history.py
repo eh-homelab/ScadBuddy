@@ -28,12 +28,15 @@ from scadbuddy.bambuddy import linking
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
 from scadbuddy.bambuddy.part_settings import PartSettings
-from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.print_links import LanArchiveLink, PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
-from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME
+from scadbuddy.print_library.ids import NATIVE_ID_BASE
+from scadbuddy.printers.lan_models import LanStarted
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -46,8 +49,10 @@ OTHER_SLUG = "other"
 def _no_recent_library_scans() -> Iterator[None]:
     """Each test starts with no library file scanned by hash lately (#1755)."""
     linking._last_library_scan.clear()
+    linking._last_lan_scan.clear()
     yield
     linking._last_library_scan.clear()
+    linking._last_lan_scan.clear()
 
 
 def state(client: TestClient) -> AppState:
@@ -1057,6 +1062,545 @@ def test_a_failed_part_settings_read_still_gives_the_print(
 
     assert response.status_code == 200, response.text
     assert response.json()["part_settings"] is None
+
+
+#: Two run ids that share the 8 characters a LAN start's name carries (#5661).
+LAN_RUN = "5661abcd" + "0" * 24
+LAN_TWIN = "5661abcd" + "f" * 24
+
+
+def lan_run(
+    client: TestClient,
+    run_id: str,
+    subject: PrintSubject,
+    slug: str,
+    *,
+    subtask_names: tuple[str, ...],
+    top_shell_layers: int = 8,
+    started_at: datetime = datetime(2026, 11, 8, tzinfo=UTC),
+) -> None:
+    """A succeeded native run of ``subject`` that started ``subtask_names`` over the LAN,
+    each on plate 1 at ``started_at``, and recorded its settings for slot 2."""
+    runs = state(client).print_runs.store
+    asyncio.run(
+        runs.insert_accepted(
+            run_id,
+            subject=subject,
+            key=f"key-{run_id}",
+            slug=slug,
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="wf-run",
+            retention=None,
+        )
+    )
+    result = PrintRunResult(
+        library_file_id=1,
+        copies=len(subtask_names),
+        path="native",
+        lan=[
+            LanStarted(
+                subtask_name=name,
+                started_at=started_at,
+                plate_id=1,
+                run_id=run_id,
+            )
+            for name in subtask_names
+        ],
+        part_settings={2: PartSettings(top_shell_layers=top_shell_layers)},
+    )
+    asyncio.run(runs.succeed(run_id, slug, result))
+
+
+def set_run_status(pg_conninfo: str, run_id: str, status: str) -> None:
+    """Set a run's status by hand, on the test's own schema (#5739): no store path gives a
+    run a result and then another status."""
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("UPDATE print_runs SET status = %s WHERE id = %s", (status, run_id))
+
+
+def hash_link(client: TestClient, output_id: str, archive_id: int) -> None:
+    """A link found by content hash, as a LAN print's is: it names no queue item."""
+    asyncio.run(
+        state(client).print_links.record(
+            PrintSubject.output(output_id),
+            PrintLink(archive_id=archive_id, matched_by="content_hash", printer_id=1),
+        )
+    )
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("filename", "subtask_name"),
+    [
+        ("scadbuddy-5661abcd-p1.3mf", "scadbuddy-5661abcd-p1"),
+        # A start sent again under a new name keeps the start's name (`_start_lan`).
+        ("scadbuddy-5661abcd-p1-2.3mf", "scadbuddy-5661abcd-p1"),
+        ("scadbuddy-5661abcd-p1-c2.3mf", "scadbuddy-5661abcd-p1-c2"),
+    ],
+)
+def test_the_detail_lists_a_lan_print_s_part_settings(
+    client: TestClient, model: str, filename: str, subtask_name: str
+) -> None:
+    """#5661: Bambuddy archives a LAN print under the file name the run uploaded, which
+    names the run's start. The link from the start to the archive is recorded once."""
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(output_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1", "scadbuddy-5661abcd-p1-c2"),
+    )
+    mock_archive(40, filename=filename)
+
+    body = client.get("/api/v1/prints/40").json()
+
+    assert body["part_settings"] == {"2": {"top_shell_layers": 8}}
+    recorded = asyncio.run(state(client).print_links.lan_start(40))
+    assert recorded is not None
+    assert (recorded.run_id, recorded.subtask_name, recorded.plate_id) == (
+        LAN_RUN,
+        subtask_name,
+        1,
+    )
+
+
+@respx.mock
+def test_a_recorded_lan_link_is_followed_once_the_archive_is_gone(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(output_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    assert client.get("/api/v1/prints/40").json()["part_settings"] is not None
+    respx.get(f"{API}/archives/40").mock(return_value=httpx.Response(404))
+    respx.get(f"{API}/archives/40/runs").mock(return_value=httpx.Response(404))
+    state(client).components.get(ARCHIVE_CACHE)._entries.clear()
+
+    body = client.get("/api/v1/prints/40").json()
+
+    assert body["status"] == "deleted_in_bambuddy"
+    assert body["part_settings"] == {"2": {"top_shell_layers": 8}}
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "filename",
+    [
+        None,
+        "name-keychain.gcode.3mf",
+        # A name of the run's form that no start of it carries.
+        "scadbuddy-5661abcd-p2.3mf",
+        "scadbuddy-5661abcd-p1.gcode",
+    ],
+)
+def test_a_lan_print_whose_file_names_no_start_has_no_part_settings(
+    client: TestClient, model: str, filename: str | None
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(output_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    mock_archive(40, filename=filename)
+
+    assert client.get("/api/v1/prints/40").json()["part_settings"] is None
+    assert asyncio.run(state(client).print_links.lan_start(40)) is None
+
+
+@respx.mock
+def test_a_lan_start_name_two_runs_carry_links_none(client: TestClient, model: str) -> None:
+    """Never a guess: two runs of the subject whose ids share the 8 characters the name
+    carries both started it, so the archive is either one's."""
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    subject = PrintSubject.output(output_id)
+    lan_run(client, LAN_RUN, subject, model, subtask_names=("scadbuddy-5661abcd-p1",))
+    lan_run(
+        client,
+        LAN_TWIN,
+        subject,
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+        top_shell_layers=3,
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+
+    assert client.get("/api/v1/prints/40").json()["part_settings"] is None
+    assert asyncio.run(state(client).print_links.lan_start(40)) is None
+
+
+@respx.mock
+def test_another_subject_s_lan_start_is_not_linked(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    other_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(other_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+
+    assert client.get("/api/v1/prints/40").json()["part_settings"] is None
+    assert asyncio.run(state(client).print_links.lan_start(40)) is None
+
+
+#: A native slice's library file (`is_native_id`), and the copy it was sliced from.
+NATIVE_COPY = NATIVE_ID_BASE + 1
+NATIVE_SLICE = NATIVE_ID_BASE + 2
+NATIVE_HASH = "ab" * 32
+
+
+def native_slice(client: TestClient, pg_conninfo: str, output_id: str) -> None:
+    """A native run's slice of ``output_id``, as ``print_record`` records it: the copy,
+    the slice under it, and the slice's row in the native library, with its sha256."""
+    uploads = state(client).uploads
+    asyncio.run(
+        uploads.record(output_id, LibraryCopy(id=NATIVE_COPY, folder_id=None, target_key="H2C"))
+    )
+    asyncio.run(uploads.record_sliced(output_id, NATIVE_COPY, SlicedCopy(id=NATIVE_SLICE)))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO library_files (id, name, size, sha256, blob_key, media_type)"
+            " VALUES (%s, %s, 10, %s, %s, 'model/3mf')",
+            (NATIVE_SLICE, "demo.plate1.gcode.3mf", NATIVE_HASH, f"library/{NATIVE_SLICE}"),
+        )
+
+
+def recent_lan_run(client: TestClient, subject: PrintSubject, slug: str, **fields: Any) -> None:
+    """`lan_run` of ``scadbuddy-5661abcd-p1``, started now unless ``fields`` say."""
+    lan_run(
+        client,
+        LAN_RUN,
+        subject,
+        slug,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+        **{"started_at": datetime.now(UTC), **fields},
+    )
+
+
+@respx.mock
+def test_the_list_links_a_native_lan_print_by_its_sliced_file_s_hash(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#5724: a native run uploads its slice straight to the printer, so no Bambuddy
+    library file has its hash. Bambuddy archives the print with the hash of the file the
+    printer printed, which is the native slice's own sha256. The list links it, and names
+    the start by the archive's file name."""
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "printing", "content_hash": NATIVE_HASH},
+        {"id": 41, "printer_id": 1, "status": "completed", "content_hash": "cd" * 32},
+    )
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert [item["archive_id"] for item in listed.json()["items"]] == [40]
+    recorded = asyncio.run(state(client).print_links.lan_start(40))
+    assert recorded is not None
+    assert (recorded.run_id, recorded.subtask_name) == (LAN_RUN, "scadbuddy-5661abcd-p1")
+    assert client.get("/api/v1/prints/40").status_code == 200
+
+
+def test_a_named_lan_start_is_not_looked_for_again(client: TestClient, model: str) -> None:
+    """#5724: once an archive names it, a start is not looked for again."""
+    configure(client)
+    output_id = make_output(client, model)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    runs = state(client).print_runs.store
+    since = datetime.now(UTC) - timedelta(days=1)
+    assert [pending.subject for pending in asyncio.run(runs.lan_unnamed(since, 10))] == [output_id]
+    asyncio.run(
+        state(client).print_links.record_lan_start(
+            LanArchiveLink(
+                archive_id=40, run_id=LAN_RUN, subtask_name="scadbuddy-5661abcd-p1", plate_id=1
+            )
+        )
+    )
+
+    assert asyncio.run(runs.lan_unnamed(since, 10)) == []
+
+
+@respx.mock
+def test_a_lan_start_older_than_the_window_is_not_looked_for(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    recent_lan_run(
+        client,
+        PrintSubject.output(output_id),
+        model,
+        started_at=datetime.now(UTC) - linking.LAN_LINK_WINDOW - timedelta(days=1),
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "completed", "content_hash": NATIVE_HASH}
+    )
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+
+
+@respx.mock
+def test_a_lan_print_of_another_subject_s_slice_is_not_linked(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """The scan matches the subject's own slices only: another output's slice hash never
+    names this run's print."""
+    configure(client)
+    output_id = make_output(client, model)
+    other_id = make_output(client, model)
+    native_slice(client, pg_conninfo, other_id)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "printing", "content_hash": NATIVE_HASH}
+    )
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+
+
+@respx.mock
+def test_a_recorded_lan_start_whose_run_was_pruned_has_no_part_settings(
+    client: TestClient, model: str
+) -> None:
+    """#5733: the run's row is pruned by its retention; the record stays, the settings
+    are gone with the run."""
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    asyncio.run(
+        state(client).print_links.record_lan_start(
+            LanArchiveLink(archive_id=40, run_id=LAN_RUN, subtask_name="scadbuddy-5661abcd-p1")
+        )
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+
+    response = client.get("/api/v1/prints/40")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["part_settings"] is None
+
+
+@respx.mock
+def test_a_lan_start_of_a_run_that_is_not_succeeded_is_matched(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#5733: the match is on the start the run's result holds, whatever the run's
+    status. Today only a succeeded run holds a result; the status is set by hand here."""
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(output_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    set_run_status(pg_conninfo, LAN_RUN, "failed")
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+
+    assert client.get("/api/v1/prints/40").json()["part_settings"] == {"2": {"top_shell_layers": 8}}
+
+
+@respx.mock
+def test_a_failed_archive_fetch_cancels_the_part_settings_read(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5739: the request's database read never outlives the request. The caller sees
+    the archive fetch's own error, not a group of them."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 40, printer_id=1, queue_item_id=7)
+    mock_bambuddy_lists()
+    links = state(client).print_links
+    started: list[int] = []
+    cancelled: list[int] = []
+
+    async def stuck(queue_item_id: int) -> PrintSend | None:
+        started.append(queue_item_id)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(queue_item_id)
+            raise
+        return None
+
+    monkeypatch.setattr(links, "send", stuck)
+    cache = state(client).components.get(ARCHIVE_CACHE)
+
+    async def broken(client: Any, archive_id: int) -> ArchiveDetail | None:
+        for _ in range(100):
+            if started:
+                break
+            await asyncio.sleep(0.01)
+        raise ApiError(502, "Bambuddy did not answer")
+
+    monkeypatch.setattr(cache, "archive", broken)
+
+    response = client.get("/api/v1/prints/40")
+
+    assert response.status_code == 502, response.text
+    assert started == [7]
+    assert cancelled == [7]
+
+
+@respx.mock
+@pytest.mark.parametrize("kind", ["queue_item", "lan_start"])
+def test_the_part_settings_read_runs_beside_the_archive_fetch(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """#5733: a send or a recorded start needs no archive, so its read does not wait for
+    Bambuddy's answer. Only the file name's match waits for it."""
+    configure(client)
+    output_id = make_output(client, model)
+    if kind == "queue_item":
+        link(client, output_id, 40, printer_id=1, queue_item_id=7)
+    else:
+        hash_link(client, output_id, 40)
+    mock_archive(40)
+    read: list[int] = []
+    links = state(client).print_links
+    reader = links.send if kind == "queue_item" else links.lan_start
+
+    async def noted(key: int) -> Any:
+        read.append(key)
+        return await reader(key)
+
+    monkeypatch.setattr(links, "send" if kind == "queue_item" else "lan_start", noted)
+    cache = state(client).components.get(ARCHIVE_CACHE)
+    fetch = cache.archive
+    read_before_fetch: list[bool] = []
+
+    async def slow(client: Any, archive_id: int) -> ArchiveDetail | None:
+        for _ in range(100):
+            if read:
+                break
+            await asyncio.sleep(0.01)
+        read_before_fetch.append(bool(read))
+        return await fetch(client, archive_id)
+
+    monkeypatch.setattr(cache, "archive", slow)
+
+    assert client.get("/api/v1/prints/40").status_code == 200
+    assert read_before_fetch[:1] == [True]
+
+
+@respx.mock
+def test_a_recorded_lan_start_of_another_subject_s_run_is_not_followed(
+    client: TestClient, model: str
+) -> None:
+    """#5723 review: the archive belongs to another subject since its start was recorded,
+    so the recorded run's settings are not this print's."""
+    configure(client)
+    output_id = make_output(client, model)
+    other_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(other_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    asyncio.run(
+        state(client).print_links.record_lan_start(
+            LanArchiveLink(archive_id=40, run_id=LAN_RUN, subtask_name="scadbuddy-5661abcd-p1")
+        )
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+
+    assert client.get("/api/v1/prints/40").json()["part_settings"] is None
+
+
+@respx.mock
+def test_a_failed_lan_record_still_lists_the_run_s_settings(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5723 review: the run is found exactly; only the record is lost, and is logged."""
+    configure(client)
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(output_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+
+    async def broken(link: LanArchiveLink) -> None:
+        raise psycopg.OperationalError("the database went away")
+
+    monkeypatch.setattr(state(client).print_links, "record_lan_start", broken)
+
+    body = client.get("/api/v1/prints/40").json()
+
+    assert body["part_settings"] == {"2": {"top_shell_layers": 8}}
+
+
+@respx.mock
+def test_the_detail_lists_a_library_file_s_lan_print_s_part_settings(
+    client: TestClient,
+) -> None:
+    """A library file's run is keyed ``library:<file id>`` (`PrintSubject.run_subject`)."""
+    configure(client)
+    subject = PrintSubject.library(89)
+    asyncio.run(
+        state(client).print_links.record(
+            subject, PrintLink(archive_id=90, matched_by="content_hash", printer_id=1)
+        )
+    )
+    lan_run(
+        client,
+        LAN_RUN,
+        subject,
+        library_slug(subject),
+        subtask_names=("scadbuddy-5661abcd-p1",),
+    )
+    mock_archive(90, filename="scadbuddy-5661abcd-p1.3mf", timelapse_path=None)
+    library_file_route(89)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["part_settings"] == {"2": {"top_shell_layers": 8}}
+    recorded = asyncio.run(state(client).print_links.lan_start(90))
+    assert recorded is not None and recorded.run_id == LAN_RUN
 
 
 @respx.mock

@@ -23,9 +23,12 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 
 # The Bambu Studio release `slicer-dist` downloads (#3821), global so the `slicer`
 # stage's BAMBU_STUDIO_VERSION, which the worker checks the CLI against, is the same
-# value. See `slicer-dist` for how to bump it.
+# value. See `slicer-dist` for how to bump it. BAMBU_STUDIO_ASSET_ID is the same
+# asset's id in the REST API, the fallback when the release URL fails (#5706); a bump
+# changes it too.
 ARG BAMBU_STUDIO_VERSION=02.08.02.61
 ARG BAMBU_STUDIO_ASSET=BambuStudio_ubuntu24.04-v02.08.02.61-20260820225108.AppImage
+ARG BAMBU_STUDIO_ASSET_ID=523226841
 ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320d723740c81a7fd
 
 # ── uv ────────────────────────────────────────────────────────────────────────
@@ -390,7 +393,9 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 #
 # Bambu Studio is pinned by version and the AppImage's sha256, bumped
 # deliberately as OPENSCAD_VERSION is: change BAMBU_STUDIO_VERSION, the release
-# asset's name and the sha256 (the global ARGs at the top) together, and re-measure
+# asset's name, its REST API asset id (BAMBU_STUDIO_ASSET_ID, from
+# `gh api repos/bambulab/BambuStudio/releases/tags/v<version>`, the fallback's URL,
+# #5706) and the sha256 (the global ARGs at the top) together, and re-measure
 # what backend/scadbuddy/slicing/profiles.py says of the profiles. The sha256 was
 # measured with `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
 # lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
@@ -401,6 +406,7 @@ FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce
 
 ARG BAMBU_STUDIO_VERSION
 ARG BAMBU_STUDIO_ASSET
+ARG BAMBU_STUDIO_ASSET_ID
 ARG BAMBU_STUDIO_SHA256_AMD64
 
 # hadolint ignore=DL3008
@@ -422,8 +428,12 @@ RUN apt-get update \
 # vendor file BBL.json beside the machine, process and filament presets, laid out
 # as resources/profiles/ is, without the tree's cover images and bed models.
 WORKDIR /opt
-RUN curl --fail --silent --show-error --location --output bambu-studio.AppImage \
-         "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
+RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --output bambu-studio.AppImage \
+           "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
+         || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --header "Accept: application/octet-stream" --output bambu-studio.AppImage \
+           "https://api.github.com/repos/bambulab/BambuStudio/releases/assets/${BAMBU_STUDIO_ASSET_ID}"; } \
     && printf '%s  bambu-studio.AppImage\n' "$BAMBU_STUDIO_SHA256_AMD64" > bambu-studio.sha256 \
     && sha256sum --check --strict bambu-studio.sha256 \
     && le() { od -An -t "u$2" -j "$1" -N "$2" --endian=little bambu-studio.AppImage; } \
@@ -509,7 +519,13 @@ CMD ["scadbuddy-slicer"]
 # linux-gnu binaries for both architectures build-image.yml targets, so nothing
 # is compiled here. The checksums are pinned in this file rather than read off
 # the release, so a replaced asset fails the build instead of shipping; bump all
-# three ARGs together.
+# five ARGs together. The two asset ids are each tarball's id in the REST API, the
+# fallback when the release URL fails (#5706). The build calls that API with no token,
+# and an anonymous caller gets 60 requests an hour per IP
+# (https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api);
+# hosted runners share IPs, so in a broad outage the fallback itself can answer 403. A
+# 403 there does not mean the asset id is wrong: the weekly `release-asset-pins` job
+# (link-check.yml) checks the ids.
 #
 # Its own stage, off `base`, so xz-utils (to unpack the .tar.xz) never reaches
 # the runtime, and so `--version` below runs against the same glibc the runtime
@@ -520,6 +536,8 @@ ARG TARGETARCH
 ARG OPENSCAD_LSP_VERSION=2.0.1
 ARG OPENSCAD_LSP_SHA256_AMD64=e51b7f84180d93a65387d3bbd00bb47ea1953af27d637c3698800f1b671005ea
 ARG OPENSCAD_LSP_SHA256_ARM64=6e5f572bbbd193a5a1b7f538b4fea0ef5f082a9cafb3f8e978dd86905e3bfb9d
+ARG OPENSCAD_LSP_ASSET_AMD64=258706878
+ARG OPENSCAD_LSP_ASSET_ARM64=258706865
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -530,12 +548,18 @@ WORKDIR /tmp/openscad-lsp
 # The checksum goes through a file, not `echo | sha256sum`, for the same DL4006
 # reason the version checks further down avoid pipes.
 RUN case "$TARGETARCH" in \
-      amd64) triple=x86_64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_AMD64" ;; \
-      arm64) triple=aarch64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_ARM64" ;; \
+      amd64) triple=x86_64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_AMD64" \
+             asset="$OPENSCAD_LSP_ASSET_AMD64" ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_ARM64" \
+             asset="$OPENSCAD_LSP_ASSET_ARM64" ;; \
       *) echo "ERROR: openscad-lsp publishes no build for '${TARGETARCH}'." >&2; exit 1 ;; \
     esac \
-    && curl --fail --silent --show-error --location --output openscad-lsp.tar.xz \
-         "https://github.com/Leathong/openscad-LSP/releases/download/v${OPENSCAD_LSP_VERSION}/openscad-lsp-${triple}.tar.xz" \
+    && { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --output openscad-lsp.tar.xz \
+           "https://github.com/Leathong/openscad-LSP/releases/download/v${OPENSCAD_LSP_VERSION}/openscad-lsp-${triple}.tar.xz" \
+         || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --header "Accept: application/octet-stream" --output openscad-lsp.tar.xz \
+           "https://api.github.com/repos/Leathong/openscad-LSP/releases/assets/${asset}"; } \
     && printf '%s  openscad-lsp.tar.xz\n' "$sha" > openscad-lsp.sha256 \
     && sha256sum --check --strict openscad-lsp.sha256 \
     && tar -xJf openscad-lsp.tar.xz --strip-components=1 \
@@ -756,18 +780,34 @@ USER root
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
 # above (the release's checksums.txt). ci.yml's `agent` job installs the same version
-# and amd64 digest for the agent's Temporal tests (#1055); bump them together.
+# and amd64 digest for the agent's Temporal tests (#1055); bump them together, with
+# TEMPORAL_CLI_ASSET_ARM64 below.
+# When the GitHub release URL still fails after its retries, a second URL serves the
+# same tarball (#5706); the sha256 check is the same for both. For amd64 it is
+# Temporal's own download site. For arm64 it is the release asset through the REST API
+# (TEMPORAL_CLI_ASSET_ARM64, the asset id of that tarball: a version bump changes it
+# too), because on 2026-11-08 temporal.download answered arm64 with HTTP 618
+# "jwt:expired" four times out of four, while the API asset URL answered 200 to an
+# anonymous `curl -H "Accept: application/octet-stream"` with the pinned sha256
+# (measured with curl and sha256sum).
 ARG TARGETARCH
 ARG TEMPORAL_CLI_VERSION=1.9.1
 ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 ARG TEMPORAL_CLI_SHA256_ARM64=6c57c352d52fc3df34412376fd9ba6f74b7e3ace8e426e6cba8600156d36a145
+ARG TEMPORAL_CLI_ASSET_ARM64=564294917
 RUN case "$TARGETARCH" in \
-      amd64) sha="$TEMPORAL_CLI_SHA256_AMD64" ;; \
-      arm64) sha="$TEMPORAL_CLI_SHA256_ARM64" ;; \
+      amd64) sha="$TEMPORAL_CLI_SHA256_AMD64" \
+             fallback="https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=amd64" ;; \
+      arm64) sha="$TEMPORAL_CLI_SHA256_ARM64" \
+             fallback="https://api.github.com/repos/temporalio/cli/releases/assets/${TEMPORAL_CLI_ASSET_ARM64}" ;; \
       *) echo "ERROR: no pinned Temporal CLI for '${TARGETARCH}'." >&2; exit 1 ;; \
     esac \
-    && curl --fail --silent --show-error --location --output /tmp/temporal-cli.tar.gz \
-        "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_${TARGETARCH}.tar.gz" \
+    && { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --output /tmp/temporal-cli.tar.gz \
+           "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_${TARGETARCH}.tar.gz" \
+         || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --header "Accept: application/octet-stream" --output /tmp/temporal-cli.tar.gz \
+           "$fallback"; } \
     && printf '%s  /tmp/temporal-cli.tar.gz\n' "$sha" > /tmp/temporal-cli.sha256 \
     && sha256sum --check --strict /tmp/temporal-cli.sha256 \
     && tar -xzf /tmp/temporal-cli.tar.gz -C /usr/local/bin temporal \

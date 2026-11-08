@@ -18,7 +18,7 @@ from scadbuddy.payments.models import HostedRequest, PaymentRequestView, Provide
 from scadbuddy.payments.store import request
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop
+from tests.orders.test_lifecycle import BY, Shop, connect
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -51,16 +51,6 @@ class PayShop(Shop):
             error=None,
         )
         return order, req
-
-
-def connect(rows: OrderStore, provider: str = "fake", *, default: bool = False) -> None:
-    """A credential row: the provider is connected (its secret is never opened here)."""
-    with rows.transaction() as conn:
-        conn.execute(
-            "INSERT INTO payment_credentials (provider, account_label, secret_sealed, dek_sealed,"
-            " kek_id, is_default) VALUES (%s, 'Fake', '\\x00', '\\x00', 'k', %s)",
-            (provider, default),
-        )
 
 
 @pytest.fixture
@@ -370,6 +360,44 @@ def test_a_second_paid_event_for_a_request_the_provider_paid_is_ignored(shop: Pa
     assert [r["outcome"] for r in outcomes] == ["recorded", "ignored"]
 
 
+def test_a_paid_event_told_again_with_its_fee_writes_the_fee_once(shop: PayShop) -> None:
+    """#5666: Square tells a payment's fee in a later ``payment.updated`` of the same
+    payment, a new event that is ``paid`` again. The money is not recorded twice; the fee
+    is written on the first payment, once."""
+    order, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", EVENT.model_copy(update={"fee_minor": None}))
+    assert shop.rows.cost_entries(order.id) == []
+    with_fee = EVENT.model_copy(update={"event_id": "e6"})
+    assert shop.lifecycle.record_provider_event("fake", with_fee) == "recorded"
+    [pay] = [p for p in shop.rows.payments(order.id) if p.provider]
+    [fee] = shop.rows.cost_entries(order.id)
+    assert (fee.amount_minor, fee.source) == (31, f"payment:{pay.id}")
+    assert shop.rows_request(req.id).payment_id == pay.id
+    again = EVENT.model_copy(update={"event_id": "e7"})
+    assert shop.lifecycle.record_provider_event("fake", again) == "ignored"
+    assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+def test_a_provider_payment_told_again_on_a_request_paid_by_hand_is_recorded_once(
+    shop: PayShop,
+) -> None:
+    """#5725 review: the request's ``payment_id`` is the cash that paid it, so the repeat
+    is told by the provider's own payment on the request, not by that pointer."""
+    order, req = shop.linked()
+    cash = shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
+    no_fee = EVENT.model_copy(update={"fee_minor": None})
+    assert shop.lifecycle.record_provider_event("fake", no_fee) == "recorded"
+    with_fee = EVENT.model_copy(update={"event_id": "e8"})
+    assert shop.lifecycle.record_provider_event("fake", with_fee) == "recorded"
+    again = EVENT.model_copy(update={"event_id": "e9"})
+    assert shop.lifecycle.record_provider_event("fake", again) == "ignored"
+    provider_paid = [p for p in shop.rows.payments(order.id) if p.provider == "fake"]
+    assert [p.amount_minor for p in provider_paid] == [700]
+    [fee] = shop.rows.cost_entries(order.id)
+    assert (fee.amount_minor, fee.source) == (31, f"payment:{provider_paid[0].id}")
+    assert shop.rows_request(req.id).payment_id == cash.id
+
+
 def test_a_paid_event_for_a_request_paid_by_hand_is_recorded(shop: PayShop) -> None:
     order, req = shop.linked()
     cash = shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
@@ -436,8 +464,24 @@ def test_a_link_for_a_request_no_longer_open_is_not_written(shop: PayShop) -> No
         hosted=HostedRequest.model_validate({"provider_ref": "fake_late", "hosted_url": LINK}),
         error=None,
     )
-    assert (late.status, late.provider_ref, late.hosted_url) == ("cancelled", None, None)
+    # #5700: the page is kept as a page to close, never as a link to pay.
+    assert (late.status, late.provider_ref, late.hosted_url) == ("cancelled", "fake_late", None)
+    assert late.close_pending_at is not None
     assert late.link_error == "the payment request is cancelled"
+
+
+def test_a_page_made_after_a_payment_by_hand_is_kept_to_close(shop: PayShop) -> None:
+    """#5700: paid by hand while the provider answered."""
+    order, _ = shop.accepted()
+    req = shop.lifecycle.open_payment_request(order.id, BY, provider="fake")
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=1000, payment_request_id=req.id)
+    late = shop.lifecycle.set_request_link(
+        req.id,
+        hosted=HostedRequest.model_validate({"provider_ref": "fake_late", "hosted_url": LINK}),
+        error=None,
+    )
+    assert (late.status, late.provider_ref, late.hosted_url) == ("paid", "fake_late", None)
+    assert late.close_pending_at is not None and late.link_error is None
 
 
 # -- cancel (Review Focus 1 and 2) -----------------------------------------------------------
@@ -453,9 +497,26 @@ def test_cancelling_the_order_cancels_its_open_requests(shop: PayShop) -> None:
 def test_a_paid_event_after_the_cancel_is_still_recorded(shop: PayShop) -> None:
     order, req = shop.linked()
     shop.lifecycle.cancel_order(order.id, BY)
+    assert shop.rows_request(req.id).close_pending_at is not None
     assert shop.lifecycle.record_provider_event("fake", EVENT) == "recorded"
     assert shop.rows_request(req.id).status == "paid"
     assert len(shop.rows.cost_entries(order.id)) == 1
+    # #5700: the page was paid, so there is nothing left to close.
+    assert shop.rows_request(req.id).close_pending_at is None
+
+
+def test_a_manual_payment_marks_the_page_it_closes(shop: PayShop) -> None:
+    """#5700: the provider's page must be closed, and the sweep tries until it is."""
+    order, req = shop.linked()
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=700)
+    assert shop.rows_request(req.id).close_pending_at is not None
+
+
+def test_the_providers_own_payment_marks_nothing(shop: PayShop) -> None:
+    _, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", EVENT)
+    assert shop.rows_request(req.id).status == "paid"
+    assert shop.rows_request(req.id).close_pending_at is None
 
 
 def test_a_link_for_a_paid_request_leaves_the_request_as_it_is(shop: PayShop) -> None:

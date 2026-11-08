@@ -35,7 +35,7 @@ import json
 import logging
 import time
 import types
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -89,6 +89,7 @@ from scadbuddy.core.secrets import (
 from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
+from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -438,6 +439,14 @@ class StoredSettings(BambuddyIds):
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
 
+    # -- the shop's money rules (#5281), stored only: no environment seeds them --------
+    #: The deposit policy's rules; ``None`` asks no deposit.
+    orders_deposit_policy: list[DepositRule] | None = None
+    #: The ways an order reaches its customer; ``None`` offers none.
+    storefront_shipping_options: list[ShippingOption] | None = None
+    #: How a customer pays by hand (shown as text, never HTML).
+    storefront_payment_instructions: str | None = None
+
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
     #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
     #: :meth:`SettingsStore.set_library_choices`).
@@ -524,6 +533,26 @@ class StoredSettings(BambuddyIds):
                 kept[scope] = ModelProject.model_validate(project)
             except ValidationError:
                 logger.warning("unreadable model project", extra={"scope": scope})
+        return kept
+
+    @field_validator("orders_deposit_policy", "storefront_shipping_options", mode="before")
+    @classmethod
+    def _readable_money_rules(cls, value: Any, info: ValidationInfo) -> Any:
+        """An entry this version cannot read (#5281) is dropped, and a value that is not a
+        list is none, so it cannot stop the settings loading."""
+        if value is None:
+            return None
+        name = info.field_name or ""
+        if not isinstance(value, list):
+            logger.warning("unreadable money setting", extra={"setting": name})
+            return None
+        shape = DepositRule if name == "orders_deposit_policy" else ShippingOption
+        kept: list[BaseModel] = []
+        for entry in value:
+            try:
+                kept.append(shape.model_validate(entry))
+            except ValidationError:
+                logger.warning("unreadable money setting entry", extra={"setting": name})
         return kept
 
     @field_validator("model_print_choices", mode="before")
@@ -663,6 +692,13 @@ class SettingsPatch(BaseModel):
     #: it: no agent tool writes settings.
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
 
+    # -- the shop's money rules (#5281), stored only; only the user sets them ----------
+    #: ``null`` asks no deposit.
+    orders_deposit_policy: list[DepositRule] | None = Field(default=None, max_length=20)
+    #: The ids are unique; ``null`` offers none.
+    storefront_shipping_options: list[ShippingOption] | None = Field(default=None, max_length=20)
+    storefront_payment_instructions: str | None = Field(default=None, max_length=2000)
+
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None
     template_activity_max_timeout: float | None = None
@@ -729,6 +765,9 @@ class SettingsPatch(BaseModel):
     pricing_labour_rate_per_hour: str | None = None
     pricing_usd_rate: str | None = None
     orders_thin_margin_percent: str | None = None
+    #: Auto tax (#5281): the percent, and whether shipping is in its base.
+    orders_tax_percent: str | None = None
+    orders_tax_shipping: bool | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -766,6 +805,17 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("storefront_shipping_options")
+    @classmethod
+    def _unique_option_ids(
+        cls, options: list[ShippingOption] | None
+    ) -> list[ShippingOption] | None:
+        ids = [option.id for option in options or ()]
+        repeated = sorted({option_id for option_id in ids if ids.count(option_id) > 1})
+        if repeated:
+            raise ValueError(f"shipping option ids are unique: {', '.join(repeated)}")
+        return options
 
     @field_validator("reset")
     @classmethod
@@ -959,6 +1009,40 @@ class SettingsStore:
 
     def load(self, timeout: float | None = None) -> StoredSettings:
         return self.snapshot(timeout).stored
+
+    def read(self, names: Collection[str]) -> dict[str, Any]:
+        """``names`` as ``snapshot`` gives them, from one query on just their rows (#5281:
+        the order rules, read in item, quote and charge transactions). An env-seeded name
+        is its runtime value (the stored one, else the environment's); any other is its
+        `StoredSettings` value. Never a secret: no row is unsealed."""
+        wanted = frozenset(names)
+        if wanted & SECRET_FIELDS or wanted & OWN_TABLES:
+            raise ValueError("read takes plain settings only")
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT name, value FROM settings WHERE name = ANY(%s)", [sorted(wanted)]
+            ).fetchall()
+        stored_rows = {row["name"]: row["value"] for row in rows}
+        runtime = self.defaults.model_copy()
+        out: dict[str, Any] = {}
+        plain: dict[str, Any] = {}
+        for name in sorted(wanted):
+            if name not in ENV_SEEDED:
+                plain[name] = stored_rows.get(name)
+                continue
+            if name in stored_rows:
+                try:
+                    coerced = check_value(name, stored_rows[name])
+                    Settings.__pydantic_validator__.validate_assignment(runtime, name, coerced)
+                except ValueError:
+                    logger.warning(
+                        "ignoring a stored setting this version refuses", extra={"setting": name}
+                    )
+            out[name] = getattr(runtime, name)
+        if plain:
+            stored = StoredSettings.model_validate(plain)
+            out.update({name: getattr(stored, name) for name in plain})
+        return out
 
     def plate_clear_required(self) -> bool:
         """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that

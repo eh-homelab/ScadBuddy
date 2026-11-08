@@ -45,8 +45,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
+from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice
 from scadbuddy.bambuddy.resolver import PrintChoices
+from scadbuddy.bambuddy.supports import SupportsChoice
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.operations.kinds import to_thread_to_end
 from scadbuddy.orders.lifecycle import (
@@ -121,6 +124,26 @@ class SliceQuoteRequest(BaseModel):
     #: Slicer settings for each slot's parts (#5571, `PrintRunRequest.part_settings`):
     #: recorded with the quote, and the item's print prints with them when it sends none.
     part_settings: PartSettingsMap | None = None
+    #: The prime tower, supports and print sequence (#4673, order operations spec §5.1),
+    #: in `PrintRunRequest`'s own shapes: the quote slices with them and records them,
+    #: so the print slices what was priced. Omitted is the template's, as the print's.
+    prime_tower: PrimeTowerChoice | None = None
+    supports: SupportsChoice | None = None
+    print_sequence: PrintSequence | None = None
+
+
+#: The fields of a slice quote's request that are its print setup (#4673): what the print
+#: sends to slice what was priced. `filaments` prices and `filament_plan` has a column
+#: of its own; `part_settings` has its own since #5571.
+SETUP_FIELDS = frozenset(
+    {"printer_id", "printer", "path", "choices", "prime_tower", "supports", "print_sequence"}
+)
+
+
+def print_setup(request: SliceQuoteRequest) -> dict[str, Any]:
+    """The quote's ``choices`` column (#4673): the request's print setup as JSON, every
+    field present (an omitted one as null), in ``PrintRunRequest``'s shapes."""
+    return request.model_dump(mode="json", include=set(SETUP_FIELDS))
 
 
 class ArchiveQuoteRequest(BaseModel):
@@ -846,6 +869,7 @@ async def quote_run(
         quote_id,
         revision_id,
         part_settings=dumped(request.part_settings),
+        request=request,
     )
 
 
@@ -894,6 +918,7 @@ async def _library_quote(
         None,
         recolour,
         part_settings=dumped(request.part_settings),
+        request=request,
     )
 
 
@@ -909,11 +934,13 @@ async def _priced(
     recolour: Callable[[Sequence[Plate]], Awaitable[None]] | None = None,
     *,
     part_settings: dict[str, dict[str, Any]] | None = None,
+    request: SliceQuoteRequest | None = None,
 ) -> Quote:
     """Each sliced plate fetched, read, kept and priced, then the quote recorded (or
     the run's holds dropped as it fails). ``recolour`` gives an item with no slots the
     ones its plates use, before they are checked (a library file item, #5544).
-    ``part_settings`` are the settings per slot it sliced with (#5571), recorded with it."""
+    ``part_settings`` are the settings per slot it sliced with (#5571), and
+    ``request``'s print setup and spools (#4673) are recorded with it too."""
     lifecycle = run.lifecycle
     store = lifecycle.store
     order_id = order.id
@@ -953,6 +980,10 @@ async def _priced(
                     revision_id=revision_id,
                     quote_id=quote_id,
                     part_settings=part_settings,
+                    choices=None if request is None else print_setup(request),
+                    filament_plan=(
+                        None if request is None else request.filament_plan.model_dump(mode="json")
+                    ),
                 ),
             )
         except LifecycleError as error:

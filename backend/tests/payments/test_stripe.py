@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
@@ -26,6 +26,7 @@ from scadbuddy.payments.provider import (
     Credential,
     ProviderError,
     ProviderUnavailableError,
+    Verified,
 )
 from scadbuddy.payments.registry import providers
 from scadbuddy.payments.stripe import API, SIGNATURE_TOLERANCE_SECONDS, STRIPE, StripeProvider
@@ -79,8 +80,9 @@ def form(request: httpx.Request) -> dict[str, list[str]]:
 
 
 def test_the_registry_offers_stripe() -> None:
-    assert providers(fake=False) == {"stripe": STRIPE}
-    assert set(providers(fake=True)) == {"stripe", "fake"}
+    assert providers(fake=False)["stripe"] is STRIPE
+    assert set(providers(fake=False)) == {"stripe", "paypal", "square"}
+    assert set(providers(fake=True)) == {"stripe", "paypal", "square", "fake"}
 
 
 def test_stripe_asks_for_two_secrets() -> None:
@@ -95,12 +97,12 @@ async def test_verify_lists_one_session_and_names_the_mode() -> None:
     listed = respx.get(f"{API}/v1/checkout/sessions").mock(
         return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.empty.json"))
     )
-    assert await STRIPE.verify(CRED) == "Stripe account (test mode)"
+    assert await STRIPE.verify(CRED) == Verified(account_label="Stripe account (test mode)")
     request = listed.calls.last.request
     assert request.url.params["limit"] == "1"
     assert request.headers["authorization"] == f"Bearer {KEY}"
     live = Credential(settings={}, secrets={"secret_key": "rk_live_1", "webhook_secret": WHSEC})
-    assert await STRIPE.verify(live) == "Stripe account (live)"
+    assert await STRIPE.verify(live) == Verified(account_label="Stripe account (live)")
 
 
 @pytest.mark.parametrize(
@@ -396,6 +398,54 @@ async def test_a_pending_refund_is_recorded_when_it_succeeds() -> None:
     assert (settled.event_id, settled.kind, settled.amount_minor) == (
         "refund:re_3bank", "refunded", 700,
     )  # fmt: skip
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("kind", "status", "failure_txn"),
+    [
+        ("refund.failed", "failed", "txn_3refundfail"),
+        ("refund.updated", "failed", "txn_3refundfail"),
+        ("refund.updated", "failed", None),
+        ("refund.updated", "canceled", "txn_3refundfail"),
+        ("refund.updated", "canceled", None),
+    ],
+)
+async def test_every_failed_or_cancelled_refund_is_one_refund_failed_event(
+    kind: str, status: str, failure_txn: str | None
+) -> None:
+    """#5681: a Refund that ends ``failed`` or ``canceled`` (a cancel is a kind of
+    failure, https://docs.stripe.com/refunds#cancel-refund) gives one ``refund_failed``
+    event, whatever its ``failure_balance_transaction``: Stripe sets that on a failure that
+    never succeeded too (https://docs.stripe.com/refunds#failed-refunds). ``refund.failed``
+    and ``refund.updated`` share its event id, and it names the refund's own event id; the
+    lifecycle decides whether there is a refund to reverse."""
+    respx.get(f"{API}/v1/checkout/sessions").mock(
+        return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.json"))
+    )
+    want = ProviderEvent(
+        event_id="refund-failed:re_3bank", kind="refund_failed", provider_ref=CS,
+        currency="USD", reverses="refund:re_3bank",
+        created_at=MADE + timedelta(seconds=200),
+    )  # fmt: skip
+    failed = payload("refund.failed.json")
+    failed["type"] = kind
+    failed["data"]["object"] |= {"status": status, "failure_balance_transaction": failure_txn}
+    body = json.dumps(failed).encode()
+    assert await STRIPE.parse_webhook(CRED, signed(body), body) == want
+
+
+async def test_a_refund_that_needs_the_customers_bank_details_is_other() -> None:
+    """``requires_action`` (https://docs.stripe.com/refunds#refunds-that-require-action) is
+    neither money out nor a failure: nothing is told until it succeeds, fails or is
+    cancelled."""
+    event = payload("refund.failed.json")
+    event["type"] = "refund.updated"
+    event["data"]["object"] |= {"status": "requires_action", "failure_balance_transaction": None}
+    body = json.dumps(event).encode()
+    with respx.mock:
+        parsed = await STRIPE.parse_webhook(CRED, signed(body), body)
+    assert (parsed.event_id, parsed.kind) == ("evt_5reffail", "other")
 
 
 @respx.mock

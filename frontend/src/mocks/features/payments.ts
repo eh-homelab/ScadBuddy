@@ -38,6 +38,9 @@ function statusOf(id: string): ProviderStatus {
     is_default: connected?.is_default ?? false,
     connected_at: connected?.connected_at ?? null,
     last_webhook_at: connected?.last_webhook_at ?? null,
+    last_webhook_error: connected?.last_webhook_error ?? null,
+    last_webhook_error_at: connected?.last_webhook_error_at ?? null,
+    currency: connected?.currency ?? null,
   }
 }
 
@@ -58,7 +61,7 @@ export const handlers = [
     if (!kek) return problem(request, 409, 'payment credentials need SCADBUDDY_SECRET_KEY_FILE', PROBLEMS + 'kek_missing')
     // The first provider connected is the default (`is_default`, at most one row).
     const was = state.providers.find((p) => p.id === id)
-    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null }
+    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null }
     state.providers = [...state.providers.filter((p) => p.id !== id), row]
     return HttpResponse.json(statusOf(id))
   }),
@@ -81,8 +84,15 @@ export const handlers = [
 ]
 
 /** Connect the fake provider as the settings form would, for a test's setup. */
-export function mockConnectProvider(account = 'a') {
-  state.providers = [{ id: FAKE.id, account_label: `Fake account ${account}`, is_default: true, connected_at: now(), last_webhook_at: null }]
+export function mockConnectProvider(account = 'a', currency: string | null = null) {
+  state.providers = [{ id: FAKE.id, account_label: `Fake account ${account}`, is_default: true, connected_at: now(), last_webhook_at: null, last_webhook_error: null, last_webhook_error_at: null, currency }]
+}
+
+/** #5684 — the fake provider's last webhook failed with `error` (connect it first). */
+export function setMockWebhookError(error: NonNullable<ProviderStatus['last_webhook_error']>) {
+  const provider = state.providers.find((p) => p.id === FAKE.id)
+  if (!provider) throw new Error('connect the fake provider first')
+  Object.assign(provider, { last_webhook_error: error, last_webhook_error_at: now() })
 }
 
 /** The fee the fake provider charges on a payment, in minor units. */
@@ -101,7 +111,8 @@ export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid
   const found: PaymentRequestView | undefined = state.paymentRequests.find((r) => r.id === requestId && r.order_id === orderId)
   if (!found?.provider) throw new Error(`no provider request ${requestId}`)
   const provider = state.providers.find((p) => p.id === found.provider)
-  if (provider) provider.last_webhook_at = now()
+  // A webhook that is recorded clears the last failure (`Payments.handle_webhook`, #5684).
+  if (provider) Object.assign(provider, { last_webhook_at: now(), last_webhook_error: null, last_webhook_error_at: null })
   const by = { kind: 'provider' as const, principal: `payment:${found.provider}`, session: null }
   if (kind === 'pending' || kind === 'failed') {
     if (found.status === 'open' || (kind === 'failed' && found.status === 'pending')) {

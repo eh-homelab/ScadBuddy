@@ -45,6 +45,9 @@ describe('OrderPage (#4249)', () => {
     const totals = screen.getByTestId('order-totals')
     expect(totals).toHaveTextContent('30.00')
     expect(totals).toHaveTextContent('35.00')
+    // #4955 step 4: the summary card names each charge on its own line.
+    expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
+    expect(within(totals).getByText('Shipping · Post')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
   })
 
@@ -85,11 +88,20 @@ describe('OrderPage (#4249)', () => {
     await screen.findByRole('heading', { name: 'Cart' })
     expect(screen.getByText(/a storefront visitor/)).toBeInTheDocument()
     expect(screen.getByTestId('order-cart')).toHaveTextContent(/not submitted/)
-    for (const name of ['Accept order', 'Put on hold', 'Cancel order…', 'Add item', 'Add custom item']) {
+    for (const name of ['Accept order', 'Put on hold', 'Cancel order…', 'Add item', 'Add product', 'Add custom item']) {
       expect(screen.queryByRole('button', { name })).toBeNull()
     }
+    // #4955: the row's ⋯ menu offers nothing but the item's details on a cart.
+    await user.click(within(screen.getByTestId('order-item-cart-item')).getByRole('button', { name: 'Row actions' }))
+    expect((await screen.findAllByRole('menuitem')).map((m) => m.textContent)).toEqual(['Open details'])
+    await user.keyboard('{Escape}')
+    // Nor does the row edit the visitor's quantity, price or title.
+    expect(within(screen.getByTestId('order-item-cart-item')).queryByRole('textbox')).toBeNull()
+    expect(within(screen.getByTestId('order-item-cart-item')).queryByRole('button', { name: 'Edit title' })).toBeNull()
     await user.click(within(screen.getByTestId('order-item-cart-item')).getByRole('button', { name: 'Name Keychain' }))
     const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).queryByTestId('item-section-quote')).toBeNull()
+    expect(within(drawer).queryByTestId('item-section-print')).toBeNull()
     expect(within(drawer).queryByRole('region', { name: 'Price' })).toBeNull()
     expect(within(drawer).queryByLabelText(/Price per unit/)).toBeNull()
     expect(within(drawer).queryByTestId('print-item')).toBeNull()
@@ -131,8 +143,8 @@ describe('OrderPage (#4249)', () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     const { user } = render(order.id)
     await screen.findByRole('heading', { name: order.number! })
-    expect(screen.getByText(/Add one with Add item above/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    expect(screen.getByText(/Add one with Add product above/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add product' }))
     const dialog = await screen.findByRole('dialog', { name: 'Add item' })
     await user.type(within(dialog).getByLabelText('Template'), 'maze')
     await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
@@ -142,33 +154,33 @@ describe('OrderPage (#4249)', () => {
     expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
   })
 
-  it('points an empty accepted order at Add item and the custom item row (#5349, #5541)', async () => {
+  it('points an empty accepted order at Add product and the custom item row (#5349, #5541)', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     const row = state.orders.find((o) => o.id === order.id)
     if (row) row.status = 'accepted'
     render(order.id)
     await screen.findByRole('heading', { name: order.number! })
-    expect(screen.getByText('No items yet. Add one with Add item above, or type a custom item below.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Add item' })).toBeInTheDocument()
+    expect(screen.getByText('No items yet. Add one with Add product above, or type a custom item below.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add product' })).toBeInTheDocument()
     // The custom row adds on the after-acceptance route, after a confirm.
     expect(screen.getByRole('button', { name: 'Add custom item' })).toBeInTheDocument()
     expect(screen.getByTestId('custom-item-row')).toBeInTheDocument()
   })
 
-  it('points an empty table at Add item only where there is one', async () => {
+  it('points an empty table at Add product only where there is one', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     await api.cancelOrder(order.id)
     render(order.id)
     await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText('No items.')).toBeInTheDocument()
-    expect(screen.queryByText(/Add one with Add item above/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Add one with Add product above/)).not.toBeInTheDocument()
   })
 
-  it('offers Add item on an accepted order, which asks first and quotes the new item (#5349)', async () => {
+  it('offers Add product on an accepted order, which asks first and quotes the new item (#5349)', async () => {
     const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
     const { user } = render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
-    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    await user.click(screen.getByRole('button', { name: 'Add product' }))
     const dialog = await screen.findByRole('dialog', { name: 'Add item' })
     await user.click(within(dialog).getByRole('button', { name: 'Design request' }))
     await user.type(within(dialog).getByLabelText('Title'), 'Tag 49')
@@ -206,12 +218,12 @@ describe('OrderPage (#4249)', () => {
     expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
   })
 
-  it('offers no Add item on an accepted order on hold', async () => {
+  it('offers no Add product on an accepted order on hold', async () => {
     await api.holdOrder(ORDER_ACCEPTED)
     render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
     expect(await screen.findByRole('button', { name: 'Release hold' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Add item' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add product' })).not.toBeInTheDocument()
   })
 
   describe('a link to a line item (#4693)', () => {

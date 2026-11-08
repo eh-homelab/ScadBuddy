@@ -15,7 +15,9 @@ PaymentRequestKind = Literal["deposit", "balance"]
 #: ``failed``: that payment did not settle. Neither records money.
 PaymentRequestStatus = Literal["open", "pending", "paid", "expired", "cancelled", "failed"]
 #: ``fee``: the provider's fee for a payment it already told, once it is known (#4958).
-ProviderEventKind = Literal["paid", "pending", "failed", "refunded", "expired", "fee", "other"]
+ProviderEventKind = Literal[
+    "paid", "pending", "failed", "refunded", "refund_failed", "expired", "fee", "other"
+]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]
@@ -41,6 +43,14 @@ class PaymentRequestView(PaymentRequest):
     link_error: str | None
     payment_id: str | None
     created_by: Actor
+    #: #5700: the request was closed here (a cancel, or a payment that is not the page's
+    #: own) and the provider has not yet confirmed that its page is closed. The
+    #: housekeeping sweep tries again until it does.
+    close_pending_at: datetime | None = None
+    #: The sweep stopped trying: the first try, at or after the
+    #: `payments.store.CLOSE_GIVE_UP_ATTEMPTS`th, that found the provider not connected.
+    #: Close the page at the provider.
+    close_abandoned_at: datetime | None = None
 
 
 class ProviderEvent(BaseModel):
@@ -57,6 +67,8 @@ class ProviderEvent(BaseModel):
     #: When the provider made the event (#4958): how long a ``fee`` that arrived
     #: before its payment is sent back for a retry (``Lifecycle._late_fee``).
     created_at: datetime | None = None
+    #: A ``refund_failed`` event's: the event id of the refund it reverses (#5681).
+    reverses: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class HostedRequest(BaseModel):

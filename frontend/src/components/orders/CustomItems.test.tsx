@@ -52,7 +52,7 @@ describe('custom line items', () => {
     const row = await screen.findByTestId(`order-item-${item.id}`)
     expect(within(row).getByRole('img', { name: 'Design work is a custom item' })).toHaveTextContent('Custom')
     expect(within(row).getByText('SKU DES-1')).toBeInTheDocument()
-    expect(within(row).getAllByRole('cell')[5]).toHaveTextContent('$50.00')
+    expect(within(row).getAllByRole('cell')[6]).toHaveTextContent('$50.00')
     expect(within(row).queryByText('not accepted')).not.toBeInTheDocument()
     // The row clears for the next one.
     expect(screen.getByRole('textbox', { name: 'Custom item title' })).toHaveValue('')
@@ -179,7 +179,7 @@ describe('custom line items', () => {
     await user.type(price, '7.5{Enter}')
     await waitFor(() => expect(updated).toHaveBeenCalledWith(ORDER_DRAFT, item.id, { unit_price_minor: 750 }))
     expect(quoted).not.toHaveBeenCalled()
-    await waitFor(() => expect(within(screen.getByTestId(`order-item-${item.id}`)).getAllByRole('cell')[5]).toHaveTextContent('$7.50'))
+    await waitFor(() => expect(within(screen.getByTestId(`order-item-${item.id}`)).getAllByRole('cell')[6]).toHaveTextContent('$7.50'))
   })
 
   it('edits a custom item in its drawer, with no slice quote and no inputs', async () => {

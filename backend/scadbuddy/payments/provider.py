@@ -1,6 +1,7 @@
 """The provider seam (#4957): what a payment provider must offer ScadBuddy. A provider
-adapter (the fake one, Stripe's in ``stripe.py``) holds no state; the shop's credential comes
-in with each call."""
+adapter (the fake one, Stripe's in ``stripe.py``, PayPal's in ``paypal.py``, Square's in
+``square.py``) holds no state but PayPal's in-memory access token (#4959); the shop's
+credential comes in with each call."""
 
 from __future__ import annotations
 
@@ -30,6 +31,16 @@ class ProviderField(BaseModel):
     secret: bool
 
 
+class Verified(BaseModel):
+    """What a provider's check of the credential says: the account label for "Connected
+    as ...", and the one currency the account takes payments in when it has one (#5666: a
+    Square location's). ``Payments.connect`` refuses an account whose currency is not the
+    shop's ``orders_currency``; None is an account that takes any."""
+
+    account_label: str
+    currency: str | None = None
+
+
 class BadSignatureError(Exception):
     """A webhook whose signature does not match. Nothing of it was read."""
 
@@ -55,8 +66,9 @@ class PaymentProvider(Protocol):
     label: str
     fields: Sequence[ProviderField]
 
-    async def verify(self, credential: Credential) -> str:
-        """Check the credential; the account label for "Connected as ..."."""
+    async def verify(self, credential: Credential) -> Verified:
+        """Check the credential; the account label for "Connected as ..." and the
+        account's currency, when it has one."""
         ...
 
     async def create_request(

@@ -722,3 +722,86 @@ def test_only_the_revision_writer_sets_an_items_design() -> None:
         for name in _callers(path, "set_design")
     }
     assert callers == {("orders/lifecycle.py", "_revise")}
+
+
+# -- deposits, waivers and auto tax (#5281) ---------------------------------------------
+
+
+def test_replacing_the_charges_keeps_the_auto_tax_row(rows: OrderStore) -> None:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        rows.set_auto_tax(conn, order.id, label="Tax, 10 %", amount_minor=100)
+        rows.replace_charges(
+            conn,
+            order.id,
+            [ChargeInput(kind="shipping", label="Post", amount_minor=500, shipping_option_id="p")],
+        )
+        charges = rows.charges(order.id, conn=conn)
+        assert [(c.kind, c.auto, c.amount_minor, c.shipping_option_id) for c in charges] == [
+            ("shipping", False, 500, "p"),
+            ("tax", True, 100, None),
+        ]
+        rows.replace_charges(conn, order.id, [])
+        assert [(c.kind, c.auto) for c in rows.charges(order.id, conn=conn)] == [("tax", True)]
+
+
+def test_the_auto_tax_row_is_set_moved_and_deleted(rows: OrderStore) -> None:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        rows.replace_charges(
+            conn, order.id, [ChargeInput(kind="fee", label="Rush", amount_minor=1)]
+        )
+        rows.set_auto_tax(conn, order.id, label="Tax", amount_minor=100)
+        rows.set_auto_tax(conn, order.id, label="Tax, 8.25 %", amount_minor=83)
+        auto = [c for c in rows.charges(order.id, conn=conn) if c.auto]
+        assert [(c.label, c.amount_minor) for c in auto] == [("Tax, 8.25 %", 83)]
+        rows.set_auto_tax(conn, order.id, label="Tax", amount_minor=None)
+        assert [c.kind for c in rows.charges(order.id, conn=conn)] == ["fee"]
+
+
+def test_the_deposit_fields_set_only_what_is_given(rows: OrderStore) -> None:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    assert (order.deposit_minor, order.deposit_waived_reason) == (None, None)
+    with rows.transaction() as conn:
+        got = rows.set_deposit_fields(conn, order.id, deposit_minor=2000)
+        assert (got.deposit_minor, got.deposit_waived_reason, got.balance_waived_reason) == (
+            2000,
+            None,
+            None,
+        )
+        got = rows.set_deposit_fields(conn, order.id, deposit_waived_reason="Known customer")
+        assert (got.deposit_minor, got.deposit_waived_reason) == (2000, "Known customer")
+        got = rows.set_deposit_fields(
+            conn, order.id, deposit_minor=None, balance_waived_reason="Paid at the door"
+        )
+        assert (got.deposit_minor, got.balance_waived_reason) == (None, "Paid at the door")
+
+
+def test_accepted_before_counts_only_the_customers_other_accepted_orders(
+    rows: OrderStore,
+) -> None:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    other = rows.insert_customer(
+        display_name="Bob", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    first = make_order(rows, customer.id)
+    second = make_order(rows, customer.id)
+    theirs = make_order(rows, other.id)
+    with rows.transaction() as conn:
+        rows.set_order_status(conn, theirs.id, "accepted")
+        assert not rows.accepted_before(conn, customer.id, first.id)
+        rows.set_order_status(conn, first.id, "accepted")
+        # an order is never its own "before"
+        assert not rows.accepted_before(conn, customer.id, first.id)
+        assert rows.accepted_before(conn, customer.id, second.id)

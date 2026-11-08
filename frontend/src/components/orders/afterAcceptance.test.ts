@@ -1,21 +1,15 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { OrderStatus } from '../../api/types'
 import { addMode, afterAcceptanceWarning, chargesWarning, itemOpen, OPEN_FOR_EDITS, partlyFulfilled, priceOpen, reviseMode, reviseWarning, TAKES_ITEMS } from './afterAcceptance'
+import { readSpec } from '../../test/spec'
 
 type Extension = 'x-open-for-edits' | 'x-takes-items'
 
 /** One of the state sets the spec `pnpm gen:api` (run before `pnpm test`) exported carries
  * on `Order.status`: the backend's own (`orders/models.py`), read, not restated. */
 function specStates(extension: Extension): string[] {
-  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch (cause) {
-    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
-  }
-  const spec = JSON.parse(text) as {
+  const { json, path } = readSpec()
+  const spec = json as {
     components?: { schemas?: { Order?: { properties?: { status?: Partial<Record<Extension, unknown>> } } } }
   }
   const states = spec.components?.schemas?.Order?.properties?.status?.[extension]

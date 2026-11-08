@@ -6,7 +6,7 @@ import pytest
 
 from scadbuddy.payments.fake import FAKE, SIGNATURE_HEADER, sign, signed_event
 from scadbuddy.payments.models import ProviderEvent
-from scadbuddy.payments.provider import BadSignatureError, Credential
+from scadbuddy.payments.provider import BadSignatureError, Credential, Verified
 from scadbuddy.payments.registry import providers
 
 CRED = Credential(settings={"account": "a"}, secrets={"signing_secret": "s3cret"})
@@ -59,7 +59,7 @@ async def test_verify_and_create_request() -> None:
     from scadbuddy.orders.models import Actor
     from scadbuddy.payments.models import PaymentRequestView
 
-    assert await FAKE.verify(CRED) == "Fake account a"
+    assert await FAKE.verify(CRED) == Verified(account_label="Fake account a")
     view = PaymentRequestView(
         id="r1", order_id="o1", kind="deposit", provider="fake", amount_minor=500,
         currency="USD", hosted_url=None, status="open", created_at=datetime.now(UTC),
@@ -82,3 +82,14 @@ async def test_the_fake_sends_the_slow_money_kinds(kind: str) -> None:
     """#4958: dev runs drive a pending, a failed and a late fee through the fake."""
     body, headers = signed_event("s3cret", {"id": "e9", "type": kind, "provider_ref": "fake_r1"})
     assert (await FAKE.parse_webhook(CRED, headers, body)).kind == kind
+
+
+async def test_the_fake_sends_a_failed_refund() -> None:
+    """#5681: dev runs reverse a refund through the fake."""
+    body, headers = signed_event(
+        "s3cret",
+        {"id": "e10", "type": "refund_failed", "provider_ref": "fake_r1", "currency": "USD",
+         "reverses": "e8"},
+    )  # fmt: skip
+    event = await FAKE.parse_webhook(CRED, headers, body)
+    assert (event.kind, event.reverses) == ("refund_failed", "e8")
