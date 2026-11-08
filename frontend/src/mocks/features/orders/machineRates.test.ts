@@ -65,4 +65,11 @@ describe('machine rate mock (#4625)', () => {
     expect(quote.lines.find((l) => l.kind === 'machine_time')?.label).toMatch(/at 2 per hour/)
     expect(quote.lines.filter((l) => l.label.startsWith('Support, '))).toHaveLength(1)
   })
+
+  it('prices a quote naming only a Bambuddy printer at its linked registry printer, as for_quote does', async () => {
+    await api.setMachineRate(LINKED, { profile: { watts: '1000', kwh_price: '3' }, wear_parts: [], maintenance: [] })
+    const quote = await api.quoteItem(ORDER_DRAFT, ITEM_DRAFT, { ...DIALOG, filaments: { '0': FILAMENT_PLA, '1': FILAMENT_PETG } })
+    expect(quote.printer).toBe(LINKED)
+    expect(quote.machine_rate_breakdown?.rate_per_hour).toBe('3')
+  })
 })

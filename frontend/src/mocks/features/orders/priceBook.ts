@@ -167,14 +167,14 @@ export function pricePlates(
 function priced(
   colours: { slot: number; filament_id?: string | null }[],
   currency: string,
-  request: Pick<SliceQuoteRequest, 'printer' | 'support_filaments'> = {},
+  request: Pick<SliceQuoteRequest, 'printer' | 'printer_id' | 'support_filaments'> = {},
 ): Omit<Quote, 'id' | 'order_item_id' | 'created_at' | 'accepted' | 'quantity' | 'total_minor' | 'created_by'> {
   const support = request.support_filaments ?? {}
   const filaments = [
     ...colours.map((colour, index) => ({ slot: colour.slot, used_g: MOCK_SLICE.grams[index] ?? 1 })),
     ...Object.keys(support).map((slot) => ({ slot: Number(slot), used_g: MOCK_SLICE.grams[Number(slot)] ?? 1 })),
   ]
-  const rate = machineRateFor(request.printer)
+  const rate = machineRateFor(request.printer, request.printer_id)
   const sha = 'b'.repeat(64)
   return {
     source: 'slice',

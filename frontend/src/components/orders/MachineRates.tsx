@@ -139,7 +139,9 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const current = draft ?? (view.data ? draftOf(view.data) : null)
-  const bambuddyTasks = (view.data?.breakdown.maintenance ?? []).filter((m) => m.why !== 'not_in_bambuddy').map((m) => m.task)
+  // Bambuddy's own task names, only from a read of Bambuddy itself: a stored read lists ours.
+  const breakdown = view.data?.breakdown
+  const bambuddyTasks = breakdown?.intervals === 'bambuddy' ? (breakdown.maintenance ?? []).filter((m) => m.why !== 'not_in_bambuddy').map((m) => m.task) : []
 
   function edit(change: (was: Draft) => Draft) {
     if (current) setDraft(change(current))

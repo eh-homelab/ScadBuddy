@@ -52,7 +52,14 @@ describe('MachineRates (#4625)', () => {
   })
 
   it("takes a linked printer's intervals from Bambuddy and says which tasks are not counted", async () => {
-    await api.setMachineRate(LINKED, { profile: { labour_rate_per_hour: '30' }, wear_parts: [], maintenance: [{ task: 'Lubricate rails', minutes: '20', consumables: '2' }] })
+    await api.setMachineRate(LINKED, {
+      profile: { labour_rate_per_hour: '30' },
+      wear_parts: [],
+      maintenance: [
+        { task: 'Lubricate rails', minutes: '20', consumables: '2' },
+        { task: 'Wipe the camera', minutes: '1', consumables: '0' },
+      ],
+    })
     const { user } = renderPage(<MachineRates />)
     await user.click(await screen.findByRole('button', { name: 'Machine rate of 3DP-31B-598' }))
     const panel = await screen.findByRole('region', { name: 'Machine rate of 3DP-31B-598' })
@@ -63,6 +70,9 @@ describe('MachineRates (#4625)', () => {
     // Its interval is Bambuddy's: none is typed here.
     const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
     expect(within(task).queryByLabelText('Every (h)')).toBeNull()
+    // The names offered are Bambuddy's own, never a task it does not track.
+    const offered = [...document.querySelectorAll(`#bambuddy-tasks-${LINKED} option`)].map((o) => o.getAttribute('value'))
+    expect(offered).toEqual(['Lubricate rails', 'Clean build plate', 'Check belts'])
   })
 
   it('says what to fix before it saves', async () => {

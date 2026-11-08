@@ -266,6 +266,12 @@ Once the printer is unlinked, the intervals sent with its inputs are kept as typ
 - Bambuddy unreachable: the quote uses the last stored intervals and says so in the
   breakdown **(call)**.
 - Settings → Pricing gets a per-printer "Machine rate" panel showing each part of the sum.
+  **As built (#5759):** the panel is under Settings → Orders, "Machine rate per printer"
+  (`frontend/src/components/orders/MachineRates.tsx`): each physical registry printer, its
+  inputs edited whole (a linked printer's intervals are Bambuddy's, so none is typed) and
+  the rate with each part. A slice quote shows the rate it was priced at
+  (`QuoteEditor.tsx`), and the quote dialog takes a support slot's filament (§6.3,
+  `QuoteFilaments.tsx`).
 
 ### 6.3 Support material
 

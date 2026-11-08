@@ -110,9 +110,25 @@ function compute(row: PrinterRow, kept: MachineRateInputs | undefined): MachineR
   }
 }
 
-/** The rate a slice quote for `printer` is priced at; null when it names no registry printer. */
-export function machineRateFor(printer: string | null | undefined): MachineRateBreakdown | null {
-  const row = printersState().find((p) => p.id === printer)
+/**
+ * The rate a slice quote is priced at, for the printer it names, as `MachineRates.for_quote`
+ * resolves it: the registry printer named, else the one linked to the Bambuddy printer named,
+ * else the configured default printer. Null for none (the book's rate prices it), and for a
+ * named row gone with no Bambuddy printer beside it.
+ */
+export function machineRateFor(printer: string | null | undefined, printerId?: number | null): MachineRateBreakdown | null {
+  const rows = printersState()
+  const byBambuddy = (id: number | null | undefined) => (id == null ? undefined : rows.find((p) => p.bambuddy_printer_id === id))
+  let row: PrinterRow | undefined
+  if (printer != null) {
+    row = rows.find((p) => p.id === printer)
+    if (!row && printerId == null) return null
+  }
+  if (!row && printerId != null) row = byBambuddy(printerId)
+  else if (!row) {
+    const settings = mockSettings()
+    row = settings.printer_id != null ? byBambuddy(settings.printer_id) : rows.find((p) => p.id === settings.default_printer)
+  }
   return row ? compute(row, inputs.get(row.id)) : null
 }
 
