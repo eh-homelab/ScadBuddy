@@ -1007,6 +1007,12 @@ describe('pricing tools (#4250)', () => {
     expect(line).toContain('without supports')
     expect(line).toContain('without a prime tower')
     expect(line).toContain('by object')
+    // #4673 PR 2: no choices or spools at all prints the accepted quote's whole setup.
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM }, ctx())
+    expect(body).toEqual({})
+    expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM } as never)).toContain(
+      "with its slice quote's print setup (refused when the quote records none)",
+    )
   })
 
   it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {

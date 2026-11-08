@@ -51,6 +51,7 @@ from scadbuddy.flows.definitions import ScriptMissingError
 from scadbuddy.flows.grants import GrantSpec, GrantStatus, validate_rules
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
 from scadbuddy.flows.models import Definition
+from scadbuddy.orders.builtin_flow import move_after_approval
 from scadbuddy.workflows.flow_triggers import (
     delete_trigger_schedule,
     ensure_trigger_schedule,
@@ -485,6 +486,9 @@ async def attach_flow_trigger_grant(
     view = _grant_view(grant)
     if view is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such trigger.")
+    if browser:
+        # #4673: a built-in trigger left behind for want of a grant moves now.
+        await move_after_approval(triggers.flows.definitions, triggers.store, trigger)
     return view
 
 
@@ -549,6 +553,9 @@ async def approve_flow_trigger_grant(
     view = _grant_view(approved)
     if view is None:
         raise _no_grant()
+    if approved is not None and approved.status == "approved":
+        trigger = await _load(triggers, trigger_id)
+        await move_after_approval(triggers.flows.definitions, triggers.store, trigger)
     return view
 
 

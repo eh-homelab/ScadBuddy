@@ -1,12 +1,18 @@
 """The built-in `order-fulfilment` flow (#4252, orders spec §7.2).
 
-The orders component registers it at start as version 1 of an ordinary flow, only when
-no flow of that name has ever had a version (`FlowDefinitions.register_new`): the shop
-edits it into version 2 or deletes it, and a later build never rewrites it (a new
-built-in is a new name). It runs on an `order.changed` trigger the shop makes, matched
-to `accepted`, with a standing grant naming `queue_print`, `order_item_fulfil` and
-`order_attach` (an agent call's grant only narrows the run's); nothing here makes that
-trigger or approves that grant.
+The orders component registers it at start as version 1 of an ordinary flow when no
+flow of that name has ever had a version (`FlowDefinitions.register_new`). While the
+newest version is still the built-in's own, a build with another script adds it as a new
+version (#4673, `_upgraded`); once the shop edits it or deletes it, no build rewrites it.
+A trigger pins its version, so each trigger of an older built-in version then moves to the
+new one, its approved grant kept, only when the grant admits every call the new script
+makes that its version did not; any other trigger stays, with :data:`NEWER_NOTICE`
+(`move_triggers`). The built-in is ScadBuddy's own code in the image, and it never gets
+more than the shop approved.
+It runs on an `order.changed` trigger the shop makes, matched to `accepted`,
+with a standing grant naming `queue_print`, `order_item_fulfil` and `order_attach` (an
+agent call's grant only narrows the run's); nothing here makes that trigger or approves
+that grant.
 
 A print refused `requote_needed` (the accepted quote's sliced file is gone or changed)
 asks a person and never re-quotes: on an accepted order a new quote is open only after a
@@ -18,9 +24,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from datetime import UTC, datetime
 from typing import Any
 
+from scadbuddy.flow_triggers.models import Trigger
+from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.flows.grants import GrantRule
+from scadbuddy.flows.repository import FlowCommit
 from scadbuddy.flows.typecheck import check_script
 
 logger = logging.getLogger(__name__)
@@ -35,6 +47,14 @@ DESCRIPTION = (
 )
 #: Who registered it: the build, never a person or an agent.
 AUTHOR: dict[str, Any] = {"kind": "builtin", "name": NAME}
+#: Shown on a trigger of an older built-in version that the upgrade did not move.
+NEWER_NOTICE = (
+    "A newer built-in flow exists: move this trigger to the newest version and approve its"
+    " grant to use it."
+)
+#: A script's calls a grant can admit (`flows/grants.py` `HostFn`), and `agent(`, which
+#: no rule admits: `queue_print(...)`, `arrange(...)`, `tool("<name>", ...)`.
+_CALL = re.compile(r"""\b(queue_print|arrange|agent)\s*\(|\btool\(\s*["']([A-Za-z0-9_]+)["']""")
 
 INPUTS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -107,7 +127,12 @@ async def print_request(item):
     """The print dialog's body for `item`: its model's (or file's) remembered choices,
     the dialog's defaults otherwise. Its spools are filled from the item's filaments. A
     library file's choices come from the library that serves, Bambuddy's or ScadBuddy's
-    own (`api/library_print.py` `get_library_choices`)."""
+    own (`api/library_print.py` `get_library_choices`). An accepted quote that records its
+    print setup (#4673) prints with it, so nothing is sent or read: other choices than the
+    quote's are `requote_needed`."""
+    accepted = [quote for quote in item.get("quotes") or [] if quote.get("accepted")]
+    if accepted and accepted[0].get("choices") is not None:
+        return {}
     if item.get("library_file") is not None:
         source = {"library_file_id": item["library_file"]["id"]}
     else:
@@ -284,16 +309,31 @@ asyncio.run(main())
 '''
 
 
-async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
-    """Register version 1 of the built-in when the name never had a version; whether it
-    did. A failure is logged: the app starts either way, and the next start tries again.
-    Without the flows' repository there is nowhere to put it."""
+async def ensure_builtin_flow(
+    definitions: FlowDefinitions, triggers: TriggerStore | None = None
+) -> bool:
+    """Register version 1 of the built-in when the name never had a version, or this
+    build's script as a new version when the newest is still an unedited built-in one
+    with another script (#4673: an install that registered an older built-in); whether it
+    wrote one. A person's version, or a deleted flow, stands. A trigger pins its version,
+    so with ``triggers`` each trigger of an older built-in version then moves to the
+    newest, or gets :data:`NEWER_NOTICE` (:func:`move_triggers`). A failure is logged: the
+    app starts either way, and the next start tries again. Without the flows' repository
+    there is nowhere to put it."""
     if not definitions.history.available:
         return False
     try:
-        # The usual start: the name has versions, so nothing to check or write.
-        # `register_new`'s locked check stays the guard (review of #5682).
-        if await asyncio.to_thread(definitions.history.versions, NAME):
+        # The usual start: the name has versions, so nothing to write unless the newest
+        # is an older built-in. `register_new`'s locked check stays the guard (review of
+        # #5682).
+        versions = await asyncio.to_thread(definitions.history.versions, NAME)
+        if versions:
+            upgraded = await _upgraded(definitions, versions[0])
+            if triggers is not None:
+                # Every start, so a start that stopped between the two still moves them.
+                await move_triggers(definitions, triggers)
+            if upgraded:
+                return True
             logger.info("the built-in %s flow was not registered: the name has versions", NAME)
             return False
         # The check a registration route applies (review of #5682): a build whose script
@@ -325,3 +365,118 @@ async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
         )
         return False
     return True
+
+
+async def _upgraded(definitions: FlowDefinitions, newest: FlowCommit) -> bool:
+    """This build's script as a new version over ``newest`` when it is the built-in's own
+    (`BUILTIN_TRAILER`), not deleted, and another script; whether it wrote one. Checked
+    again under the history's write lock (``expect_head``), so replicas starting together
+    write it once."""
+    if newest.builtin != NAME:
+        return False
+    state = await asyncio.to_thread(definitions.states.state, NAME)
+    if state.deleted_at is not None:
+        return False
+    script = await asyncio.to_thread(definitions.history.script_at, NAME, newest.commit)
+    if script == SCRIPT:
+        return False
+    if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
+        logger.error(
+            "the built-in %s flow does not type-check; not upgraded",
+            NAME,
+            extra={"problems": len(problems)},
+        )
+        return False
+    made = await definitions.upgrade_builtin(
+        NAME,
+        SCRIPT,
+        AUTHOR,
+        head=newest.commit,
+        inputs_schema=INPUTS_SCHEMA,
+        message="Update the built-in order-fulfilment flow",
+    )
+    return made is not None
+
+
+def script_calls(script: str) -> set[tuple[str, str | None]]:
+    """The grant-relevant calls ``script`` makes, as ``(fn, tool)``: ``tool`` only for a
+    ``tool("<name>", ...)`` call."""
+    return {
+        ("tool", match[2]) if match[2] else (match[1], None) for match in _CALL.finditer(script)
+    }
+
+
+def _admitted(call: tuple[str, str | None], rules: list[GrantRule]) -> bool:
+    fn, tool = call
+    return any(rule.fn == fn and (fn != "tool" or rule.tool in (None, tool)) for rule in rules)
+
+
+async def move_triggers(definitions: FlowDefinitions, triggers: TriggerStore) -> int:
+    """Move each trigger of the built-in's older, unedited versions to its newest (#4673),
+    keeping the approved standing grant, when all of these hold: the newest version is
+    the built-in's own; the trigger runs a version the built-in registered; its grant is
+    approved and in force; and each call the new script makes that its version's did not
+    is one the grant admits by function and tool (`agent(` never is). The bounds the rules
+    set still apply to every call. A trigger left behind gets :data:`NEWER_NOTICE`, only
+    while it still runs the version read (another replica or a person may have moved it
+    meanwhile); a trigger on the newest loses any notice. A person moves one, which
+    returns its grant to `requested`. Every trigger of the flow is the shop's: a build
+    makes none. How many moved."""
+    versions = await asyncio.to_thread(definitions.history.versions, NAME)
+    if not versions or versions[0].builtin != NAME:
+        return 0
+    newest = versions[0]
+    builtin = {v.version_id: v for v in versions if v.builtin == NAME}
+    calls = script_calls(
+        await asyncio.to_thread(definitions.history.script_at, NAME, newest.commit)
+    )
+    moved = 0
+    for trigger in await triggers.list_triggers(name=NAME, limit=None):
+        if trigger.definition_id == newest.version_id:
+            if trigger.notice is not None:
+                await triggers.set_notice(trigger.id, None, newest.version_id)
+            continue
+        if await _move(definitions, triggers, trigger, builtin, newest, calls):
+            moved += 1
+        else:
+            await triggers.set_notice(trigger.id, NEWER_NOTICE, trigger.definition_id)
+    if moved:
+        logger.info("moved %d trigger(s) to the built-in %s flow's newest version", moved, NAME)
+    return moved
+
+
+async def move_after_approval(
+    definitions: FlowDefinitions, triggers: TriggerStore, trigger: Trigger
+) -> None:
+    """After a person approves ``trigger``'s grant: when it is the built-in flow's, move
+    its triggers now (:func:`move_triggers`), not only at the API's next start (#5732
+    review). A failure is logged; the approval stands either way."""
+    if trigger.name != NAME or not definitions.history.available:
+        return
+    try:
+        await move_triggers(definitions, triggers)
+    except Exception:
+        logger.exception("could not move the built-in %s flow's triggers", NAME)
+
+
+async def _move(
+    definitions: FlowDefinitions,
+    triggers: TriggerStore,
+    trigger: Trigger,
+    builtin: dict[str, FlowCommit],
+    newest: FlowCommit,
+    calls: set[tuple[str, str | None]],
+) -> bool:
+    old = builtin.get(trigger.definition_id)
+    if old is None:
+        return False  # a person's version
+    grant = await triggers.current_grant(trigger.id)
+    if grant is None or not grant.in_force(datetime.now(UTC)) or grant.approval_id is None:
+        return False
+    before = script_calls(await asyncio.to_thread(definitions.history.script_at, NAME, old.commit))
+    if not all(_admitted(call, grant.spec.rules) for call in calls - before):
+        return False
+    made = await triggers.move_builtin(
+        trigger.id, trigger.definition_id, newest.version_id, grant.approval_id, AUTHOR
+    )
+    return made is not None

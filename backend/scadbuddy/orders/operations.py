@@ -60,7 +60,15 @@ from scadbuddy.orders.bambuddy import (
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
-from scadbuddy.orders.printing import print_check, print_item, sent_setup, test_print_check
+from scadbuddy.orders.printing import (
+    ItemPrintRequest,
+    print_check,
+    print_item,
+    quoted_path_refusal,
+    sent_keys,
+    sent_setup,
+    test_print_check,
+)
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import item_project
 from scadbuddy.orders.quote import (
@@ -354,6 +362,18 @@ class _Renders:
         return self.core.render.store.read(job_id)
 
 
+def filled(sent: Mapping[str, Any], setup: Mapping[str, Any] | None) -> dict[str, Any]:
+    """An item print's request (its operation's ``request``, dumped with
+    ``exclude_unset``) with each part of the quote's print setup it left out (#4673,
+    ``printing.quoted_setup``; a null one stays out, as the request's default). A null
+    ``choices`` or ``filament_plan`` sent is left out (``printing.sent_keys``)."""
+    kept = sent_keys(sent)
+    quoted = {
+        key: value for key, value in (setup or {}).items() if key not in kept and value is not None
+    }
+    return {**quoted, **{key: value for key, value in sent.items() if key in kept}}
+
+
 def print_body(
     request: Mapping[str, Any],
     copies: int,
@@ -369,16 +389,11 @@ def print_body(
     place of any project or folder the request named; ``filament_plan`` the check's
     filled plan (§5.4 "Spools"), in place of the request's. ``part_settings`` are the
     quote's settings per slot (#5571), which a request that sends none prints with, so
-    the print slices what the quote priced; ``setup`` the quote's tower, supports and
-    sequence (#4673, ``printing.quoted_setup``), each taken when the request sent none."""
-    quoted = {
-        key: value
-        for key, value in (setup or {}).items()
-        if key not in request["request"] and value is not None
-    }
+    the print slices what the quote priced; ``setup`` the quote's print setup and spools
+    (#4673, ``printing.quoted_setup``), each taken when the request sent none
+    (:func:`filled`)."""
     body: dict[str, Any] = {
-        **quoted,
-        **request["request"],
+        **filled(request["request"], setup),
         "copies": copies,
         "all_plates": True,
         "plate_ids": None,
@@ -533,7 +548,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         ``test_print_check``, when the request names its ``revision_id``), then the
         printer the run would refuse, as a quote's check refuses it."""
         orders = components.get(ORDERS)
-        body = PrintRunRequest.model_validate(request["request"])
+        sent = request["request"]
+        # Validated once (#5720 review): choices and spools may be the quote's (#4673).
+        asked = ItemPrintRequest.model_validate(sent)
+        setup = sent_setup(asked, sent_keys(sent))
         revision_id = request.get("revision_id")
         if revision_id is not None:
             checked = await test_print_check(
@@ -545,8 +563,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 revision_id,
                 schema_of=lambda reference: reference_schema(core, reference),
                 by=Actor.model_validate(request["by"]),
-                part_settings=dumped(body.part_settings),
-                setup=sent_setup(request["request"]),
+                part_settings=dumped(asked.part_settings),
+                setup=setup,
             )
         else:
             checked = await print_check(
@@ -557,9 +575,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 request["item_id"],
                 schema_of=lambda reference: reference_schema(core, reference),
                 library=served_library(),
-                part_settings=dumped(body.part_settings),
-                setup=sent_setup(request["request"]),
+                part_settings=dumped(asked.part_settings),
+                setup=setup,
             )
+        # The request as it prints: what it left out is the quote's (`_same_setup` passed).
+        body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))
+        native = await native_run(body)
+        if body.path == "native" and "path" not in sent_keys(sent) and not native:
+            raise quoted_path_refusal(request["item_id"])
         if body.printer is not None:
             settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
@@ -568,7 +591,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
         # so a refusal writes nothing, and recorded with it so a retry keys its run as
         # the first try did. On the native path the plan is the request's.
-        if not await native_run(body):
+        if not native:
             printer_id = body.printer_id
             if printer_id is None and body.printer is not None:
                 row = await asyncio.to_thread(components.get(PRINTERS).store.get, body.printer)
@@ -604,15 +627,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             return False
         return route.native
 
-    async def item_project_of(request: dict[str, Any]) -> int | None:
+    async def item_project_of(request: dict[str, Any], body: PrintRunRequest) -> int | None:
         """The item's Bambuddy project (§8.1), ensured before anything is claimed, so a
         retry's run is keyed as its first try's; None without Bambuddy, and for a print
-        on the native path, which files under no project. Bambuddy failing to make it is
-        a 503 the operation tries again."""
+        on the native path (``body``'s, the quote's setup filled in), which files under
+        no project. Bambuddy failing to make it is a 503 the operation tries again."""
         orders = components.get(ORDERS)
         if not orders.integrations.linked:
             return None
-        body = PrintRunRequest.model_validate(request["request"])
         settings = await asyncio.to_thread(core.settings_store.load)
         if native_backends(settings):
             printers = components.get(PRINTERS)
@@ -662,14 +684,16 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         else:
             assert output_id is not None
             subject = PrintSubject.output(output_id)
-        project_id = await item_project_of(request)
-        store = components.get(ORDERS).store
         # The check's filled plan (§5.4 "Spools"); one checked before it has none.
         plan = checked.get("filament_plan")
         # The quote's settings per slot (#5571); one checked before #5571 has none.
         quoted_settings = checked.get("part_settings")
-        # The quote's tower, supports and sequence (#4673); one checked before has none.
+        # The quote's print setup and spools (#4673); one checked before has less or none.
         setup = checked.get("setup")
+        project_id = await item_project_of(
+            request, PrintRunRequest.model_validate(filled(request["request"], setup))
+        )
+        store = components.get(ORDERS).store
 
         async def keyed() -> tuple[bool, list[int | None]]:
             """Whether the claim recorded its project, and the projects its run may be

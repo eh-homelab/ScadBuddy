@@ -1074,8 +1074,14 @@ What this relies on, and what the design adds for it:
   order and the customer and answers the template's text addressed to the customer's
   primary contacts, `sent: false`, for a person to send. Sending through a plugin is
   #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
-  `notify` and `settle_hours`), registered at start only when its name never had a version
-  (`FlowDefinitions.register_new`), so a person's edit or delete stands;
+  `notify` and `settle_hours`), registered at start when its name never had a version
+  (`FlowDefinitions.register_new`), and as a new version when the newest is still an
+  unedited built-in one with another script (#4673), so a person's edit or delete stands.
+  A trigger pins its version: each trigger of an older built-in version moves to the new
+  one, its approved grant kept, only when that grant admits every call the new script
+  makes that its version did not; any other trigger stays, with the notice "A newer
+  built-in flow exists: move this trigger to the newest version and approve its grant to
+  use it.";
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
   and on a refusal (`order_on_hold`, `requote_needed`, any other), or print choices it
   cannot read (no output, or one gone), asks a person with

@@ -29,6 +29,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.orders.archives import mirror_run
@@ -169,12 +170,15 @@ def _build(core: Core, components: Components) -> OrdersComponent:
 
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
-    # §7.2: the built-in flow, once, when its name never had a version. Beside the start,
+    # §7.2: the built-in flow, when its name never had a version or its newest is an
+    # unedited older built-in (#4673). Beside the start,
     # so a slow flows repository delays nothing (review of #5682).
     registering: asyncio.Task[bool] | None = None
     if orders.flows is not None and orders.core.settings.orders_builtin_flow:
         registering = asyncio.create_task(
-            ensure_builtin_flow(orders.flows), name="register built-in flow"
+            # #4673: its triggers, on the pool `FLOW_TRIGGERS` uses, move with an upgrade.
+            ensure_builtin_flow(orders.flows, TriggerStore(orders.core.projection.pool)),
+            name="register built-in flow",
         )
     # The print path's follow (#4719): an item follows the print its attempt started.
     # §8.2: a settled print's attempt copies its Bambuddy archives.
