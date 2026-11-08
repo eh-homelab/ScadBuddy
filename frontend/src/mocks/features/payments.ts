@@ -18,7 +18,11 @@ const FAKE = {
     { name: 'account', label: 'Account', secret: false },
     { name: 'signing_secret', label: 'Signing secret', secret: true },
   ],
+  /** As `payments/fake.py`: its account takes any currency (#5666). */
+  reports_currency: false,
 }
+/** The mocked provider, for tests that read what it declares. */
+export const FAKE_PROVIDER = FAKE
 
 /** Whether `SCADBUDDY_SECRET_KEY_FILE` is set (`KekMissingError`). */
 let kek = true
@@ -41,7 +45,7 @@ function statusOf(id: string): ProviderStatus {
     last_webhook_error: connected?.last_webhook_error ?? null,
     last_webhook_error_at: connected?.last_webhook_error_at ?? null,
     currency: connected?.currency ?? null,
-    reports_currency: connected?.reports_currency ?? false,
+    reports_currency: connected?.reports_currency ?? FAKE.reports_currency,
   }
 }
 
@@ -62,7 +66,7 @@ export const handlers = [
     if (!kek) return problem(request, 409, 'payment credentials need SCADBUDDY_SECRET_KEY_FILE', PROBLEMS + 'kek_missing')
     // The first provider connected is the default (`is_default`, at most one row).
     const was = state.providers.find((p) => p.id === id)
-    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null, reports_currency: false }
+    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null, reports_currency: FAKE.reports_currency }
     state.providers = [...state.providers.filter((p) => p.id !== id), row]
     return HttpResponse.json(statusOf(id))
   }),

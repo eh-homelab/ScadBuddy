@@ -181,6 +181,36 @@ def test_a_provider_says_whether_its_account_takes_one_currency(client: TestClie
     assert found == {"stripe": False, "paypal": False, "square": True, "fake": False}
 
 
+def test_a_reconnect_that_names_no_currency_keeps_the_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5752 review: a provider whose account takes one currency, reconnected to an
+    account that names none, is refused before anything is written; the row keeps its
+    label and its stored currency."""
+    monkeypatch.setattr(FAKE, "reports_currency", True, raising=False)
+
+    async def in_dollars(*args: object) -> Verified:
+        return Verified(account_label="Fake account a", currency="USD")
+
+    async def no_currency(*args: object) -> Verified:
+        return Verified(account_label="Fake account b")
+
+    monkeypatch.setattr(FAKE, "verify", in_dollars)
+    assert client.put(PROVIDER, json=FAKE_CONNECT).status_code == 200
+    before = fake_status(client)
+    monkeypatch.setattr(FAKE, "verify", no_currency)
+    refused = client.put(PROVIDER, json=FAKE_CONNECT)
+    assert refused.status_code == 409
+    assert refused.json()["type"] == PROBLEMS + "currency_unknown"
+    after = fake_status(client)
+    assert (after["connected"], after["account_label"], after["currency"]) == (
+        True,
+        "Fake account a",
+        "USD",
+    )
+    assert after["connected_at"] == before["connected_at"]
+
+
 def test_an_account_that_takes_any_currency_has_none(client: TestClient) -> None:
     assert client.put(PROVIDER, json=FAKE_CONNECT).status_code == 200
     assert fake_status(client)["currency"] is None
