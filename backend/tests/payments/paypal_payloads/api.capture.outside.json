@@ -1,0 +1,13 @@
+{
+  "id": "9XY12345AB678901C",
+  "amount": {
+    "currency_code": "USD",
+    "value": "20.00"
+  },
+  "status": "REFUNDED",
+  "supplementary_data": {
+    "related_ids": {
+      "order_id": "1AB23456CD789012E"
+    }
+  }
+}

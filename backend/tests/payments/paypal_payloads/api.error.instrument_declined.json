@@ -1,0 +1,18 @@
+{
+  "name": "UNPROCESSABLE_ENTITY",
+  "details": [
+    {
+      "issue": "INSTRUMENT_DECLINED",
+      "description": "The instrument presented  was either declined by the processor or bank, or it can't be used for this payment."
+    }
+  ],
+  "message": "The requested action could not be performed, semantically incorrect, or failed business validation.",
+  "debug_id": "f63fbc340a6ce",
+  "links": [
+    {
+      "href": "https://developer.paypal.com/api/orders/v2/#error-INSTRUMENT_DECLINED",
+      "rel": "information_link",
+      "method": "GET"
+    }
+  ]
+}
