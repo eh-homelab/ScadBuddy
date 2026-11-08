@@ -32,6 +32,11 @@ async function openSlot(slot: number): Promise<HTMLElement> {
   return settings
 }
 
+async function showAdvanced() {
+  fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+  await screen.findByRole('group', { name: /nozzles/i })
+}
+
 function printButton() {
   return screen.getByRole('button', { name: /^Print$/ })
 }
@@ -90,7 +95,9 @@ describe('PrintPicker · settings per colour (#5627)', () => {
   it('keeps a value the user set when a later check reads a process whose default equals it', async () => {
     const real = api.checkPrint.bind(api)
     let flagged = 0
+    let checks = 0
     vi.spyOn(api, 'checkPrint').mockImplementation(async (outputId, body, processValues) => {
+      checks += 1
       const answer = await real(outputId, body, processValues)
       if (!processValues) return answer
       flagged += 1
@@ -104,8 +111,15 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     const top = within(slot).getByLabelText(/Top shell layers/)
     await waitFor(() => expect(top).toHaveValue(5))
 
+    const before = checks
     fireEvent.change(top, { target: { value: '8' } })
-    // The request changed, so the check reads again: now the default is 8 too.
+    // #5686: the edit checks again, but the process is the same, so its values are not read again.
+    await waitFor(() => expect(checks).toBeGreaterThan(before))
+    expect(flagged).toBe(1)
+
+    // Another prime tower is another process: the check reads it, and now the default is 8 too.
+    await showAdvanced()
+    fireEvent.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
     await waitFor(() => expect(flagged).toBeGreaterThan(1))
     await waitFor(() => expect(printButton()).toBeEnabled())
     expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
