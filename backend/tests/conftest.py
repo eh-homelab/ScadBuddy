@@ -480,6 +480,28 @@ if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
     )
     raise SystemExit(0)
 
+if "%%LISTING%%" in text and out is not None and out.endswith(".param"):
+    # A storefront listing's template (#5282): a ranged width, a free height, a
+    # `// color` parameter (typed by the source scan) and a select.
+    pathlib.Path(out).write_text(
+        json.dumps(
+            {
+                "title": "Listing",
+                "parameters": [
+                    {"name": "width", "type": "number", "initial": 50, "group": "Main",
+                     "min": 10, "max": 100, "step": 1},
+                    {"name": "height", "type": "number", "initial": 5, "group": "Main"},
+                    {"name": "colour", "type": "string", "initial": "#FF0000",
+                     "group": "Main"},
+                    {"name": "shape", "type": "string", "initial": "round", "group": "Main",
+                     "options": [{"name": "Round", "value": "round"},
+                                 {"name": "Square", "value": "square"}]},
+                ],
+            }
+        )
+    )
+    raise SystemExit(0)
+
 if out is not None and out.endswith(".3mf"):
     # The API tests' render (tests/api/conftest.py): `width=999` fails as a template
     # that could not open its picture does; anything else prints FAKE_STDERR and

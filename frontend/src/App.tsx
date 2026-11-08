@@ -30,6 +30,7 @@ const loadPrints = () => import('./pages/PrintsPage')
 const PrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).PrintsPage }))
 const TemplatePrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).TemplatePrintsPage }))
 const SettingsPage = lazyRetry(async () => ({ default: (await import('./pages/SettingsPage')).SettingsPage }))
+const StorefrontPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontPage')).StorefrontPage }))
 const VersionsPage = lazyRetry(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
 const WorkflowRunPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
 const WorkflowsPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
@@ -111,6 +112,7 @@ export function App() {
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />
+        <Route path="storefront" element={<StorefrontPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
         <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
         <Route path="workflows/flows/:id" element={<FlowPage />} />

@@ -9,7 +9,7 @@ from typing import Any, BinaryIO, Literal
 
 from pydantic import BaseModel
 
-BlobKind = Literal["piece", "snapshot", "asset", "font", "slice", "library", "workspace"]
+BlobKind = Literal["piece", "snapshot", "asset", "font", "slice", "library", "workspace", "media"]
 #: What a put stores: bytes, or a seekable file read from its start, which is hashed and
 #: uploaded a chunk at a time rather than held whole (#503).
 BlobData = bytes | BinaryIO
@@ -35,7 +35,7 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
 #: snapshots (a cache of git) by grace alone. Assets have `AssetStore.sweep`; fonts and
 #: library files are skipped here: `print_library/sweep.py` `sweep_library` purges their
 #: trash and collects the blobs no row names.
-SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot", "slice", "workspace")
+SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot", "slice", "workspace", "media")
 
 
 class BlobScope(BaseModel):

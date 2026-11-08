@@ -3,8 +3,9 @@
 Building it does no I/O: the shared rows pool (`rows/component.py`, #5226) opens on
 first use, as it does for `print_library/component.py`, since `Components.build_all`
 runs before the lifespan opens anything. The sweep of uploads reads every item's
-inputs through `store` (``main.sweep_assets``); the routes reach `store` and
-`lifecycle` (every transition, publishing on the core's bus) through `OrdersDep`.
+inputs through `store` (``main.sweep_assets``); the routes reach `store`,
+`lifecycle` (every transition, publishing on the core's bus) and the storefront's
+`listings` (#5282) through `OrdersDep`.
 ``refs`` holds a slice quote's sliced files (#4250), which the lifecycle releases as
 §3.4 says. Running, it follows every print an item's attempt started
 (``printing.py`` ``listen_for_prints``, #4719). ``integrations`` is the Bambuddy seam
@@ -31,6 +32,7 @@ from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.storefront.listings import ListingStore
 from scadbuddy.payments.registry import providers
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
@@ -41,6 +43,7 @@ class OrdersComponent:
         self.core = core
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
+        self._listings: ListingStore | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
         #: The slice quotes' holds on their sliced files (#4250 Ruling 3), on the
         #: projection's autocommit pool as every `blob_refs` writer's.
@@ -54,6 +57,14 @@ class OrdersComponent:
             self._pool.open(wait=False)
             self._store = OrderStore(self._pool)
         return self._store
+
+    @property
+    def listings(self) -> ListingStore:
+        """The storefront's listings (#5282), on the rows' pool."""
+        if self._listings is None:
+            self._pool.open(wait=False)
+            self._listings = ListingStore(self._pool)
+        return self._listings
 
     @property
     def integrations(self) -> OrderIntegrations:

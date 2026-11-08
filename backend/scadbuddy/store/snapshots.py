@@ -2,8 +2,9 @@
 
 The API makes it (it has git); a worker unpacks it into the same revision-export
 directory `prepare_source` reads, so a populated export is found and git is never
-needed on the worker. A snapshot is a cache of git: nothing references it, it is swept
-after the grace once no render touches it, and `ensure` makes it again on demand.
+needed on the worker. A snapshot is a cache of git: it is swept after the grace once no
+render touches it, and `ensure` makes it again on demand. Only a published storefront
+listing references one (`orders/storefront/listings.py`, #5282), which keeps it.
 
 `pack_dir` leaves out dot-named files and symlinks, so a template whose tree holds
 either renders on a worker without them: such a template renders differently there

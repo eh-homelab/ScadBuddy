@@ -1,0 +1,518 @@
+"""The storefront's listings (#5282, spec 2026-11-02 §5.3): what the public site offers,
+kept by the back office's Storefront page.
+
+``ListingStore`` keeps the rows. An edit names the ``updated_at`` the editor read, so a
+second editor's stale save is refused (409 ``listing_changed``), and an edit of a
+published listing unpublishes it: a change is not live until the shop publishes again.
+
+``publish`` checks the listing against its commit's schema and captures what a visitor's
+render needs without git (plan point 2): the schema, whether the template is a pipeline,
+its name and library pins, and its source snapshot. It copies each chosen media file
+into the content store. The snapshot and the media are held in ``blob_refs`` under
+(:data:`HOLDER`, listing id) while the listing is published; unpublishing, an edit and a
+delete drop that hold in the same transaction as the row.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from collections.abc import Collection, Mapping, Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final
+
+from fastapi import status
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
+
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, declares_pipeline
+from scadbuddy.library.libraries import CheckoutFetcher
+from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.storefront.wire import (
+    ChoiceBound,
+    Listing,
+    ListingInput,
+    ListingMedia,
+    ListingSnapshot,
+    NumberBound,
+    ParamBound,
+    TextBound,
+)
+from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.runner import OpenSCADError, cached_schema, format_scad_value
+from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
+from scadbuddy.store.content_models import BlobScope
+from scadbuddy.store.refs import BlobRefs
+from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
+
+if TYPE_CHECKING:
+    from scadbuddy.core.components import Core
+
+#: The ``blob_refs`` holder kind of a published listing's snapshot and media.
+HOLDER: Final = "storefront_listing"
+#: Refused unless the store is S3: the public site serves listing media as presigned
+#: GETs, and a visitor's render reads the snapshot from the content store (plan).
+NEEDS_S3: Final = f"{STOREFRONT_PROBLEMS}storefront_needs_s3"
+
+_COLUMNS = (
+    "id, slug, commit, title, description, position, published, params, fixed, colours,"
+    " media_ids, snapshot, media, published_at, created_at, updated_at"
+)
+_NUMBERS = frozenset({"number", "integer", "slider"})
+
+type Pool = ConnectionPool[Connection[DictRow]]
+
+
+def problem(status_code: int, slug: str, detail: str, **extensions: Any) -> ApiError:
+    """A refusal under ``https://scadbuddy.dev/problems/storefront/<slug>``."""
+    return ApiError(status_code, detail, type_=STOREFRONT_PROBLEMS + slug, **extensions)
+
+
+def _not_found(listing_id: str) -> ApiError:
+    return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", f"no listing {listing_id!r}")
+
+
+def _changed(listing_id: str) -> ApiError:
+    return problem(
+        status.HTTP_409_CONFLICT,
+        "listing_changed",
+        f"listing {listing_id!r} changed since it was read; load it again",
+    )
+
+
+def _listing(row: DictRow) -> Listing:
+    return Listing.model_validate(row)
+
+
+def _drop_holds(conn: Connection[DictRow], listing_id: str, keep: Collection[str] = ()) -> None:
+    conn.execute(
+        "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s AND NOT (key = ANY(%s))",
+        (HOLDER, listing_id, list(keep)),
+    )
+
+
+class ListingStore:
+    def __init__(self, pool: Pool) -> None:
+        self.pool = pool
+
+    def create(self, body: ListingInput) -> Listing:
+        """A new listing, unpublished, after every other one."""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO storefront_listings"
+                " (slug, commit, title, description, position, params, fixed, colours, media_ids)"
+                " VALUES (%s, %s, %s, %s,"
+                " (SELECT coalesce(max(position) + 1, 0) FROM storefront_listings),"
+                f" %s, %s, %s, %s) RETURNING {_COLUMNS}",
+                (*self._fields(body),),
+            ).fetchone()
+        assert row is not None
+        return _listing(row)
+
+    @staticmethod
+    def _fields(body: ListingInput) -> tuple[object, ...]:
+        dumped = body.model_dump(mode="json")
+        return (
+            body.slug,
+            body.commit,
+            body.title,
+            body.description,
+            Jsonb(dumped["params"]),
+            Jsonb(dumped["fixed"]),
+            body.colours,
+            body.media_ids,
+        )
+
+    def update(
+        self, listing_id: str, body: ListingInput, *, expected_updated_at: datetime
+    ) -> Listing:
+        """The listing replaced by ``body``, and unpublished; 409 ``listing_changed``
+        when it changed after ``expected_updated_at`` was read, 404 when it is gone."""
+        slug, commit, title, description, params, fixed, colours, media_ids = self._fields(body)
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE storefront_listings SET slug = %s, commit = %s, title = %s,"
+                " description = %s, params = %s, fixed = %s, colours = %s, media_ids = %s,"
+                " published = false, snapshot = NULL, media = '[]', published_at = NULL,"
+                " updated_at = clock_timestamp()"
+                f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
+                (
+                    slug,
+                    commit,
+                    title,
+                    description,
+                    params,
+                    fixed,
+                    colours,
+                    media_ids,
+                    listing_id,
+                    expected_updated_at,
+                ),
+            ).fetchone()
+            if row is None:
+                raise self._refusal(conn, listing_id)
+            _drop_holds(conn, listing_id)
+        return _listing(row)
+
+    @staticmethod
+    def _refusal(conn: Connection[DictRow], listing_id: str) -> ApiError:
+        found = conn.execute(
+            "SELECT 1 FROM storefront_listings WHERE id = %s", (listing_id,)
+        ).fetchone()
+        return _not_found(listing_id) if found is None else _changed(listing_id)
+
+    def get(self, listing_id: str) -> Listing | None:
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_listings WHERE id = %s", (listing_id,)
+            ).fetchone()
+        return None if row is None else _listing(row)
+
+    def published(self) -> list[Listing]:
+        """The published listings, in the shop's order."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_listings WHERE published ORDER BY position, id"
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
+    def all(self) -> list[Listing]:
+        """Every listing, in the shop's order."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_listings ORDER BY position, id"
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
+    def reorder(self, ids: Sequence[str]) -> list[Listing]:
+        """Every listing, in the order of ``ids``. ``ids`` must name each listing once:
+        an order made from a list that has since gained or lost one is 409
+        ``listing_changed``."""
+        with self.pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "SELECT id FROM storefront_listings ORDER BY id FOR UPDATE"
+            ).fetchall()
+            if len(set(ids)) != len(ids) or {row["id"] for row in rows} != set(ids):
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "listing_changed",
+                    "the order must name every listing once; load the listings again",
+                )
+            conn.execute(
+                "UPDATE storefront_listings SET position = given.position - 1"
+                " FROM unnest(%s::text[]) WITH ORDINALITY AS given(id, position)"
+                " WHERE storefront_listings.id = given.id",
+                (list(ids),),
+            )
+        return self.all()
+
+    def delete(self, listing_id: str) -> None:
+        """Remove an unpublished listing; 409 ``listing_published`` while it is
+        published, 404 when it is gone."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT published FROM storefront_listings WHERE id = %s FOR UPDATE",
+                (listing_id,),
+            ).fetchone()
+            if row is None:
+                raise _not_found(listing_id)
+            if row["published"]:
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "listing_published",
+                    f"listing {listing_id!r} is published; unpublish it first",
+                )
+            conn.execute("DELETE FROM storefront_listings WHERE id = %s", (listing_id,))
+            _drop_holds(conn, listing_id)
+
+    def mark_published(
+        self,
+        listing_id: str,
+        *,
+        fixed: Mapping[str, ParamValue],
+        snapshot: ListingSnapshot,
+        media: Sequence[ListingMedia],
+        expected_updated_at: datetime,
+    ) -> Listing:
+        """The listing published with what ``publish`` captured. Holds of the listing
+        on any blob other than the snapshot and ``media`` are dropped (a republish's
+        old ones). 409 ``listing_changed`` when it changed after it was read."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE storefront_listings SET fixed = %s, snapshot = %s, media = %s,"
+                " published = true, published_at = clock_timestamp(),"
+                " updated_at = clock_timestamp()"
+                f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
+                (
+                    Jsonb(dict(fixed)),
+                    Jsonb(snapshot.model_dump(mode="json")),
+                    Jsonb([item.model_dump(mode="json") for item in media]),
+                    listing_id,
+                    expected_updated_at,
+                ),
+            ).fetchone()
+            if row is None:
+                raise self._refusal(conn, listing_id)
+            _drop_holds(conn, listing_id, [snapshot.snapshot_key, *(m.blob_key for m in media)])
+        return _listing(row)
+
+    def mark_unpublished(self, listing_id: str) -> Listing:
+        """The listing taken off the public site, and its holds dropped; 404 when it is
+        gone."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE storefront_listings SET published = false, snapshot = NULL,"
+                " media = '[]', published_at = NULL, updated_at = clock_timestamp()"
+                f" WHERE id = %s RETURNING {_COLUMNS}",
+                (listing_id,),
+            ).fetchone()
+            if row is None:
+                raise _not_found(listing_id)
+            _drop_holds(conn, listing_id)
+        return _listing(row)
+
+    def release_if_unpublished(self, listing_id: str) -> None:
+        """Drop the listing's holds unless it is published: after a publish lost to an
+        edit, whose own drop may have run before the publish took its holds."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT published FROM storefront_listings WHERE id = %s FOR UPDATE",
+                (listing_id,),
+            ).fetchone()
+            if row is None or not row["published"]:
+                _drop_holds(conn, listing_id)
+
+    def filament_colours(self) -> dict[str, str]:
+        """Each price-book filament not archived, by id: its colour (``#RRGGBB``)."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, colour FROM filaments WHERE archived_at IS NULL"
+            ).fetchall()
+        return {row["id"]: row["colour"] for row in rows}
+
+
+# -- publish ---------------------------------------------------------------------------
+
+
+def _unprocessable(slug: str, detail: str, name: str | None = None) -> ApiError:
+    extensions = {} if name is None else {"name": name}
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, slug, detail, **extensions)
+
+
+def _takes(parameter: Parameter, value: ParamValue) -> bool:
+    try:
+        format_scad_value(parameter, value)
+    except ValueError:
+        return False
+    return True
+
+
+def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
+    """``bound`` as a subset of what the schema lets ``parameter`` take, or 422."""
+    name = parameter.name
+    outside = _unprocessable(
+        "listing_bounds_outside_schema",
+        f"the bounds of {name!r} are not inside what its schema allows",
+        name,
+    )
+    if parameter.type == "color":
+        if not isinstance(bound, ChoiceBound):
+            raise outside
+        wanted = {colour.casefold() for colour in colours}
+        for choice in bound.choices:
+            if not isinstance(choice, str) or choice.casefold() not in wanted:
+                raise _unprocessable(
+                    "listing_colour_unknown",
+                    f"{name!r} offers {choice!r}, which is not the colour of a listing filament",
+                    name,
+                )
+        return
+    if isinstance(bound, NumberBound):
+        if parameter.type not in _NUMBERS or bound.min > bound.max:
+            raise outside
+        if not (_takes(parameter, bound.min) and _takes(parameter, bound.max)):
+            raise outside
+        if parameter.step is not None and bound.step is not None and bound.step < parameter.step:
+            raise outside
+        return
+    if isinstance(bound, TextBound):
+        if parameter.type != "string" or parameter.options:
+            raise outside
+        if parameter.max_length is not None and bound.max_length > parameter.max_length:
+            raise outside
+        return
+    # A choice: a template's own `file` samples are not offered to the public.
+    if parameter.type == "file" or not all(_takes(parameter, c) for c in bound.choices):
+        raise outside
+
+
+def checked_fixed(
+    schema: CustomizerSchema,
+    body: ListingInput,
+    colours: Mapping[str, str],
+) -> dict[str, ParamValue]:
+    """The listing checked against ``schema`` and the price book's ``colours`` (by
+    filament id), and its fixed values with every parameter it does not name at the
+    schema's default (plan point 13). Raises the 422 of the first fault."""
+    for filament_id in body.colours:
+        if filament_id not in colours:
+            raise _unprocessable(
+                "listing_colour_unknown",
+                f"{filament_id!r} is not a filament of the price book",
+            )
+    by_name = {parameter.name: parameter for parameter in schema.parameters}
+    for name in [*body.params, *body.fixed]:
+        if name not in by_name:
+            raise _unprocessable(
+                "listing_param_unknown", f"the template has no parameter {name!r}", name
+            )
+    offered = [colours[filament_id] for filament_id in body.colours]
+    for name, bound in body.params.items():
+        _check_bound(by_name[name], bound, offered)
+    for name, value in body.fixed.items():
+        if name in body.params:
+            raise _unprocessable(
+                "listing_fixed_invalid", f"{name!r} is both fixed and offered", name
+            )
+        if not _takes(by_name[name], value):
+            raise _unprocessable("listing_fixed_invalid", f"{name!r} does not take {value!r}", name)
+    fixed = dict(body.fixed)
+    for parameter in schema.parameters:
+        if parameter.name in body.params or parameter.name in fixed:
+            continue
+        if parameter.initial is not None and _takes(parameter, parameter.initial):
+            fixed[parameter.name] = parameter.initial
+    return fixed
+
+
+async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
+    """The commit's schema, pipeline flag, name and library pins, without the snapshot
+    key; 422 ``listing_reference`` for a slug or commit
+    that is not a revision of a template."""
+    fetcher = CheckoutFetcher(core.libraries, core.installs, core.checkouts)
+    try:
+        resolved = await resolve_reference(
+            core.catalogue,
+            core.history,
+            core.outputs,
+            paths=core.paths,
+            config=core.config,
+            fetcher=fetcher,
+            slug=slug,
+            commit=commit,
+            inputs=None,
+            output_id=None,
+        )
+        source = await resolve_source(
+            slug, commit, paths=core.paths, history=core.history, fetcher=fetcher
+        )
+    except (ReferenceError, TemplateDeletedError) as error:
+        raise _unprocessable("listing_reference", str(error)) from None
+    except (GitError, RevisionNotFoundError) as error:
+        raise _unprocessable("listing_reference", f"{slug}@{commit}: {error}") from None
+    try:
+        schema = await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(core.config)
+        )
+    except (OSError, OpenSCADError) as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"the schema could not be built: {error}"
+        ) from None
+    directory = source.scad.parent
+    reference = resolved.reference
+    return ListingSnapshot(
+        schema=schema,
+        pipeline=await asyncio.to_thread(declares_pipeline, directory, slug),
+        template_name=reference.template_name,
+        libraries=list(reference.libraries),
+        snapshot_key="",
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _copy_media(
+    core: Core, refs: BlobRefs, listing: Listing, title: str
+) -> list[ListingMedia]:
+    """Each chosen media file stored as ``listing-media-<sha256>`` and held."""
+    content = core.store.content
+    assert content is not None
+    copied: list[ListingMedia] = []
+    for media_id in listing.media_ids:
+        try:
+            view, path = await asyncio.to_thread(core.catalogue.media_item, listing.slug, media_id)
+        except (MediaNotFoundError, ModelNotFoundError):
+            raise _unprocessable(
+                "listing_media_unknown", f"the template has no media {media_id!r}"
+            ) from None
+        key = f"listing-media-{await asyncio.to_thread(_sha256, path)}"
+        with path.open("rb") as data:
+            await content.put(
+                "media",
+                data,
+                name=view.file,
+                scope=BlobScope(slug=listing.slug, title=title),
+                key=key,
+            )
+        await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
+        copied.append(
+            ListingMedia(
+                blob_key=key, kind=view.kind, media_type=view.content_type, caption=view.caption
+            )
+        )
+    return copied
+
+
+async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
+    """The listing checked against its commit and published (see the module's notes).
+    409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
+    ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
+    ``listing_colour_unknown``, ``listing_media_unknown`` or ``listing_reference`` for a
+    listing its commit or the price book does not back; 409 ``listing_changed`` when it
+    was edited while it was being published."""
+    listing = await asyncio.to_thread(store.get, listing_id)
+    if listing is None:
+        raise _not_found(listing_id)
+    snapshots = core.store.snapshots
+    if core.store.backend != "s3" or snapshots is None:
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "storefront_needs_s3",
+            "the storefront needs store_backend s3: set it in Settings first",
+        )
+    facts = await _commit_facts(core, listing.slug, listing.commit)
+    colours = await asyncio.to_thread(store.filament_colours)
+    fixed = checked_fixed(facts.schema_, listing, colours)
+    refs = BlobRefs(core.projection.pool)
+    try:
+        key = await snapshots.ensure(listing.slug, listing.commit)
+        await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
+        media = await _copy_media(core, refs, listing, facts.template_name)
+        return await asyncio.to_thread(
+            store.mark_published,
+            listing.id,
+            fixed=fixed,
+            snapshot=facts.model_copy(update={"snapshot_key": key}),
+            media=media,
+            expected_updated_at=listing.updated_at,
+        )
+    except BaseException:
+        await asyncio.to_thread(store.release_if_unpublished, listing.id)
+        raise
+
+
+async def unpublish(store: ListingStore, listing_id: str) -> Listing:
+    """The listing off the public site; its hold on the snapshot and the media goes with
+    it, so the sweep may take them once nothing else holds them."""
+    return await asyncio.to_thread(store.mark_unpublished, listing_id)
