@@ -533,8 +533,11 @@ call before ScadBuddy reads it
 ([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. PayPal has no call
-that voids an order. A cancelled request therefore marks its order so that ScadBuddy
-never captures it, and the customer is never charged.
+that voids an order. A cancel therefore marks the order so that ScadBuddy will not
+capture a later approval of it. A capture that completed, or was already under way,
+before the cancel is still recorded as a payment on the cancelled request. ScadBuddy
+captures only orders it made (a request id in `custom_id`), but use a REST app of its
+own all the same.
 
 ### Authentication on the deployment (#4975)
 

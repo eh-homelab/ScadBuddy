@@ -232,6 +232,17 @@ async def test_the_token_is_kept_until_it_is_about_to_expire(
     assert pp["token"].call_count == 2
 
 
+async def test_an_expired_token_is_dropped_when_another_is_kept(
+    paypal: PayPalProvider, pp: Any, clock: Clock
+) -> None:
+    """A rotated secret leaves its old token behind until it expires; then it goes."""
+    pp.get(f"/v1/notifications/webhooks/{WEBHOOK_ID}").respond(json=payload("api.webhook.json"))
+    await paypal.verify(CRED)
+    clock.now += 31668
+    await paypal.verify(Credential(settings=SETTINGS, secrets={"client_secret": "rotated"}))
+    assert len(paypal._tokens) == 1
+
+
 async def test_another_secret_never_reuses_a_token(paypal: PayPalProvider, pp: Any) -> None:
     pp.get(f"/v1/notifications/webhooks/{WEBHOOK_ID}").respond(json=payload("api.webhook.json"))
     await paypal.verify(CRED)
@@ -548,6 +559,19 @@ async def test_an_approval_sent_before_the_cancel_is_never_captured(
     event = await parse(paypal, "checkout.order.approved.json")
     assert (event.kind, event.provider_ref) == ("other", ORDER)
     assert pp["order"].called
+
+
+async def test_an_order_scadbuddy_did_not_make_is_not_captured(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    """Another integration on the same REST app: its order has no request id in
+    ``custom_id`` with the matching ``invoice_id``, so ScadBuddy leaves it alone."""
+    order = payload("api.order.approved.json")
+    order["purchase_units"][0] |= {"custom_id": "other-shop-77", "invoice_id": "INV-9"}
+    pp["order"].respond(json=order)
+    # No capture route: a capture call would fail the test.
+    event = await parse(paypal, "checkout.order.approved.json")
+    assert (event.kind, event.provider_ref) == ("other", ORDER)
 
 
 @pytest.mark.parametrize("status", ["COMPLETED", "VOIDED", "PAYER_ACTION_REQUIRED"])

@@ -89,7 +89,9 @@ API: Final[Mapping[str, str]] = {
 TIMEOUT: Final = httpx.Timeout(20.0)
 #: A token is fetched again this long before PayPal says it expires.
 TOKEN_MARGIN_SECONDS: Final = 60
-#: The ``custom_id`` a cancelled request's order carries: its approval is never captured.
+#: The ``custom_id`` a cancelled request's order carries: ScadBuddy will not capture a
+#: later approval of it. A capture already completed, or under way, before the mark landed
+#: is still recorded as a payment on the cancelled request.
 CANCELLED: Final = "scadbuddy-cancelled"
 #: Currencies PayPal takes in whole units only.
 NO_DECIMALS: Final = frozenset({"HUF", "JPY", "TWD"})
@@ -245,7 +247,10 @@ class PayPalProvider:
         value, expires_in = found.get("access_token"), found.get("expires_in")
         if not isinstance(value, str) or not isinstance(expires_in, int):
             raise _NoAnswerError()
-        token = _Token(value, str(found.get("app_id", "")), self._clock() + expires_in)
+        now = self._clock()
+        token = _Token(value, str(found.get("app_id", "")), now + expires_in)
+        # A rotated secret's token is dead weight once it expires.
+        self._tokens = {k: t for k, t in self._tokens.items() if t.expires_at > now}
         self._tokens[key] = token
         return token
 
@@ -383,8 +388,9 @@ class PayPalProvider:
             raise ProviderError("PayPal's answer named no approval link") from None
 
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
-        """Mark the order so its approval is never captured. An order already completed,
-        voided or gone is no error."""
+        """Mark the order so ScadBuddy will not capture a later approval of it. An order
+        already completed, voided or gone is no error; a capture that completed, or was
+        already under way, before the mark is still recorded as a payment."""
         path = f"/v2/checkout/orders/{_path_id(provider_ref)}"
         patch = [
             {
@@ -503,7 +509,8 @@ class PayPalProvider:
         units = now.get("purchase_units")
         if now.get("status") != "APPROVED" or not isinstance(units, list):
             return other
-        if any(isinstance(u, dict) and u.get("custom_id") == CANCELLED for u in units):
+        if not all(isinstance(u, dict) and _ours(u) for u in units):
+            # Cancelled here, or another integration's order on the same REST app.
             return other
         path = f"/v2/checkout/orders/{order_id}/capture"
         try:
@@ -557,6 +564,20 @@ def _shown(refused: _RefusedError) -> ProviderError:
     if refused.status == 403:
         return ProviderError("the PayPal app lacks a permission ScadBuddy needs")
     return ProviderError(f"PayPal refused: {refused.issue}: {refused.message}")
+
+
+def _ours(unit: Mapping[str, Any]) -> bool:
+    """A purchase unit ScadBuddy made and has not cancelled: ``custom_id`` is the request id
+    and ``invoice_id`` is ``<order number>-<request id>`` (``create_request``)."""
+    custom_id = unit.get("custom_id")
+    invoice_id = unit.get("invoice_id")
+    return (
+        isinstance(custom_id, str)
+        and bool(custom_id)
+        and custom_id != CANCELLED
+        and isinstance(invoice_id, str)
+        and invoice_id.endswith(f"-{custom_id}")
+    )
 
 
 def _path_id(value: object) -> str:
