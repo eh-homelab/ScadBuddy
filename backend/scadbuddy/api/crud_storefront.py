@@ -29,6 +29,11 @@ order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at 
 values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (each with an
 ``Idempotency-Key``, 428 without). Another visitor's item is 404 ``item_not_found``. A body
 that is not an item is 422 ``draft_body_invalid``.
+
+Area ``requests``: ``POST …/draft/requests`` (multipart ``text`` and ``files``,
+``Idempotency-Key`` required) adds a design request with its files. The body is read with
+its caps as it arrives (`storefront/uploads.py`), then each file again
+(`orders/storefront/drafts.py` `add_request`): this side never trusts the edge's checks.
 """
 
 from __future__ import annotations
@@ -50,7 +55,12 @@ from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
-from scadbuddy.orders.storefront.drafts import add_listing_item, get_draft, remove_item
+from scadbuddy.orders.storefront.drafts import (
+    add_listing_item,
+    add_request,
+    get_draft,
+    remove_item,
+)
 from scadbuddy.orders.storefront.listings import (
     problem,
     public_content,
@@ -71,6 +81,7 @@ from scadbuddy.orders.storefront.wire import (
     RenderBody,
     StoreRender,
 )
+from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
     STORE_CLIENT_PROBLEM,
@@ -282,3 +293,44 @@ async def draft_remove(
     """An item taken off the visitor's draft; 404 ``item_not_found`` unless it is on it."""
     key = required_key(idempotency_key)
     return await remove_item(state, visitor, key, item_id)
+
+
+@router.post(
+    "/draft/requests",
+    name="crud_storefront_draft_request",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["text"],
+                        "properties": {
+                            "text": {"type": "string"},
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string", "format": "binary"},
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def draft_request(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> DraftView:
+    """A design request added to the visitor's draft
+    (`orders/storefront/drafts.py` `add_request`)."""
+    key = required_key(idempotency_key)
+    upload = await read_request(request)
+    try:
+        return await add_request(state, visitor, key, text=upload.text, files=upload.files)
+    finally:
+        await upload.close()

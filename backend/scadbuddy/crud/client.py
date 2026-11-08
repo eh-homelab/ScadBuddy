@@ -45,8 +45,8 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection, Mapping
-from typing import Any, Literal
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from typing import Any, BinaryIO, Literal
 
 import httpx
 from temporalio import activity
@@ -245,8 +245,14 @@ class _Base:
         timeout: float | None,
         headers: Mapping[str, str] | None,
         content: bytes | None = None,
+        data: Mapping[str, str] | None = None,
+        files: Sequence[tuple[str, tuple[str, BinaryIO, str]]] | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
+        if data is not None:
+            kwargs["data"] = data
+        if files is not None:
+            kwargs["files"] = files
         sent = dict(headers or {})
         if json is not None:
             kwargs["json"] = json
@@ -333,7 +339,11 @@ class CrudClient(_Base):
         budget: float | None = None,
         headers: Mapping[str, str] | None = None,
         content: bytes | None = None,
+        data: Mapping[str, str] | None = None,
+        files: Sequence[tuple[str, tuple[str, BinaryIO, str]]] | None = None,
     ) -> httpx.Response:
+        """One call, retried as the module says. ``data`` and ``files`` send multipart;
+        httpx reads each file from its start on every try."""
         call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
@@ -342,7 +352,7 @@ class CrudClient(_Base):
                 response = await (fresh or self._http).request(
                     method,
                     path,
-                    **self._kwargs(json, idempotency_key, timeout, headers, content),
+                    **self._kwargs(json, idempotency_key, timeout, headers, content, data, files),
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)

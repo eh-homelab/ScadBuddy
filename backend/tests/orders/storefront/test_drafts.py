@@ -6,11 +6,17 @@ draft it is."""
 
 from __future__ import annotations
 
+import base64
+import os
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,6 +24,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.events import Event, EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders import lifecycle as lifecycle_module
 from scadbuddy.orders.component import ORDERS, OrdersComponent
@@ -27,7 +34,9 @@ from scadbuddy.orders.storefront import drafts as drafts_module
 from scadbuddy.orders.storefront.inputs import listing_reference
 from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingSnapshot
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from scadbuddy.storefront import uploads
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
+from tests.support.store import s3  # noqa: F401  (fixture)
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -90,8 +99,12 @@ class CrudCaller:
         json: Any = None,
         content: str | None = None,
         key: str | None = None,
+        data: dict[str, str] | None = None,
+        files: Any = None,
     ) -> Any:
         headers = self._headers(token, key)
+        if data is not None or files is not None:
+            return self.api.post(CRUD + path, data=data, files=files, headers=headers)
         if content is not None:
             headers["Content-Type"] = "application/json"
             return self.api.post(CRUD + path, content=content, headers=headers)
@@ -541,3 +554,222 @@ def test_the_view_reads_the_attachments_once(
     monkeypatch.setattr(store, "subject_attachments", per_item)
     assert len(crud.get("/draft").json()["items"]) == 3
     assert len(reads) == 1
+
+
+# -- design requests (Task 9) ---------------------------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+PDF = b"%PDF-1.7\n" + b"0" * 64
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+BIG = 25 * 1024 * 1024
+
+
+@pytest.fixture
+def s3_api(
+    settings: Settings,
+    s3: S3Settings,  # noqa: F811
+    tmp_path: Path,
+) -> Iterator[TestClient]:
+    """The app on an S3 store, which the public site needs, with requests on."""
+    kek = tmp_path / "kek"
+    kek.write_text(base64.b64encode(os.urandom(32)).decode())
+    on_s3 = settings.model_copy(
+        update={
+            "store_backend": "s3",
+            "store_s3_endpoint": s3.endpoint,
+            "store_s3_bucket": s3.bucket,
+            "store_s3_prefix": s3.prefix,
+            "store_s3_access_key_id": s3.access_key_id,
+            "store_s3_secret_access_key": s3.secret_access_key,
+            "secret_key_file": kek,
+        }
+    )
+    with TestClient(create_app(on_s3)) as client:
+        yield client
+
+
+@pytest.fixture
+def requests_off(s3_api: TestClient) -> CrudCaller:
+    return CrudCaller(s3_api)
+
+
+@pytest.fixture
+def asks(s3_api: TestClient) -> CrudCaller:
+    """The edge's caller, with "Ask for a design" on."""
+    on = s3_api.put("/api/v1/settings", json={"storefront_requests_enabled": True})
+    assert on.status_code == 200, on.text
+    return CrudCaller(s3_api)
+
+
+def ask(crud: CrudCaller, files: Any = None, *, text: str = "A hook", key: str = "r1") -> Any:
+    if files:
+        return crud.post("/draft/requests", data={"text": text}, files=files, key=key)
+    # A browser's form with no file is still multipart.
+    body = (
+        b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\n'
+        + text.encode()
+        + b"\r\n--b--\r\n"
+    )
+    headers = crud._headers(TOKEN_A, key)
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    return crud.api.post(CRUD + "/draft/requests", content=body, headers=headers)
+
+
+def test_a_request_keeps_its_files(asks: CrudCaller) -> None:
+    files = [("files", ("a.png", PNG, "image/png")), ("files", ("b.pdf", PDF, "application/pdf"))]
+    r = ask(asks, files)
+    assert r.status_code == 200, r.text
+    [item] = r.json()["items"]
+    assert (item["kind"], item["notes"], item["inputs"], item["quantity"]) == (
+        "request",
+        "A hook",
+        None,
+        1,
+    )
+    assert [(a["filename"], a["kind"]) for a in item["attachments"]] == [
+        ("a.png", "image"),
+        ("b.pdf", "pdf"),
+    ]
+
+
+def test_a_files_url_is_a_short_download_of_its_sniffed_type(asks: CrudCaller) -> None:
+    # The name says PNG; the bytes are a PDF, and the bytes decide.
+    r = ask(asks, [("files", ("photo.png", PDF, "image/png"))])
+    [attachment] = r.json()["items"][0]["attachments"]
+    assert attachment["kind"] == "pdf"
+    # ``Expires`` is the end as a Unix time: an hour at most.
+    query = parse_qs(urlsplit(attachment["url"]).query)
+    assert int(query["Expires"][0]) - time.time() <= 3600 + 60
+    got = httpx.get(attachment["url"])
+    assert got.status_code == 200 and got.content == PDF
+    assert got.headers["content-type"] == "application/pdf"
+    assert got.headers["content-disposition"].startswith("attachment;")
+    assert "photo.png" in got.headers["content-disposition"]
+
+
+def test_a_file_the_index_lost_is_left_out(asks: CrudCaller, s3_api: TestClient) -> None:
+    ask(asks, [("files", ("a.png", PNG, "image/png"))])
+    with _state(s3_api).projection.pool.connection() as conn:
+        conn.execute("DELETE FROM store_blobs WHERE key LIKE 'request-file-%%'")
+    [item] = asks.get("/draft").json()["items"]
+    assert item["attachments"] == []
+
+
+@pytest.mark.parametrize(
+    ("files", "status", "slug"),
+    [
+        ([("files", ("x.exe", b"MZ" + b"0" * 100, "image/png"))], 415, "file_type"),
+        ([("files", ("x.svg", SVG, "image/svg+xml"))], 415, "file_type"),
+        ([("files", ("x.html", b"<!doctype html><p>hi", "text/html"))], 415, "file_type"),
+        ([("files", (f"{n}.png", PNG, "image/png")) for n in range(11)], 422, "too_many_files"),
+        ([("files", ("big.png", PNG + b"0" * BIG, "image/png"))], 413, "file_too_large"),
+    ],
+)
+def test_the_crud_side_caps_uploads_itself(
+    asks: CrudCaller, s3_api: TestClient, files: list[Any], status: int, slug: str
+) -> None:
+    r = ask(asks, files, key="r2")
+    assert r.status_code == status, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}{slug}"
+    assert asks.get("/draft").json() is None
+
+
+@pytest.mark.parametrize("text", ["", "x" * 5001])
+def test_a_request_needs_its_text(asks: CrudCaller, text: str) -> None:
+    r = ask(asks, text=text, key="r4")
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+
+
+def test_a_request_may_come_with_no_files(asks: CrudCaller) -> None:
+    r = ask(asks, key="r5")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["attachments"] == []
+
+
+def test_requests_are_off_by_default(requests_off: CrudCaller) -> None:
+    r = ask(requests_off, key="r3")
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+
+
+def test_a_retried_request_makes_one_item_whatever_changed_since(
+    asks: CrudCaller, s3_api: TestClient
+) -> None:
+    files = [("files", ("a.png", PNG, "image/png"))]
+    first = ask(asks, files, key="r6")
+    off = s3_api.put("/api/v1/settings", json={"storefront_requests_enabled": False})
+    assert off.status_code == 200
+    again = ask(asks, files, key="r6")
+    assert (again.status_code, again.json()) == (200, first.json())
+    assert len(asks.get("/draft").json()["items"]) == 1
+
+
+def test_a_request_counts_against_the_draft_cap(
+    asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(drafts_module, "MAX_DRAFT_ITEMS", 1)
+    assert ask(asks, key="r7").status_code == 200
+    r = ask(asks, key="r8")
+    assert r.status_code == 422 and r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_full"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A part header past the cap.
+        b'--b\r\nContent-Disposition: form-data; name="text"\r\nX-Pad: '
+        + b"p" * 20000
+        + b"\r\n\r\nhi\r\n--b--\r\n",
+        # A field that is neither text nor a file.
+        b'--b\r\nContent-Disposition: form-data; name="other"\r\n\r\nhi\r\n--b--\r\n',
+        # Not multipart at all.
+        b"{}",
+    ],
+)
+def test_a_body_that_is_not_a_request_is_422(asks: CrudCaller, body: bytes) -> None:
+    headers = asks._headers(TOKEN_A, "r9")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=body, headers=headers)
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+
+
+def test_a_request_needs_an_idempotency_key(asks: CrudCaller) -> None:
+    r = asks.api.post(
+        CRUD + "/draft/requests", data={"text": "x"}, headers=asks._headers(TOKEN_A, None)
+    )
+    assert r.status_code == 428
+
+
+def test_the_back_office_reads_a_requests_file(asks: CrudCaller, s3_api: TestClient) -> None:
+    draft = ask(asks, [("files", ("a.png", PNG, "image/png"))], key="r10").json()
+    listed = s3_api.get(f"/api/v1/orders/{draft['id']}/attachments").json()["items"]
+    [attachment] = listed
+    assert (attachment["kind"], attachment["role"], attachment["media_type"]) == (
+        "image",
+        "reference",
+        "image/png",
+    )
+    got = s3_api.get(f"/api/v1/orders/{draft['id']}/attachments/{attachment['id']}/content")
+    assert got.status_code == 200 and got.content == PNG
+
+
+def test_the_crud_side_caps_the_whole_body(
+    asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_REQUEST_BODY", 1024)
+    r = ask(asks, [("files", ("a.png", PNG + b"0" * 2048, "image/png"))], key="r11")
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}file_too_large"
+
+
+def test_removing_a_request_drops_its_files_holds(asks: CrudCaller, s3_api: TestClient) -> None:
+    draft = ask(asks, [("files", ("a.png", PNG, "image/png"))], key="r12").json()
+    r = asks.delete(f"/draft/items/{draft['items'][0]['id']}", key="r13")
+    assert r.status_code == 200, r.text
+    with _state(s3_api).projection.pool.connection() as conn:
+        held = conn.execute(
+            "SELECT count(*) AS n FROM blob_refs WHERE holder_kind = 'attachment'"
+        ).fetchone()
+    assert held is not None and held["n"] == 0

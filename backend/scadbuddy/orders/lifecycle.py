@@ -4731,16 +4731,21 @@ class Lifecycle:
         caption: str,
         fulfilment_id: str | None = None,
         revision_id: str | None = None,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
     ) -> Attachment:
         """The row of a file already kept as ``blob_key``, on the order, one of its
         items, or with ``fulfilment_id`` one of that item's attempts (#4251); the store
         holds the blob for it in the same transaction. With ``revision_id`` it is on
         that revision of the item (storefront spec §4): a render, or beside a
-        ``fulfilment_id`` the photo of that revision's test print."""
+        ``fulfilment_id`` the photo of that revision's test print. ``cart_of`` and
+        ``conn`` as `delete_item`'s."""
         if revision_id is None:
             _refuse_revision_role(role)
-        with self.store.transaction() as conn:
+        tell = conn is None
+        with self.store.transaction(conn) as conn:
             order = self._lock(conn, order_id)
+            self._visitors_cart(order, cart_of)
             item = None if item_id is None else self._item_of(conn, order, item_id)
             if revision_id is not None:
                 found = self.store.revision(revision_id, conn=conn)
@@ -4801,7 +4806,8 @@ class Lifecycle:
             )
             change = _Change(order)
             self._subject_item(change, conn, attachment)
-        self._told(change)
+        if tell:
+            self._told(change)
         return attachment
 
     def edit_attachment(

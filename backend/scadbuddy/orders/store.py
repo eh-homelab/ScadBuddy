@@ -2537,6 +2537,16 @@ class OrderStore:
             (holder_kind, holder_id, sorted(keep)),
         )
 
+    def hold_with_attachment(self, conn: Conn, key: str, attachment_id: str) -> None:
+        """One more blob the attachment holds, under its own holder, in the caller's
+        transaction (a storefront file's raw copy, #5282): `delete_attachment` drops it
+        with the row's own hold."""
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (key, ATTACHMENT_HOLDER, attachment_id),
+        )
+
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
         """The row and its hold on the file, together; the blob sweep takes the bytes
         once nothing else holds them. The one way an attachment goes: nothing cascades

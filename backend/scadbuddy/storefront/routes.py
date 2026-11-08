@@ -5,7 +5,9 @@ address. `app.py` answers a CRUD refusal.
 A render's body, and a draft item's, goes on as the visitor sent it (at most
 `MAX_RENDER_BODY` bytes). Each write gets a new ``Idempotency-Key`` (a UUID 4) per browser
 request, which the CRUD client keeps across its retries (plan point 21). A render's preview
-is relayed as a stream, never held whole, as ``model/gltf-binary``."""
+is relayed as a stream, never held whole, as ``model/gltf-binary``. A design request is
+read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
+spooled, then sent on as multipart a chunk at a time."""
 
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.client import CrudStream
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
 #: The largest render or draft item body the edge relays: far past any listing's values.
@@ -135,6 +138,18 @@ async def remove_item(item_id: str, crud: Crud, visitor_id: Visitor, client: Cli
         raise ApiError(404, "There is no such item.", type_=f"{STOREFRONT_PROBLEMS}item_not_found")
     key = str(uuid.uuid4())
     return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
+
+
+@visitor_router.post("/draft/requests")
+async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    upload = await read_request(request)
+    try:
+        key = str(uuid.uuid4())
+        return await crud.add_request(
+            upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
+        )
+    finally:
+        await upload.close()
 
 
 class _Relayed(StreamingResponse):

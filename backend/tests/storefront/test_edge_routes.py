@@ -20,6 +20,7 @@ from starlette.routing import Route
 
 from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudUnavailableError
+from scadbuddy.storefront import uploads
 from scadbuddy.storefront.app import create_app
 from scadbuddy.storefront.ratelimit import (
     MAX_CLIENTS,
@@ -705,3 +706,111 @@ def test_an_item_id_that_is_not_one_never_reaches_the_crud_side(
     # ".." leaves the path whole: ``DELETE /draft`` is no route.
     assert r.status_code == (405 if item_id == ".." else 404)
     assert len(crud_mock.calls) == before
+
+
+# -- design requests (Task 9) ---------------------------------------------------------------
+
+REQUESTS = "/api/v1/internal/crud/storefront/draft/requests"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+BIG = 25 * 1024 * 1024
+
+
+def _ask(edge: TestClient, files: Any = None, **kwargs: Any) -> Any:
+    return edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook"},
+        files=files or [],
+        headers={"Origin": PUBLIC_URL},
+        **kwargs,
+    )
+
+
+def test_a_request_is_streamed_on_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 200 and r.json() == VIEW
+    sent = route.calls.last.request
+    assert sent.headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert uuid.UUID(sent.headers["idempotency-key"]).version == 4
+    assert b'name="text"' in sent.content and b"A hook" in sent.content
+    assert b'filename="a.png"' in sent.content and PNG in sent.content
+
+
+def test_the_edge_refuses_an_oversized_file_before_the_crud_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    files = [("files", ("big.png", PNG + b"0" * BIG, "image/png"))]
+    r = _ask(edge, files)
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}file_too_large"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+def test_the_edge_refuses_too_many_files_before_the_crud_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    files = [("files", (f"{n}.png", PNG, "image/png")) for n in range(11)]
+    r = _ask(edge, files)
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}too_many_files"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+def test_the_edge_caps_the_whole_body(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_REQUEST_BODY", 1024)
+    r = _ask(edge, [("files", ("a.png", PNG + b"0" * 2048, "image/png"))])
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}file_too_large"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'--b\r\nContent-Disposition: form-data; name="text"\r\nX-Pad: '
+        + b"p" * 20000
+        + b"\r\n\r\nhi\r\n--b--\r\n",
+        b'--b\r\nContent-Disposition: form-data; name="other"\r\n\r\nhi\r\n--b--\r\n',
+        b"".join(
+            b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\nhi\r\n' for _ in range(3)
+        )
+        + b"--b--\r\n",
+    ],
+)
+def test_the_edge_refuses_a_body_that_is_not_a_request(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    body: bytes,
+) -> None:
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        content=body,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "multipart/form-data; boundary=b"},
+    )
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+def test_a_request_refusal_passes_through(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    refused = {
+        "type": f"{STOREFRONT_PROBLEMS}file_type",
+        "title": "Unsupported Media Type",
+        "status": 415,
+        "detail": "Send photos, videos or PDFs.",
+    }
+    crud_mock.post(REQUESTS).respond(415, json=refused, headers=CRUD)
+    r = _ask(edge, [("files", ("x.svg", b"<svg/>", "image/svg+xml"))])
+    assert r.status_code == 415 and r.json()["type"] == refused["type"]

@@ -8,7 +8,9 @@ problem and ``Retry-After``, and any other with a bare 502 (`storefront/app.py`)
 sends the visitor id the edge verified (`VISITOR_HEADER`) and the browser's address
 (`CLIENT_HEADER`); a write also sends its ``Idempotency-Key``, the same on each retry. A
 render's body, and a draft item's, goes as the visitor sent it, unread; a render's preview
-comes back as a stream (`CrudStream`), which the edge relays without holding it whole.
+comes back as a stream (`CrudStream`), which the edge relays without holding it whole. A
+design request goes as multipart from the files the edge spooled, read a chunk at a time
+and from their start again on each retry.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -17,7 +19,10 @@ checks it.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Any, Final
+
+from starlette.datastructures import UploadFile
 
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
 from scadbuddy.crud.client import CrudClient, CrudStream, wait_for_areas
@@ -26,7 +31,7 @@ from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here.
-EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts"})
+EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts", "requests"})
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 
 
@@ -117,6 +122,29 @@ class StorefrontCrud:
         return await self._call(
             "DELETE", f"/draft/items/{item_id}", visitor_id=visitor_id, client=client, key=key
         )
+
+    async def add_request(
+        self,
+        text: str,
+        files: Sequence[UploadFile],
+        *,
+        key: str,
+        visitor_id: str,
+        client: str,
+    ) -> Any:
+        """``POST …/storefront/draft/requests``: ``text`` and each spooled file, as
+        multipart, with the request's ``Idempotency-Key``."""
+        response = await self._crud.request(
+            "POST",
+            f"{BASE}/draft/requests",
+            idempotency_key=key,
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+            data={"text": text},
+            files=[
+                ("files", (f.filename or "file", f.file, "application/octet-stream")) for f in files
+            ],
+        )
+        return response.json()
 
     async def render_preview(
         self, job_id: str, *, plate: int | None, visitor_id: str, client: str

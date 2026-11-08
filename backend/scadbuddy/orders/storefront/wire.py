@@ -20,10 +20,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
-from scadbuddy.orders.models import AttachmentKind, ItemKind
+from scadbuddy.orders.models import ItemKind
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import (
+    MAX_REQUEST_FILE_BYTES as MAX_REQUEST_FILE_BYTES,
+)
+from scadbuddy.storefront.wire import (
+    MAX_REQUEST_FILES as MAX_REQUEST_FILES,
+)
+from scadbuddy.storefront.wire import (
+    REQUEST_KINDS as REQUEST_KINDS,
+)
 
 #: A commit of the models repository, whole: a listing never pins a short id.
 LISTING_COMMIT = r"^[0-9a-f]{40}$"
@@ -261,11 +270,16 @@ class AddListingItem(RenderBody):
     quantity: int = Field(1, ge=1, le=100, strict=True)
 
 
+#: What a visitor's file is, as its bytes say: one of `REQUEST_KINDS`, else ``other``.
+DraftFileKind = Literal["image", "video", "pdf", "other"]
+
+
 class DraftAttachment(BaseModel):
-    """A file of an item, as a presigned GET (`PUBLIC_MEDIA_TTL`)."""
+    """A file of an item, as a presigned GET (`PUBLIC_MEDIA_TTL`) that downloads it, with
+    its sniffed media type."""
 
     filename: str
-    kind: AttachmentKind
+    kind: DraftFileKind
     url: str
 
 
