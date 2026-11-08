@@ -15,6 +15,8 @@ is needed to light it up.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -104,9 +106,13 @@ def _build(core: Core, components: Components) -> OrdersComponent:
 
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
-    # §7.2: the built-in flow, once, when its name never had a version.
+    # §7.2: the built-in flow, once, when its name never had a version. Beside the start,
+    # so a slow flows repository delays nothing (review of #5682).
+    registering: asyncio.Task[bool] | None = None
     if orders.flows is not None and orders.core.settings.orders_builtin_flow:
-        await ensure_builtin_flow(orders.flows)
+        registering = asyncio.create_task(
+            ensure_builtin_flow(orders.flows), name="register built-in flow"
+        )
     # The print path's follow (#4719): an item follows the print its attempt started.
     # §8.2: a settled print's attempt copies its Bambuddy archives.
     remove = listen_for_prints(
@@ -117,6 +123,10 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if registering is not None:
+            registering.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await registering
         await remove()
 
 

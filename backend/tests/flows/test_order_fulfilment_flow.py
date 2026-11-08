@@ -4,6 +4,7 @@ edit or delete."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.flows.typecheck import check_script
-from scadbuddy.orders import component
+from scadbuddy.orders import builtin_flow, component
 from scadbuddy.orders.builtin_flow import (
     INPUTS_SCHEMA,
     NAME,
@@ -43,6 +44,7 @@ def definitions(tmp_path: Path, jobs: JobProjection) -> FlowDefinitions:
 async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     definitions: FlowDefinitions,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await definitions.start()
     assert await ensure_builtin_flow(definitions) is True
@@ -54,7 +56,14 @@ async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     [listed] = await definitions.versions(NAME, limit=1)
     assert listed.created_by == {"kind": "builtin", "name": NAME}
     assert created_by(first.agent, first.builtin) == {"kind": "builtin", "name": NAME}
-    # A second start, or a second replica, registers nothing, and says so in the log.
+
+    # A second start, or a second replica, registers nothing, and says so in the log;
+    # it reads the versions first, so it never type-checks the script again (review of
+    # #5682).
+    async def no_check(*args: object, **kwargs: object) -> list[object]:
+        raise AssertionError("type-checked although the name has versions")
+
+    monkeypatch.setattr(builtin_flow, "check_script", no_check)
     with caplog.at_level("INFO", logger="scadbuddy.orders.builtin_flow"):
         assert await ensure_builtin_flow(definitions) is False
     assert "not registered: the name has versions" in caplog.text
@@ -95,8 +104,46 @@ async def test_the_component_registers_it_only_when_switched_on_with_flows(
         integrations=None,
     )
     async with component._run(cast(component.OrdersComponent, orders)):
-        pass
+        await asyncio.sleep(0)
     assert calls == (["defs"] if registered else [])
+
+
+async def test_a_slow_registration_never_holds_up_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #5682: the registration runs beside the start, so a slow flows repository
+    delays nothing, and it is cancelled when the component stops."""
+    listening: list[bool] = []
+    cancelled = asyncio.Event()
+
+    async def ensure(definitions: object) -> bool:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return True
+
+    async def remove() -> None:
+        return None
+
+    def listen(*args: object) -> Any:
+        listening.append(True)
+        return remove
+
+    monkeypatch.setattr(component, "ensure_builtin_flow", ensure)
+    monkeypatch.setattr(component, "listen_for_prints", listen)
+    orders = SimpleNamespace(
+        flows="defs",
+        core=SimpleNamespace(settings=SimpleNamespace(orders_builtin_flow=True), events=None),
+        lifecycle=None,
+        integrations=None,
+    )
+    async with asyncio.timeout(5):
+        async with component._run(cast(component.OrdersComponent, orders)):
+            await asyncio.sleep(0)
+            assert listening == [True]
+    assert cancelled.is_set()
 
 
 class _Host:
@@ -125,6 +172,7 @@ class _Host:
         self.reads = 0
         self.calls: list[str] = []
         self.printed: list[str] = []
+        self.slept: list[float] = []
         self.questions: list[str] = []
 
     async def trigger(self) -> dict[str, Any]:
@@ -165,6 +213,7 @@ class _Host:
 
     async def sleep(self, seconds: float) -> None:
         self.calls.append("sleep")
+        self.slept.append(seconds)
 
     async def agent(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         self.calls.append("agent")
@@ -196,6 +245,8 @@ def test_a_stale_quote_asks_a_person_and_never_re_quotes() -> None:
     assert host.printed == ["a", "a", "b"]
     assert "order_item_quote" not in host.calls
     assert "re-quote" in host.questions[0]
+    # An early "print" before the new quote is accepted would pass the item over.
+    assert "accept the new quote, then answer print" in host.questions[0]
 
 
 def test_a_hold_asks_until_the_order_is_released() -> None:
@@ -254,7 +305,21 @@ def test_prints_still_running_at_the_deadline_end_the_run_without_a_check() -> N
     result = host.run()
     assert "agent" not in host.calls and "order_notify_customer" not in host.calls
     assert "did not end within 1 hours" in result["summary"]
-    assert host.calls.count("sleep") == 12
+    # The polls back off (300, 600, 1200 s), and the last waits only to the deadline.
+    assert host.slept == [300, 600, 1200, 1500]
+
+
+def test_the_longest_wait_keeps_the_run_history_bounded() -> None:
+    """Review of #5682: a flow run is one workflow with no continue-as-new, and each poll
+    adds a timer and a whole order read to its history. At the schema's maximum the polls
+    must stay few: backed off to one an hour, about 170, never 2,016."""
+    printing = ([_item("a", "printing")], "in_production")
+    hours = INPUTS_SCHEMA["properties"]["settle_hours"]["maximum"]
+    host = _Host([_item("a")], [_OK], [], later=[printing], settle_hours=hours)
+    host.run()
+    assert sum(host.slept) == hours * 3600
+    assert max(host.slept) == 3600
+    assert len(host.slept) <= 175
 
 
 def test_no_ready_message_for_an_order_that_is_not_ready() -> None:
@@ -315,3 +380,19 @@ def test_an_item_no_longer_printable_after_the_question_is_passed_over() -> None
     host = _Host([_item("a")], [held], ["print"], later=[gone])
     result = host.run()
     assert host.printed == ["a"] and result["skipped"] == ["a"]
+
+
+def test_a_print_that_queued_anyway_is_waited_for_and_never_sent_twice() -> None:
+    """Review of #5682: a failed run with `may_have_queued` can leave the item queued; the
+    re-read counts it as printed, so the check waits for it."""
+    failed = {"status": "failed", "problem": None, "error": "lost", "may_have_queued": True}
+    host = _Host(
+        [_item("a")],
+        [failed],
+        ["print"],
+        later=[([_item("a", "queued")], "in_production"), ([_item("a", "printed")], "ready")],
+    )
+    result = host.run()
+    assert host.printed == ["a"]
+    assert result["skipped"] == []
+    assert "agent" in host.calls

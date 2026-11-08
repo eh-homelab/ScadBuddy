@@ -622,13 +622,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   other) or print choices it cannot read (no output, or one gone) asks a person to fix it and answer `print`, and an unanswered or skipped item
   is passed over, never the run's end. It never re-quotes: on an accepted order a new
   quote opens only after a person's revision after acceptance. A print run ends once
-  its plates are queued, so it then reads `order_get` every `POLL_S` (`sleep`) until no
-  printed item is `queued` or `printing`, for at most the input `settle_hours` (default
-  48; past it the run ends with a summary and no check). Only then does it ask
+  its plates are queued, so it then reads `order_get` (`sleep` between reads, from
+  `POLL_S` doubling to `POLL_MAX_S`, so a run's history stays bounded: it has no
+  continue-as-new) until no printed item is `queued` or `printing`, for at most the
+  input `settle_hours` (default 48; past it the run ends with a summary and no check);
+  an item a failed print left `queued` anyway counts as printed. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
   once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
-  through a plugin is #5660). `ensure_builtin_flow` runs `check_script` first and
-  registers nothing that fails it, and the version's commit names the built-in
+  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  component's start; it reads the versions first (a name with any registers nothing),
+  then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
   build (`flows/reconcile.py` `created_by`).
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is

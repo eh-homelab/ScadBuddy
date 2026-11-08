@@ -15,6 +15,7 @@ so the price the customer accepted stands until they make it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -75,8 +76,12 @@ PRINTABLE = ["approved", "failed"]
 ASK_TIMEOUT_S = 86400
 #: An item still on its way to the printer or on it.
 IN_FLIGHT = ["queued", "printing"]
-#: How often the order is read while its prints run, in seconds.
+#: The first wait between reads of the order while its prints run, in seconds; each
+#: wait doubles up to POLL_MAX_S. A run is one workflow with no continue-as-new, and
+#: each read adds a timer and the whole order to its history, so the reads stay few: about
+#: 170 at the longest settle_hours, not 2,016 (review of #5682).
 POLL_S = 300
+POLL_MAX_S = 3600
 
 
 def data(text):
@@ -124,12 +129,12 @@ async def print_request(item):
 
 
 async def current(order_id, item_id):
-    """The item as it is now, or None when it is gone or no longer printable: a person's
-    fix (a revision, a new quote) gives it a new output (review of #5682)."""
+    """The item as it is now, or None when it is gone: a person's fix (a revision, a new
+    quote) gives it a new output (review of #5682)."""
     detail = data(await tool("order_get", {"order_id": order_id}))
     for found in detail["items"]:
         if found["id"] == item_id:
-            return found if found["status"] in PRINTABLE else None
+            return found
     return None
 
 
@@ -142,6 +147,12 @@ async def print_item(order, item):
         if not first:
             item = await current(order["id"], item["id"])
             if item is None:
+                return False
+            if item["status"] in IN_FLIGHT:
+                # A print that reached the queue anyway (`may_have_queued`): printed, so
+                # the check waits for it, and never sent twice (review of #5682).
+                return True
+            if item["status"] not in PRINTABLE:
                 return False
         first = False
         try:
@@ -171,7 +182,8 @@ async def print_item(order, item):
             # acceptance), never this flow's: the accepted price stands until then.
             question = (
                 f"{item['title']} cannot print from its accepted quote: its sliced file "
-                "is gone or changed. Revise and re-quote it, then answer print, or skip."
+                "is gone or changed. Revise and re-quote it, accept the new quote, then "
+                "answer print, or skip."
             )
         else:
             reason = out["error"] or "no reason given"
@@ -199,6 +211,7 @@ async def settle(order_id, printed, hours):
     """The order once none of `printed` (item ids) is queued or printing: a print run
     ends once its plates are queued, not once they are printed. None past `hours`."""
     left = hours * 3600
+    wait = POLL_S
     while True:
         detail = data(await tool("order_get", {"order_id": order_id}))
         busy = [i for i in detail["items"] if i["id"] in printed and i["status"] in IN_FLIGHT]
@@ -206,8 +219,10 @@ async def settle(order_id, printed, hours):
             return detail
         if left <= 0:
             return None
-        await sleep(POLL_S)
-        left -= POLL_S
+        step = min(wait, left)
+        await sleep(step)
+        left -= step
+        wait = min(wait * 2, POLL_MAX_S)
 
 
 async def main():
@@ -268,16 +283,21 @@ async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
     Without the flows' repository there is nowhere to put it."""
     if not definitions.history.available:
         return False
-    # The check a registration route applies (review of #5682): a build whose script no
-    # longer type-checks registers nothing.
-    if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
-        logger.error(
-            "the built-in %s flow does not type-check; not registered",
-            NAME,
-            extra={"problems": len(problems)},
-        )
-        return False
     try:
+        # The usual start: the name has versions, so nothing to check or write.
+        # `register_new`'s locked check stays the guard (review of #5682).
+        if await asyncio.to_thread(definitions.history.versions, NAME):
+            logger.info("the built-in %s flow was not registered: the name has versions", NAME)
+            return False
+        # The check a registration route applies (review of #5682): a build whose script
+        # no longer type-checks registers nothing.
+        if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
+            logger.error(
+                "the built-in %s flow does not type-check; not registered",
+                NAME,
+                extra={"problems": len(problems)},
+            )
+            return False
         made = await definitions.register_new(
             NAME,
             SCRIPT,

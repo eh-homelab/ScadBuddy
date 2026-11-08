@@ -1085,9 +1085,12 @@ What this relies on, and what the design adds for it:
   accepted order (`order_not_open`) until a person revises it after acceptance (§3.5),
   so the accepted price stands until a person decides, and there is no
   `auto_accept_quotes_under_minor`. A print run ends once its plates are queued, so
-  the flow then waits, reading the order every five minutes, until no printed item is
-  `queued` or `printing` (at most the input `settle_hours`, default 48; past it the run
-  ends with a summary and no check). Only then does it hand the attempts to the agent
+  the flow then waits, reading the order after five minutes and then at waits that
+  double up to an hour, until no printed item is `queued` or `printing` (at most the
+  input `settle_hours`, default 48, maximum 168; past it the run ends with a summary
+  and no check). A run is one workflow with no continue-as-new, and each read adds a
+  timer and the whole order to its history, so the backoff keeps the longest wait to
+  about 170 reads. An item a failed print left `queued` anyway counts as printed. Only then does it hand the attempts to the agent
   under a grant kept to the order, and it composes `ready` only when the re-read order
   is `ready`. A trigger to run it is made by a person.
 
