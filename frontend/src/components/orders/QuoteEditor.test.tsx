@@ -312,7 +312,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     const rate = screen.getByTestId('quote-machine-rate')
     expect(rate).toHaveTextContent('Machine rate 0.665 per hour for Garage, with the intervals last read: Bambuddy did not answer')
-    await user.click(within(rate).getByText(/Machine rate 0.665/))
+    await user.click(within(rate).getByRole('button', { name: /Machine rate 0.665/ }))
     expect(within(rate).getByRole('list', { name: 'Machine rate parts' })).toHaveTextContent('Depreciation 0.48 per hour')
   })
 })

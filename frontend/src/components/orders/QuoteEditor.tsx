@@ -8,6 +8,7 @@ import { orderItemSource } from '../../lib/printSource'
 import { useDebounced } from '../../lib/useDebounced'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Spinner } from '@/components/ui/spinner'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -56,18 +57,20 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
     )
   }
   return (
-    <details className="ml-3 text-xs text-muted-foreground" data-testid="quote-machine-rate">
-      <summary className="cursor-pointer">
+    <Collapsible className="ml-3 text-xs text-muted-foreground" data-testid="quote-machine-rate">
+      <CollapsibleTrigger className="cursor-pointer text-left">
         Machine rate {rate.rate_per_hour} per hour for {printer}
         {INTERVALS[rate.intervals] ? `, ${INTERVALS[rate.intervals]}` : ''}
-      </summary>
-      <ul className="ml-3" aria-label="Machine rate parts">
-        <li>Depreciation {rate.depreciation_per_hour} per hour</li>
-        <li>Power {rate.power_per_hour} per hour</li>
-        <li>Wear parts {rate.wear_per_hour} per hour</li>
-        <li>Maintenance {rate.maintenance_per_hour} per hour</li>
-      </ul>
-    </details>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ul className="ml-3" aria-label="Machine rate parts">
+          <li>Depreciation {rate.depreciation_per_hour} per hour</li>
+          <li>Power {rate.power_per_hour} per hour</li>
+          <li>Wear parts {rate.wear_per_hour} per hour</li>
+          <li>Maintenance {rate.maintenance_per_hour} per hour</li>
+        </ul>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
