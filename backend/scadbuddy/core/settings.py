@@ -109,7 +109,8 @@ class Settings(BaseSettings):
     # its default parameters, in the background, and show that as its thumbnail.
     preview_renders: bool = True
     # SCADBUDDY_ORDERS_BUILTIN_FLOW: register the built-in `order-fulfilment` flow at
-    # start when its name never had a version (orders spec §7.2, #4252).
+    # start when its name never had a version, or this build's script when the newest
+    # version is an unedited older built-in (orders spec §7.2, #4252, #4673).
     orders_builtin_flow: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS

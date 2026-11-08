@@ -38,6 +38,8 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import FULFILMENT_HOLDER
 from scadbuddy.orders.operations import ORDER_ITEM_PRINT, existing_run, print_body
 from scadbuddy.orders.printing import print_request_id
+from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.models import PrinterPatch
 from scadbuddy.workflows.print_models import SourceSpec
 from tests.api.conftest import follow_operation
 from tests.api.test_customers import create as create_customer
@@ -623,6 +625,17 @@ def test_an_item_prints_through_bambuddys_queue_with_its_calibrations(
     assert uploads() == uploaded_before + 1
 
 
+#: A LAN quote's choices that slice on both routes (#4673): each slot pinned to Bambu
+#: Studio's own PLA Basic, which the native slicer reads and Bambuddy's recorded
+#: catalogue (`slicer-presets-h2c.json`) lists.
+PLA_BASIC: dict[str, Any] = {"source": "standard", "id": "Bambu PLA Basic @BBL H2C"}
+LAN_CHOICES: dict[str, Any] = {
+    "nozzles": [{"size": "0.4"}],
+    "tier": "standard",
+    "filament_overrides": {"1": PLA_BASIC, "2": PLA_BASIC},
+}
+
+
 def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice(
     model: str,
     settings: Settings,
@@ -656,7 +669,10 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
                 printer=row,
                 printer_id=None,
                 filament_plan=lan_plan,
-                choices={"nozzles": [{"size": "0.4"}], "tier": "standard"},
+                # #4673: the print slices with the quote's choices on Bambuddy's route
+                # too, so each slot is pinned to a preset the native slicer reads there
+                # (a cloud ref of Bambu Studio's own PLA Basic, `slicing/catalogue.py`).
+                choices=LAN_CHOICES,
             )
             assert started.status_code == 202, started.text
             op = follow_operation(client, started.json(), timeout=120, poll=0.2)
@@ -681,11 +697,16 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
                 )
                 assert fixed.status_code == 200, fixed.text
 
+            # #4673: the quote's printer and choices, Bambuddy's spools and its route.
             attempt = answered(
                 client,
                 client.post(
                     f"{shop.path}/print",
-                    json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+                    json={
+                        "filament_plan": body()["filament_plan"],
+                        "path": "bambuddy",
+                        "options": CALIBRATIONS,
+                    },
                     headers=press(),
                 ),
             )
@@ -694,6 +715,56 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
             assert slicer.calls == 2
             (queued,) = library.queue_bodies
             assert {name: queued[name] for name in CALIBRATIONS} == CALIBRATIONS
+
+
+def test_a_quotes_lan_path_on_a_printer_no_longer_on_the_lan_wants_a_new_quote(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,  # noqa: F811
+    tmp_path: Path,
+    fake_openscad: str,
+    library: FakeLibrary,  # noqa: F811
+) -> None:
+    """#5732 review: a print that leaves `path` out takes the quote's `native`. When the
+    printer no longer prints over the LAN, the refusal says the path was the quote's and
+    how to go on, never the run's own words about a path the print did not send."""
+    two_colours(fake_openscad)
+    Projects()
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        configure(client)
+        with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
+            slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
+            row = _lan_routed(client)
+            shop = QuoteShop(client)
+            lan_plan = {
+                "slots": [
+                    {"slot_id": 1, "spool_id": tray_spool_id(0, 1)},
+                    {"slot_id": 2, "spool_id": tray_spool_id(0, 1)},
+                ]
+            }
+            started = shop.post(
+                printer=row,
+                printer_id=None,
+                path="native",
+                filament_plan=lan_plan,
+                choices=LAN_CHOICES,
+            )
+            assert started.status_code == 202, started.text
+            op = follow_operation(client, started.json(), timeout=120, poll=0.2)
+            assert op["status"] == "succeeded", op
+            quote = op["result"]
+            assert quote["choices"]["path"] == "native"
+            assert client.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+            assert client.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+
+            printers: Printers = _state(client).components.get(PRINTERS)
+            printers.store.patch(row, PrinterPatch.model_validate({"preferred_path": "bambuddy"}))
+            refusal = problem(
+                client.post(f"{shop.path}/print", json={}, headers=press()), "requote_needed"
+            )
+            assert "quote was sliced on the LAN" in refusal["detail"]
+            assert 'path "bambuddy"' in refusal["detail"]
 
 
 @pytest.mark.parametrize("path", ["print", "revisions/r1/test-print"])
@@ -889,3 +960,106 @@ def test_a_test_print_takes_its_slice_quotes_setup(
     assert attempt["purpose"] == "test"
     [request] = sent
     assert _setup_of(request) == {key: quote["choices"][key] for key in SETUP_KEYS}
+
+
+# -- the print sends what was quoted (#4673 PR 2, order operations spec §5.1) ------------------
+
+
+def _accepted(client: TestClient, shop: QuoteShop, quote: dict[str, Any]) -> None:
+    assert client.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert client.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    _books_spools(shop)
+
+
+def test_a_print_with_no_choices_prints_the_quotes_setup(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A print that sends no choices of its own prints with the accepted quote's printer,
+    path, choices, spools, tower, supports and sequence, so it prints the quote's slice."""
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    _accepted(bambuddy, shop, quote)
+    queue_route()
+
+    # #5732 review: an explicit null is left out, as `{}`: never a 500.
+    nulls = {"choices": None, "filament_plan": None}
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=nulls, headers=press()))
+
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+    [request] = sent
+    recorded = quote["choices"]
+    assert request.printer_id == recorded["printer_id"]
+    assert request.choices.model_dump(mode="json") == recorded["choices"]
+    assert _setup_of(request) == {key: recorded[key] for key in SETUP_KEYS}
+    assert [s.model_dump(mode="json") for s in request.filament_plan.slots] == quote[
+        "filament_plan"
+    ]["slots"]
+
+
+def test_a_print_whose_choices_differ_from_the_quotes_wants_a_new_quote(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never sliced again silently: another printer or quality than the quote's is
+    `requote_needed`, naming what differs. The quote's own sent again prints. (Another
+    `path` is #5352's: the same setup on another route.)"""
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    _accepted(bambuddy, shop, quote)
+
+    for other, named in (
+        (body(tier="draft"), "choices"),
+        ({**body(), "printer_id": 2}, "printer_id"),
+        # #5732 review: an explicit null is named as one.
+        ({**body(), "prime_tower": None}, "prime_tower (null)"),
+    ):
+        refusal = problem(
+            bambuddy.post(f"{shop.path}/print", json=other, headers=press()), "requote_needed"
+        )
+        assert named in refusal["detail"]
+        # #5732 review: the setup refusal names what differs, apart from the words.
+        assert refusal["differs"] == [named.removesuffix(" (null)")]
+        assert refusal["reason"] == "setup_differs"
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=body(), headers=press()))
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+
+
+def test_a_test_print_with_no_choices_prints_its_quotes_setup(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    revision = shop.get_item()["current_revision_id"]
+    _books_spools(shop)
+    url = f"{shop.path}/revisions/{revision}/test-print"
+    problem(bambuddy.post(url, json=body(tier="draft"), headers=press()), "requote_needed")
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(url, json={}, headers=press()))
+
+    assert attempt["purpose"] == "test"
+    [request] = sent
+    assert request.choices.model_dump(mode="json") == quote["choices"]["choices"]
+
+
+def test_a_manual_quote_prints_with_the_requests_choices_and_needs_some(
+    bambuddy: TestClient,
+) -> None:
+    """A manual quote sliced nothing and records no setup: the print slices with the
+    request's choices, and a request with none is refused, naming them."""
+    slice_routes()
+    queue_route()
+    item = Item(bambuddy)
+    refusal = problem(
+        bambuddy.post(f"{item.path}/print", json={}, headers=press()), "print_setup_missing", 422
+    )
+    assert "choices" in refusal["detail"]
+    # #5732 review: an explicit null is none sent: a 422 naming it, never a 500.
+    nulled = {"choices": None, "filament_plan": body()["filament_plan"]}
+    refusal = problem(
+        bambuddy.post(f"{item.path}/print", json=nulled, headers=press()),
+        "print_setup_missing",
+        422,
+    )
+    assert "choices" in refusal["detail"] and "filament_plan" not in refusal["detail"]
+    attempt = printed(item, key="print-manual")
+    assert attempt["sliced_sha256"] is None

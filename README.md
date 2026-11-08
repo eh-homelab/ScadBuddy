@@ -159,7 +159,12 @@ on shutdown.
   library queue's name, like the housekeeping ones);
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (default `true`: at start the API registers the
   built-in `order-fulfilment` flow as version 1 when no flow of that name ever had a
-  version; a person's edit or delete stands, and nothing runs until a person makes its
+  version, and this build's script as a new version when the newest is still an unedited
+  built-in one (#4673). A trigger pins its version: each trigger of an older built-in
+  version moves to the new one, keeping its approved grant, only when the new script calls
+  nothing its version did not that the grant does not admit; any other trigger stays, with
+  the notice "A newer built-in flow exists: move this trigger to the newest version and approve its grant to use it." A person's edit or
+  delete stands, and nothing runs until a person makes its
   trigger and approves its grant; `false` registers nothing; read from the environment
   only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
   are the request's, each print is refused and the flow asks a person to print the item
@@ -572,8 +577,11 @@ and `MERCHANT_PROFILE_READ`
 ScadBuddy checks that the location is active and that it takes payments in the shop's
 order currency ([Location](https://developer.squareup.com/reference/square/objects/Location)):
 a location in another currency is refused. When the order currency is changed later,
-the page warns that new payment links will fail until Square is connected again with a
-location in that currency. The page then shows
+the page warns that payment links for orders created from then on will fail (existing
+orders keep their currency) until Square is connected again with a location in that
+currency. A Square account connected before the location's currency was kept (#5744)
+shows "Currency not checked; reconnect to check it." until it is connected again. The
+page then shows
 "Connected as Square location … (sandbox)" or "(production)". Each payment request is a
 Square payment link for the request's amount, named for the order, with the request in
 its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).

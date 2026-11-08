@@ -99,6 +99,17 @@ class ArchiveFacts(BaseModel):
     slots: list[ArchiveSlot] = Field(default_factory=list)
 
 
+class MaintenanceTask(BaseModel):
+    """A task of Bambuddy's maintenance tracker, in orders' own shape (``MaintenanceStatus``
+    in Bambuddy's ``backend/app/schemas/maintenance.py``), for a machine rate (#4625)."""
+
+    task: str
+    #: Print-hours for an ``hours`` task, calendar days for a ``days`` one.
+    interval_hours: float
+    interval_type: Literal["hours", "days"] = "hours"
+    enabled: bool = True
+
+
 #: What of an archive can be copied: an attempt's finish photo and timelapse (§8.2), or
 #: the printed file itself, which a past print's item copies into the native library
 #: (#4777, order operations spec §3.2).
@@ -166,6 +177,11 @@ class OrderIntegrations(Protocol):
         ``limit`` bytes, with ``target`` removed."""
         ...
 
+    async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        """Bambuddy printer ``printer_id``'s maintenance tasks and their intervals
+        (#4625). :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
     async def project_exists(self, project_id: int) -> bool:
         """Whether Bambuddy still has project ``project_id`` (#5263: one deleted there is
         made again). :class:`NotLinkedError` without a Bambuddy."""
@@ -200,6 +216,9 @@ class NotLinked:
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
+        raise NotLinkedError
+
+    async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
         raise NotLinkedError
 
     async def project_exists(self, project_id: int) -> bool:

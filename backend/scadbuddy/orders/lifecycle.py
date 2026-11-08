@@ -56,6 +56,7 @@ from scadbuddy.orders.models import (
     FulfilmentPurpose,
     ItemStatus,
     LibraryFileRef,
+    MachineRateBreakdown,
     Money,
     Order,
     OrderItem,
@@ -3322,6 +3323,8 @@ class Lifecycle:
         revision_id: str | None,
         quote_id: str | None = None,
         part_settings: dict[str, dict[str, Any]] | None = None,
+        printer: str | None = None,
+        machine_rate_breakdown: MachineRateBreakdown | None = None,
         choices: dict[str, Any] | None = None,
         filament_plan: dict[str, Any] | None = None,
     ) -> Quote:
@@ -3379,6 +3382,8 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
                 part_settings=part_settings,
+                printer=printer,
+                machine_rate_breakdown=machine_rate_breakdown,
                 choices=choices,
                 filament_plan=filament_plan,
             )

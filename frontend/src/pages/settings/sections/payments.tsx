@@ -197,7 +197,7 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
         </p>
       )}
       {provider.connected && <WebhookError error={provider.last_webhook_error} at={provider.last_webhook_error_at} />}
-      {provider.connected && <CurrencyWarning currency={provider.currency ?? null} />}
+      {provider.connected && <CurrencyWarning currency={provider.currency ?? null} reported={provider.reports_currency ?? false} />}
       {form && (
         <form
           className="flex flex-wrap items-end gap-2"
@@ -235,14 +235,22 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
 
 /**
  * #5666 — an account that takes one currency (a Square location's) cannot take a link in
- * another: when `orders_currency` moved away from it after the connect, say so here.
+ * another: when `orders_currency` moved away from it after the connect, say so here. Such
+ * an account connected before its currency was kept has none: ask for a reconnect.
  */
-function CurrencyWarning({ currency }: { currency: string | null }) {
+function CurrencyWarning({ currency, reported }: { currency: string | null; reported: boolean }) {
   const orders = useSettingsCache().settings?.orders_currency
+  if (reported && !currency) {
+    return (
+      <p role="status" className="text-[13px] text-warn">
+        Currency not checked; reconnect to check it.
+      </p>
+    )
+  }
   if (!currency || !orders || currency === orders) return null
   return (
     <p role="status" className="text-[13px] text-warn">
-      Connected in {currency}; orders are in {orders}. New payment links will fail.
+      Connected in {currency}; orders are in {orders}. Payment links for orders in {orders} will fail; orders in {currency} still work.
     </p>
   )
 }

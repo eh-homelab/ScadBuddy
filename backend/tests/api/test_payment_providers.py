@@ -173,6 +173,14 @@ def test_an_account_in_another_currency_is_409_and_not_connected(
     assert fake_status(client)["currency"] == "USD"
 
 
+def test_a_provider_says_whether_its_account_takes_one_currency(client: TestClient) -> None:
+    """#5666: Square's location takes one currency, so a row with none (connected before
+    the currency was kept) is one Settings asks to reconnect; the others take any."""
+    statuses = client.get("/api/v1/payments/providers").json()
+    found = {s["id"]: s["reports_currency"] for s in statuses}
+    assert found == {"stripe": False, "paypal": False, "square": True, "fake": False}
+
+
 def test_an_account_that_takes_any_currency_has_none(client: TestClient) -> None:
     assert client.put(PROVIDER, json=FAKE_CONNECT).status_code == 200
     assert fake_status(client)["currency"] is None
