@@ -115,6 +115,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
@@ -188,6 +189,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_SLICES_SWEEP,
     NATIVE_COPIES_SWEEP,
     NATIVE_SLICES_SWEEP,
+    PAYMENT_CLOSES_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_SYNC_SWEEP,
     PRINTER_WATCHES_SWEEP,
@@ -708,6 +710,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_auth_sessions() -> None:
         await _heartbeating(_sweep_auth_sessions_logged(state))
 
+    @activity.defn(name=PAYMENT_CLOSES_SWEEP)
+    async def retry_payment_closes() -> None:
+        await _heartbeating(_retry_payment_closes_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -732,6 +738,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_native_copies,
         push_git_remote,
         sweep_auth_sessions,
+        retry_payment_closes,
     ]
 
 
@@ -1188,6 +1195,18 @@ async def _push_git_remote_logged(state: AppState) -> None:
         raise
     if pushed:
         logger.info("pushed to the git remote", extra={"repositories": pushed})
+
+
+async def _retry_payment_closes_logged(state: AppState) -> None:
+    """#5700: close again each provider's page whose close failed, once its wait is over."""
+    payments = state.components.get(PAYMENTS)
+    try:
+        closed = await payments.service.retry_closes()
+    except Exception:
+        logger.exception("could not retry the payment pages' closes")
+        raise
+    if closed:
+        logger.info("closed payment pages", extra={"count": closed})
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:

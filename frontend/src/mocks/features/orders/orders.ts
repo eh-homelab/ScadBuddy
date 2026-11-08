@@ -1108,6 +1108,8 @@ export const handlers = [
         link_error: null,
         payment_id: null,
         created_by: BROWSER,
+        // #5700: the mock's provider always confirms a close at once.
+        close_pending_at: null,
       }
       state.paymentRequests.push(opened)
       event(order, 'payment_request.opened', { request_id: id, kind: opened.kind, amount_minor: amount })

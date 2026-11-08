@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import Actor, Money, Order, Payment
-from scadbuddy.orders.store import UNSET, UnsetType
+from scadbuddy.orders.store import UNSET, Conn, UnsetType
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.credentials import (
     CredentialUnreadableError,
@@ -236,13 +236,17 @@ class Payments:
     # Each call closes requests through the lifecycle, then, after the commit, closes the
     # provider's page of each request that left ``open`` for ``cancelled`` or for
     # ``paid`` by hand. A provider that fails is logged and undoes nothing: the request
-    # stays closed here, and a provider's paid event on it is still recorded.
+    # stays closed here, and a provider's paid event on it is still recorded. The close
+    # transaction marks each such page (``close_pending_at``, #5700); a confirmed close
+    # clears the mark, and a failed one leaves it for `retry_closes`, the housekeeping
+    # sweep's, which tries again with a backoff.
 
     async def cancel_request(self, order_id: str, request_id: str, by: Actor) -> PaymentRequestView:
         cancelled = await asyncio.to_thread(
             self._orders.lifecycle.cancel_payment_request, order_id, request_id, by
         )
-        await self._close_pages([cancelled])
+        if await self._close_pages([cancelled]):
+            return cancelled.model_copy(update={"close_pending_at": None})
         return cancelled
 
     async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
@@ -268,12 +272,28 @@ class Payments:
         with self._orders.store.transaction() as conn:
             return payments.requests_for_order(conn, order_id)
 
-    async def _close_pages(self, closed: Iterable[PaymentRequestView]) -> None:
+    async def retry_closes(self) -> int:
+        """#5700, the housekeeping sweep: close each marked page whose wait is over
+        (`payments.closes_due`). Returns how many the providers confirmed."""
+
+        def due() -> list[PaymentRequestView]:
+            with self._orders.store.transaction() as conn:
+                return payments.closes_due(conn)
+
+        return await self._close_pages(await asyncio.to_thread(due))
+
+    async def _close_pages(self, closed: Iterable[PaymentRequestView]) -> int:
+        """Close each page; how many the providers confirmed."""
+        confirmed = 0
         for request in closed:
             if request.provider is not None and request.provider_ref is not None:
-                await self._close_page(request.id, request.provider, request.provider_ref)
+                confirmed += await self._close_page(
+                    request.id, request.provider, request.provider_ref
+                )
+        return confirmed
 
-    async def _close_page(self, request_id: str, provider: str, provider_ref: str) -> None:
+    async def _close_page(self, request_id: str, provider: str, provider_ref: str) -> bool:
+        """Clears the request's mark when the provider confirms; counts a failed try."""
         try:
             adapter, credential = await asyncio.to_thread(self._connected, provider)
             await adapter.cancel_request(credential, provider_ref)
@@ -284,6 +304,14 @@ class Payments:
             CredentialUnreadableError,
         ) as failed:
             logger.warning("the page of payment request %s was not closed: %s", request_id, failed)
+            await asyncio.to_thread(self._note_close, request_id, payments.close_failed)
+            return False
+        await asyncio.to_thread(self._note_close, request_id, payments.close_confirmed)
+        return True
+
+    def _note_close(self, request_id: str, note: Callable[[Conn, str], None]) -> None:
+        with self._orders.store.transaction() as conn:
+            note(conn, request_id)
 
     # -- webhooks ---------------------------------------------------------------------
 

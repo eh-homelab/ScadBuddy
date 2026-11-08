@@ -453,9 +453,26 @@ def test_cancelling_the_order_cancels_its_open_requests(shop: PayShop) -> None:
 def test_a_paid_event_after_the_cancel_is_still_recorded(shop: PayShop) -> None:
     order, req = shop.linked()
     shop.lifecycle.cancel_order(order.id, BY)
+    assert shop.rows_request(req.id).close_pending_at is not None
     assert shop.lifecycle.record_provider_event("fake", EVENT) == "recorded"
     assert shop.rows_request(req.id).status == "paid"
     assert len(shop.rows.cost_entries(order.id)) == 1
+    # #5700: the page was paid, so there is nothing left to close.
+    assert shop.rows_request(req.id).close_pending_at is None
+
+
+def test_a_manual_payment_marks_the_page_it_closes(shop: PayShop) -> None:
+    """#5700: the provider's page must be closed, and the sweep tries until it is."""
+    order, req = shop.linked()
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=700)
+    assert shop.rows_request(req.id).close_pending_at is not None
+
+
+def test_the_providers_own_payment_marks_nothing(shop: PayShop) -> None:
+    _, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", EVENT)
+    assert shop.rows_request(req.id).status == "paid"
+    assert shop.rows_request(req.id).close_pending_at is None
 
 
 def test_a_link_for_a_paid_request_leaves_the_request_as_it_is(shop: PayShop) -> None:

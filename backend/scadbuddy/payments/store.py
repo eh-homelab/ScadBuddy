@@ -21,7 +21,13 @@ from scadbuddy.payments.models import (
 _PUBLIC = (
     "id, order_id, kind, provider, amount_minor, currency, hosted_url, status, created_at, paid_at"
 )
-_VIEW = f"{_PUBLIC}, provider_ref, link_error, payment_id, created_by"
+_VIEW = f"{_PUBLIC}, provider_ref, link_error, payment_id, created_by, close_pending_at"
+
+#: #5700: the first wait before the sweep closes a marked page. It gives the close after
+#: the commit time to finish; each failed try doubles the wait, up to a day.
+CLOSE_RETRY_FIRST_MINUTES = 5
+#: The most marked pages one sweep tries.
+CLOSE_RETRY_BATCH = 10
 
 
 def insert_request(
@@ -91,14 +97,55 @@ def set_request_status(
     *,
     payment_id: str | None = None,
 ) -> PaymentRequestView:
+    """#5700: the one place that marks a provider's page to close (``close_pending_at``).
+    A request with a page that is cancelled, or paid by a payment that is not its own
+    provider's (by hand, or a payment on another request that cleared the balance), is
+    marked. Its own provider's payment clears the mark: the page was paid."""
     row = conn.execute(
-        "UPDATE payment_requests SET status = %s,"
-        " paid_at = CASE WHEN %s = 'paid' THEN clock_timestamp() END,"
-        f" payment_id = COALESCE(%s, payment_id) WHERE id = %s RETURNING {_VIEW}",
-        (status, status, payment_id, request_id),
+        "UPDATE payment_requests r SET status = %(status)s,"
+        " paid_at = CASE WHEN %(status)s = 'paid' THEN clock_timestamp() END,"
+        " payment_id = COALESCE(%(payment)s, r.payment_id),"
+        " close_pending_at = CASE"
+        "  WHEN r.provider_ref IS NOT NULL AND (%(status)s = 'cancelled' OR"
+        "   (%(status)s = 'paid' AND EXISTS (SELECT 1 FROM order_payments p"
+        "    WHERE p.id = %(payment)s"
+        "    AND (p.provider IS NULL OR p.payment_request_id IS DISTINCT FROM r.id))))"
+        "  THEN clock_timestamp()"
+        "  WHEN %(status)s = 'paid' THEN NULL"
+        "  ELSE r.close_pending_at END"
+        f" WHERE r.id = %(id)s RETURNING {_VIEW}",
+        {"status": status, "payment": payment_id, "id": request_id},
     ).fetchone()
     assert row is not None
     return PaymentRequestView.model_validate(row)
+
+
+def closes_due(conn: Conn, limit: int = CLOSE_RETRY_BATCH) -> list[PaymentRequestView]:
+    """The marked pages whose wait is over: `CLOSE_RETRY_FIRST_MINUTES` after the mark or
+    the last try, doubled for each failed try, at most a day. Oldest mark first."""
+    rows = conn.execute(
+        f"SELECT {_VIEW} FROM payment_requests WHERE close_pending_at IS NOT NULL"
+        " AND COALESCE(close_tried_at, close_pending_at) <= clock_timestamp() - LEAST("
+        "  %s * interval '1 minute' * power(2, LEAST(close_attempts, 16)), interval '1 day')"
+        " ORDER BY close_pending_at, id LIMIT %s",
+        (CLOSE_RETRY_FIRST_MINUTES, limit),
+    ).fetchall()
+    return [PaymentRequestView.model_validate(r) for r in rows]
+
+
+def close_confirmed(conn: Conn, request_id: str) -> None:
+    """The provider closed the page, or says it was closed already."""
+    conn.execute("UPDATE payment_requests SET close_pending_at = NULL WHERE id = %s", (request_id,))
+
+
+def close_failed(conn: Conn, request_id: str) -> None:
+    """One more failed try of a marked page; a request with no mark is left as it is."""
+    conn.execute(
+        "UPDATE payment_requests SET close_attempts = close_attempts + 1,"
+        " close_tried_at = clock_timestamp()"
+        " WHERE id = %s AND close_pending_at IS NOT NULL",
+        (request_id,),
+    )
 
 
 def set_request_link(
