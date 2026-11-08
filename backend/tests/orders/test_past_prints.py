@@ -21,7 +21,7 @@ from scadbuddy.orders.integrations import (
     CopiedMedia,
 )
 from scadbuddy.orders.lifecycle import NewLibraryItem, NewModelItem
-from scadbuddy.orders.models import LibraryFileRef, OrderItem
+from scadbuddy.orders.models import ColourSlot, LibraryFileRef, OrderItem
 from scadbuddy.orders.past_prints import (
     ArchiveQuoteRequest,
     archive_colours,
@@ -233,6 +233,24 @@ async def test_the_copy_makes_its_folder_and_a_lost_race_trashes_its_copy(
     assert racing.trashed == [6_000_000_001]
 
 
+async def test_a_copy_recorded_by_another_pick_and_gone_since_is_replaced(
+    rows: OrderStore, tmp_path: Path
+) -> None:
+    class Racing(Copies):
+        """Another pick records a copy of 72 that is trashed before this one reads it."""
+
+        async def upload(self, filename: str, path: Path) -> LibraryFileRef:
+            made = await super().upload(filename, path)
+            rows.record_archive_copy(72, 4_000_000_001, replace=None)
+            return made
+
+    racing = Racing()
+    made = await copied_file(rows, Seam(plate(72)), racing, 72, tmp_path)
+    # This pick's copy stands, and the record names it: the next pick reuses it.
+    assert made.id in racing.files and racing.trashed == []
+    assert rows.archive_copy(72) == made.id
+
+
 async def test_an_archive_gone_before_the_copy_is_refused(rows: OrderStore, tmp_path: Path) -> None:
     with pytest.raises(ApiError) as gone:
         await copied_file(rows, Seam(), Copies(), 71, tmp_path)
@@ -384,6 +402,50 @@ async def test_every_filament_written_is_checked_with_filament_id(shop: QuoteSho
     after = shop.rows.item(item.id)
     assert after is not None and after.colours == []
     assert shop.rows.quotes(item.id) == []
+
+
+async def test_filament_id_fills_the_slots_filaments_leaves_unnamed(shop: QuoteShop) -> None:
+    """The check judges the filaments the run writes: the body's over ``filament_id``."""
+    item: OrderItem = shop.lifecycle.add_library_item(
+        shop.order.id,
+        BY,
+        LibraryFileRef(id=5_000_000_001, filename="bracket.gcode.3mf", library="native"),
+        quantity=1,
+        origin_archive_ids=(71,),
+    )
+    # Slots written by an earlier attempt, with no filaments yet.
+    blank = [ColourSlot(slot=0, colour="#FF0000"), ColourSlot(slot=1, colour="#00FF00")]
+    with shop.rows.transaction() as conn:
+        shop.rows.set_library_colours(conn, item.id, blank)
+    request = ArchiveQuoteRequest(filament_id=shop.pla, filaments={1: shop.petg})
+    quote = await quote_from_archive(
+        shop.lifecycle, Seam(plate(71)), Book(), shop.order.id, item.id, request, BY
+    )
+    assert quote.source == "archive"
+    after = shop.rows.item(item.id)
+    assert after is not None
+    assert [(s.slot, s.filament_id) for s in after.colours] == [(0, shop.pla), (1, shop.petg)]
+
+
+async def test_a_slotless_item_is_refused_before_a_slot_is_left_without_filament(
+    shop: QuoteShop,
+) -> None:
+    item: OrderItem = shop.lifecycle.add_library_item(
+        shop.order.id,
+        BY,
+        LibraryFileRef(id=5_000_000_001, filename="bracket.gcode.3mf", library="native"),
+        quantity=1,
+        origin_archive_ids=(71,),
+    )
+    for request in (ArchiveQuoteRequest(), ArchiveQuoteRequest(filaments={0: shop.pla})):
+        with pytest.raises(ApiError) as refused:
+            await quote_from_archive(
+                shop.lifecycle, Seam(plate(71)), Book(), shop.order.id, item.id, request, BY
+            )
+        assert refused.value.status == 422
+        assert refused.value.extensions["errors"][0]["loc"] == ["body", "filaments"]
+        after = shop.rows.item(item.id)
+        assert after is not None and after.colours == []
 
 
 def test_archive_colours_take_every_used_slot() -> None:

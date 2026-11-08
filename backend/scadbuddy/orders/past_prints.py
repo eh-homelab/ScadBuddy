@@ -170,17 +170,20 @@ async def copied_file(
         made = await copies.upload(copied.filename, target)
     finally:
         target.unlink(missing_ok=True)
-    stands = await asyncio.to_thread(
-        store.record_archive_copy, archive_id, made.id, replace=existing
-    )
-    if stands != made.id:
+    replace = existing
+    while True:
+        stands = await asyncio.to_thread(
+            store.record_archive_copy, archive_id, made.id, replace=replace
+        )
+        if stands == made.id:
+            return made
         # Another pick of the same archive recorded its copy first: use that one, and
-        # leave no second copy in the library.
+        # leave no second copy in the library. Gone since, this pick's copy replaces it.
         other = await copies.file(stands)
         if other is not None:
             await copies.trash(made.id)
             return other
-    return made
+        replace = stands
 
 
 def archive_colours(
@@ -263,10 +266,14 @@ async def quote_from_archive(
     store = lifecycle.store
     _, policy, _ = await asyncio.to_thread(book.policy)
     # `filament_id` stands for every slot the print used, which only its archives name:
-    # the check sees it as one slot's.
+    # the check sees it on each slot the item has (on slot 0 of an item with none), under
+    # the body's own filaments, as the run writes them.
     checked = request
     if request.filament_id is not None:
-        checked = request.model_copy(update={"filaments": {0: request.filament_id}})
+        found = await asyncio.to_thread(store.item, item_id)
+        slots = [slot.slot for slot in found.colours] if found and found.colours else [0]
+        under = {slot: request.filament_id for slot in slots}
+        checked = request.model_copy(update={"filaments": under | dict(request.filaments)})
     await asyncio.to_thread(quote_check, store, policy, order_id, item_id, checked)
     item = await asyncio.to_thread(store.item, item_id)
     order = await asyncio.to_thread(store.order, order_id)
@@ -306,11 +313,23 @@ async def quote_from_archive(
             )
         archives.append(facts)
         plates.append(_plate(facts, facts.plate_id or plate_id or position))
+    used = {slot.slot_id - 1 for a in archives for slot in a.slots if slot.used_g}
     filaments = dict(request.filaments)
     if request.filament_id is not None:
-        used = {slot.slot_id - 1 for a in archives for slot in a.slots if slot.used_g}
         filaments = {slot: request.filament_id for slot in used} | filaments
     await asyncio.to_thread(check_filaments, store, filaments)
+    unnamed = sorted(used - set(filaments)) if not item.colours else []
+    if unnamed:
+        message = (
+            f"the print used colour slot {unnamed[0]}: name its filament in filaments,"
+            " or send filament_id"
+        )
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            message,
+            type_=PROBLEMS + "filaments",
+            errors=[{"loc": ["body", "filaments"], "msg": message}],
+        )
     try:
         if not item.colours:
             colours = archive_colours(archives, filaments)

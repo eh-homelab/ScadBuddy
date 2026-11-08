@@ -52,6 +52,32 @@ describe('past prints mock (#4777)', () => {
     expect(stranger?.status).toBe(422)
   })
 
+  it('measures an attempt from an accepted archive quote, as from a slice quote', async () => {
+    const item = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9103, quantity: 1 })
+    const quote = await api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filament_id: FILAMENT_PLA })
+    state.quotes.find((q) => q.id === quote.id)!.accepted = true
+    state.fulfilments.push({
+      id: 'f-archive',
+      order_item_id: item.id,
+      attempt: 1,
+      quantity: 1,
+      outcome: 'succeeded',
+      failure_reason: null,
+      started_at: null,
+      finished_at: null,
+      notes: '',
+      accepted_at: null,
+      created_by: { kind: 'browser' },
+      created_at: '2026-11-07T10:00:00Z',
+      purpose: 'production',
+      archive_ids: [],
+    })
+    const costs = await api.orderCosts(ORDER_DRAFT)
+    const attempt = costs.items.find((i) => i.item_id === item.id)?.attempts[0]
+    expect(attempt?.grams).not.toBeNull()
+    expect(attempt?.estimated).toContain('grams')
+  })
+
   it('gives a library file item with no slots the slots its print used', async () => {
     const item = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9103, quantity: 1 })
     expect(item.colours).toEqual([])
