@@ -53,11 +53,13 @@ class FakeBambuddy:
         *,
         garbled: bool = False,
         not_json: bool = False,
+        not_utf8: bool = False,
         bug: bool = False,
     ) -> None:
         self.tasks = tasks
         self.garbled = garbled
         self.not_json = not_json
+        self.not_utf8 = not_utf8
         self.bug = bug
         self.asked: list[int] = []
 
@@ -75,6 +77,9 @@ class FakeBambuddy:
         if self.not_json:
             # A 200 whose body is not JSON, as ``response.json()`` raises.
             json.loads("<html>")
+        if self.not_utf8:
+            # A 200 whose body is not UTF-8, as ``response.json()`` decodes it.
+            json.loads(b"\xff\xfe\xfa")
         if self.bug:
             # A bug in the read, not a reply from Bambuddy.
             int("not a number")
@@ -284,6 +289,22 @@ async def test_a_reply_that_is_not_json_falls_back_to_the_stored_intervals(
     )
     await rates(store, printers, settings_store, live).breakdown(printer)
     broken = FakeBambuddy([], not_json=True)
+    rate = await rates(store, printers, settings_store, broken).breakdown(printer)
+    assert broken.asked == [7]
+    assert rate.intervals == "stored"
+    assert rate.maintenance_per_hour == "0.24"
+
+
+async def test_a_reply_that_is_not_utf8_falls_back_to_the_stored_intervals(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    broken = FakeBambuddy([], not_utf8=True)
     rate = await rates(store, printers, settings_store, broken).breakdown(printer)
     assert broken.asked == [7]
     assert rate.intervals == "stored"

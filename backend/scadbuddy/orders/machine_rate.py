@@ -519,9 +519,15 @@ class MachineRates:
             if live and self.integrations.linked:
                 try:
                     tasks = await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
-                except (ApiError, NotLinkedError, ValidationError, json.JSONDecodeError):
-                    # A reply that does not validate, or is not JSON, is Bambuddy not
-                    # answering usefully. Any other ValueError is a bug and propagates.
+                except (
+                    ApiError,
+                    NotLinkedError,
+                    ValidationError,
+                    json.JSONDecodeError,
+                    UnicodeDecodeError,
+                ):
+                    # A reply that does not validate, is not JSON or is not text is
+                    # Bambuddy not answering usefully. Any other ValueError is a bug.
                     logger.warning(
                         "Bambuddy's maintenance tasks could not be read; the stored"
                         " intervals price the machine rate",
