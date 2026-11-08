@@ -120,6 +120,15 @@ def test_editing_a_published_listing_unpublishes_it(
         store.update(published.id, body(), expected_updated_at=published.updated_at)
 
 
+def test_a_choice_with_nothing_to_choose_is_refused(store: ListingStore) -> None:
+    empty = body(params={"colour": {"kind": "choice", "choices": []}})
+    with refused_as("listing_choice_empty", 422):
+        store.create(empty)
+    listing = store.create(body())
+    with refused_as("listing_choice_empty", 422):
+        store.update(listing.id, empty, expected_updated_at=listing.updated_at)
+
+
 def test_an_edit_of_a_listing_that_is_gone_is_404(store: ListingStore) -> None:
     with refused_as("listing_not_found", 404):
         store.update("nope", body(), expected_updated_at=datetime.now(UTC))
@@ -174,7 +183,6 @@ def test_the_table_refuses_a_published_row_without_a_snapshot(
     "bound",
     [
         {"kind": "text", "max_length": 201},
-        {"kind": "choice", "choices": []},
         {"kind": "number", "min": 1},
         {"kind": "colour"},
     ],
@@ -299,3 +307,17 @@ def test_one_publish_of_a_listing_at_a_time(store: ListingStore) -> None:
     finally:
         end()
     store.begin_publish(listing.id)()
+
+
+def test_a_running_publish_holds_no_pooled_connection(store: ListingStore, pg_pool: PgPool) -> None:
+    """The publish lock is on a connection of its own: a publish's git, schema build and
+    uploads never keep one of the rows pool's connections."""
+    listings = [store.create(body(title=f"L{n}")) for n in range(3)]
+    before = pg_pool.get_stats().get("pool_size", 0) - pg_pool.get_stats().get("pool_available", 0)
+    ends = [store.begin_publish(listing.id) for listing in listings]
+    try:
+        stats = pg_pool.get_stats()
+        assert stats.get("pool_size", 0) - stats.get("pool_available", 0) == before
+    finally:
+        for end in ends:
+            end()

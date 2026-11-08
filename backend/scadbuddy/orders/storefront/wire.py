@@ -36,12 +36,13 @@ class NumberBound(BaseModel):
 
 class ChoiceBound(BaseModel):
     """One of ``choices``. For a ``// color`` parameter, each choice is the colour of one
-    of the listing's filaments."""
+    of the listing's filaments. An empty list is refused when the listing is saved (422
+    ``listing_choice_empty``), with a sentence that names the parameter."""
 
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["choice"]
-    choices: list[ParamValue] = Field(min_length=1)
+    choices: list[ParamValue]
 
 
 class TextBound(BaseModel):

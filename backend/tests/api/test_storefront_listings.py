@@ -285,6 +285,30 @@ def test_the_routes_refuse_a_listing_of_the_wrong_shape(
     assert client.post(LISTINGS, json=body).status_code == 422
 
 
+def test_a_choice_with_nothing_to_choose_says_so(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    """A colour parameter offered with every filament unchecked has no choice: the
+    refusal names the parameter and says to choose a filament, not Pydantic's text."""
+    params = {"colour": {"kind": "choice", "choices": []}}
+    refused = client.post(LISTINGS, json=listing_body(template, pla_red, params=params))
+    assert refused.status_code == 422, refused.text
+    problem = refused.json()
+    assert problem["type"] == STOREFRONT_PROBLEMS + "listing_choice_empty"
+    assert problem["name"] == "colour"
+    assert "choose at least one filament" in problem["detail"]
+    made = create(client, listing_body(template, pla_red))
+    refused = client.put(
+        f"{LISTINGS}/{made['id']}",
+        json={
+            "listing": listing_body(template, pla_red, params=params),
+            "updated_at": made["updated_at"],
+        },
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["type"] == STOREFRONT_PROBLEMS + "listing_choice_empty"
+
+
 def test_a_commit_that_is_not_the_templates_is_refused(
     client: TestClient, template: dict[str, Any], pla_red: str
 ) -> None:
