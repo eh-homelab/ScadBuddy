@@ -9,10 +9,17 @@ not counted.
 
 The counts are in memory, per replica. The render limits, which cost money, are counted
 in Postgres by the CRUD side (spec §5.4). A client with no request in the last window is
-forgotten at the next sweep, so the memory follows the clients of the last minute. The
-table holds at most `MAX_CLIENTS`: when it is full, the idle clients are swept at once,
-and if it is still full a new client gets the same 429. A live client's history is
-never dropped to make room, so no flood of new addresses can reset anyone's count.
+forgotten at the next sweep, so the memory follows the clients of the last minute.
+
+Two rules keep a flood of addresses from filling the table and locking others out:
+
+- One IPv6 /48 (a usual allocation: 65,536 /64s) holds at most `MAX_PER_PREFIX` /64
+  entries. A new /64 past those is counted under the /48 itself, so one allocation adds
+  at most 65 entries, and its overflow shares one allowance.
+- The table holds at most `MAX_CLIENTS`. When it is full, the idle clients are swept at
+  once (at most once a second). If it is still full, a new client is counted in one
+  shared bucket, `OVERFLOW`, with the same limits: limited, never locked out. A live
+  client's history is never dropped to make room, so no flood can reset anyone's count.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from typing import Final
 
@@ -39,6 +46,11 @@ WRITE_LIMIT: Final = 30
 MAX_CLIENTS: Final = 50_000
 #: An IPv6 client is its /64.
 IPV6_PREFIX: Final = 64
+#: Past `MAX_PER_PREFIX` /64s of one /48, the next ones share the /48's entry.
+IPV6_ALLOCATION: Final = 48
+MAX_PER_PREFIX: Final = 64
+#: The key of the bucket new clients share while the table is full.
+OVERFLOW: Final = "overflow"
 #: The shortest wait between two sweeps of a full table, so a flood of new clients does
 #: not walk the whole table on each request.
 FULL_SWEEP_EVERY: Final = 1.0
@@ -63,12 +75,22 @@ def client_key(address: str) -> str:
     return str(ip)
 
 
+def _allocation(key: str) -> str | None:
+    """The /48 of an IPv6 /64 key (`client_key`); None for any other key."""
+    if not key.endswith(f"/{IPV6_PREFIX}"):
+        return None
+    network = ipaddress.ip_network(key)
+    return str(network.supernet(new_prefix=IPV6_ALLOCATION))
+
+
 class _Client:
-    """A client's request times; each deque is made on its first use."""
+    """A client's request times; each deque is made on its first use. ``allocation``
+    is the /48 of a /64 entry, which it counts against."""
 
-    __slots__ = ("reads", "writes")
+    __slots__ = ("allocation", "reads", "writes")
 
-    def __init__(self) -> None:
+    def __init__(self, allocation: str | None = None) -> None:
+        self.allocation = allocation
         self.reads: deque[float] | None = None
         self.writes: deque[float] | None = None
 
@@ -111,6 +133,8 @@ class RequestLimit:
         self._clock = clock
         self._max_clients = max_clients
         self._clients: dict[str, _Client] = {}
+        #: How many /64 entries each /48 holds.
+        self._per_allocation: Counter[str] = Counter()
         self._next_sweep = clock() + WINDOW
         self._next_full_sweep = -math.inf
 
@@ -119,9 +143,9 @@ class RequestLimit:
         return set(self._clients)
 
     def history(self, address: str) -> tuple[int | None, int | None]:
-        """How many reads and writes of ``address``'s client are kept; None for one never
-        made."""
-        entry = self._clients.get(client_key(address))
+        """How many reads and writes are kept of the entry ``address`` counts under now;
+        None for one never made."""
+        entry = self._clients.get(self._key(client_key(address)))
         if entry is None:
             return (None, None)
         return (
@@ -135,15 +159,20 @@ class RequestLimit:
         now = self._clock()
         if now >= self._next_sweep:
             self._sweep(now)
-        key = client_key(address)
+        key = self._key(client_key(address))
         entry = self._clients.get(key)
         if entry is None:
             if len(self._clients) >= self._max_clients and now >= self._next_full_sweep:
                 self._next_full_sweep = now + FULL_SWEEP_EVERY
                 self._sweep(now)
             if len(self._clients) >= self._max_clients:
-                return math.ceil(WINDOW)
-            entry = self._clients[key] = _Client()
+                key = OVERFLOW
+                entry = self._clients.get(key)
+        if entry is None:
+            allocation = _allocation(key)
+            entry = self._clients[key] = _Client(allocation)
+            if allocation is not None:
+                self._per_allocation[allocation] += 1
         times = entry.writes if write else entry.reads
         if times is None:
             times = deque()
@@ -159,10 +188,22 @@ class RequestLimit:
         times.append(now)
         return None
 
+    def _key(self, key: str) -> str:
+        """``key``, or its /48 when it is a new /64 of a /48 that holds `MAX_PER_PREFIX`."""
+        if key in self._clients:
+            return key
+        allocation = _allocation(key)
+        if allocation is not None and self._per_allocation[allocation] >= MAX_PER_PREFIX:
+            return allocation
+        return key
+
     def _sweep(self, now: float) -> None:
         self._clients = {
             key: entry for key, entry in self._clients.items() if entry.newest() > now - WINDOW
         }
+        self._per_allocation = Counter(
+            entry.allocation for entry in self._clients.values() if entry.allocation is not None
+        )
         self._next_sweep = now + WINDOW
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

@@ -21,6 +21,8 @@ from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.storefront.app import create_app
 from scadbuddy.storefront.ratelimit import (
     MAX_CLIENTS,
+    MAX_PER_PREFIX,
+    OVERFLOW,
     READ_LIMIT,
     WINDOW,
     WRITE_LIMIT,
@@ -287,33 +289,41 @@ def test_two_addresses_in_one_64_share_a_limit() -> None:
     assert limit.note("2001:db8:1:3::1", write=True) is None
 
 
-def test_a_full_table_refuses_a_new_client_and_keeps_the_old() -> None:
-    clock = Clock()
-    limit = RequestLimit(
+def small_table(clock: Clock, max_clients: int = 3) -> RequestLimit:
+    return RequestLimit(
         _ok,  # type: ignore[arg-type]
         prefix="/api/store/v1",
         trusted=(),
         clock=clock,
-        max_clients=3,
+        max_clients=max_clients,
     )
+
+
+def test_a_full_table_sends_a_new_client_to_the_overflow_bucket() -> None:
+    clock = Clock()
+    limit = small_table(clock)
     for n in range(3):
         assert limit.note(f"198.51.100.{n}", write=True) is None
-    retry = limit.note("198.51.100.9", write=True)
+    # New clients share one bucket with the same limits: served, then limited.
+    for n in range(WRITE_LIMIT):
+        assert limit.note(f"203.0.113.{n}", write=True) is None
+    retry = limit.note("203.0.113.200", write=True)
     assert retry is not None and retry >= 1
-    assert limit.clients() == {"198.51.100.0", "198.51.100.1", "198.51.100.2"}
-    # The old clients keep their history: one more write each still counts.
+    assert limit.clients() == {"198.51.100.0", "198.51.100.1", "198.51.100.2", OVERFLOW}
+    # The old clients keep their own history: one more write each still counts.
     for _ in range(WRITE_LIMIT - 1):
         assert limit.note("198.51.100.0", write=True) is None
     assert limit.note("198.51.100.0", write=True) is not None
-    # Once the old ones are idle past the window, a new client fits at once.
+    assert limit.note("198.51.100.1", write=True) is None
+    # Once the old ones are idle past the window, a new client has its own entry.
     clock.now += WINDOW + 1
-    assert limit.note("198.51.100.9", write=True) is None
-    assert limit.clients() == {"198.51.100.9"}
+    assert limit.note("203.0.113.9", write=True) is None
+    assert limit.clients() == {"203.0.113.9"}
 
 
-def test_a_full_table_answers_429_as_the_limit_does() -> None:
+def test_the_overflow_bucket_answers_through_the_middleware() -> None:
     clock = Clock()
-    app = FastAPI(routes=[Route("/api/store/v1/x", _ok, methods=["GET"])])
+    app = FastAPI(routes=[Route("/api/store/v1/x", _ok, methods=["POST"])])
     app.add_middleware(
         RequestLimit,
         prefix="/api/store/v1",
@@ -322,13 +332,51 @@ def test_a_full_table_answers_429_as_the_limit_does() -> None:
         max_clients=1,
     )
     client = TestClient(app, client=CLIENT)
-    assert (
-        client.get("/api/store/v1/x", headers={"X-Forwarded-For": "198.51.100.1"}).status_code
-        == 200
-    )
-    r = client.get("/api/store/v1/x", headers={"X-Forwarded-For": "198.51.100.2"})
+    first = {"X-Forwarded-For": "198.51.100.1"}
+    assert client.post("/api/store/v1/x", headers=first).status_code == 200
+    codes = [
+        client.post(
+            "/api/store/v1/x", headers={"X-Forwarded-For": f"198.51.100.{n + 2}"}
+        ).status_code
+        for n in range(WRITE_LIMIT + 1)
+    ]
+    assert codes[:WRITE_LIMIT] == [200] * WRITE_LIMIT
+    assert codes[-1] == 429
+    r = client.post("/api/store/v1/x", headers={"X-Forwarded-For": "198.51.100.250"})
     assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}rate_limited"
+    # The client that was there first is untouched.
+    assert client.post("/api/store/v1/x", headers=first).status_code == 200
+
+
+def test_one_48_holds_at_most_65_entries() -> None:
+    clock = Clock()
+    limit = RequestLimit(_ok, prefix="/api/store/v1", trusted=(), clock=clock)  # type: ignore[arg-type]
+    for n in range(70):
+        assert limit.note(f"2001:db8:7:{n:x}::1", write=False) is None
+    keys = limit.clients()
+    assert len(keys) == MAX_PER_PREFIX + 1 == 65
+    assert "2001:db8:7::/48" in keys
+    # The /64s past the first 64 share the /48's allowance.
+    for n in range(64, 70):
+        assert limit.history(f"2001:db8:7:{n:x}::1") == (6, None)
+    # An address of a /64 that has its own entry keeps it.
+    assert limit.history("2001:db8:7:0::2") == (1, None)
+    # Another /48 is not touched.
+    assert limit.note("2001:db8:8:1::1", write=False) is None
+    assert "2001:db8:8:1::/64" in limit.clients()
+
+
+def test_the_48_count_follows_the_sweep() -> None:
+    clock = Clock()
+    limit = RequestLimit(_ok, prefix="/api/store/v1", trusted=(), clock=clock)  # type: ignore[arg-type]
+    for n in range(MAX_PER_PREFIX):
+        limit.note(f"2001:db8:7:{n:x}::1", write=False)
+    clock.now += WINDOW + 1
+    limit.note("198.51.100.1", write=False)
+    # The /48's /64s left with the sweep, so a new /64 of it has its own entry again.
+    limit.note("2001:db8:7:ff::1", write=False)
+    assert "2001:db8:7:ff::/64" in limit.clients()
 
 
 def test_the_table_stays_flat_over_many_clients() -> None:
