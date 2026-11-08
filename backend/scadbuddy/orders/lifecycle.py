@@ -1050,14 +1050,15 @@ class Lifecycle:
     def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
         1 to 500 characters). The open deposit request stays open. An order with no
-        deposit has nothing to waive: it is returned as it is, nothing written."""
+        deposit has nothing to waive, and the same reason again changes nothing: it is
+        returned as it is, nothing written."""
         reason = reason.strip()
         if not 1 <= len(reason) <= 500:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
-            if order.deposit_minor is None:
+            if order.deposit_minor is None or order.deposit_waived_reason == reason:
                 return order
             order = self.store.set_deposit_fields(conn, order.id, deposit_waived_reason=reason)
             self._event(conn, order, by, "deposit.waived", reason=reason)
@@ -1088,16 +1089,23 @@ class Lifecycle:
                 payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
 
     # -- the balance (#5281, storefront spec §9) ------------------------------------------
-    # An order that asked for money (a deposit or any payment request) gets a `balance`
-    # request at acceptance. While a balance request stands (not `cancelled`), the balance
-    # is above zero and no one waived it, the order does not ship (`balance_unpaid`). A
-    # back-office order with no request ships as it always did.
+    # An order that asked for money (a deposit, or a payment request not cancelled) gets
+    # a `balance` request at acceptance, and its open deposit request is cancelled. While
+    # a balance request stands (not `cancelled`), the balance is above zero and no one
+    # waived it, the order does not ship, and a shipment edit does not raise a quantity
+    # (`balance_unpaid`). A back-office order with no request ships as it always did.
 
     def _open_balance(self, conn: Conn, order: Order, by: Actor) -> None:
-        """At acceptance, opens a `balance` request for what is not paid yet, on the
-        default provider, when the order has a deposit or any payment request."""
-        if order.deposit_minor is None and not payments.requests_for_order(conn, order.id):
+        """At acceptance, cancels the open deposit requests and opens a `balance` request
+        for what is not paid yet, on the default provider, when the order has a deposit or
+        a payment request that is not cancelled. One open request then asks for the rest."""
+        found = payments.requests_for_order(conn, order.id)
+        if order.deposit_minor is None and all(r.status == "cancelled" for r in found):
             return
+        for request in found:
+            if request.kind == "deposit" and request.status == "open":
+                payments.set_request_status(conn, request.id, "cancelled")
+                self._event(conn, order, by, "payment_request.cancelled", request_id=request.id)
         due = totals_of(self.store, conn, order.id).balance_minor
         if due <= 0:
             return
@@ -3940,6 +3948,9 @@ class Lifecycle:
             sent = edit.model_fields_set
             if edit.items is not None:
                 self._shippable(conn, order, edit.items, replacing=shipment.id)
+                before = {line.order_item_id: line.quantity for line in shipment.items}
+                if any(line.quantity > before.get(line.order_item_id, 0) for line in edit.items):
+                    self._balance_paid(conn, order)
 
             def given(name: str) -> Any:
                 return getattr(edit, name) if name in sent else UNSET

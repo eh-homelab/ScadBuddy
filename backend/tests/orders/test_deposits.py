@@ -314,6 +314,18 @@ def test_no_deposit_cleared_or_waived_writes_nothing(shop: Shop) -> None:
     assert len(shop.events) == told
 
 
+def test_the_same_deposit_waiver_twice_writes_one_row(shop: Shop) -> None:
+    order = shop.lifecycle.set_deposit(shop.order().id, BY, 2000)
+    shop.lifecycle.waive_deposit(order.id, BY, "known customer")
+    before, told = _writes(shop, order), len(shop.events)
+    again = shop.lifecycle.waive_deposit(order.id, BY, " known customer ")
+    assert again.deposit_waived_reason == "known customer"
+    assert _writes(shop, order) == before and len(shop.events) == told
+    shop.lifecycle.waive_deposit(order.id, BY, "pays later")
+    waivers = [e.detail for e in shop.rows.events(order.id) if e.kind == "deposit.waived"]
+    assert waivers == [{"reason": "known customer"}, {"reason": "pays later"}]
+
+
 def test_a_refund_after_acceptance_brings_the_rule_back_until_waived(shop: Shop) -> None:
     order, item, rev = requested(shop)
     shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
