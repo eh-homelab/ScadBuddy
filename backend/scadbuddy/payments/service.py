@@ -306,7 +306,11 @@ class Payments:
         before any event or money is written (only its category, below);
         ``ProviderError`` is a signed body it cannot read;
         ``ProviderUnavailableError`` is a provider call the reading needed that failed,
-        and also leaves before anything is written. An event that came before one it
+        and also leaves before anything is written. A capture after an ``approved`` event
+        (#4959) that the provider did not answer raises it too, after the request moved to
+        ``pending`` (its audit row written): the capture may have landed, so the request
+        stays ``pending`` and the event's row stays, and the provider's retry reads
+        ``replayed`` and captures again under the same key. An event that came before one it
         depends on (``EventTooEarlyError``, a late fee within ``FEE_RETRY_WINDOW``) writes
         nothing and answers the same 503, so the provider sends it again; that bounded wait
         is not a failure, so it keeps no category. Every other failure but an unknown
@@ -364,9 +368,10 @@ class Payments:
         """#4959: capture an approval after its ``pending`` committed, with no lock held.
         A replay captures only a request still ``pending`` (the process may have stopped
         before its capture); the event id keys the provider's capture, so one that did
-        land is not made twice. A capture that does not happen puts the request back to
-        ``failed``; one the provider did not answer also forgets the event, so the
-        provider's retry is read again."""
+        land is not made twice. A capture the provider refused or declined puts the
+        request back to ``failed``. One whose outcome is unknown (no answer, a timeout)
+        leaves it ``pending``, so a cancel or a manual payment is refused until the
+        provider's capture event or its retried approval settles it."""
         assert event.provider_ref is not None
 
         def pending() -> PaymentRequestView | None:
@@ -377,25 +382,20 @@ class Payments:
         if found is None or found.status != "pending":
             return
 
-        def failed(*, forget_event: bool) -> Awaitable[None]:
-            return asyncio.to_thread(
-                lambda: self._orders.lifecycle.capture_failed(
-                    provider, found.id, event.event_id, forget_event=forget_event
-                )
-            )
+        def failed() -> Awaitable[None]:
+            return asyncio.to_thread(self._orders.lifecycle.capture_failed, provider, found.id)
 
         try:
             captured = await adapter.capture_request(credential, event.provider_ref, event.event_id)
         except ProviderUnavailableError:
-            await failed(forget_event=True)
             raise
         except ProviderError as refused:
             logger.warning("payment request %s was not captured: %s", found.id, refused)
-            await failed(forget_event=False)
+            await failed()
             return
         if captured == "declined":
             logger.info("%s declined the capture of payment request %s", provider, found.id)
-            await failed(forget_event=False)
+            await failed()
 
     # -- the shop's accounts ----------------------------------------------------------
 

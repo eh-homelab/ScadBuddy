@@ -151,7 +151,11 @@ def test_a_bank_debit_that_fails_records_no_money(
     }
     assert request_status(client, order_id) == "failed"
     assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
-    # A failed request no longer needs the webhook secret, so Stripe can be disconnected.
+    # A failed request can still be paid on its page (#4959), so it keeps Stripe connected
+    # until it is cancelled.
+    assert client.delete("/api/v1/payments/providers/stripe").status_code == 409
+    request_id = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()[0]["id"]
+    client.post(f"/api/v1/orders/{order_id}/payment-requests/{request_id}/cancel")
     assert client.delete("/api/v1/payments/providers/stripe").status_code == 204
 
 

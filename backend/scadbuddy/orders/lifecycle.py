@@ -1011,13 +1011,9 @@ class Lifecycle:
             self._told(change)
         return outcome
 
-    def capture_failed(
-        self, provider: str, request_id: str, event_id: str, *, forget_event: bool
-    ) -> None:
-        """#4959: the capture after an ``approved`` event did not happen. A request still
-        ``pending`` goes back to ``failed``, which the shop sees. ``forget_event`` deletes
-        the event's row, so the provider's retry of it is read again rather than
-        ``replayed``."""
+    def capture_failed(self, provider: str, request_id: str) -> None:
+        """#4959: the provider refused or declined the capture after an ``approved``
+        event. A request still ``pending`` goes back to ``failed``, which the shop sees."""
         by = Actor(kind="provider", principal=f"payment:{provider}")
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
@@ -1028,8 +1024,6 @@ class Lifecycle:
             if found.status == "pending":
                 payments.set_request_status(conn, found.id, "failed")
                 self._event(conn, order, by, "payment_request.failed", request_id=found.id)
-            if forget_event:
-                payments.forget_event(conn, provider, event_id)
         self._told(_Change(order))
 
     def _paid_by(self, conn: Conn, order: Order, found: PaymentRequestView, provider: str) -> bool:

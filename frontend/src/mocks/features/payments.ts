@@ -67,8 +67,9 @@ export const handlers = [
   http.delete('/api/v1/payments/providers/:id', ({ request, params }) => {
     const id = String(params.id)
     if (!state.providers.some((p) => p.id === id)) return unknown(request, id)
-    // A pending request (#4958) still needs the provider's webhook secret, as `has_open_requests` says.
-    if (state.paymentRequests.some((r) => r.provider === id && (r.status === 'open' || r.status === 'pending'))) {
+    // A pending request (#4958) still needs the provider's webhook secret, and a failed one's page can
+    // still be approved (#4959), as `has_open_requests` says.
+    if (state.paymentRequests.some((r) => r.provider === id && ['open', 'pending', 'failed'].includes(r.status))) {
       return problem(request, 409, `payment provider ${id} has open payment requests`, PROBLEMS + 'provider_has_open_requests')
     }
     state.providers = state.providers.filter((p) => p.id !== id)

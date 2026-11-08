@@ -79,7 +79,10 @@ async def connect_provider(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     summary="Disconnect a provider",
-    description="409 `provider_has_open_requests` while an open payment request names it.",
+    description=(
+        "409 `provider_has_open_requests` while an open, pending or failed payment"
+        " request names it."
+    ),
 )
 async def disconnect_provider(provider: str, payments: PaymentsDep) -> Response:
     try:

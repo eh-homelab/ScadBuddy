@@ -55,12 +55,14 @@ describe('PaymentRequests (#4957)', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
-  it('keeps the provider connected while a request is pending, as the backend does (#4958)', async () => {
+  it('keeps the provider connected while a request is pending or failed, as the backend does (#4958, #4959)', async () => {
     mockConnectProvider()
     const opened = await api.requestPayment(ORDER_ACCEPTED, {})
     mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'pending')
     await expect(api.disconnectPaymentProvider('fake')).rejects.toThrow('open payment requests')
     mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'failed')
+    await expect(api.disconnectPaymentProvider('fake')).rejects.toThrow('open payment requests')
+    await api.cancelPaymentRequest(ORDER_ACCEPTED, opened.id)
     await expect(api.disconnectPaymentProvider('fake')).resolves.toBeUndefined()
   })
 

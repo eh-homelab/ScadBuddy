@@ -90,7 +90,7 @@ async def request_payment(
 @router.post(
     "/{order_id}/payment-requests/{request_id}/cancel",
     response_model=PaymentRequestView,
-    summary="Cancel an open payment request",
+    summary="Cancel an open or failed payment request",
 )
 async def cancel_payment_request(
     order_id: str, request_id: str, service: PaymentsDep

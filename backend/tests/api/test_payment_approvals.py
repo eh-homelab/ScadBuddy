@@ -2,8 +2,10 @@
 approval is captured. Under the order lock, an open or failed request moves to
 ``pending`` and the transaction commits. Only then is the provider's ``capture_request``
 called, with no lock held and no transaction open. A cancelled or paid request is left
-alone, so its approval is never captured. A capture that fails moves the request back to
-``failed``. The capture's own events (paid, failed) move it on, as before."""
+alone, so its approval is never captured. A capture the provider refuses or declines
+moves the request back to ``failed``; one whose outcome is unknown (no answer) leaves it
+``pending`` until the provider's retry or the capture's own event settles it. The
+capture's own events (paid, failed) move it on, as before."""
 
 from __future__ import annotations
 
@@ -214,6 +216,8 @@ def test_a_capture_the_provider_refuses_leaves_the_request_failed(
 def test_a_capture_the_provider_does_not_answer_is_503_and_tried_again(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The capture may have landed, so the request stays ``pending`` and the event's row
+    stays: PayPal's retry reads ``replayed`` and captures again under the same key."""
     order_id, req = linked(client)
     tries = {"n": 0}
 
@@ -226,11 +230,49 @@ def test_a_capture_the_provider_does_not_answer_is_503_and_tried_again(
     calls = answer_with(monkeypatch, down_once)
     first = post(client, approved(req))
     assert first.status_code == 503
-    assert status_of(client, order_id, req["id"]) == "failed"
-    # The provider sends it again: the event was forgotten, so it is read again.
-    assert post(client, approved(req)).json() == {"outcome": "recorded"}
+    assert status_of(client, order_id, req["id"]) == "pending"
+    assert post(client, approved(req)).json() == {"outcome": "replayed"}
     assert calls == ["ap1", "ap1"]
     assert status_of(client, order_id, req["id"]) == "pending"
+
+
+def test_a_capture_that_times_out_holds_the_request_until_its_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout says nothing of the capture: the request stays ``pending``, so a cancel
+    is refused, and the capture's COMPLETED is recorded once."""
+    order_id, req = linked(client)
+
+    def timed_out(ref: str, event: str) -> CaptureOutcome:
+        raise ProviderUnavailableError("PayPal did not answer in time")
+
+    answer_with(monkeypatch, timed_out)
+    assert post(client, approved(req)).status_code == 503
+    assert status_of(client, order_id, req["id"]) == "pending"
+    with pytest.raises(LifecycleError) as refused:
+        lifecycle(client).cancel_payment_request(order_id, req["id"], BY)
+    assert refused.value.slug == "payment_request_not_open"
+    assert post(client, paid(req)).json() == {"outcome": "recorded"}
+    assert post(client, paid(req)).json() == {"outcome": "replayed"}
+    assert status_of(client, order_id, req["id"]) == "paid"
+    found = client.get(f"/api/v1/orders/{order_id}").json()
+    assert [p["amount_minor"] for p in found["payments"]] == [req["amount_minor"]]
+
+
+def test_a_disconnect_is_refused_while_a_failed_request_can_be_approved(
+    client: TestClient,
+) -> None:
+    """A failed request's page can still be approved, so it holds the provider until it
+    is cancelled."""
+    order_id, req = linked(client)
+    failed = {"id": "f1", "type": "failed", "provider_ref": req["provider_ref"]}
+    assert post(client, signed_event("s3cret", failed)).json() == {"outcome": "recorded"}
+    assert status_of(client, order_id, req["id"]) == "failed"
+    refused = client.delete("/api/v1/payments/providers/fake")
+    assert refused.status_code == 409
+    assert refused.json()["type"].endswith("provider_has_open_requests")
+    client.post(f"/api/v1/orders/{order_id}/payment-requests/{req['id']}/cancel")
+    assert client.delete("/api/v1/payments/providers/fake").status_code == 204
 
 
 def test_a_replay_of_an_approval_still_pending_captures_again(

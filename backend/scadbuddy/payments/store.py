@@ -149,13 +149,6 @@ def told_event(conn: Conn, provider: str, event_id: str) -> tuple[bool, str | No
     return True, row["payment_id"] if row["outcome"] == "recorded" else None
 
 
-def forget_event(conn: Conn, provider: str, event_id: str) -> None:
-    """Drop an event's row, so the provider's next delivery of it is read again."""
-    conn.execute(
-        "DELETE FROM payment_events WHERE provider = %s AND event_id = %s", (provider, event_id)
-    )
-
-
 def finish_event(
     conn: Conn,
     event_row: int,
@@ -194,10 +187,12 @@ def hold_provider(conn: Conn, provider: str) -> bool:
 
 
 def has_open_requests(conn: Conn, provider: str) -> bool:
-    """An open request, or a pending one: its settling event still needs the credential."""
+    """An open request, a pending one (its settling event still needs the credential), or
+    a failed one (its page can still be approved, and only a connected provider captures
+    it, #4959)."""
     row = conn.execute(
         "SELECT EXISTS (SELECT 1 FROM payment_requests WHERE provider = %s"
-        " AND status IN ('open', 'pending'))"
+        " AND status IN ('open', 'pending', 'failed'))"
         " AS found",
         (provider,),
     ).fetchone()
