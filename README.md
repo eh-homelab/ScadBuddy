@@ -554,8 +554,9 @@ names no event for a pending refund that completes later
 ([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)), so one still
 pending then is not recorded: record it by hand when PayPal shows it completed. PayPal
 has no call that voids an order. A cancel ends the request (open or failed; a pending one
-is refused, because money is on its way), and ScadBuddy never captures a later approval
-of a cancelled request. As defence in depth, the cancel also marks the order's
+is refused, because money is on its way, and so is the cancel of its order), and
+ScadBuddy never captures a later approval of a cancelled request. As defence in depth,
+the cancel also marks the order's
 `custom_id`; PayPal takes that mark only on an order the customer has approved
 ([PATCH](https://developer.paypal.com/docs/api/orders/v2/#orders_patch)). A capture that
 completed or was already under way before the cancel is recorded as a payment on the

@@ -1425,14 +1425,20 @@ class Lifecycle:
 
     def cancel_order(self, order_id: str, by: Actor, reason: str | None = None) -> Order:
         """§3.5: from any state before `shipped`; cancels the open items and the open
-        payment requests, and keeps every fulfilled one's attempts. Allowed on hold
-        (Ruling 14)."""
+        and failed payment requests, and keeps every fulfilled one's attempts. Allowed on
+        hold (Ruling 14). A pending request is money on its way, so it refuses the cancel
+        (`payment_in_flight`, #4959) until its provider settles it."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
             if order.status in ("shipped", *ENDED):
                 raise LifecycleError(
                     "order_not_cancellable", f"order {order.label} is {order.status}"
+                )
+            if any(r.status == "pending" for r in payments.requests_for_order(conn, order.id)):
+                raise LifecycleError(
+                    "payment_in_flight",
+                    f"order {order.label} has a payment in flight; wait until it settles",
                 )
             change = _Change(order)
             every = self.store.items(order.id, conn=conn)

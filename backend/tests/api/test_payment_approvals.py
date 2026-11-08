@@ -259,6 +259,48 @@ def test_a_capture_that_times_out_holds_the_request_until_its_event(
     assert [p["amount_minor"] for p in found["payments"]] == [req["amount_minor"]]
 
 
+def test_a_retried_approval_never_captures_on_an_order_cancelled_meanwhile(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capture got no answer, so the order's cancel is refused. Should the order end
+    anyway (here written straight to its row), PayPal's retry of the approval reads
+    ``replayed`` and captures nothing. A capture that did land still sends its
+    COMPLETED, which is recorded."""
+    order_id, req = linked(client)
+
+    def down(ref: str, event: str) -> CaptureOutcome:
+        raise ProviderUnavailableError("PayPal did not answer")
+
+    calls = answer_with(monkeypatch, down)
+    assert post(client, approved(req)).status_code == 503
+    refused = client.post(f"/api/v1/orders/{order_id}/cancel")
+    assert refused.status_code == 409
+    assert refused.json()["type"].endswith("/payment_in_flight")
+    store = lifecycle(client).store
+    with store.transaction() as conn:
+        store.set_order_status(conn, order_id, "cancelled")
+    assert post(client, approved(req)).json() == {"outcome": "replayed"}
+    assert calls == ["ap1"]
+    assert post(client, paid(req)).json() == {"outcome": "recorded"}
+
+
+def test_a_replay_of_an_ignored_approval_captures_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ap2`` came while ``ap1``'s capture was unanswered, so it was ignored. Its replay
+    finds the request ``pending`` but captures nothing: only a recorded approval does."""
+    _, req = linked(client)
+
+    def down(ref: str, event: str) -> CaptureOutcome:
+        raise ProviderUnavailableError("PayPal did not answer")
+
+    calls = answer_with(monkeypatch, down)
+    assert post(client, approved(req, "ap1")).status_code == 503
+    assert post(client, approved(req, "ap2")).json() == {"outcome": "ignored"}
+    assert post(client, approved(req, "ap2")).json() == {"outcome": "replayed"}
+    assert calls == ["ap1"]
+
+
 def test_a_disconnect_is_refused_while_a_failed_request_can_be_approved(
     client: TestClient,
 ) -> None:
@@ -310,20 +352,24 @@ def test_a_cancel_during_the_capture_is_refused(
     assert status_of(client, order_id, req["id"]) == "pending"
 
 
-def test_an_order_cancelled_during_the_capture_leaves_the_request_pending(
+def test_an_order_cancel_during_the_capture_is_refused(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The order's cancel ends its open and failed requests only; a pending one is left,
-    and the money on its way is recorded
-    when the capture's event arrives."""
+    """A pending request is money on its way: the order's cancel is refused
+    (``payment_in_flight``), and the money is recorded when the capture's event arrives."""
     order_id, req = linked(client)
+    refused: list[str] = []
 
     def cancel_order(ref: str, event: str) -> CaptureOutcome:
-        lifecycle(client).cancel_order(order_id, BY)
+        try:
+            lifecycle(client).cancel_order(order_id, BY)
+        except LifecycleError as error:
+            refused.append(error.slug)
         return "captured"
 
     answer_with(monkeypatch, cancel_order)
     assert post(client, approved(req)).json() == {"outcome": "recorded"}
+    assert refused == ["payment_in_flight"]
     assert status_of(client, order_id, req["id"]) == "pending"
     assert post(client, paid(req)).json() == {"outcome": "recorded"}
     found = client.get(f"/api/v1/orders/{order_id}").json()

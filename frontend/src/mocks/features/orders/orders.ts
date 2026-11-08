@@ -979,6 +979,10 @@ export const handlers = [
     return transition(request, () => {
       const order = lock(String(params.id))
       if (order.status === 'shipped' || ENDED.has(order.status)) throw new Refused('order_not_cancellable', `order ${order.number} is ${order.status}`)
+      // A pending request is money on its way (#4959).
+      if (state.paymentRequests.some((r) => r.order_id === order.id && r.status === 'pending')) {
+        throw new Refused('payment_in_flight', `order ${order.number} has a payment in flight; wait until it settles`)
+      }
       const cancelled: string[] = []
       for (const i of itemsOf(order.id)) {
         if (!SETTLED.has(i.status)) {

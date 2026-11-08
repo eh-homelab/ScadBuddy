@@ -99,7 +99,8 @@ class CapturingProvider(PaymentProvider, Protocol):
         self, credential: Credential, provider_ref: str, event_id: str
     ) -> CaptureOutcome:
         """Capture the approved payment, keyed on ``event_id`` so a retry captures once.
-        ``ProviderUnavailableError`` when the provider did not answer (the request goes
-        back to ``failed`` and the event is read again on the provider's retry);
+        ``ProviderUnavailableError`` when the provider did not answer (the request stays
+        ``pending`` and the event's row is kept, so the provider's retry of the event reads
+        ``replayed`` and captures again under the same key);
         ``ProviderError`` for a refusal a retry would meet again."""
         ...

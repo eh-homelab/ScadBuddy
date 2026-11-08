@@ -125,6 +125,26 @@ describe('PaymentRequests (#4957)', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument())
   })
 
+  it('says a failed request can still be paid when its provider says the page can be approved again (#4959)', async () => {
+    await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+    })
+    expect(await screen.findByText('The customer can still pay this link. Cancel it to stop that.')).toBeInTheDocument()
+  })
+
+  it('says nothing of paying again when the provider does not say so, as for Stripe', async () => {
+    await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+      state.paymentRequests.find((r) => r.id === id)!.provider = 'stripe'
+    })
+    expect(await screen.findByText('Failed')).toBeInTheDocument()
+    await screen.findByText('stripe')
+    expect(screen.queryByText(/can still pay this link/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+  })
+
   it('offers no new request on a closed order', async () => {
     mockConnectProvider()
     renderPage(<Host id={ORDER_CLOSED} />)

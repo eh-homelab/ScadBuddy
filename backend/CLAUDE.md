@@ -906,7 +906,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   lock held; a capture PayPal refused or declined puts the request back to `failed` in a
   second transaction (`Lifecycle.capture_failed`), and one whose outcome is unknown (no
   answer) leaves it `pending` and keeps the event's row, so PayPal's retry reads `replayed`
-  and captures again under the same key. The capture's events record the money. Each
+  and captures again under the same key, only for an approval recorded (not `ignored`) and
+  never on an order ended since. The capture's events record the money. Each
   webhook is checked by PayPal's verify-webhook-signature call with the raw body; the
   OAuth token is cached in memory, never stored; a cancel ends open and failed requests
   (`CAPTURABLE`) and marks the order's `custom_id` as defence in depth; the facts, each
@@ -938,9 +939,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
-  manual payment, and a disconnect is refused while one is pending or failed (#4959: a
-  failed request's page can still be approved). A cancel (of the
-  request or its order) ends a `failed` request as well as an open one. A `refund_failed`
+  manual payment, and refuses its order's cancel (`payment_in_flight`). A disconnect is
+  refused while a request is pending or failed: a failed one holds its provider until it is
+  cancelled (#4959; PayPal's page of a failed request can still be approved, and
+  `ProviderStatus.reapprovable` says so, which the order page's note reads). A cancel (of
+  the request or its order) ends a `failed` request as well as an open one, and closes its
+  page only at a provider that captures (`Payments._close_pages`). A `refund_failed`
   event (#5681; Stripe sends it for every `failed` or `canceled` Refund) names the
   refund's event id (`ProviderEvent.reverses`, kept on its `payment_events` row). When
   that refund was recorded, it writes a positive payment that cancels the refund's row,

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Annotated, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from scadbuddy.orders.lifecycle import LifecycleError
+from scadbuddy.orders.lifecycle import ENDED, LifecycleError
 from scadbuddy.orders.models import Actor, Money, Order, Payment
 from scadbuddy.orders.store import UNSET, UnsetType
 from scadbuddy.payments import store as payments
@@ -106,6 +106,9 @@ class ProviderStatus(BaseModel):
     #: Why the last webhook failed, cleared by the next that succeeds (#5684).
     last_webhook_error: WebhookError | None
     last_webhook_error_at: datetime | None
+    #: Whether a failed request's page can still be paid (#4959): true for a provider
+    #: that captures an approval (PayPal), whose order the customer can approve again.
+    reapprovable: bool
 
 
 class ProviderConnect(BaseModel):
@@ -241,40 +244,55 @@ class Payments:
     # stays closed here, and a provider's paid event on it is still recorded.
 
     async def cancel_request(self, order_id: str, request_id: str, by: Actor) -> PaymentRequestView:
+        failed = await asyncio.to_thread(self._failed, order_id)
         cancelled = await asyncio.to_thread(
             self._orders.lifecycle.cancel_payment_request, order_id, request_id, by
         )
-        await self._close_pages([cancelled])
+        await self._close_pages([cancelled], failed)
         return cancelled
 
     async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
         """``cancel`` cancels the order and its open and failed requests."""
-        before = {
-            r.id
-            for r in await asyncio.to_thread(self._requests, order_id)
-            if r.status == "cancelled"
-        }
+        requests = await asyncio.to_thread(self._requests, order_id)
+        before = {r.id for r in requests if r.status == "cancelled"}
+        failed = {r.id for r in requests if r.status == "failed"}
         cancelled = await asyncio.to_thread(cancel)
         after = await asyncio.to_thread(self._requests, order_id)
-        await self._close_pages(r for r in after if r.status == "cancelled" and r.id not in before)
+        await self._close_pages(
+            (r for r in after if r.status == "cancelled" and r.id not in before), failed
+        )
         return cancelled
 
     async def add_payment(self, order_id: str, add: Callable[[], Payment]) -> Payment:
         """``add`` records a payment the shop received, which can pay open and failed
         requests."""
+        failed = await asyncio.to_thread(self._failed, order_id)
         payment = await asyncio.to_thread(add)
         after = await asyncio.to_thread(self._requests, order_id)
-        await self._close_pages(r for r in after if r.payment_id == payment.id)
+        await self._close_pages((r for r in after if r.payment_id == payment.id), failed)
         return payment
 
     def _requests(self, order_id: str) -> list[PaymentRequestView]:
         with self._orders.store.transaction() as conn:
             return payments.requests_for_order(conn, order_id)
 
-    async def _close_pages(self, closed: Iterable[PaymentRequestView]) -> None:
+    def _failed(self, order_id: str) -> set[str]:
+        return {r.id for r in self._requests(order_id) if r.status == "failed"}
+
+    async def _close_pages(self, closed: Iterable[PaymentRequestView], failed: set[str]) -> None:
+        """``failed`` names the requests that were ``failed`` before they closed. Their page
+        is open only at a provider that captures an approval (PayPal); another provider's
+        failed page has already closed (Stripe's session completed), so it is not asked."""
         for request in closed:
-            if request.provider is not None and request.provider_ref is not None:
-                await self._close_page(request.id, request.provider, request.provider_ref)
+            if request.provider is None or request.provider_ref is None:
+                continue
+            if request.id in failed and not self._reapprovable(request.provider):
+                continue
+            await self._close_page(request.id, request.provider, request.provider_ref)
+
+    def _reapprovable(self, provider: str) -> bool:
+        adapter = self._registry.get(provider)
+        return adapter is not None and hasattr(adapter, "capture_request")
 
     async def _close_page(self, request_id: str, provider: str, provider_ref: str) -> None:
         try:
@@ -371,15 +389,25 @@ class Payments:
         land is not made twice. A capture the provider refused or declined puts the
         request back to ``failed``. One whose outcome is unknown (no answer, a timeout)
         leaves it ``pending``, so a cancel or a manual payment is refused until the
-        provider's capture event or its retried approval settles it."""
+        provider's capture event or its retried approval settles it. Only the approval
+        that moved the request (its event recorded, not ``ignored``) captures, and never on
+        an order that has ended or is a cart since."""
         assert event.provider_ref is not None
 
         def pending() -> PaymentRequestView | None:
             with self._orders.store.transaction() as conn:
-                return payments.request_by_ref(conn, provider, event.provider_ref or "")
+                found = payments.request_by_ref(conn, provider, event.provider_ref or "")
+                if found is None or found.status != "pending":
+                    return None
+                if payments.event_outcome(conn, provider, event.event_id) != "recorded":
+                    return None
+                order = self._orders.store.order(found.order_id, conn=conn)
+                if order is None or order.status in ENDED or order.unsubmitted:
+                    return None
+                return found
 
         found = await asyncio.to_thread(pending)
-        if found is None or found.status != "pending":
+        if found is None:
             return
 
         def failed() -> Awaitable[None]:
@@ -464,6 +492,7 @@ class Payments:
                     last_webhook_at=None if row is None else row.last_webhook_at,
                     last_webhook_error=None if row is None else row.last_webhook_error,
                     last_webhook_error_at=None if row is None else row.last_webhook_error_at,
+                    reapprovable=self._reapprovable(provider_id),
                 )
             )
         return found

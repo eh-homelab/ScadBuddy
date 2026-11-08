@@ -151,11 +151,13 @@ def test_a_bank_debit_that_fails_records_no_money(
     }
     assert request_status(client, order_id) == "failed"
     assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
-    # A failed request can still be paid on its page (#4959), so it keeps Stripe connected
-    # until it is cancelled.
+    # A failed request holds its provider until it is cancelled (#4959; for PayPal its
+    # page can be approved again). Stripe's session already completed, so the cancel
+    # does not ask Stripe to expire it.
     assert client.delete("/api/v1/payments/providers/stripe").status_code == 409
     request_id = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()[0]["id"]
     client.post(f"/api/v1/orders/{order_id}/payment-requests/{request_id}/cancel")
+    assert not stripe["expire"].called
     assert client.delete("/api/v1/payments/providers/stripe").status_code == 204
 
 

@@ -151,6 +151,13 @@ def test_disconnect_with_an_open_request_is_409(client: TestClient) -> None:
     assert fake_status(client)["connected"] is False
 
 
+def test_a_provider_says_whether_a_failed_page_can_be_approved_again(client: TestClient) -> None:
+    """#4959: only a provider that captures an approval (PayPal, and the fake) keeps a
+    failed request's page payable; the order page says so only for those."""
+    found = {s["id"]: s["reapprovable"] for s in client.get("/api/v1/payments/providers").json()}
+    assert found == {"fake": True, "paypal": True, "stripe": False}
+
+
 def test_the_default_is_chosen(client: TestClient) -> None:
     connect_fake(client)
     assert client.post(f"{PROVIDER}/default").status_code == 204

@@ -14,6 +14,8 @@ const PROBLEMS = 'https://scadbuddy.dev/problems/payments/'
 const FAKE = {
   id: 'fake',
   label: 'Fake',
+  // The backend's fake captures an approval, as PayPal does (`Payments._reapprovable`).
+  reapprovable: true,
   fields: [
     { name: 'account', label: 'Account', secret: false },
     { name: 'signing_secret', label: 'Signing secret', secret: true },
