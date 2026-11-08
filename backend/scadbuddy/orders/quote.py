@@ -234,11 +234,11 @@ def quote_check(
         raise refused(error) from None
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
     if not requote_open(order, item, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            f"order {order.number} is {order.status}: an item is quoted while the order is"
+            f"order {order.label} is {order.status}: an item is quoted while the order is"
             " draft or quoted, or, past that, while the item has no accepted quote or was"
             " revised after acceptance",
             type_=PROBLEMS + "order_not_open",
@@ -457,7 +457,7 @@ async def ensure_output(
             "job_id": job.id,
             "index": 0,
             "inputs": reference.inputs,
-            "name": f"{order.number} {item.title}",
+            "name": f"{order.label} {item.title}",
             **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )

@@ -270,6 +270,11 @@ class Order(BaseModel):
     storefront_visitor_id: str | None = None
 
     @property
+    def label(self) -> str:
+        """How a message names the order: its number, or ``cart <id>`` for a cart."""
+        return self.number if self.number is not None else f"cart {self.id}"
+
+    @property
     def unsubmitted(self) -> bool:
         """A storefront draft: the shop may read it, but never act on it."""
         return self.source == "storefront" and self.submitted_at is None

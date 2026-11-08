@@ -721,7 +721,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             item = await asyncio.to_thread(store.item, item_id)
             if item is None or item.order_id != order.id:
                 raise ApiError(
-                    status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
+                    status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}"
                 )
         # A request recorded before attempts had files names none (#4251).
         fulfilment_id = request.get("fulfilment_id")

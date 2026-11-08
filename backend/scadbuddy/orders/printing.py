@@ -178,13 +178,11 @@ async def print_check(
     ``part_settings``, which a request that sends none prints with."""
     order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
-        raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
+        raise _refused(f"order_{order.status}", f"order {order.label} is {order.status}")
     if order.status not in DERIVED:
-        raise _refused(
-            "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
-        )
+        raise _refused("order_not_accepted", f"order {order.label} is {order.status}, not accepted")
     if order.on_hold:
-        raise _refused("order_on_hold", f"order {order.number} is on hold")
+        raise _refused("order_on_hold", f"order {order.label} is on hold")
     reference = None if item.library_file is not None else reference_of(item)
     if item.status not in FULFILLABLE:
         raise _refused(
@@ -245,9 +243,9 @@ async def test_print_check(
     except LifecycleError as error:
         raise refused(error) from None
     if order.status in ENDED:
-        raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
+        raise _refused(f"order_{order.status}", f"order {order.label} is {order.status}")
     if order.on_hold:
-        raise _refused("order_on_hold", f"order {order.number} is on hold")
+        raise _refused("order_on_hold", f"order {order.label} is on hold")
     reference = reference_of(item)
     if item.status in SETTLED:
         raise _refused("item_not_open", f"item {item.id} is {item.status}", items=[item.id])
@@ -321,7 +319,7 @@ async def _order_and_item(
         raise refused(error) from None
     item = await asyncio.to_thread(store.item, item_id)
     if item is None or item.order_id != order.id:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
     return order, item
 
 

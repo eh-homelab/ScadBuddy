@@ -12,13 +12,14 @@ from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_settings_runtime import _state
+from tests.conftest import PgPool
 from tests.orders.test_lifecycle import resolved
 
 
 @pytest.fixture
-def draft_with_item(client: TestClient) -> str:
+def draft_with_item(client: TestClient, pg_pool: PgPool) -> str:
     orders = _state(client).components.get(ORDERS)
-    visitor = VisitorStore(orders.store._pool).ensure("v" * 43)
+    visitor = VisitorStore(pg_pool).ensure("v" * 43)
     by = visitor_actor(visitor)
     draft = orders.lifecycle.ensure_draft(visitor.id, by, currency="USD")
     orders.lifecycle.add_items(draft.id, by, [NewModelItem(resolved=resolved(), quantity=1)])

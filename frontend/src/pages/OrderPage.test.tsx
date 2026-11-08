@@ -5,7 +5,7 @@ import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
-import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -74,6 +74,24 @@ describe('OrderPage (#4249)', () => {
     const alert = await screen.findByTestId('order-refusal')
     expect(alert).toHaveTextContent(/no accepted quote/)
     expect(alert).toHaveTextContent('Name Keychain')
+  })
+
+  it('offers no accept, quote, print, hold or cancel on a storefront cart (#5282)', async () => {
+    const cart = seedCart()
+    state.items.push(item('cart-item', cart.id, 'draft'))
+    const { user } = render(cart.id)
+    await screen.findByRole('heading', { name: 'Cart' })
+    expect(screen.getByText(/a storefront visitor/)).toBeInTheDocument()
+    expect(screen.getByTestId('order-cart')).toHaveTextContent(/not submitted/)
+    for (const name of ['Accept order', 'Put on hold', 'Cancel order…', 'Add item', 'Add custom item']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    await user.click(within(screen.getByTestId('order-item-cart-item')).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).queryByRole('region', { name: 'Price' })).toBeNull()
+    expect(within(drawer).queryByLabelText(/Price per unit/)).toBeNull()
+    expect(within(drawer).queryByTestId('print-item')).toBeNull()
+    expect(within(drawer).queryByTestId('test-print-item')).toBeNull()
   })
 
   it('prices an item from its drawer, accepts the order, and closes it from a shipment', async () => {

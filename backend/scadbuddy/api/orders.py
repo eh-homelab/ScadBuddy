@@ -1212,8 +1212,7 @@ async def accept_order(order_id: str, orders: OrdersDep) -> Order:
     # leave it unrecorded, and the next ensure would make a second of the same name.
     ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
     _ENSURING.add(ensuring)
-    # An accepted order is never a cart (#5282), so it has its number.
-    ensuring.add_done_callback(lambda task: _ensured(task, accepted.number or accepted.id))
+    ensuring.add_done_callback(lambda task: _ensured(task, accepted.label))
     await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
     return accepted
 

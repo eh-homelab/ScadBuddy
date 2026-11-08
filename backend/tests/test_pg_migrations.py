@@ -563,6 +563,11 @@ def test_the_storefront_drafts_migration_keeps_every_order_a_back_office_one(
             "INSERT INTO orders (id, currency, created_by, source, storefront_visitor_id)"
             " VALUES ('d', 'USD', '{}', 'storefront', 'v')"
         )
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute("UPDATE orders SET storefront_visitor_id = 'v' WHERE id = 'o'")
+        assert conn.execute(
+            "SELECT to_regclass('orders_storefront_visitor') IS NOT NULL"
+        ).fetchone() == (True,)
         conn.execute("DELETE FROM storefront_visitors")
         assert conn.execute(
             "SELECT storefront_visitor_id FROM orders WHERE id = 'd'"

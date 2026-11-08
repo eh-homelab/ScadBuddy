@@ -6,6 +6,7 @@ edge never sees it, and the drafts and the visitor actor name it."""
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -16,6 +17,8 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.orders.models import Actor
 
 _VISITOR = "id, created_at, last_seen_at"
+#: The edge's visitor id: 32 random bytes as URL-safe base64, unpadded.
+VISITOR_ID = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,9 @@ class Visitor:
 
 
 def _hash(visitor_id: str) -> str:
+    """The id's sha256 (hex); ``ValueError`` for an id not of the edge's shape."""
+    if not VISITOR_ID.fullmatch(visitor_id):
+        raise ValueError("a visitor id is 43 URL-safe base64 characters")
     return hashlib.sha256(visitor_id.encode()).hexdigest()
 
 

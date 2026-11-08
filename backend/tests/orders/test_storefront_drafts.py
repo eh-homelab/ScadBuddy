@@ -17,7 +17,12 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.lifecycle import LifecycleError, ManualQuoteInput, NewModelItem
+from scadbuddy.orders.lifecycle import (
+    LifecycleError,
+    ManualQuoteInput,
+    NewCustomItem,
+    NewModelItem,
+)
 from scadbuddy.orders.models import Order, OrderFilter
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.printing import test_print_check as check_test_print
@@ -206,9 +211,63 @@ def _manual_quote(shop: Shop, order: Order) -> object:
     )
 
 
+def _only_item(shop: Shop, order: Order) -> str:
+    [item] = shop.rows.items(order.id)
+    return item.id
+
+
+def _custom_on_cart(shop: Shop, order: Order) -> str:
+    """A custom item put on the cart by hand: no route may price one there."""
+    with shop.rows.transaction() as conn:
+        item = shop.rows.insert_custom_item(
+            conn,
+            order.id,
+            title="Design",
+            quantity=1,
+            notes="",
+            sku=None,
+            requires_printing=False,
+        )
+    return item.id
+
+
 ACTS: dict[str, Callable[[Shop, Order], object]] = {
     "accept": _accept,
     "manual_quote": _manual_quote,
+    "accept_quote": lambda shop, order: shop.lifecycle.accept_quote(
+        order.id, _only_item(shop, order), "any", BY
+    ),
+    "slice_quote": lambda shop, order: shop.lifecycle.record_slice_quote(
+        order.id,
+        _only_item(shop, order),
+        cast(Any, None),
+        [],
+        sliced_sha256="0" * 64,
+        sliced_blob_key="k",
+        by=BY,
+        revision_id=None,
+    ),
+    "claim_print": lambda shop, order: shop.lifecycle.claim_print(
+        order.id,
+        _only_item(shop, order),
+        BY,
+        request_id="r1",
+        sliced_sha256=None,
+        sliced_blob_key=None,
+    ),
+    "add_custom_item": lambda shop, order: shop.lifecycle.add_items(
+        order.id, BY, [NewCustomItem(title="Design", quantity=1, unit_price_minor=500)]
+    ),
+    "add_custom_item_unaccepted": lambda shop, order: shop.lifecycle.add_items(
+        order.id,
+        BY,
+        [NewCustomItem(title="Design", quantity=1, unit_price_minor=500, accept=False)],
+    ),
+    "price_custom_item": lambda shop, order: shop.lifecycle.update_item(
+        order.id, _custom_on_cart(shop, order), BY, unit_price_minor=700
+    ),
+    "cancel": lambda shop, order: shop.lifecycle.cancel_order(order.id, BY),
+    "hold": lambda shop, order: shop.lifecycle.hold(order.id, BY),
 }
 
 
@@ -216,9 +275,36 @@ ACTS: dict[str, Callable[[Shop, Order], object]] = {
 def test_the_shop_cannot_act_on_an_unsubmitted_draft(
     shop: Shop, draft_with_item: Order, act: str
 ) -> None:
+    events = shop.kinds(draft_with_item)
+    revisions = [shop.rows.revisions(i.id) for i in shop.rows.items(draft_with_item.id)]
     with pytest.raises(LifecycleError) as refused:
         ACTS[act](shop, draft_with_item)
     assert refused.value.slug == "order_not_submitted"
+    assert str(refused.value) == f"cart {draft_with_item.id} is not yet submitted"
+    # The refusal wrote nothing: no quote, no audit row, no repaired revision.
+    items = shop.rows.items(draft_with_item.id)
+    assert all(shop.rows.quotes(i.id) == [] for i in items)
+    assert shop.kinds(draft_with_item) == events
+    assert [shop.rows.revisions(i.id) for i in items][: len(revisions)] == revisions
+    after = shop.get(draft_with_item)
+    assert (after.status, after.on_hold) == ("draft", False)
+
+
+def test_a_refusal_names_a_cart_by_its_id(shop: Shop, draft_with_item: Order) -> None:
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.update_item(draft_with_item.id, "nobody", BY, title="T")
+    assert str(refused.value) == f"no item nobody of order cart {draft_with_item.id}"
+    assert draft_with_item.label == f"cart {draft_with_item.id}"
+    assert shop.order().label.startswith("ORD-")
+
+
+def test_a_bad_visitor_id_is_refused(visitors: VisitorStore) -> None:
+    for bad in ("a" * 42, "a" * 44, "a" * 42 + "+", "a" * 42 + "=", ""):
+        with pytest.raises(ValueError):
+            visitors.ensure(bad)
+        with pytest.raises(ValueError):
+            visitors.find(bad)
+    assert visitors.find("-_" + "A" * 41) is None
 
 
 def test_the_list_hides_drafts_unless_asked(shop: Shop, draft_with_item: Order) -> None:

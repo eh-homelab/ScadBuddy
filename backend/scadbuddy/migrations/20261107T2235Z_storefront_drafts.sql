@@ -19,6 +19,10 @@ ALTER TABLE orders
   ADD CONSTRAINT orders_customer_and_number CHECK (
     (customer_id IS NOT NULL AND number IS NOT NULL)
     OR (source = 'storefront' AND submitted_at IS NULL)
+  ),
+  -- Only a storefront order names a visitor.
+  ADD CONSTRAINT orders_visitor_is_storefront CHECK (
+    storefront_visitor_id IS NULL OR source = 'storefront'
   );
 
 -- One draft per visitor: a second insert fails, and `Lifecycle.ensure_draft` reads the
@@ -26,3 +30,5 @@ ALTER TABLE orders
 CREATE UNIQUE INDEX orders_one_draft_per_visitor ON orders (storefront_visitor_id)
   WHERE submitted_at IS NULL AND source = 'storefront';
 CREATE INDEX orders_source ON orders (source, submitted_at);
+-- A visitor's delete sets its orders' `storefront_visitor_id` to NULL without a scan.
+CREATE INDEX orders_storefront_visitor ON orders (storefront_visitor_id);

@@ -4,7 +4,7 @@ import { api } from '../api/client'
 import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
-import { addMode, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
+import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
@@ -162,6 +162,7 @@ export function OrderPage() {
   // #5349: `after_acceptance` on an accepted, in-production or ready order not on hold.
   const adds = addMode(order)
   const ended = ENDED.has(order.status)
+  const cart = isCart(order)
   const titles = new Map(items.map((i) => [i.id, i.title]))
   const current = items.find((i) => i.id === openItem)
   const addresses = customer.data?.addresses ?? []
@@ -195,7 +196,12 @@ export function OrderPage() {
             </Button>
           </div>
         )}
-        {!ended && (
+        {cart && (
+          <p role="status" data-testid="order-cart" className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
+            A storefront cart the visitor has not submitted. Nothing on it can be quoted, accepted, held, cancelled or printed.
+          </p>
+        )}
+        {!ended && !cart && (
           <div className="flex flex-wrap items-center gap-2" aria-label="Order actions">
             {editable && (
               <Button disabled={busy} onClick={() => void act(() => api.acceptOrder(order.id))}>
@@ -712,7 +718,7 @@ function ItemDrawer({
       </dl>
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
-      {custom ? (
+      {isCart(order) ? null : custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
@@ -720,7 +726,7 @@ function ItemDrawer({
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
-      <PrintItem order={order} item={item} onChanged={onChanged} />
+      {!isCart(order) && <PrintItem order={order} item={item} onChanged={onChanged} />}
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={production} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       <OrderAttachments
         orderId={order.id}
