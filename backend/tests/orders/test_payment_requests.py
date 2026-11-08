@@ -388,6 +388,26 @@ def test_a_paid_event_told_again_with_its_fee_writes_the_fee_once(shop: PayShop)
     assert len(shop.rows.cost_entries(order.id)) == 1
 
 
+def test_a_provider_payment_told_again_on_a_request_paid_by_hand_is_recorded_once(
+    shop: PayShop,
+) -> None:
+    """#5725 review: the request's ``payment_id`` is the cash that paid it, so the repeat
+    is told by the provider's own payment on the request, not by that pointer."""
+    order, req = shop.linked()
+    cash = shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
+    no_fee = EVENT.model_copy(update={"fee_minor": None})
+    assert shop.lifecycle.record_provider_event("fake", no_fee) == "recorded"
+    with_fee = EVENT.model_copy(update={"event_id": "e8"})
+    assert shop.lifecycle.record_provider_event("fake", with_fee) == "recorded"
+    again = EVENT.model_copy(update={"event_id": "e9"})
+    assert shop.lifecycle.record_provider_event("fake", again) == "ignored"
+    provider_paid = [p for p in shop.rows.payments(order.id) if p.provider == "fake"]
+    assert [p.amount_minor for p in provider_paid] == [700]
+    [fee] = shop.rows.cost_entries(order.id)
+    assert (fee.amount_minor, fee.source) == (31, f"payment:{provider_paid[0].id}")
+    assert shop.rows_request(req.id).payment_id == cash.id
+
+
 def test_a_paid_event_for_a_request_paid_by_hand_is_recorded(shop: PayShop) -> None:
     order, req = shop.linked()
     cash = shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)

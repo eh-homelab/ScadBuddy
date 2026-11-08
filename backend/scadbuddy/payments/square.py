@@ -30,17 +30,24 @@ Square's documented behaviour this relies on:
   page at a time with ``cursor``, at most 1000 a page
   (https://developer.squareup.com/reference/square/checkout-api/list-payment-links).
 - A Payment carries its ``order_id``, its ``status`` (``APPROVED``, ``PENDING``,
-  ``COMPLETED``, ``CANCELED`` or ``FAILED``), ``total_money`` (``amount_money`` plus a tip)
-  and ``processing_fee``: the fees and fee adjustments Square assessed, each typed
-  ``INITIAL`` or ``ADJUSTMENT`` (https://developer.squareup.com/reference/square/objects/Payment,
+  ``COMPLETED``, ``CANCELED`` or ``FAILED``), its ``source_type`` (``CARD``,
+  ``BANK_ACCOUNT`` and others), ``total_money`` (``amount_money`` plus a tip, so a payment
+  with a tip is recorded for more than the request asked) and ``processing_fee``: the
+  fees and fee adjustments Square assessed, each typed ``INITIAL`` or ``ADJUSTMENT`` (https://developer.squareup.com/reference/square/objects/Payment,
   https://developer.squareup.com/reference/square/objects/ProcessingFee). Amounts are in
   the currency's smallest unit
   (https://developer.squareup.com/docs/build-basics/working-with-monetary-amounts).
 - ``payment.updated`` is sent when a payment completes and again when Square adds its
-  processing fees; an ACH bank payment is made ``PENDING`` (``payment.created``) and later
-  ``COMPLETED`` or ``FAILED`` (https://developer.squareup.com/docs/payments-api/webhooks).
-  So a completed payment is ``paid`` under Square's own event id each time it is told, and
-  the lifecycle records its money once and its fee once, whichever update carries it.
+  processing fees (https://developer.squareup.com/docs/payments-api/webhooks). So a
+  completed payment is ``paid`` under Square's own event id each time it is told, and the
+  lifecycle records its money once and its fee once, whichever update carries it: the
+  repeat is found by the provider's own payment on the request, so a request paid by hand
+  first still takes it once (``Lifecycle._provider_payment``).
+- An ACH payment has ``source_type`` ``BANK_ACCOUNT``; it is created ``PENDING`` and moves
+  to ``COMPLETED`` or ``FAILED`` once the transfer resolves
+  (https://developer.squareup.com/docs/payments-api/take-payments/ach-payments). Only that
+  ``FAILED`` fails the request. A card that is declined or voided (``FAILED``,
+  ``CANCELED``) leaves the payment link open for another try, so the request stays open.
 - A refund (``refund.created``, ``refund.updated``) has its own ``id``, ``amount_money``,
   ``payment_id`` and ``status`` (``PENDING``, ``COMPLETED``, ``REJECTED``, ``FAILED``)
   (https://developer.squareup.com/reference/square/objects/PaymentRefund,
@@ -104,8 +111,6 @@ LINKS_PAGE: Final = "1000"
 _PAYMENT_KINDS: Final[Mapping[str, ProviderEventKind]] = {
     "COMPLETED": "paid",
     "PENDING": "pending",
-    "FAILED": "failed",
-    "CANCELED": "failed",
 }
 _PAYMENT_EVENTS: Final = frozenset({"payment.created", "payment.updated"})
 _REFUND_EVENTS: Final = frozenset({"refund.created", "refund.updated"})
@@ -413,12 +418,16 @@ def _money(money: Mapping[str, Any]) -> tuple[int, str]:
 
 
 def _payment_event(event_id: str, payment: dict[str, Any]) -> ProviderEvent:
-    kind = _PAYMENT_KINDS.get(str(payment.get("status")))
+    status = payment.get("status")
+    if status == "FAILED" and payment.get("source_type") == "BANK_ACCOUNT":
+        return ProviderEvent(
+            event_id=event_id, kind="failed", provider_ref=_path_id(payment["order_id"])
+        )
+    kind = _PAYMENT_KINDS.get(str(status))
     if kind is None:
         return ProviderEvent(event_id=event_id, kind="other")
     order_id = _path_id(payment["order_id"])
-    if kind == "failed":
-        return ProviderEvent(event_id=event_id, kind=kind, provider_ref=order_id)
+    # ``total_money`` includes any tip, so the recorded payment can exceed the request.
     amount, currency = _money(payment["total_money"])
     return ProviderEvent(
         event_id=event_id,

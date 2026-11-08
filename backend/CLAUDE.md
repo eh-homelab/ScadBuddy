@@ -926,7 +926,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Square order id, which each payment carries; `x-square-hmacsha256-signature` checked by our
   own code over the notification URL setting and the raw body; a cancel finds the order's
   link by listing the links and deletes it; a payment is `paid` under Square's event id each
-  time it is told, and its fee comes from `processing_fee`; the facts, each with its Square
+  time it is told, and its fee comes from `processing_fee`; only an ACH payment's `FAILED`
+  fails the request, a declined card leaves it open; the facts, each with its Square
   link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
@@ -953,8 +954,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
   only while the request is open or pending and the event (`ProviderEvent.created_at`) is
   younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A
-  `paid` event for a request this provider's payment already paid writes no money; with a
-  fee it writes that payment's fee once (#5666: Square adds the fee in a later update). A `pending` event (a bank debit on its way)
+  `paid` event for a request on which this provider already recorded its payment (same
+  provider, request and reference, `Lifecycle._provider_payment`, whatever the request's
+  `payment_id`) writes no money; with a fee it writes that payment's fee once (#5666:
+  Square adds the fee in a later update). A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. A `refund_failed`

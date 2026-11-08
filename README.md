@@ -572,8 +572,9 @@ ScadBuddy checks that the location is active. The page then shows
 "Connected as Square location … (sandbox)" or "(production)". Each payment request is a
 Square payment link for the request's amount, named for the order, with the request in
 its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).
-A completed payment is recorded on the request; a bank (ACH) payment shows as `pending`
-until it completes, and as `failed` when it does not. The Square fee comes from the
+A completed payment is recorded on the request, tip included; a bank (ACH) payment shows
+as `pending` until it completes, and as `failed` when it does not. A declined card leaves
+the request open: the customer can try again on the same link. The Square fee comes from the
 payment's processing fee, which Square may add in a later `payment.updated`, and is
 recorded on the order's costs once. Each refund is recorded once, for its own amount,
 when Square says it completed; one that is then rejected or fails gets a payment that

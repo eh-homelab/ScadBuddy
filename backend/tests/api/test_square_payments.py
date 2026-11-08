@@ -5,6 +5,7 @@ call; nothing reaches the network."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,8 +18,15 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.square import API
-from tests.api.test_order_payments import payable_order, request_payment, with_payments
+from tests.api.test_order_payments import (
+    _due,
+    _state,
+    payable_order,
+    request_payment,
+    with_payments,
+)
 from tests.payments.test_square import (
     LINK,
     LOCATION,
@@ -206,3 +214,53 @@ def test_square_down_while_reading_a_refund_is_503_and_square_retries(
     square["payment"].respond(json=payload("api.payment.json"))
     assert send(client, "refund.updated.completed.json").json() == {"outcome": "recorded"}
     assert [p["amount_minor"] for p in detail(client, order_id)["payments"]] == [700, -400]
+
+
+def pay_by_hand(client: TestClient, order_id: str, request_id: str) -> None:
+    paid = client.post(
+        f"/api/v1/orders/{order_id}/payments",
+        json={"amount_minor": 700, "method": "cash", "payment_request_id": request_id},
+    )
+    assert paid.status_code == 201, paid.text
+
+
+def test_a_link_paid_after_cash_paid_its_request_records_the_money_once(
+    client: TestClient, square: respx.MockRouter, pg_conninfo: str
+) -> None:
+    """#5725 review: cash paid the request first, so its ``payment_id`` is the cash. Each
+    later ``payment.updated`` of the Square payment is still the same money."""
+    order_id, req = square_request(client)
+    pay_by_hand(client, order_id, req["id"])
+    assert send(client, "payment.updated.completed.json").json() == {"outcome": "recorded"}
+    assert send(client, "payment.updated.completed.fee.json").json() == {"outcome": "recorded"}
+    assert send(client, "refund.updated.completed.json").json() == {"outcome": "recorded"}
+    payments = detail(client, order_id)["payments"]
+    assert [(p["amount_minor"], p["method"]) for p in payments] == [
+        (700, "cash"),
+        (700, "square"),
+        (-400, "square"),
+    ]
+    assert fees(pg_conninfo) == [(50, f"payment:{payments[1]['id']}")]
+
+
+def test_the_sweep_deletes_the_link_of_a_request_paid_by_hand(
+    client: TestClient, square: respx.MockRouter
+) -> None:
+    """#5700: a manual payment marks the Square page to close; when the delete fails, the
+    housekeeping sweep calls `cancel_request` again until Square deletes the link."""
+    square["delete"].respond(
+        500, json={"errors": [{"category": "API_ERROR", "code": "INTERNAL_SERVER_ERROR"}]}
+    )
+    order_id, req = square_request(client)
+    pay_by_hand(client, order_id, req["id"])
+    assert square["delete"].call_count == 1
+    [marked] = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()
+    assert marked["close_pending_at"] is not None
+
+    square["delete"].respond(json=payload("api.payment_link.deleted.json"))
+    _due(client, req["id"])
+    service = _state(client).components.get(PAYMENTS).service
+    assert asyncio.run(service.retry_closes()) == 1
+    assert square["delete"].call_count == 2
+    [closed] = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()
+    assert closed["close_pending_at"] is None

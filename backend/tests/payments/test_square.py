@@ -392,14 +392,27 @@ async def test_a_bank_payment_is_pending_until_it_settles_or_fails(name: str, ki
     assert (event.kind, event.provider_ref) == (kind, ORDER)
 
 
-@pytest.mark.parametrize("status", ["APPROVED", "CANCELED"])
-async def test_a_payment_neither_paid_nor_settling_is_other_or_failed(status: str) -> None:
-    event = payload("payment.updated.completed.json")
+@pytest.mark.parametrize(
+    ("name", "status", "kind"),
+    [
+        ("payment.updated.completed.json", "APPROVED", "other"),
+        # A declined or voided card leaves the link payable: the request stays open.
+        ("payment.updated.completed.json", "FAILED", "other"),
+        ("payment.updated.completed.json", "CANCELED", "other"),
+        # Only a bank (ACH) payment that did not settle fails the request.
+        ("payment.created.pending.json", "FAILED", "failed"),
+        ("payment.created.pending.json", "CANCELED", "other"),
+    ],
+)
+async def test_only_a_bank_payment_that_did_not_settle_is_failed(
+    name: str, status: str, kind: str
+) -> None:
+    event = payload(name)
     event["data"]["object"]["payment"]["status"] = status
     body = json.dumps(event).encode()
     headers = {"x-square-hmacsha256-signature": sign(SIGNATURE_KEY, NOTIFY, body)}
     found = await SQUARE.parse_webhook(CRED, headers, body)
-    assert found.kind == ("other" if status == "APPROVED" else "failed")
+    assert found.kind == kind
 
 
 async def test_a_completed_refund_is_keyed_by_its_own_id(sq: Any) -> None:
