@@ -66,6 +66,7 @@ from scadbuddy.orders.models import (
     ColourSlot,
     Filament,
     LibraryFileRef,
+    MachineRateBreakdown,
     Order,
     OrderItem,
     PricingPolicy,
@@ -124,6 +125,11 @@ class SliceQuoteRequest(BaseModel):
     #: Slicer settings for each slot's parts (#5571, `PrintRunRequest.part_settings`):
     #: recorded with the quote, and the item's print prints with them when it sends none.
     part_settings: PartSettingsMap | None = None
+    #: The price-book filament of each sliced slot that is no colour slot of the item
+    #: (``{slot: filament_id}``, from 0 as ``filaments``): the support or support
+    #: interface filament (#4625, order operations spec §6.3), priced as its own line
+    #: from the slice's grams. Never written onto the item.
+    support_filaments: dict[int, str] = Field(default_factory=dict)
     #: The prime tower, supports and print sequence (#4673, order operations spec §5.1),
     #: in `PrintRunRequest`'s own shapes: the quote slices with them and records them,
     #: so the print slices what was priced. Omitted is the template's, as the print's.
@@ -326,6 +332,33 @@ def quote_check(
             " names costs 0",
         )
     return slots
+
+
+def support_check(store: OrderStore, item_id: str, request: SliceQuoteRequest) -> None:
+    """422 ``support_filaments`` for a support slot that is a colour slot of the item (its
+    filament is the slot's own), or below 0, or a support filament unknown or archived
+    (§6.3). Blocking; writes nothing."""
+    item = store.item(item_id)
+    if item is None:
+        return
+    colours = {slot.slot for slot in item.colours}
+    for slot, filament_id in sorted(request.support_filaments.items()):
+        if slot < 0 or slot in colours:
+            raise _unprocessable(
+                "support_filaments",
+                f"colour slot {slot} is priced with its own filament, not as support"
+                if slot in colours
+                else f"slot {slot} is no slot",
+            )
+        record = store.filament(filament_id)
+        if record is None:
+            raise _unprocessable(
+                "support_filaments", f"slot {slot}: no filament {filament_id} in the price book"
+            )
+        if record.archived_at is not None:
+            raise _unprocessable(
+                "support_filaments", f"slot {slot}: filament {filament_id} is archived"
+            )
 
 
 # -- the run's steps ---------------------------------------------------------------------------
@@ -741,17 +774,42 @@ def price_quote(
     policy: PricingPolicy,
     *,
     currency: str,
+    support: Mapping[int, str] | None = None,
 ) -> Priced:
     """Task 2's arithmetic over the item's filaments as they are now, the book's policy
-    copied into the lines. A slot with no filament is a 422 naming it."""
+    copied into the lines. ``support`` prices each slot that is no colour slot of the
+    item with its own line (§6.3). A slot with no filament, or a support slot no plate
+    uses, is a 422 naming it."""
     filaments: dict[int, Filament] = {}
     for slot in item.colours:
         if slot.filament_id is not None:
             record = store.filament(slot.filament_id)
             if record is not None:
                 filaments[slot.slot] = record
+    used = {filament.slot for plate in plates for filament in plate.filaments}
+    for number in sorted(support or {}):
+        if number not in used and number not in filaments:
+            raise _unprocessable(
+                "support_filaments",
+                f"slot {number} (slot {number + 1}) is used on no sliced plate; a support"
+                " filament is given only for a slot the slice uses",
+            )
+    supports: set[int] = set()
+    for number, filament_id in (support or {}).items():
+        record = store.filament(filament_id)
+        # One archived since the check is refused as an unpriced slot (``price``).
+        if number not in filaments and record is not None and record.archived_at is None:
+            filaments[number] = record
+            supports.add(number)
     try:
-        return price(plates, filaments, policy, currency=currency, quantity=item.quantity)
+        return price(
+            plates,
+            filaments,
+            policy,
+            currency=currency,
+            quantity=item.quantity,
+            support=supports,
+        )
     except PricingError as error:
         raise _unprocessable("filaments", str(error)) from None
 
@@ -775,6 +833,11 @@ class QuoteRun:
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None
     #: The library that serves, for a library file item's quote (#5544).
     library: LibraryFiles | None = None
+    #: The machine rate of the printer the request slices for (``printer``,
+    #: ``printer_id``; ``MachineRates.for_quote``, #4625); None prices at the book's rate.
+    machine_rate: (
+        Callable[[str | None, int | None], Awaitable[MachineRateBreakdown | None]] | None
+    ) = None
 
 
 def operation_quote_id(operation: str | None) -> str:
@@ -934,13 +997,15 @@ async def _priced(
     recolour: Callable[[Sequence[Plate]], Awaitable[None]] | None = None,
     *,
     part_settings: dict[str, dict[str, Any]] | None = None,
-    request: SliceQuoteRequest | None = None,
+    request: SliceQuoteRequest,
 ) -> Quote:
     """Each sliced plate fetched, read, kept and priced, then the quote recorded (or
     the run's holds dropped as it fails). ``recolour`` gives an item with no slots the
     ones its plates use, before they are checked (a library file item, #5544).
     ``part_settings`` are the settings per slot it sliced with (#5571), and
-    ``request``'s print setup and spools (#4673) are recorded with it too."""
+    ``request``'s print setup and spools (#4673) are recorded with it too. Machine time
+    is priced at the rate of the printer ``request`` sliced for, recorded with each part
+    of it (#4625), and its support slots with their own filaments."""
     lifecycle = run.lifecycle
     store = lifecycle.store
     order_id = order.id
@@ -960,8 +1025,20 @@ async def _priced(
         assert item is not None
         unsliced_slots(plates, item)
         _, policy, _ = await asyncio.to_thread(run.book.policy)
+        rate = None
+        if run.machine_rate is not None:
+            rate = await run.machine_rate(request.printer, request.printer_id)
+        if rate is not None:
+            policy = policy.model_copy(update={"machine_rate_per_hour": rate.rate_per_hour})
         priced = await asyncio.to_thread(
-            price_quote, plates, item, store, policy, currency=order.currency
+            lambda: price_quote(
+                plates,
+                item,
+                store,
+                policy,
+                currency=order.currency,
+                support=request.support_filaments,
+            )
         )
         first = plates[0]
         assert first.sha256 is not None and first.blob_key is not None
@@ -980,10 +1057,10 @@ async def _priced(
                     revision_id=revision_id,
                     quote_id=quote_id,
                     part_settings=part_settings,
-                    choices=None if request is None else print_setup(request),
-                    filament_plan=(
-                        None if request is None else request.filament_plan.model_dump(mode="json")
-                    ),
+                    printer=None if rate is None else rate.printer,
+                    machine_rate_breakdown=rate,
+                    choices=print_setup(request),
+                    filament_plan=request.filament_plan.model_dump(mode="json"),
                 ),
             )
         except LifecycleError as error:

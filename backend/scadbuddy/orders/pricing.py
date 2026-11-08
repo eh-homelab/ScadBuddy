@@ -17,7 +17,7 @@ moves a recorded quote (§5.1).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, Field
@@ -107,13 +107,14 @@ def price(
     *,
     currency: str,
     quantity: int,
+    support: Collection[int] = (),
     estimated: bool = False,
 ) -> Priced:
     """The lines and totals of ``plates`` priced under ``policy`` with the slot's
-    ``filaments`` (keyed by the plates' slot numbers). :class:`PricingError` for a
-    slot no record covers, or a plate with no seconds. ``estimated`` (the storefront's
-    rough estimate, which slices nothing) takes plates with no seconds and gives no
-    machine time line."""
+    ``filaments`` (keyed by the plates' slot numbers); a ``support`` slot's line says
+    so (#4625). :class:`PricingError` for a slot no record covers, or a plate with no
+    seconds. ``estimated`` (the storefront's rough estimate, which slices nothing) takes
+    plates with no seconds and gives no machine time line."""
     for plate in plates:
         if plate.print_seconds <= 0 and not estimated:
             raise PricingError(f"plate {plate.index}'s print time is unknown", plate=plate.index)
@@ -129,6 +130,8 @@ def price(
         rate = Decimal(record.cost_per_kg)
         amount = to_minor(grams[slot] * rate / GRAMS_PER_KG, currency)
         label = f"{filament_name(record)}, {_text(grams[slot])} g at {record.cost_per_kg} per kg"
+        if slot in support:
+            label = f"Support, {label}"
         lines.append(_line("filament", label, amount))
 
     machine_rate = Decimal(policy.machine_rate_per_hour)

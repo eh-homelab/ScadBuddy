@@ -485,6 +485,64 @@ class QuoteLine(BaseModel):
     amount_minor: Money
 
 
+# -- a machine rate (#4625, order operations spec 2026-11-07 §6.2) ----------------------
+
+
+#: Where a rate's task intervals came from: Bambuddy now (``bambuddy``), the last ones
+#: read from it because it did not answer (``stored``), typed in ScadBuddy for a printer
+#: Bambuddy does not track (``typed``), or none at all (``none``: no profile).
+IntervalSource = Literal["bambuddy", "stored", "typed", "none"]
+#: Why a task is listed and not counted.
+#: ``not_read``: a linked printer's task whose interval Bambuddy has not given (yet).
+NotCounted = Literal["calendar", "disabled", "no_interval", "not_in_bambuddy", "not_read"]
+
+
+class MaintenancePart(BaseModel):
+    task: str
+    interval_hours: str | None
+    interval_type: Literal["hours", "days"] = "hours"
+    minutes: str
+    consumables: str
+    per_hour: str
+    counted: bool
+    why: NotCounted | None = None
+
+
+class WearPartRate(BaseModel):
+    name: str
+    cost: str
+    life_hours: str
+    per_hour: str
+
+
+class MachineRateBreakdown(BaseModel):
+    """Each part of a machine rate, as a quote records it (``machine_rate_breakdown``)
+    and Settings shows it: decimal strings in ``currency``."""
+
+    #: The registry printer and its name when the rate was computed.
+    printer: str | None = None
+    printer_name: str | None = None
+    #: ``profile``: derived from the printer's inputs; ``price_book``: the printer has
+    #: no profile, so it is the book's ``machine_rate_per_hour`` and every part is 0.
+    source: Literal["profile", "price_book"]
+    rate_per_hour: str
+    currency: str
+    labour_rate_per_hour: str | None = None
+    maintenance: list[MaintenancePart] = Field(default_factory=list)
+    maintenance_per_hour: str = "0"
+    wear: list[WearPartRate] = Field(default_factory=list)
+    wear_per_hour: str = "0"
+    watts: str = "0"
+    kwh_price: str = "0"
+    power_per_hour: str = "0"
+    purchase_price: str = "0"
+    life_hours: str | None = None
+    depreciation_per_hour: str = "0"
+    intervals: IntervalSource = "none"
+    #: When the stored intervals were read from Bambuddy (``intervals`` ``stored``).
+    intervals_read_at: datetime | None = None
+
+
 class Quote(BaseModel):
     id: str
     order_item_id: str
@@ -509,6 +567,10 @@ class Quote(BaseModel):
     #: `{"<slot>": {"<key>": value}}`. Null for none. An item's print that sends none
     #: prints with these (`orders/operations.py` `print_body`).
     part_settings: dict[str, dict[str, Any]] | None = None
+    #: The registry printer a slice quote was priced for (#4625), and each part of the
+    #: machine rate it was priced at. Null on a manual quote and on one recorded before.
+    printer: str | None = None
+    machine_rate_breakdown: MachineRateBreakdown | None = None
     #: A slice quote's print setup (#4673, order operations spec §5.1), as it sliced:
     #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports` and
     #: `print_sequence`, each in `PrintRunRequest`'s shape (`orders/quote.py`

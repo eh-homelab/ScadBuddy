@@ -20,6 +20,7 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
+    MaintenanceTask,
     ShelfSpool,
     SpoolGroup,
 )
@@ -56,6 +57,9 @@ class Projects:
         raise AssertionError("not asked")
 
     async def spool_groups(self) -> list[SpoolGroup]:
+        raise AssertionError("not asked")
+
+    async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
         raise AssertionError("not asked")
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:

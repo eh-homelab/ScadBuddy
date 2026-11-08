@@ -28,6 +28,7 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
+    MaintenanceTask,
     MediaTooLargeError,
     ShelfSpool,
     SpoolGroup,
@@ -64,6 +65,9 @@ class Archives:
         raise AssertionError("not asked")
 
     async def spool_groups(self) -> list[SpoolGroup]:
+        raise AssertionError("not asked")
+
+    async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
         raise AssertionError("not asked")
 
     async def project_exists(self, project_id: int) -> bool:
