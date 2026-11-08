@@ -7,7 +7,9 @@ a finished one still held) is `RenderLimits.free`; any other is `RenderLimits.ad
 counted against the visitor's and the client's limits. Both run inside `idempotent_write`
 keyed by the edge's ``Idempotency-Key``, so a request the edge sends again after a lost
 answer is counted once (plan point 21). That look takes no lock, so the submit's answer
-decides at the end: a run of its own is counted, a joined or reused job is not. A start
+decides at the end: a joined or reused job is not counted, and a run of its own is counted
+under the same limits as `admit` (`RenderLimits.count`); over them, the run is withdrawn
+and the visitor gets 429 ``render_limited``. A start
 that fails before any job can exist (`never_started`), or that a full queue refuses,
 drops the row and its recorded reply (`RenderLimits.undo`): a render that never started
 costs nothing. A start that may have made a job keeps both, so the same key sent again
@@ -125,6 +127,34 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
 
 
+def _limited(error: RenderLimited) -> ApiError:
+    """429 ``render_limited``, with the limit and the seconds to wait."""
+    return problem(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        "render_limited",
+        "You have made a lot of renders. Wait a moment, then try again.",
+        headers={"Retry-After": str(error.retry_after)},
+        limit=error.limit,
+        retry_after=error.retry_after,
+    )
+
+
+async def _withdraw_limited(
+    state: AppState, limits: RenderLimits, job: Job, row: int, key: str
+) -> None:
+    """A run of the visitor's own over its limits: its claim withdrawn (the last claim
+    cancels the job), then its row and reply dropped. A withdrawal that fails keeps the
+    row, counted and naming the job, so the run still counts against the limits."""
+    try:
+        await state.render.withdraw(job.id, request_id=f"{key}:limited")
+    except Exception:
+        logger.warning("a run over a visitor's limit could not be withdrawn", exc_info=True)
+        await asyncio.to_thread(limits.set_counted, row, True)
+        await asyncio.to_thread(limits.attach, row, job.id)
+        return
+    await asyncio.to_thread(limits.undo, row, key)
+
+
 def _runtime(state: AppState) -> Settings:
     """The stored settings as they are now, which the limits and the estimate's timeout
     both read. Blocking: call it in a thread."""
@@ -231,14 +261,7 @@ async def start_render(
     try:
         recorded = await asyncio.to_thread(record)
     except RenderLimited as error:
-        raise problem(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "render_limited",
-            "You have made a lot of renders. Wait a moment, then try again.",
-            headers={"Retry-After": str(error.retry_after)},
-            limit=error.limit,
-            retry_after=error.retry_after,
-        ) from None
+        raise _limited(error) from None
     row: int = recorded.body["row"]
     counted: bool = recorded.body["counted"]
     params = reference.inputs.get("params", {})
@@ -276,11 +299,18 @@ async def start_render(
             "The shop could not start this render. Try again in a moment.",
             headers={"Retry-After": str(UNAVAILABLE_RETRY)},
         ) from None
-    if counted == coalesced:
-        # `_shared` read the jobs before the submit, with no lock. The submit decides:
-        # a run of its own counts (the open job settled in between), and a joined or
-        # reused job costs nothing (one opened in between).
-        await asyncio.to_thread(limits.set_counted, row, not coalesced)
+    # `_shared` read the jobs before the submit, with no lock. The submit decides.
+    if counted and coalesced:
+        # A job opened in between: joined or reused, it costs nothing.
+        await asyncio.to_thread(limits.set_counted, row, False)
+    elif not counted and not coalesced:
+        # The open job settled in between: the run is the visitor's own, and passes the
+        # same limits as any other.
+        try:
+            await asyncio.to_thread(limits.count, row, visitor.id, client, settings=runtime)
+        except RenderLimited as error:
+            await _withdraw_limited(state, limits, job, row, key)
+            raise _limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
     return store_render(job)
 
@@ -378,8 +408,9 @@ def _settle(outcome: Future[_Analysis], analysis: _Analysis) -> None:
 
 
 def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
-    """The job's analysis in flight: the one already there, else a new one on the shared
-    threads, else `BUSY` when `ANALYSIS_QUEUE` analyses are held. The work records its
+    """The job's analysis in flight: the one already there, else its record, else a new
+    one on the shared threads, else `BUSY` when `ANALYSIS_QUEUE` analyses are held.
+    Blocking: call it in a thread. The work records its
     own outcome and ends its flight, whatever the requests do. One not started within
     ``timeout`` is withdrawn (`BUSY`, not recorded); one that runs past ``timeout`` from
     its start is recorded ``timeout``."""
@@ -390,10 +421,12 @@ def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
         flying = _flights.get(job.id)
         if flying is not None:
             return flying
-        if _held >= ANALYSIS_QUEUE:
-            full: Future[_Analysis] = Future()
-            full.set_result(BUSY)
-            return full
+        # A flight that ended between the caller's look and this one recorded first.
+        stood = _recorded(state, job.id)
+        if stood is not None or _held >= ANALYSIS_QUEUE:
+            answered: Future[_Analysis] = Future()
+            answered.set_result(stood or BUSY)
+            return answered
         outcome: Future[_Analysis] = Future()
         _flights[job.id] = outcome
         _held += 1
@@ -443,9 +476,23 @@ def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
 
     withdraw = threading.Timer(timeout, withdrawn)
     withdraw.daemon = True
-    running = _executor().submit(work)
+    try:
+        running = _executor().submit(work)
+    except BaseException:
+        # No work, so no `settled`: take the flight and its place back.
+        with _lock:
+            if _flights.get(job.id) is outcome:
+                del _flights[job.id]
+            _held -= 1
+        _settle(outcome, BUSY)
+        raise
     running.add_done_callback(settled)
-    withdraw.start()
+    try:
+        withdraw.start()
+    except BaseException:
+        # `settled` ends the flight: at once when the work is cancelled, else when it ends.
+        running.cancel()
+        raise
     return outcome
 
 
@@ -459,7 +506,7 @@ async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
             assert job.result is not None
             await materialize_result(state.store.blobs, job.result)
             runtime = await asyncio.to_thread(_runtime, state)
-            outcome = _begin(state, job, runtime.render_timeout)
+            outcome = await asyncio.to_thread(_begin, state, job, runtime.render_timeout)
         # Shielded: a request that leaves never cancels the flight others await.
         analysis = await asyncio.shield(asyncio.wrap_future(outcome))
     if analysis.parts is not None:

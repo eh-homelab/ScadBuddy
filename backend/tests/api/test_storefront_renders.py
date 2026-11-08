@@ -746,3 +746,85 @@ def test_a_full_analysis_queue_is_not_ready(
     assert r.status_code == 422, r.text
     assert r.json()["detail"] == "The price is not ready yet. Try again in a moment."
     assert counted.calls == 0 and parts_record(crud, job["id"]) is None
+
+
+def test_a_shared_guess_over_the_limit_is_refused_and_withdrawn(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    """Re-review 1: a render guessed "shared" that starts a run of its own passes the
+    same limits as any other. Over them it is refused and its run withdrawn, so a
+    visitor racing a fast-failing render cannot exceed the per-client limit."""
+    for w in (30, 31, 32):
+        a_render(crud, TOKEN_A, listing, {"width": w})
+    started, release = tmp_path / "started", tmp_path / "release"
+    set_fake_env(
+        Path(settings.openscad).parent,
+        "FAKE_HOLD",
+        {"started": str(started), "release": str(release)},
+    )
+    monkeypatch.setattr(renders_module, "_shared", lambda *_args: True)
+    seen: list[Job] = []
+    render = _state(crud.api).render
+    real = render.submit_answer
+
+    async def kept(*args: Any, **kwargs: Any) -> tuple[Job, bool]:
+        answer = await real(*args, **kwargs)
+        seen.append(answer[0])
+        return answer
+
+    monkeypatch.setattr(render, "submit_answer", kept)
+    try:
+        r = crud.post("/renders", json=render_body(listing, {"width": 76}), key="k-race")
+        assert r.status_code == 429, r.text
+        assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_limited"
+        assert counted_rows(crud, TOKEN_A) == 3 and counted_rows(crud, TOKEN_A, counted=False) == 0
+        assert ledger_rows(crud, "k-race") == 0
+        [job] = seen
+        assert render.store.read(job.id).state == "cancelled"
+    finally:
+        release.touch()
+
+
+def test_an_analysis_that_cannot_start_leaves_no_flight(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review 1: a pool that refuses the work takes back the flight and its place."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 68})
+
+    class Refusing:
+        def submit(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    held = renders_module._held
+    monkeypatch.setattr(renders_module, "_executor", lambda: Refusing())
+    r = crud.get(f"/renders/{job['id']}/estimate")
+    assert r.status_code == 500
+    assert job["id"] not in renders_module._flights
+    assert renders_module._held == held
+
+
+def test_a_job_recorded_in_between_is_not_analysed_again(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review 1: the work recorded its parts after the request's first look; the
+    flight's own look finds them."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 69})
+    state = _state(crud.api)
+    assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
+    counted = Counted()
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    real = renders_module._recorded
+    looks: list[str] = []
+
+    def first_look_misses(state_: Any, job_id: str) -> Any:
+        looks.append(job_id)
+        return None if len(looks) == 1 else real(state_, job_id)
+
+    monkeypatch.setattr(renders_module, "_recorded", first_look_misses)
+    assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
+    assert counted.calls == 0
+    assert state is not None

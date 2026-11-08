@@ -157,39 +157,8 @@ class RenderLimits:
         the visitor, the client or the open renders are at their limit. ``visitor_id``
         is the visitor's row id (``storefront_visitors.id``)."""
         client = client_key(client)
-        # The concurrency limit is the whole shop's, so every admit takes one lock
-        # (`LOCK_OPEN`) and admits run one at a time. Keep this transaction short: a
-        # few counts and one insert, never a Temporal call or other I/O.
         with conn.transaction():
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s)),"
-                " pg_advisory_xact_lock(%s::integer, hashtext(%s)),"
-                " pg_advisory_xact_lock(%s::integer, 0)",
-                (LOCK_VISITOR, visitor_id, LOCK_CLIENT, client, LOCK_OPEN),
-            )
-            at = now
-            if at is None:
-                row = conn.execute("SELECT clock_timestamp() AS at").fetchone()
-                assert row is not None
-                at = row["at"]
-            assert at is not None
-            for limit, window, most in (
-                ("per_minute", MINUTE, settings.storefront_renders_per_minute),
-                ("per_day", DAY, settings.storefront_renders_per_day),
-            ):
-                wait = self._rate(conn, visitor_id, client, window=window, limit=most, at=at)
-                if wait is not None:
-                    raise RenderLimited(limit, wait)  # type: ignore[arg-type]
-            row = conn.execute(
-                "SELECT count(*) AS n FROM storefront_renders r"
-                " WHERE r.counted AND r.created_at > %s"
-                " AND (r.job_id IS NULL OR EXISTS (SELECT 1 FROM render_jobs j"
-                "  WHERE j.id = r.job_id AND j.state <> ALL(%s)))",
-                (at - timedelta(seconds=settings.render_timeout), list(SETTLED)),
-            ).fetchone()
-            assert row is not None
-            if row["n"] >= settings.storefront_render_concurrency:
-                raise RenderLimited("concurrency", CONCURRENCY_RETRY)
+            self._check(conn, visitor_id, client, settings, now)
             return self._insert(
                 conn,
                 visitor_id,
@@ -200,6 +169,57 @@ class RenderLimits:
                 colours=colours or {},
                 at=now,
             )
+
+    def count(self, row_id: int, visitor_id: str, client: str, *, settings: Settings) -> None:
+        """A `free` row whose submit started a run of its own after all: counted, under
+        the same limits as `admit`. `RenderLimited` leaves it as it was."""
+        with self._pool.connection() as conn, conn.transaction():
+            self._check(conn, visitor_id, client_key(client), settings, None)
+            conn.execute("UPDATE storefront_renders SET counted = true WHERE id = %s", (row_id,))
+
+    def _check(
+        self,
+        conn: Conn,
+        visitor_id: str,
+        client: str,
+        settings: Settings,
+        now: datetime | None,
+    ) -> None:
+        """Inside the caller's transaction: the locks, then `RenderLimited` when the
+        visitor, the client or the open renders are at their limit. ``client`` is a
+        `client_key`."""
+        # The concurrency limit is the whole shop's, so every admit takes one lock
+        # (`LOCK_OPEN`) and admits run one at a time. Keep this transaction short: a
+        # few counts and one write, never a Temporal call or other I/O.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s)),"
+            " pg_advisory_xact_lock(%s::integer, hashtext(%s)),"
+            " pg_advisory_xact_lock(%s::integer, 0)",
+            (LOCK_VISITOR, visitor_id, LOCK_CLIENT, client, LOCK_OPEN),
+        )
+        at = now
+        if at is None:
+            row = conn.execute("SELECT clock_timestamp() AS at").fetchone()
+            assert row is not None
+            at = row["at"]
+        assert at is not None
+        for limit, window, most in (
+            ("per_minute", MINUTE, settings.storefront_renders_per_minute),
+            ("per_day", DAY, settings.storefront_renders_per_day),
+        ):
+            wait = self._rate(conn, visitor_id, client, window=window, limit=most, at=at)
+            if wait is not None:
+                raise RenderLimited(limit, wait)  # type: ignore[arg-type]
+        row = conn.execute(
+            "SELECT count(*) AS n FROM storefront_renders r"
+            " WHERE r.counted AND r.created_at > %s"
+            " AND (r.job_id IS NULL OR EXISTS (SELECT 1 FROM render_jobs j"
+            "  WHERE j.id = r.job_id AND j.state <> ALL(%s)))",
+            (at - timedelta(seconds=settings.render_timeout), list(SETTLED)),
+        ).fetchone()
+        assert row is not None
+        if row["n"] >= settings.storefront_render_concurrency:
+            raise RenderLimited("concurrency", CONCURRENCY_RETRY)
 
     def free(
         self,
