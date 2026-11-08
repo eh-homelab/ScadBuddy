@@ -19,6 +19,14 @@ import {
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
+/** A request body as sent: every field may be left out, each with the schema's type. */
+type Sent<T> = { [K in keyof T]?: T[K] }
+type MachineRateSent = {
+  profile: Sent<components['schemas']['CostProfile']>
+  wear_parts?: components['schemas']['WearPart'][]
+  maintenance?: Sent<components['schemas']['MaintenanceCost']>[]
+}
+
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
 // items as ScadBuddy's own records. Routes: backend/scadbuddy/api/customers.py and
 // api/orders.py. `read` lists and gets; `write` is a record the shop keeps (a customer, an
@@ -1962,9 +1970,16 @@ export const orderTools: Tool[] = [
         return json({ removed: printer })
       }
       if (inputs === undefined) throw new ToolError('nothing to change: give inputs, or remove: true')
+      // Checked against the route's schema, so the zod shape cannot drift from it. The
+      // generated type marks a field with a default as required (openapi-typescript's
+      // defaultNonNullable), though the API takes it omitted: `Sent` lets it be left out.
+      const sent: MachineRateSent = inputs
       return json(
         await ok(
-          backend.PUT('/api/v1/printers/{printer_id}/machine-rate', { params: { path }, body: inputs as never }),
+          backend.PUT('/api/v1/printers/{printer_id}/machine-rate', {
+            params: { path },
+            body: sent as components['schemas']['MachineRateInputs'],
+          }),
           `set printer ${printer}'s machine rate`,
         ),
       )

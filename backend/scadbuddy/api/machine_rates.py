@@ -51,9 +51,11 @@ async def get_machine_rate(printer_id: str, orders: OrdersDep) -> MachineRateVie
     response_model=MachineRateView,
     summary="Set a printer's machine rate inputs",
     description=(
-        "Replaces the profile, the wear parts and the maintenance task costs whole. A "
-        "task whose interval was read from Bambuddy keeps it; the `interval_hours` sent "
-        "for it is ignored, and a linked printer's task not read yet is not counted. " + DESCRIPTION
+        "Replaces the profile, the wear parts and the maintenance task costs whole. On a "
+        "printer linked to Bambuddy, a task whose interval was read from Bambuddy keeps "
+        "it; the `interval_hours` sent for it is ignored, and a task not read yet is not "
+        "counted. On a printer unlinked since, the `interval_hours` sent is kept, as "
+        "typed. " + DESCRIPTION
     ),
 )
 async def put_machine_rate(

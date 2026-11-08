@@ -236,9 +236,10 @@ maintenance ~0.24, wear ~0.14, power ~0.03, depreciation ~0.48.
 task's `interval_type` and `enabled`. Calendar and disabled tasks are listed and never
 counted. Shapes:
 [`backend/app/schemas/maintenance.py`](https://github.com/maziggy/bambuddy/blob/2f87192334f66bc4b27b84ba48c6a2d216dd8afc/backend/app/schemas/maintenance.py)
-at maziggy/bambuddy@2f87192. Each read keeps the intervals of the tasks it counted and
-clears the rest, so the stored rate (Bambuddy unreachable, the money view) is the rate
-last read.
+at maziggy/bambuddy@2f87192. Each read keeps the intervals of the tasks it counted, to the
+tenth of an hour (an interval that rounds to nothing is not counted), and clears the
+rest, so the stored rate (Bambuddy unreachable, the money view) is the rate last read.
+Once the printer is unlinked, the intervals sent with its inputs are kept as typed.
 
 ### 6.2 The rate
 

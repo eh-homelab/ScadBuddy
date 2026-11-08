@@ -220,6 +220,9 @@ async def test_a_quote_is_priced_for_the_printer_it_names(
     assert machine.resolve(None, None) == lan
     settings_store.save(SettingsPatch(default_printer=None, printer_id=7))
     assert machine.resolve(None, None) == linked
+    # A named row gone, with no Bambuddy printer to fall back to, is no printer: the
+    # book's rate, never the default printer's in its place.
+    assert machine.resolve("00000000-0000-0000-0000-000000000000", None) is None
 
 
 async def test_stored_rates_need_no_bambuddy(
@@ -309,6 +312,55 @@ async def test_a_reply_that_is_not_utf8_falls_back_to_the_stored_intervals(
     assert broken.asked == [7]
     assert rate.intervals == "stored"
     assert rate.maintenance_per_hour == "0.24"
+
+
+async def test_an_unlinked_printers_typed_intervals_count(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    assert store.stored(printer.id).costs[0].interval_hours == "50"
+    unlinked = printers.unlink_bambuddy(printer.id)
+    store.replace(printer.id, INPUTS)
+    assert store.stored(printer.id).costs[0].interval_hours == "100"
+    rate = await rates(store, printers, settings_store, live).breakdown(unlinked)
+    assert rate.intervals == "typed"
+    assert rate.maintenance_per_hour == "0.12"
+
+
+async def test_bambuddys_intervals_are_kept_to_a_tenth_of_an_hour(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(
+        printer.id,
+        MachineRateInputs(
+            profile=CostProfile(labour_rate_per_hour="30"),
+            maintenance=[
+                MaintenanceCost(task="Rods", minutes="0", consumables="1"),
+                MaintenanceCost(task="Tiny", minutes="0", consumables="1"),
+            ],
+        ),
+    )
+    live = FakeBambuddy(
+        [
+            MaintenanceTask(task="Rods", interval_hours=0.25),
+            MaintenanceTask(task="Tiny", interval_hours=0.04),
+        ]
+    )
+    machine = rates(store, printers, settings_store, live)
+    rate = await machine.breakdown(printer)
+    stored = {cost.task: cost.interval_hours for cost in store.stored(printer.id).costs}
+    # 0.25 h is kept as 0.3 h, and one that rounds to nothing is not counted.
+    assert stored == {"Rods": "0.3", "Tiny": None}
+    assert (
+        rate.maintenance_per_hour
+        == (await machine.breakdown(printer, live=False)).maintenance_per_hour
+    )
 
 
 async def test_a_bug_in_the_read_is_not_taken_for_bambuddy_not_answering(

@@ -143,10 +143,16 @@ def _rounded(number: Decimal) -> Decimal:
     return number.quantize(RATE_PLACES, rounding=ROUND_HALF_UP)
 
 
-def _hours(value: float) -> str:
-    """An interval Bambuddy gave as a float, as the shortest decimal string (``str``
-    once: never the float's binary expansion)."""
-    return _text(Decimal(str(value)))
+#: A kept interval's places (``printer_maintenance_costs.interval_hours``, ``numeric(10, 1)``).
+INTERVAL_PLACES = Decimal("0.1")
+
+
+def _hours(value: float) -> str | None:
+    """An interval Bambuddy gave as a float, to the tenth of an hour its row keeps (``str``
+    once: never the float's binary expansion), so the live rate is the one stored. None
+    for one that rounds to nothing: not counted."""
+    hours = Decimal(str(value)).quantize(INTERVAL_PLACES, rounding=ROUND_HALF_UP)
+    return _text(hours) if hours > 0 else None
 
 
 def _task_part(
@@ -220,9 +226,9 @@ def compute(
                 why = "disabled"
             elif task.interval_type == "days":
                 why = "calendar"
-            elif task.interval_hours <= 0:
+            interval = _hours(task.interval_hours)
+            if why is None and interval is None:
                 why = "no_interval"
-            interval = _hours(task.interval_hours) if task.interval_hours > 0 else None
             parts.append(
                 _task_part(
                     task.task,
@@ -377,9 +383,10 @@ class MachineRateStore:
         return found
 
     def replace(self, printer: str, body: MachineRateInputs) -> None:
-        """The printer's inputs, replaced whole in one transaction. A task whose interval
-        was read from Bambuddy keeps it (and when it was read): what is sent for it is
-        ignored."""
+        """The printer's inputs, replaced whole in one transaction. On a printer linked to
+        Bambuddy, a task whose interval was read from Bambuddy keeps it (and when it was
+        read): what is sent for it is ignored. On one unlinked since, what is sent is
+        kept, as typed."""
         key = printer_uuid(printer)
         assert key is not None
         profile = body.profile
@@ -402,11 +409,15 @@ class MachineRateStore:
                     profile.labour_rate_per_hour,
                 ),
             )
+            # Bambuddy's intervals are kept only while it tracks the printer: once
+            # unlinked, the intervals sent are typed ones and count.
             read = {
                 r["task"]: (r["interval_hours"], r["interval_read_at"])
                 for r in conn.execute(
-                    "SELECT task, interval_hours, interval_read_at FROM printer_maintenance_costs"
-                    " WHERE printer = %s AND interval_read_at IS NOT NULL",
+                    "SELECT m.task, m.interval_hours, m.interval_read_at"
+                    " FROM printer_maintenance_costs m JOIN printers p ON p.id = m.printer"
+                    " WHERE m.printer = %s AND m.interval_read_at IS NOT NULL"
+                    " AND p.bambuddy_printer_id IS NOT NULL",
                     (key,),
                 ).fetchall()
             }
@@ -446,27 +457,29 @@ class MachineRateStore:
         key = printer_uuid(printer)
         if key is None:
             return
-        counted = [
-            task
+        counted = {
+            task.task: hours
             for task in tasks
-            if task.enabled and task.interval_type == "hours" and task.interval_hours > 0
-        ]
+            if task.enabled
+            and task.interval_type == "hours"
+            and (hours := _hours(task.interval_hours)) is not None
+        }
         with self._pool.connection() as conn, conn.transaction():
             # Waits for a replace of the same printer, which rewrites these rows.
             conn.execute(
                 "SELECT 1 FROM printer_cost_profiles WHERE printer = %s FOR UPDATE", (key,)
             )
-            for task in counted:
+            for name, hours in counted.items():
                 conn.execute(
                     "UPDATE printer_maintenance_costs SET interval_hours = %s,"
                     " interval_read_at = now() WHERE printer = %s AND task = %s",
-                    (_hours(task.interval_hours), key, task.task),
+                    (hours, key, name),
                 )
             conn.execute(
                 "UPDATE printer_maintenance_costs SET interval_hours = NULL,"
                 " interval_read_at = NULL WHERE printer = %s AND NOT (task = ANY(%s))"
                 " AND (interval_hours IS NOT NULL OR interval_read_at IS NOT NULL)",
-                (key, [task.task for task in counted]),
+                (key, list(counted)),
             )
 
 
@@ -617,11 +630,16 @@ class MachineRates:
     def resolve(self, printer: str | None, printer_id: int | None) -> PrinterRow | None:
         """The registry printer a quote is priced for (§6.2): the one it names, else the
         one linked to the Bambuddy printer it names, else the configured default
-        printer. None when it names none and none is configured. Blocking."""
+        printer. None when it names none and none is configured, or names a row gone
+        with no Bambuddy printer beside it. Blocking."""
         if printer is not None:
             row = self.printers.get(printer)
             if row is not None:
                 return row
+            if printer_id is None:
+                # A named row gone (the quote's check refuses one): no printer, so the
+                # book's rate, never the default printer's in its place.
+                return None
         if printer_id is not None:
             return self.printers.by_bambuddy_id(printer_id)
         stored = self.settings.load()
