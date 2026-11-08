@@ -78,6 +78,8 @@ export type ConnectedProvider = {
   /** #5684 — the last webhook failure's category and time, cleared by the next success. */
   last_webhook_error: ProviderStatus['last_webhook_error']
   last_webhook_error_at: string | null
+  /** #5666 — the one currency the account takes, when it has one (a Square location's). */
+  currency: string | null
 }
 
 export type State = {
@@ -383,7 +385,7 @@ function fixtures(): State {
         items: [{ order_item_id: ITEM_CLOSED, quantity: 1 }],
       },
     ],
-    charges: [{ id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0 }],
+    charges: [{ id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0, auto: false }],
     payments: [],
     paymentRequests: [],
     providers: [],

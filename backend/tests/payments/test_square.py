@@ -492,6 +492,7 @@ async def test_a_card_payment_pending_is_other() -> None:
         "payment.updated.completed.json",
         "payment.created.pending.json",
         "payment.updated.failed.json",
+        "payment.updated.settled.json",
     ],
 )
 async def test_a_payment_with_no_order_is_not_scadbuddy_s(name: str) -> None:

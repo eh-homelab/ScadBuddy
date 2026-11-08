@@ -32,6 +32,7 @@ import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
 import { archiveCopies, pastPrint } from './pastPrints'
+import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -57,7 +58,8 @@ const FULFILLABLE = new Set(['approved', 'failed'])
 const PRINTING = new Set(['queued', 'printing', 'printed'])
 
 const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax'])
-const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor'])
+// #5281: a charge sent back as read carries its `id`, `auto` and `shipping_option_id`.
+const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor', 'id', 'auto', 'shipping_option_id'])
 
 /**
  * Pydantic's lax `int` (#5573, measured with `ChargeInput.model_validate_json`): an integral
@@ -84,6 +86,7 @@ function chargeProblem(c: unknown): string | null {
   const points = typeof row.label === 'string' ? [...row.label].length : 0
   if (points < 1 || points > 200) return 'label: String should have 1 to 200 characters'
   if (laxInt(row.amount_minor) === null) return 'amount_minor: Input should be a valid integer'
+  if (row.shipping_option_id != null && row.kind !== 'shipping') return 'shipping_option_id: Value error, only a shipping charge names a shipping option'
   return null
 }
 
@@ -205,6 +208,7 @@ function added(order: Order, item: OrderItem, afterAcceptance: boolean, detail: 
   } else {
     event(order, 'item.added', { item_id: item.id, ...detail })
   }
+  retax(order.id)
 }
 export function event(order: Order, kind: string, detail: Record<string, unknown> = {}) {
   state.events.push({ id: state.events.length + 1, order_id: order.id, at: now(), by: BROWSER, kind, detail })
@@ -243,7 +247,8 @@ export function rederive(order: Order) {
 
 function detail(order: Order): OrderDetail {
   const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
-  const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position)
+  // `store.charges`: the typed rows by position, then the auto tax row (#5281).
+  const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position)
   const payments = state.payments.filter((p) => p.order_id === order.id)
   // `orders/totals.py` `order_totals`: an accepted quote's total, else the newest quote's unit
   // price times the quantity now; an item with no quote is in no sum.
@@ -262,21 +267,38 @@ function detail(order: Order): OrderDetail {
   }
   const charged = charges.reduce((sum, c) => sum + c.amount_minor, 0)
   const paid = payments.reduce((sum, p) => sum + p.amount_minor, 0)
+  const balance = subtotal + charged - paid
+  const requests = state.paymentRequests.filter((r) => r.order_id === order.id)
+  // #5281: the deposit less what is paid, and `balance_unpaid`'s rule (`totals.balance_due`).
+  const depositDue = order.deposit_minor != null && order.deposit_waived_reason == null ? Math.max(0, order.deposit_minor - paid) : 0
+  const held = order.balance_waived_reason == null && balance > 0 && requests.some((r) => r.kind === 'balance' && r.status !== 'cancelled')
   return {
     order,
     items,
     charges,
     payments,
-    payment_requests: state.paymentRequests.filter((r) => r.order_id === order.id),
+    payment_requests: requests,
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
     projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
-    totals: { subtotal_minor: subtotal, pending_minor: pending, unpriced_items: unpriced, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
+    totals: {
+      subtotal_minor: subtotal,
+      pending_minor: pending,
+      unpriced_items: unpriced,
+      charges_minor: charged,
+      total_minor: subtotal + charged,
+      paid_minor: paid,
+      balance_minor: balance,
+      deposit_due_minor: depositDue,
+      shipping_held: held,
+    },
   }
 }
 
 /** The balance now: the total minus what was paid (`totals_of`), refunds included. */
 export const balanceOf = (order: Order) => detail(order).totals.balance_minor
+/** `totals_of`: the order's totals now. */
+export const totalsOf = (order: Order) => detail(order).totals
 
 /** `payments.set_request_status`: the request's new state, and the payment that paid it. */
 export function settleRequest(request: PaymentRequestView, status: PaymentRequestView['status'], paymentId?: string) {
@@ -390,6 +412,7 @@ export function acceptQuote(order: Order, found: OrderItem, quote: Quote): Order
   found.revised_after_acceptance = false
   found.updated_at = now()
   event(order, 'quote.accepted', { item_id: found.id, quote_id: quote.id })
+  retax(order.id)
   rederive(order)
   return found
 }
@@ -430,6 +453,7 @@ function customPrice(order: Order, found: OrderItem, price: number, accept: bool
   state.quotes.push(quote)
   found.status = accept ? 'approved' : 'quoted'
   event(order, accept ? 'quote.accepted' : 'quote.recorded', { item_id: found.id, quote_id: quote.id })
+  retax(order.id)
   return quote
 }
 
@@ -742,7 +766,7 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
 }
 
 /** `lifecycle.py` `check_submitted` (#5282): a visitor's cart takes no quote, money or work. */
-function checkSubmitted(order: Order) {
+export function checkSubmitted(order: Order) {
   if (order.source === 'storefront' && order.submitted_at == null) throw new Refused('order_not_submitted', `${order.number ?? 'The cart'} is a visitor's cart, not submitted`)
 }
 
@@ -791,6 +815,7 @@ const duplicateItem: Parameters<typeof http.post>[1] = async (info) => {
     stored.colours = original.colours
   }
   event(lock(String(params.id)), 'item.duplicated', { item_id: stored.id, from_item_id: original.id })
+  retax(String(params.id))
   return HttpResponse.json(stored, { status: 201 })
 }
 
@@ -1002,14 +1027,16 @@ export const handlers = [
         if (typeof wanted === 'string' && !owner?.addresses.some((a) => a.id === wanted)) {
           return fieldProblem(request, field, `no address ${wanted} of the order's customer`)
         }
+        if (field === 'shipping_address_id' && field in body && wanted == null) noOptionShips(order, body.charges)
         if (field in body) order[field] = wanted ?? null
       }
       if (body.notes != null) order.notes = body.notes
       if ('due_at' in body) order.due_at = body.due_at ?? null
       if (body.charges) {
-        state.charges = state.charges.filter((c) => c.order_id !== order.id)
-        body.charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
-        event(order, 'charges.replaced', { count: body.charges.length })
+        const typed = typedCharges(order.id, body.charges)
+        replaceCharges(order.id, typed)
+        event(order, 'charges.replaced', { count: typed.length })
+        retax(order.id)
       }
       order.updated_at = now()
       return HttpResponse.json(order)
@@ -1040,9 +1067,10 @@ export const handlers = [
       notOnHold(order)
       const line = (c: { kind: string; label: string; amount_minor: number }) => ({ kind: c.kind, label: c.label, amount_minor: c.amount_minor })
       const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
-      state.charges = state.charges.filter((c) => c.order_id !== order.id)
-      parsed.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
-      event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after: parsed.map(line) })
+      replaceCharges(order.id, typedCharges(order.id, parsed))
+      retax(order.id)
+      const after = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position).map(line)
+      event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after })
       order.updated_at = now()
       return HttpResponse.json(order)
     } catch (error) {
@@ -1067,6 +1095,8 @@ export const handlers = [
           order[`${field}_address`] = snapshot
         }
       }
+      // #5281: an order that asked for money keeps one open request, for the balance.
+      openBalance(order)
       setStatus(order, 'accepted')
       // #4253 §8.1 — with Bambuddy linked, the order's project and one per item that prints.
       if (mockSettings().bambuddy_url && !state.projects.some((p) => p.order_id === order.id)) {
@@ -1167,6 +1197,9 @@ export const handlers = [
       // One audit row, as the backend writes: the rederive's own, if it wrote one, is folded in.
       state.events.splice(before)
       event(order, 'order.status', { from_status: from, to: order.status, reopened: true, items: restored })
+      retax(order.id)
+      // `_open_balance(reopened=True)`, after the retax: the cancel ended the balance request.
+      if (from === 'cancelled' && TAKES_ITEMS.has(base)) openBalance(order, true)
       return order
     }),
   ),
@@ -1271,7 +1304,10 @@ export const handlers = [
       const payment: Payment = { id: newId('p'), order_id: order.id, amount_minor: body.amount_minor, method: body.method ?? null, reference: body.reference ?? null, received_at: body.received_at ?? null, notes: body.notes ?? '', created_at: now(), payment_request_id: body.payment_request_id ?? null, provider: null }
       state.payments.push(payment)
       if (named) settleRequest(named, 'paid', payment.id)
-      if (payment.amount_minor > 0) closeBalance(order, payment)
+      if (payment.amount_minor > 0) {
+        closeDeposit(order, payment.id)
+        closeBalance(order, payment)
+      }
       event(order, 'payment.added', { payment_id: payment.id, payment_request_id: body.payment_request_id ?? null })
       return HttpResponse.json(payment, { status: 201 })
     } catch (error) {
@@ -1362,6 +1398,7 @@ export const handlers = [
       if (price !== null) customPrice(order, found, price, accept)
       found.updated_at = now()
       event(order, 'item.updated', { item_id: found.id, repinned: repins })
+      retax(order.id)
       rederive(order)
       return found
     })
@@ -1389,6 +1426,7 @@ export const handlers = [
       state.revisions = state.revisions.filter((r) => r.item_id !== found.id)
       state.items = state.items.filter((i) => i.id !== found.id)
       event(order, 'item.deleted', { item_id: found.id })
+      retax(order.id)
       rederive(order)
       return new HttpResponse(null, { status: 204 })
     } catch (error) {
@@ -1410,6 +1448,7 @@ export const handlers = [
       found.status = status
       found.updated_at = now()
       event(order, 'item.reopened', { item_id: found.id, to: found.status })
+      retax(order.id)
       rederive(order)
       return found
     }),
@@ -1423,6 +1462,7 @@ export const handlers = [
       found.status = 'cancelled'
       found.updated_at = now()
       event(order, 'item.cancelled', { item_id: found.id })
+      retax(order.id)
       rederive(order)
       return found
     }),
@@ -1467,6 +1507,7 @@ export const handlers = [
       state.quotes.push(quote)
       if (found.status === 'draft') found.status = 'quoted'
       event(order, 'quote.recorded', { item_id: found.id, quote_id: quote.id })
+      retax(order.id)
       return HttpResponse.json(quote, { status: 201 })
     } catch (error) {
       return refused(request, error)
@@ -1696,6 +1737,8 @@ export const handlers = [
       if (wrong.length > 0) throw new Refused('item_not_found', `not items of order ${order.number}`, wrong, true)
       const unmade = lines.filter((l) => items.find((i) => i.id === l.order_item_id)?.status !== 'fulfilled').map((l) => l.order_item_id)
       if (unmade.length > 0) throw new Refused('items_not_fulfilled', 'a shipment carries fulfilled items only', unmade)
+      const unpaid = balanceUnpaid(order.id)
+      if (unpaid) throw unpaid
       const shipment: Shipment = {
         id: newId('s'),
         order_id: order.id,
@@ -1729,6 +1772,13 @@ export const handlers = [
       if (body.items) {
         const unmade = body.items.filter((l) => items.find((i) => i.id === l.order_item_id)?.status !== 'fulfilled').map((l) => l.order_item_id)
         if (unmade.length > 0) throw new Refused('items_not_fulfilled', 'a shipment carries fulfilled items only', unmade)
+        // #5281: an edit that raises a quantity waits for the balance, as a new shipment does.
+        const was = (id: string) => shipment.items.filter((l) => l.order_item_id === id).reduce((sum, l) => sum + l.quantity, 0)
+        const asked = (id: string) => body.items!.filter((l) => l.order_item_id === id).reduce((sum, l) => sum + l.quantity, 0)
+        if (body.items.some((l) => asked(l.order_item_id) > was(l.order_item_id))) {
+          const unpaid = balanceUnpaid(order.id)
+          if (unpaid) throw unpaid
+        }
       }
       // Only what the body carries changes; a field left out keeps the shipment's value.
       for (const key of ['carrier', 'service', 'tracking', 'shipped_at', 'cost_minor', 'notes', 'items'] as const) {

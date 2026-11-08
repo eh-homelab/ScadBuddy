@@ -7,6 +7,34 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/storefront/listings',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'PUT /api/v1/storefront/listings/order',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'PUT /api/v1/storefront/listings/{listing_id}',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/publish',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'DELETE /api/v1/storefront/listings/{listing_id}',
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+  },
+  {
     operation: 'POST /api/v1/parts',
     reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
   },

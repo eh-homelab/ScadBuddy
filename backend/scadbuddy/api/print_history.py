@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Sequence
@@ -53,6 +54,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.params import schema_of
 from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
 from scadbuddy.attachments.component import PrintAttachmentsDep
+from scadbuddy.bambuddy import linking
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -69,8 +71,9 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
 from scadbuddy.bambuddy.print_links import LanArchiveLink, LinkedPrint, PrintLinkStore
 from scadbuddy.bambuddy.print_source import is_sliced, printable
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
+from scadbuddy.bambuddy.runs import LanPending, PrintRun, PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -515,8 +518,9 @@ async def _part_settings(
     waits for it (#5733). The settings are None when nothing names a run exactly (a send
     recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
     under another name) or the run is pruned. A failed read of them is logged and gives
-    None, so the print record still loads. A failed fetch cancels the read."""
-    # A task group, so a failed fetch cancels the read and waits for it: the request's
+    None, so the print record still loads. A failed fetch cancels the read, and a read
+    that fails with an error `_guarded` does not catch cancels the fetch."""
+    # A task group, so a failed task cancels the other and waits for it: the request's
     # database read never outlives the request (#5739). The caller sees the error itself.
     try:
         async with asyncio.TaskGroup() as group:
@@ -619,6 +623,57 @@ async def _run_by_file(
             "could not record a LAN print's start", extra={"archive_id": link.archive_id}
         )
     return run
+
+
+async def _link_lan_prints(
+    cache: ArchiveCache,
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    links: PrintLinkStore,
+    runs: PrintRunStore,
+) -> None:
+    """Link the archives of the LAN starts no archive names yet (#5724): a LAN start has
+    no queue item, so nothing else links its print. Each subject with such a start since
+    `linking.LAN_LINK_WINDOW` is scanned by its slices' hashes
+    (`linking.link_lan_starts`), at most `linking.LAN_SCANS_PER_CALL` per call and once per
+    `linking.LAN_SCAN_INTERVAL`. Each archive found that names no start yet is read once,
+    and its file name names the start (`_run_by_file`, the exactly-one rule), so the
+    start is not looked for again. A failure is logged, never raised: the list still
+    loads, and a later call tries again."""
+    try:
+        pending = await runs.lan_unnamed(
+            datetime.now(UTC) - linking.LAN_LINK_WINDOW, linking.LAN_PENDING_LIMIT
+        )
+    except psycopg.Error:
+        logger.exception("could not read the LAN prints to link")
+        return
+    now = time.monotonic()
+    claimed: list[LanPending] = []
+    for row in pending:
+        if len(claimed) >= linking.LAN_SCANS_PER_CALL:
+            break
+        if linking.claim_lan_scan(row.subject, now):
+            claimed.append(row)
+    gate = asyncio.Semaphore(linking.LAN_SCAN_CONCURRENCY)
+
+    async def scan(row: LanPending) -> None:
+        subject = PrintSubject.from_run_subject(row.subject)
+        async with gate:
+            try:
+                found = await linking.link_lan_starts(
+                    client, uploads, links, subject, row.first, row.last
+                )
+                for link in found:
+                    if await links.lan_start(link.archive_id) is not None:
+                        continue
+                    archive = await cache.archive(client, link.archive_id)
+                    linked = LinkedPrint(**link.model_dump(), subject=subject.key)
+                    await _run_by_file(links, runs, linked, archive)
+            except (ApiError, psycopg.Error, ValueError):
+                linking.release_lan_scan(row.subject)
+                logger.exception("could not link a LAN print", extra={"subject": subject.key})
+
+    await asyncio.gather(*(scan(row) for row in claimed))
 
 
 def _prints_url(archive_id: int, path: str) -> str:
@@ -957,7 +1012,9 @@ async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
         "`status` (or `deleted_in_bambuddy`), `printer_id`, the day the print started "
         "(`from`, `to`, inclusive) and `q`, matched against the output's, the library "
         "file's and the print's names and the parameter values. The first page of one "
-        "library file's history also looks for its reprints made inside Bambuddy. One "
+        "library file's history also looks for its reprints made inside Bambuddy, and "
+        "every first page looks for the prints started over the LAN that no archive "
+        "names yet. One "
         f"request examines at most {MAX_SCANNED} linked prints, so a page can be short, "
         "even empty, and still carry a `next_cursor`."
     ),
@@ -973,6 +1030,7 @@ async def list_prints(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    print_runs: PrintRunsDep,
     slug: Annotated[
         str | None, Query(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
     ] = None,
@@ -1023,6 +1081,10 @@ async def list_prints(
 
     async with client_for(store.load()) as client:
         files = _LibraryFiles(cache, client)
+        if cursor is None:
+            # Only the first page can show a print linked now. Any filter can show a
+            # LAN print, of an output or of a library file (#5724).
+            await _link_lan_prints(cache, client, uploads, links, print_runs.store)
         if cursor is None and slug is None:
             # Only the first page can show a print linked now, and a slug filter
             # leaves every library print out (#1663). The other filters can show

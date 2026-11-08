@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { USER_ONLY } from '../../../agent/dom'
 import { api, ApiError } from '../../../api/client'
 import type { ProviderStatus } from '../../../api/types'
@@ -10,7 +10,9 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { useAsync } from '../../../lib/useAsync'
+import { useSettingsCache } from '../cache'
 import { Section } from '../controls'
 import type { AreaId } from '../registry'
 
@@ -54,7 +56,71 @@ export function Component() {
       <div className="mt-3">
         <BankAccount />
       </div>
+      <Instructions />
     </Section>
+  )
+}
+
+/** The backend's bound (`settings_store.py` `storefront_payment_instructions`). */
+const INSTRUCTIONS_MAX = 2000
+
+/**
+ * #5281 (storefront spec §7) — how a customer pays by hand, such as a bank transfer
+ * (`storefront_payment_instructions`). Plain text: it is shown as text, never as markup.
+ * Empty saves none.
+ */
+function Instructions() {
+  const settings = useAsync(() => api.getSettings(), [])
+  const [text, setText] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => {
+    if (settings.data && text === null) setText(settings.data.storefront_payment_instructions ?? '')
+  }, [settings.data, text])
+
+  return (
+    <form
+      className="mt-4 space-y-2 rounded-md border p-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        setBusy(true)
+        setError(null)
+        api
+          .putSettings({ storefront_payment_instructions: text?.trim() ? text : null })
+          .then((next) => {
+            setText(next.storefront_payment_instructions ?? '')
+            setSaved(true)
+          })
+          .catch((err: unknown) => setError(refusalText(err)))
+          .finally(() => setBusy(false))
+      }}
+    >
+      <Label htmlFor="payment-instructions">Payment instructions</Label>
+      <p className="text-xs text-muted-foreground">How a customer pays without a provider, such as your bank details. Plain text, shown to the customer as written.</p>
+      <Textarea
+        id="payment-instructions"
+        rows={3}
+        maxLength={INSTRUCTIONS_MAX}
+        disabled={text === null}
+        value={text ?? ''}
+        onChange={(e) => {
+          setSaved(false)
+          setText(e.target.value)
+        }}
+      />
+      <div className="flex items-center gap-2">
+        <Button type="submit" size="sm" disabled={busy || text === null} {...USER_ONLY}>
+          Save instructions
+        </Button>
+        {saved && <span className="text-xs text-muted-foreground">Saved.</span>}
+      </div>
+      {error && (
+        <p role="alert" className="text-[13px] text-warn">
+          {error}
+        </p>
+      )}
+    </form>
   )
 }
 
@@ -131,6 +197,7 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
         </p>
       )}
       {provider.connected && <WebhookError error={provider.last_webhook_error} at={provider.last_webhook_error_at} />}
+      {provider.connected && <CurrencyWarning currency={provider.currency ?? null} />}
       {form && (
         <form
           className="flex flex-wrap items-end gap-2"
@@ -163,5 +230,19 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
         </p>
       )}
     </section>
+  )
+}
+
+/**
+ * #5666 — an account that takes one currency (a Square location's) cannot take a link in
+ * another: when `orders_currency` moved away from it after the connect, say so here.
+ */
+function CurrencyWarning({ currency }: { currency: string | null }) {
+  const orders = useSettingsCache().settings?.orders_currency
+  if (!currency || !orders || currency === orders) return null
+  return (
+    <p role="status" className="text-[13px] text-warn">
+      Connected in {currency}; orders are in {orders}. New payment links will fail.
+    </p>
   )
 }

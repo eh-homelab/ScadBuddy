@@ -1024,6 +1024,12 @@ export const settingsDefaults = {
   library_backend: 'bambuddy',
   slicer_backend: 'bambuddy',
   orders_currency: 'USD',
+  // #5281 — auto tax, the deposit policy and the shipping options, at the backend's defaults.
+  orders_tax_percent: '0',
+  orders_tax_shipping: false,
+  orders_deposit_policy: [],
+  storefront_shipping_options: [],
+  storefront_payment_instructions: null,
   // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
   pricing_machine_rate_per_hour: '0',
   pricing_setup_fee: '0',
@@ -1064,9 +1070,12 @@ export const settingsDeployment: Record<string, unknown> = {
   google_fonts_api_key: 'from-the-deployment',
 }
 
+/** #5281 — stored only, never env-seeded: no source badge and no reset. */
+const STORED_ONLY = new Set(['orders_deposit_policy', 'storefront_shipping_options', 'storefront_payment_instructions'])
+
 /** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
 export const settingsApplies: NonNullable<Settings['applies']> = {
-  ...Object.fromEntries(Object.keys(settingsDefaults).map((name) => [name, 'live' as const])),
+  ...Object.fromEntries(Object.keys(settingsDefaults).filter((name) => !STORED_ONLY.has(name)).map((name) => [name, 'live' as const])),
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
   git_remote_token: 'live',

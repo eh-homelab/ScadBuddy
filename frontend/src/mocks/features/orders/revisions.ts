@@ -6,6 +6,7 @@ import { printersState } from '../printers'
 import { upload } from './attachments'
 import type { Resolved } from './orders'
 import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, OPEN_FOR_EDITS, openForRequote, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, TAKES_ITEMS, transition, withFilaments } from './orders'
+import { depositUnpaid, retax } from './money'
 import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revisionsOf, state } from './state'
 
 /**
@@ -157,6 +158,7 @@ function addRevision(afterAcceptance: boolean) {
       const output = 'output_id' in body ? (body.output_id ?? null) : sameDesign(reference, found.reference) ? found.output_id : null
       const revision = pushRevision(order, found, reference, colours, body.note ?? '', afterAcceptance)
       found.output_id = output ?? null
+      retax(order.id)
       rederive(order)
       return HttpResponse.json(revision, { status: 201 })
     } catch (error) {
@@ -178,6 +180,9 @@ export const handlers = [
       const revision = newestOf(found, String(params.revision))
       if (revision.answer !== null) throw new Refused('revision_answered', `revision ${revision.number} is ${revision.answer}`)
       if (revision.sent_at) return revision
+      // #5281: no design goes to the customer until the deposit is paid or waived.
+      const unpaid = depositUnpaid(order.id)
+      if (unpaid) throw unpaid
       if (!state.attachments.some((a) => a.subject === `order_item_revision:${revision.id}`)) {
         throw new Refused('revision_empty', `revision ${revision.number} has no file to send`)
       }
@@ -243,6 +248,8 @@ export const handlers = [
       const attempts = state.fulfilments.filter((f) => f.order_item_id === found.id)
       const open = printInFlight(found.id)
       if (open) throw new Refused('print_in_flight', `item ${found.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [found.id])
+      const unpaid = depositUnpaid(order.id)
+      if (unpaid) throw unpaid
       const quote = quotesOf(found.id).filter((q) => q.revision_id === revision.id).sort(byCreated).at(-1)
       if (!quote || found.output_id === null) throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
       const printer = body.printer == null ? undefined : printersState().find((row) => row.id === body.printer)

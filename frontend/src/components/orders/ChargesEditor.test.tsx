@@ -2,13 +2,15 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { Order, OrderCharge } from '../../api/types'
-import { resetMockState } from '../../mocks/handlers'
-import { ORDER_ACCEPTED, ORDER_DRAFT } from '../../mocks/features/orders/state'
+import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
+import { ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
+import { useAsync } from '../../lib/useAsync'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { addMode } from './afterAcceptance'
 import { ChargesEditor } from './ChargesEditor'
 
-const POST: OrderCharge = { id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0 }
+const POST: OrderCharge = { id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0, auto: false }
 
 function order(id: string, status: Order['status'], onHold = false) {
   return { id, number: 'ORD-2026-2', status, on_hold: onHold, currency: 'USD', minor_exponent: 2 }
@@ -109,4 +111,137 @@ describe('ChargesEditor', () => {
     expect(within(region).getByText('Post')).toBeInTheDocument()
     expect(within(region).queryByRole('button', { name: 'Save charges' })).toBeNull()
   })
+
+  // #5281: ScadBuddy computes the auto tax row; the editor shows it and never sends it.
+  describe('the auto tax', () => {
+    function Host() {
+      const view = useAsync(() => api.order(ORDER_DRAFT), [])
+      if (!view.data) return null
+      const o = view.data.order
+      return <ChargesEditor order={o} charges={view.data.charges ?? []} mode={addMode(o)} onChanged={view.refresh} />
+    }
+
+    it('shows the auto tax read-only and keeps it on save', async () => {
+      setMockSettings({ ...mockSettings(), orders_tax_percent: '10', orders_tax_shipping: true })
+      await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }] })
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      const auto = await within(region).findByTestId('auto-tax')
+      expect(auto).toHaveTextContent('Tax 10%')
+      expect(auto).toHaveTextContent('auto')
+      expect(auto).toHaveTextContent('$1.00')
+      // One editable row, the shipping; the tax is not one of them.
+      expect(within(region).queryByLabelText('Charge 2 label')).toBeNull()
+
+      await user.clear(within(region).getByLabelText('Charge 1 amount'))
+      await user.type(within(region).getByLabelText('Charge 1 amount'), '20')
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 2000 }] }))
+      // Recomputed on the new shipping.
+      await waitFor(() => expect(within(region).getByTestId('auto-tax')).toHaveTextContent('$2.00'))
+      expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT && c.auto).map((c) => c.amount_minor)).toEqual([200])
+    })
+
+    it("keeps a charge's shipping option on save", async () => {
+      setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }] })
+      await api.setShippingOption(ORDER_DRAFT, 'post')
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      await user.click(await within(region).findByRole('button', { name: 'Add charge' }))
+      await user.type(within(region).getByLabelText('Charge 2 label'), 'Rush')
+      await user.type(within(region).getByLabelText('Charge 2 amount'), '3')
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() =>
+        expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, {
+          charges: [
+            { kind: 'shipping', label: 'Tracked post', amount_minor: 650, shipping_option_id: 'post' },
+            { kind: 'shipping', label: 'Rush', amount_minor: 300 },
+          ],
+        }),
+      )
+    })
+
+    // Review fix round 1, important 1; #5726 review: two tax lines with one label read as one.
+    it("refuses a typed tax with the auto row's label until it has another", async () => {
+      setMockSettings({ ...mockSettings(), orders_tax_percent: '10', orders_tax_shipping: true })
+      await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }] })
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      await within(region).findByTestId('auto-tax')
+      await user.click(within(region).getByRole('button', { name: 'Add charge' }))
+      await choose(user, within(region).getByRole('combobox', { name: 'Charge 2 kind' }), 'tax')
+      await user.type(within(region).getByLabelText('Charge 2 label'), 'Tax 10%')
+      await user.type(within(region).getByLabelText('Charge 2 amount'), '0')
+      expect(within(region).getByRole('alert', { name: 'Charge 2 label problem' })).toHaveTextContent('Two tax lines must not share a label: “Tax 10%” is the automatic tax. Give this one another label.')
+      expect(within(region).getByRole('button', { name: 'Save charges' })).toBeDisabled()
+      await user.clear(within(region).getByLabelText('Charge 2 label'))
+      await user.type(within(region).getByLabelText('Charge 2 label'), 'Sales tax')
+      expect(within(region).queryByRole('alert', { name: 'Charge 2 label problem' })).toBeNull()
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }, { kind: 'tax', label: 'Sales tax', amount_minor: 0 }] }))
+    })
+
+    // Review fix round 1, minor 5: a charge edited away from its option's price no longer claims it.
+    it("drops the shipping option from a charge whose label or amount is edited", async () => {
+      setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }] })
+      await api.setShippingOption(ORDER_DRAFT, 'post')
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      const amount = await within(region).findByLabelText('Charge 1 amount')
+      await user.clear(amount)
+      await user.type(amount, '5')
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Tracked post', amount_minor: 500 }] }))
+    })
+
+    it('discards unsaved edits', async () => {
+      const dirty = vi.fn()
+      const o = { ...order(ORDER_DRAFT, 'draft') }
+      const { user } = renderPage(<ChargesEditor order={o} charges={[]} mode={addMode(o)} onChanged={() => {}} onDirtyChange={dirty} />)
+      const region = screen.getByRole('region', { name: 'Charges' })
+      await user.click(within(region).getByRole('button', { name: 'Add charge' }))
+      expect(dirty).toHaveBeenLastCalledWith(true)
+      await user.click(within(region).getByRole('button', { name: 'Discard' }))
+      expect(within(region).queryByLabelText('Charge 1 label')).toBeNull()
+      expect(dirty).toHaveBeenLastCalledWith(false)
+    })
+
+    // Review fix round 2: the editor stays unsaved until the save's reload lands, so the
+    // picker stays off and the rows do not flash back to the old charges.
+    it('stays unsaved after the save answers, until the reload brings the new charges', async () => {
+      const dirty = vi.fn()
+      const o = { ...order(ORDER_DRAFT, 'draft') }
+      const view = renderPage(<ChargesEditor order={o} charges={[]} mode={addMode(o)} onChanged={() => {}} onDirtyChange={dirty} />)
+      const region = screen.getByRole('region', { name: 'Charges' })
+      await view.user.click(within(region).getByRole('button', { name: 'Add charge' }))
+      await view.user.type(within(region).getByLabelText('Charge 1 label'), 'Post')
+      await view.user.type(within(region).getByLabelText('Charge 1 amount'), '5')
+      await view.user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT)).toHaveLength(1))
+      // Answered, not reloaded: the row and the unsaved state stay.
+      await waitFor(() => expect(within(region).getByRole('button', { name: 'Save charges' })).toBeDisabled())
+      expect(within(region).getByLabelText('Charge 1 label')).toHaveValue('Post')
+      expect(dirty).toHaveBeenLastCalledWith(true)
+      const saved = state.charges.filter((c) => c.order_id === ORDER_DRAFT)
+      view.rerender(<ChargesEditor order={o} charges={saved} mode={addMode(o)} onChanged={() => {}} onDirtyChange={dirty} />)
+      await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false))
+      expect(within(region).getByLabelText('Charge 1 label')).toHaveValue('Post')
+    })
+
+    it('locks its edit controls while the shipping option is being written', () => {
+      const o = { ...order(ORDER_DRAFT, 'draft') }
+      renderPage(<ChargesEditor order={o} charges={[POST]} mode={addMode(o)} onChanged={() => {}} locked />)
+      const region = screen.getByRole('region', { name: 'Charges' })
+      expect(within(region).getByRole('button', { name: 'Add charge' })).toBeDisabled()
+      expect(within(region).getByLabelText('Charge 1 label')).toBeDisabled()
+      expect(within(region).getByLabelText('Charge 1 amount')).toBeDisabled()
+      expect(within(region).getByRole('combobox', { name: 'Charge 1 kind' })).toBeDisabled()
+      expect(within(region).getByRole('button', { name: 'Remove charge 1' })).toBeDisabled()
+    })
+  })
 })
+

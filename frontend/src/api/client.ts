@@ -260,6 +260,8 @@ import type {
   BankUnlinked,
   PolicyUpdate,
   PriceBook,
+  StorefrontListing,
+  StorefrontListingInput,
   ProviderConnect,
   ProviderStatus,
   Quote,
@@ -2453,6 +2455,21 @@ export const api = {
   unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the
+   * deposit requests it replaces and asks for what is not paid yet. */
+  setDeposit: (orderId: string, amount_minor: number | null) =>
+    request<Order>(`/orders/${seg(orderId)}/deposit`, { method: 'PUT', body: JSON.stringify({ amount_minor }) }),
+  /** #5281 — the deposit the shop's policy asks of the order now. */
+  applyDepositPolicy: (orderId: string) => request<Order>(`/orders/${seg(orderId)}/deposit/policy`, { method: 'POST' }),
+  /** #5281 — "Proceed without deposit", for `reason`. */
+  waiveDeposit: (orderId: string, reason: string) =>
+    request<Order>(`/orders/${seg(orderId)}/deposit/waive`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #5281 — "Ship without full payment", for `reason`, once accepted. */
+  waiveBalance: (orderId: string, reason: string) =>
+    request<Order>(`/orders/${seg(orderId)}/balance/waive`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #5281 — the order's one shipping charge from Settings → Orders' options (null removes it). */
+  setShippingOption: (orderId: string, option_id: string | null) =>
+    request<Order>(`/orders/${seg(orderId)}/shipping-option`, { method: 'PUT', body: JSON.stringify({ option_id }) }),
   cancelPaymentRequest: (orderId: string, requestId: string) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests/${seg(requestId)}/cancel`, { method: 'POST' }),
   linkPaymentRequest: (orderId: string, requestId: string) =>
@@ -2649,6 +2666,24 @@ export const api = {
   updateFilament: (id: string, body: FilamentPatch) =>
     request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
+  // -- the storefront's listings (#5282, spec 2026-11-02 §5.3) ---------------------------------
+  storefrontListings: () => request<StorefrontListing[]>('/storefront/listings'),
+  createStorefrontListing: (body: StorefrontListingInput) =>
+    request<StorefrontListing>('/storefront/listings', { method: 'POST', body: JSON.stringify(body) }),
+  /** Replaces the listing whole and unpublishes it; `updatedAt` is the `updated_at` the editor read. */
+  updateStorefrontListing: (id: string, body: StorefrontListingInput, updatedAt: string) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ listing: body, updated_at: updatedAt }),
+    }),
+  publishStorefrontListing: (id: string) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
+  unpublishStorefrontListing: (id: string) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/unpublish`, { method: 'POST' }),
+  /** Every listing's id, in the order the public site shows them. */
+  orderStorefrontListings: (ids: string[]) =>
+    request<StorefrontListing[]>('/storefront/listings/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+  deleteStorefrontListing: (id: string) => request<void>(`/storefront/listings/${seg(id)}`, { method: 'DELETE' }),
   unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
   /** #4253 §8.3: the filament records made or updated from Bambuddy's spools, on click only. */
   importSpools: () => request<SpoolImport>('/orders/price-book/import-spools', { method: 'POST' }),

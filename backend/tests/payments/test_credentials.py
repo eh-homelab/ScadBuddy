@@ -59,6 +59,23 @@ def test_connect_again_replaces_the_secret_and_keeps_the_default(rows: OrderStor
     assert cred is not None and cred.secrets == {"signing_secret": "n3w"}
 
 
+def test_the_account_currency_is_kept_and_a_reconnect_replaces_it(rows: OrderStore) -> None:
+    """#5666: the currency `verify` gave (a Square location's), so Settings can warn when
+    the shop's ``orders_currency`` moves away from it; None for an account that takes any."""
+    creds = PaymentCredentials(rows, KEK)
+    assert _connect(creds).currency is None
+    row = creds.connect(
+        "fake",
+        settings={"account": "a"},
+        secrets={"signing_secret": "s3cret"},
+        account_label="Fake account fake",
+        currency="CAD",
+    )
+    assert row.currency == "CAD"
+    assert [r.currency for r in creds.rows()] == ["CAD"]
+    assert _connect(creds).currency is None
+
+
 def test_the_seal_is_bound_to_the_row_and_the_provider(
     rows: OrderStore, pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:

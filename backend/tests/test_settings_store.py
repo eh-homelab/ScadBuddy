@@ -17,6 +17,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import PoolTimeout
 
 from scadbuddy.bambuddy.options import PrintOptions
@@ -962,6 +963,38 @@ def test_a_missing_or_refused_solid_concurrency_is_the_environments(
             assert load_render_store_settings(store.pool, seeded).solid_concurrency == read, stored
     finally:
         store.close()
+
+
+def test_an_unreadable_money_rule_is_dropped_and_the_settings_still_load(
+    store: SettingsStore, settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#5281: a stored deposit rule or shipping option this version cannot read (a newer
+    one wrote it, or a hand edit) is dropped, never a settings read that fails."""
+    good_rule = {"criterion": "has_request", "amount_minor": 2000}
+    good_option = {"id": "pickup", "label": "Pick up", "amount_minor": 0, "ships": False}
+    rows = {
+        "orders_deposit_policy": [good_rule, {"criterion": "on_tuesdays", "percent": "5"}],
+        "storefront_shipping_options": [good_option, {**good_option, "id": "post", "x": 1}],
+    }
+    with psycopg.connect(settings.database_url) as conn:
+        for name, value in rows.items():
+            conn.execute("INSERT INTO settings (name, value) VALUES (%s, %s)", (name, Jsonb(value)))
+    loaded = store.snapshot().stored
+    assert [rule.model_dump(exclude_none=True) for rule in loaded.orders_deposit_policy or []] == [
+        good_rule
+    ]
+    assert [o.id for o in loaded.storefront_shipping_options or []] == ["pickup"]
+    assert "on_tuesdays" not in caplog.text
+    assert sorted(str(getattr(r, "setting", "")) for r in caplog.records) == [
+        "orders_deposit_policy",
+        "storefront_shipping_options",
+    ]
+
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "UPDATE settings SET value = '\"lots\"'::jsonb WHERE name = 'orders_deposit_policy'"
+        )
+    assert store.snapshot().stored.orders_deposit_policy is None
 
 
 def test_the_storefront_settings_have_their_defaults(settings: Settings) -> None:
