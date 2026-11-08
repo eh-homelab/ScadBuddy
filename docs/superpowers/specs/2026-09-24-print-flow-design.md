@@ -365,19 +365,36 @@ prints with the quote's (`print_body` reads `{}` as none sent). The run's result
 records them (`PrintRunResult.part_settings`), and `GET /prints/{archive_id}` lists them as
 `part_settings`, found through the queue item's send and its run. A print started over
 the LAN has no queue item, so its run is found through the start it became (#5661,
-`print_history._lan_run`). Bambuddy archives a print it did not queue under the name of
+`print_history._run_by_file`). Bambuddy archives a print it did not queue under the name of
 the file the printer printed (`services/archive.py` `archive_print`,
 [maziggy/bambuddy@2ce0d93](https://github.com/maziggy/bambuddy/blob/2ce0d93451c50516f9a3bacbc80c80e14fbdcc3e/backend/app/services/archive.py)).
 That name is the one the run uploaded (`scadbuddy-<run id[:8]>-p<plate>[-c<copy>][-<attempt>].3mf`,
 `workflows/printing.py` `_start_lan`), and it names the start. The first read of a link
 found by content hash whose file name has that form looks for the start among the
-succeeded runs of the link's own subject. When exactly one start of one run has that
+runs of the link's own subject whose result holds it, whatever the run's status (#5733;
+today only a run that succeeded holds a result). When exactly one start of one run has that
 name, the read records it (`lan_print_archives`: archive, run, start, plate) and lists
-that run's settings. Later reads follow the record, also once Bambuddy has deleted the
-archive. Any other case (no such name, no such start, two runs that share the name)
+that run's settings. Later reads follow the record (`print_history._named_run`), also once
+Bambuddy has deleted the archive, and list none once the run is pruned or the archive
+belongs to another subject. A send or a recorded start is read while the archive is
+fetched; only the file name waits for the archive (#5733). Any other case (no such name, no such start, two runs that share the name)
 records nothing and lists none: the link is never a guess. A LAN print reaches `/prints`
-only through a content hash link (`linking.link_subject_by_hash`), which matches the
-hashes of the subject's sliced files in Bambuddy's library. Every answer gives a slot's settings
+only through a content hash link. A native run uploads its slice straight to the printer,
+so no file in Bambuddy's library has its hash, and the queue path's scan
+(`linking.link_subject_by_hash`) never finds it (#5724). Bambuddy computes an archive's
+`content_hash` as the SHA-256 of the 3MF it downloads from the printer (`archive_print`,
+`compute_file_hash`, same commit), and that file holds the bytes the run uploaded
+(`printers/print_activities.py` `lan_upload`, from the slice's blob). The native library
+row of the same slice holds the SHA-256 of the same blob (`library_files.sha256`, written
+by `print_sliced_upload`). So the first page of `GET /prints` looks for each subject
+with a LAN start in the last 14 days that no archive names yet
+(`PrintRunStore.lan_unnamed`, over `lan_print_archives`): it scans Bambuddy's archives
+of the starts' days for the hashes of the subject's slices, native and Bambuddy's
+(`linking.link_lan_starts`), records each match as a `content_hash` link, and names the
+start from the archive's file name as above. At most four subjects are scanned per
+request, and one subject at most once per process every 10 minutes
+(`linking.LAN_SCANS_PER_CALL`, `LAN_SCAN_INTERVAL`). A start whose print never reached
+Bambuddy is looked for until its 14 days end. Every answer gives a slot's settings
 with only what is set (`part_settings.parts_set_only`, on the read models: the run result,
 the print record, the remembered choices and the check), so a reprint can send them again as
 they are. A request's own dump keeps every key, so `run_key` is what it was before #5627.

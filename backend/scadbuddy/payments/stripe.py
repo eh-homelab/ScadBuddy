@@ -75,6 +75,7 @@ from scadbuddy.payments.provider import (
     ProviderError,
     ProviderField,
     ProviderUnavailableError,
+    Verified,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,7 @@ class StripeProvider:
 
     # -- the seam ---------------------------------------------------------------------
 
-    async def verify(self, credential: Credential) -> str:
+    async def verify(self, credential: Credential) -> Verified:
         key = credential.secrets.get("secret_key", "")
         if not key.startswith(("sk_", "rk_")):
             raise ProviderError("a Stripe secret key starts sk_ or rk_ (a restricted key)")
@@ -223,7 +224,11 @@ class StripeProvider:
             raise ProviderError("a Stripe webhook signing secret starts whsec_")
         # The permission every request needs; a restricted key may lack the account read.
         await self._act(credential, "GET", "/v1/checkout/sessions", params={"limit": "1"})
-        return "Stripe account (live)" if "_live_" in key else "Stripe account (test mode)"
+        # An account takes many currencies: none to compare.
+        live = "_live_" in key
+        return Verified(
+            account_label="Stripe account (live)" if live else "Stripe account (test mode)"
+        )
 
     async def create_request(
         self,

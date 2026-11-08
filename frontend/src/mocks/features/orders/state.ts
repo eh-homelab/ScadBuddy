@@ -78,6 +78,8 @@ export type ConnectedProvider = {
   /** #5684 — the last webhook failure's category and time, cleared by the next success. */
   last_webhook_error: ProviderStatus['last_webhook_error']
   last_webhook_error_at: string | null
+  /** #5666 — the one currency the account takes, when it has one (a Square location's). */
+  currency: string | null
 }
 
 export type State = {

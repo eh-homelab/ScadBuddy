@@ -85,6 +85,7 @@ def square_request(client: TestClient) -> tuple[str, dict[str, Any]]:
     assert connected.status_code == 200, connected.text
     # The settings page shows this as "Connected as …": sandbox or production.
     assert connected.json()["account_label"] == "Square location Print shop (sandbox)"
+    assert connected.json()["currency"] == "USD"
     assert TOKEN not in connected.text and SIGNATURE_KEY not in connected.text
     order = payable_order(client, 700)
     req = request_payment(client, order["id"], provider="square")
@@ -180,6 +181,24 @@ def test_cancelling_a_request_deletes_its_payment_link(
     cancelled = client.post(f"/api/v1/orders/{order_id}/payment-requests/{req['id']}/cancel")
     assert cancelled.status_code == 200, cancelled.text
     assert square["delete"].called
+
+
+def test_a_location_in_another_currency_is_refused(
+    client: TestClient, square: respx.MockRouter
+) -> None:
+    """A Square location takes one currency (the Location object's ``currency``); a
+    location that is not in the shop's ``orders_currency`` could take none of its links."""
+    location = payload("api.location.json")
+    location["location"]["currency"] = "CAD"
+    square.get(f"/v2/locations/{LOCATION}").respond(json=location)
+    refused = client.put("/api/v1/payments/providers/square", json=CONNECT)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/payments/currency_mismatch"
+    assert TOKEN not in refused.text
+    [square_row] = [
+        s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "square"
+    ]
+    assert square_row["connected"] is False
 
 
 def test_a_forged_event_records_nothing(

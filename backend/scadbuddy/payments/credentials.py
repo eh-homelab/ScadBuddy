@@ -17,13 +17,13 @@ from pydantic import BaseModel
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments.provider import Credential
-from scadbuddy.payments.store import has_open_requests
+from scadbuddy.payments.store import has_open_requests, resume_closes
 
 logger = logging.getLogger(__name__)
 
 _ROW = (
     "provider, account_label, settings, is_default, connected_at, last_webhook_at,"
-    " last_webhook_error, last_webhook_error_at"
+    " last_webhook_error, last_webhook_error_at, currency"
 )
 
 #: How long the same webhook failure category is not stamped again (#5681 review).
@@ -73,6 +73,8 @@ class ProviderRow(BaseModel):
     last_webhook_at: datetime | None
     last_webhook_error: WebhookError | None = None
     last_webhook_error_at: datetime | None = None
+    #: The one currency the account takes, when it has one (#5666, `Verified.currency`).
+    currency: str | None = None
 
 
 class PaymentCredentials:
@@ -97,8 +99,10 @@ class PaymentCredentials:
         settings: Mapping[str, str],
         secrets: Mapping[str, str],
         account_label: str,
+        currency: str | None = None,
     ) -> ProviderRow:
-        """Upsert. The first row connected becomes the default."""
+        """Upsert. The first row connected becomes the default. The provider's pages the
+        sweep could not close start their tries over (`resume_closes`)."""
         if self._kek is None:
             raise KekMissingError()
         plaintext = json.dumps(dict(secrets), sort_keys=True)
@@ -111,6 +115,7 @@ class PaymentCredentials:
             sealed = seal_secret(self._kek, plaintext, credential_aad(row_id, provider))
             values = (
                 account_label,
+                currency,
                 json.dumps(dict(settings)),
                 sealed.secret_sealed,
                 sealed.dek_sealed,
@@ -118,7 +123,8 @@ class PaymentCredentials:
             )
             if found:
                 row = conn.execute(
-                    "UPDATE payment_credentials SET account_label = %s, settings = %s::jsonb,"
+                    "UPDATE payment_credentials SET account_label = %s, currency = %s,"
+                    " settings = %s::jsonb,"
                     " secret_sealed = %s, dek_sealed = %s, kek_id = %s, connected_at ="
                     " clock_timestamp(), last_webhook_error = NULL, last_webhook_error_at ="
                     f" NULL WHERE id = %s RETURNING {_ROW}",
@@ -126,12 +132,14 @@ class PaymentCredentials:
                 ).fetchone()
             else:
                 row = conn.execute(
-                    "INSERT INTO payment_credentials (id, provider, account_label, settings,"
-                    " secret_sealed, dek_sealed, kek_id, is_default) VALUES (%s, %s, %s,"
-                    " %s::jsonb, %s, %s, %s, NOT EXISTS (SELECT 1 FROM payment_credentials))"
+                    "INSERT INTO payment_credentials (id, provider, account_label, currency,"
+                    " settings, secret_sealed, dek_sealed, kek_id, is_default) VALUES (%s, %s,"
+                    " %s, %s, %s::jsonb, %s, %s, %s,"
+                    " NOT EXISTS (SELECT 1 FROM payment_credentials))"
                     f" RETURNING {_ROW}",
                     (row_id, provider, *values),
                 ).fetchone()
+            resume_closes(conn, provider)
         assert row is not None
         return ProviderRow.model_validate(row)
 

@@ -492,6 +492,12 @@ class BambuddyUploadStore:
         """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""
         await asyncio.to_thread(self._record_slice_hash, output_id, sliced_id, file_hash)
 
+    async def native_slice_hashes(self, output_id: str) -> set[str]:
+        """The SHA-256 of each of the output's native slices (#5724), from its row in the
+        native library (``library_files.sha256``), trashed or not: the hash of the file a
+        LAN start of it uploaded. A slice whose row was purged has none."""
+        return await asyncio.to_thread(self._native_slice_hashes, output_id)
+
     async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         """When the output's first recorded copy was uploaded and its last slice was
         recorded, or ``None`` with no slice (#306).
@@ -899,11 +905,22 @@ class BambuddyUploadStore:
                 (file_hash, output_id, sliced_id),
             )
 
+    def _native_slice_hashes(self, output_id: str) -> set[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT f.sha256 FROM output_bambuddy_slices s"
+                " JOIN library_files f ON f.id = s.sliced_library_file_id"
+                " WHERE s.output_id = %s AND s.sliced_library_file_id >= %s",
+                (output_id, NATIVE_ID_BASE),
+            ).fetchall()
+        return {row["sha256"] for row in rows}
+
     def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                # Bambuddy's copies and slices only (#4312 review M1): the window scans
-                # Bambuddy's archives, which a native copy is never in.
+                # Bambuddy's copies and slices only (#4312 review M1): this window is the
+                # queue path's. A native slice reaches Bambuddy's archives only as a LAN
+                # start, which `linking.link_lan_starts` scans by the starts' own days.
                 "SELECT (SELECT min(created_at) FROM output_bambuddy_uploads"
                 "  WHERE output_id = %(output)s AND library_file_id < %(base)s) AS first_upload,"
                 " (SELECT max(created_at) FROM output_bambuddy_slices"

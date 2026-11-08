@@ -16,7 +16,8 @@ share both tables (#1750).
   (``matched_by``): ``queue_item``, the queue item ScadBuddy created reports
   ``archive_id``; ``content_hash``, once the item is gone, an archive whose
   ``content_hash`` equals a sliced file of the subject's
-  (`linking.link_subject_by_hash`, a library file's since #1755). A library file's
+  (`linking.link_subject_by_hash`, a library file's since #1755), or of a LAN start,
+  which has no queue item (`linking.link_lan_starts`, #5724). A library file's
   sends are linked once their item names an archive (`linking.link_library_prints`).
   An archive two subjects name is the output's.
 
@@ -27,8 +28,10 @@ share both tables (#1750).
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
 ``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
-hash whose file the start uploaded (`print_history._lan_run`). A LAN start has no queue
-item, so no send names it.
+hash whose file the start uploaded (`print_history._run_by_file`): on the print's first
+read, or as the prints list links the print (`print_history._link_lan_prints`, #5724),
+which looks only for the starts no row here names. A LAN start has no queue item, so no
+send names it.
 """
 
 from __future__ import annotations
