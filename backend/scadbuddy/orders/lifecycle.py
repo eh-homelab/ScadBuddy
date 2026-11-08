@@ -1524,6 +1524,18 @@ class Lifecycle:
         self._told(_Change(accepted))
         return accepted
 
+    def _no_payment_in_flight(self, conn: Conn, order: Order, *, kind: str | None = None) -> None:
+        """A pending request (of ``kind``, when given) is money on its way: what would end
+        or change what it pays waits until its provider settles it (`payment_in_flight`)."""
+        if any(
+            r.status == "pending" and (kind is None or r.kind == kind)
+            for r in payments.requests_for_order(conn, order.id)
+        ):
+            raise LifecycleError(
+                "payment_in_flight",
+                f"order {order.label} has a payment in flight; wait until it settles",
+            )
+
     def cancel_order(self, order_id: str, by: Actor, reason: str | None = None) -> Order:
         """§3.5: from any state before `shipped`; cancels the open items and the open
         and failed payment requests, and keeps every fulfilled one's attempts. Allowed on
@@ -1536,11 +1548,7 @@ class Lifecycle:
                 raise LifecycleError(
                     "order_not_cancellable", f"order {order.label} is {order.status}"
                 )
-            if any(r.status == "pending" for r in payments.requests_for_order(conn, order.id)):
-                raise LifecycleError(
-                    "payment_in_flight",
-                    f"order {order.label} has a payment in flight; wait until it settles",
-                )
+            self._no_payment_in_flight(conn, order)
             change = _Change(order)
             every = self.store.items(order.id, conn=conn)
             for item in every:
