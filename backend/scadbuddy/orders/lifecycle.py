@@ -1087,6 +1087,77 @@ class Lifecycle:
             if found.kind == "deposit" and found.status == "open":
                 payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
 
+    # -- the balance (#5281, storefront spec §9) ------------------------------------------
+    # An order that asked for money (a deposit or any payment request) gets a `balance`
+    # request at acceptance. While a balance request stands (not `cancelled`), the balance
+    # is above zero and no one waived it, the order does not ship (`balance_unpaid`). A
+    # back-office order with no request ships as it always did.
+
+    def _open_balance(self, conn: Conn, order: Order, by: Actor) -> None:
+        """At acceptance, opens a `balance` request for what is not paid yet, on the
+        default provider, when the order has a deposit or any payment request."""
+        if order.deposit_minor is None and not payments.requests_for_order(conn, order.id):
+            return
+        due = totals_of(self.store, conn, order.id).balance_minor
+        if due <= 0:
+            return
+        opened = payments.insert_request(
+            conn,
+            order_id=order.id,
+            kind="balance",
+            provider=payments.default_provider(conn, self.offered_providers),
+            amount_minor=due,
+            currency=order.currency,
+            created_by=by,
+        )
+        self.store.insert_event(
+            conn,
+            order.id,
+            by,
+            "payment_request.opened",
+            {"request_id": opened.id, "kind": "balance", "amount_minor": due},
+        )
+
+    def _balance_paid(self, conn: Conn, order: Order) -> None:
+        """Refuses (`balance_unpaid`) while the order has a `balance` request not
+        cancelled, no one waived the balance, and the balance is above zero. A paid
+        request does not free a balance that grew after it."""
+        if order.balance_waived_reason is not None:
+            return
+        if not any(
+            found.kind == "balance" and found.status != "cancelled"
+            for found in payments.requests_for_order(conn, order.id)
+        ):
+            return
+        balance = totals_of(self.store, conn, order.id).balance_minor
+        if balance > 0:
+            raise LifecycleError(
+                "balance_unpaid",
+                f"order {order.number}'s balance is not paid: {balance} due;"
+                " record the payment or ship without full payment",
+            )
+
+    def waive_balance(self, order_id: str, by: Actor, reason: str) -> Order:
+        """ "Ship without full payment": the order ships unpaid, for ``reason`` (trimmed,
+        1 to 500 characters), once accepted (`order_not_accepted` before). The open
+        balance request stays open. The same reason again writes nothing."""
+        reason = reason.strip()
+        if not 1 <= len(reason) <= 500:
+            raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            if order.status not in DERIVED:
+                raise LifecycleError(
+                    "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
+                )
+            if order.balance_waived_reason == reason:
+                return order
+            order = self.store.set_deposit_fields(conn, order.id, balance_waived_reason=reason)
+            self._event(conn, order, by, "balance.waived", reason=reason)
+        self._told(_Change(order))
+        return order
+
     def set_request_link(
         self, request_id: str, *, hosted: HostedRequest | None, error: str | None
     ) -> PaymentRequestView:
@@ -1419,6 +1490,7 @@ class Lifecycle:
             )
             accepted = self.store.set_order_status(conn, order.id, "accepted")
             self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
+            self._open_balance(conn, order, by)
         self._told(_Change(accepted))
         return accepted
 
@@ -3829,6 +3901,7 @@ class Lifecycle:
                     "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
                 )
             self._not_on_hold(order)
+            self._balance_paid(conn, order)
             self._shippable(conn, order, body.items)
             shipment = self.store.insert_shipment(
                 conn,
