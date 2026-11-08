@@ -4,8 +4,13 @@ The orders component registers it at start as version 1 of an ordinary flow, onl
 no flow of that name has ever had a version (`FlowDefinitions.register_new`): the shop
 edits it into version 2 or deletes it, and a later build never rewrites it (a new
 built-in is a new name). It runs on an `order.changed` trigger the shop makes, matched
-to `accepted`, with a standing grant naming `queue_print`, `order_item_accept_quote`
-and `order_item_fulfil`; nothing here makes that trigger or approves that grant.
+to `accepted`, with a standing grant naming `queue_print` and `order_item_fulfil`;
+nothing here makes that trigger or approves that grant.
+
+A print refused `requote_needed` (the accepted quote's sliced file is gone or changed)
+asks a person and never re-quotes: on an accepted order a new quote is open only after a
+revision after acceptance (`Lifecycle._revisable_after_acceptance`), a person's call,
+so the price the customer accepted stands until they make it.
 """
 
 from __future__ import annotations
@@ -20,9 +25,9 @@ logger = logging.getLogger(__name__)
 NAME = "order-fulfilment"
 DISPLAY_NAME = "Order fulfilment"
 DESCRIPTION = (
-    "Prints each approved line item of an accepted order from its accepted quote, quotes "
-    "a stale one again (accepting a rise under the shop's threshold, asking a person "
-    "above it), has an agent check the prints and record them, and writes the "
+    "Prints each approved or failed line item of an accepted order from its accepted "
+    "quote, asks a person when a print cannot start (the order on hold, or a stale "
+    "quote to re-quote), has an agent check the prints and record them, and writes the "
     "customer's message when asked to."
 )
 #: Who registered it: the build, never a person or an agent.
@@ -35,15 +40,6 @@ INPUTS_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": "Write the customer's 'ready' message when the order is done",
-        },
-        "auto_accept_quotes_under_minor": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 0,
-            "description": (
-                "A new quote that rises less than this (minor units) over the accepted "
-                "one is accepted without asking"
-            ),
         },
     },
     "additionalProperties": False,
@@ -62,6 +58,10 @@ FULFILMENT_REPORT = {
     },
     "required": ["summary"],
 }
+#: What `order_item_print` prints: an approved item, or one whose attempt failed.
+PRINTABLE = ["approved", "failed"]
+#: How long a question to a person waits, in seconds. An unanswered one skips its item.
+ASK_TIMEOUT_S = 86400
 
 
 def data(text):
@@ -70,6 +70,16 @@ def data(text):
     if isinstance(value, dict) and "untrusted_data" in value:
         value = json.loads(value["untrusted_data"]["content"])
     return value
+
+
+async def ask(question):
+    """A person's answer, lower-cased; None when nobody answered in time, so one
+    unanswered item never ends the run."""
+    try:
+        answer = await wait_for_human(question, ASK_TIMEOUT_S)
+    except Exception:
+        return None
+    return answer["answer"].strip().lower()
 
 
 async def print_request(item):
@@ -95,39 +105,34 @@ async def print_request(item):
     return request
 
 
-def accepted_total(item):
-    for quote in item["quotes"]:
-        if quote["accepted"]:
-            return quote["total_minor"]
-    return 0
-
-
-async def requote(order, item, request, threshold):
-    """A new slice quote for `item`, accepted when the rise is under `threshold` or a
-    person says yes; whether it was."""
-    filaments = {}
-    for colour in item["colours"]:
-        if colour.get("filament_id"):
-            filaments[str(colour["slot"])] = colour["filament_id"]
-    quote = data(await tool("order_item_quote", {
-        "order_id": order["id"],
-        "item_id": item["id"],
-        "slice": {**request, "filaments": filaments},
-    }))
-    was = accepted_total(item)
-    rise = quote["total_minor"] - was
-    if rise >= threshold:
-        answer = await wait_for_human(
-            f"{item['title']} re-quoted at {quote['total_minor']} minor units "
-            f"(accepted {was}). Accept and print? Answer yes to go on.",
-            86400,
-        )
-        if answer["answer"].strip().lower() != "yes":
+async def print_item(order, item):
+    """Print `item`, asking a person each time it does not start; whether it started."""
+    source = {"order_id": order["id"], "order_item_id": item["id"]}
+    request = await print_request(item)
+    while True:
+        out = await queue_print(source, request)
+        if out["status"] == "succeeded":
+            return True
+        if out["problem"] == "order_on_hold":
+            # Spec 7.2: a hold pauses the flow's work until a person releases it.
+            question = (
+                f"Order {order['number']} is on hold, so {item['title']} did not print. "
+                "Release the order, then answer print to print it, or skip."
+            )
+        elif out["problem"] == "requote_needed":
+            # A re-quote of an accepted item is a person's call (a revision after
+            # acceptance), never this flow's: the accepted price stands until then.
+            question = (
+                f"{item['title']} cannot print from its accepted quote: its sliced file "
+                "is gone or changed. Revise and re-quote it, then answer print, or skip."
+            )
+        else:
+            question = (
+                f"The print of {item['title']} did not go: {out['status']}, "
+                f"{out['error']}. Answer print to try again, or skip."
+            )
+        if await ask(question) != "print":
             return False
-    await tool("order_item_accept_quote", {
-        "order_id": order["id"], "item_id": item["id"], "quote_id": quote["id"],
-    })
-    return True
 
 
 async def main():
@@ -138,31 +143,12 @@ async def main():
     order_id = ev["order_id"]
     detail = data(await tool("order_get", {"order_id": order_id}))
     order = detail["order"]
+    skipped = []
     for item in detail["items"]:
-        if item["status"] != "approved" or item["kind"] == "custom":
+        if item["status"] not in PRINTABLE or item["kind"] == "custom":
             continue
-        source = {"order_id": order_id, "order_item_id": item["id"]}
-        request = await print_request(item)
-        out = await queue_print(source, request)
-        if out["problem"] == "order_on_hold":
-            # §7.2: a hold pauses the flow's work; the person releases it, then it goes on.
-            await wait_for_human(
-                f"Order {order['number']} is on hold, so {item['title']} did not print. "
-                "Release the order, then answer anything to print it.",
-                86400,
-            )
-            out = await queue_print(source, request)
-        if out["problem"] == "requote_needed":
-            threshold = settings["auto_accept_quotes_under_minor"]
-            if not await requote(order, item, request, threshold):
-                continue
-            out = await queue_print(source, request)
-        if out["status"] != "succeeded":
-            await wait_for_human(
-                f"The print of {item['title']} did not go: {out['status']}, {out['error']}. "
-                "Answer anything once you have looked at it.",
-                86400,
-            )
+        if not await print_item(order, item):
+            skipped.append(item["title"])
     done = await agent(
         f"Check every printed item of order {order['number']} (id {order_id}): add the "
         "finished photo and the timelapse to each attempt, count the good ones as made, "
@@ -176,7 +162,7 @@ async def main():
         message = data(await tool("order_notify_customer", {
             "order_id": order_id, "template": "ready",
         }))
-    return {"report": done, "message": message}
+    return {"report": done, "skipped": skipped, "message": message}
 
 
 asyncio.run(main())

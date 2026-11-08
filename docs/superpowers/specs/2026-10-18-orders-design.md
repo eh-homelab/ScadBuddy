@@ -1073,13 +1073,18 @@ What this relies on, and what the design adds for it:
   As built (#4252): `order_notify_customer` is `read` and only composes: it reads the
   order and the customer and answers the template's text addressed to the customer's
   primary contacts, `sent: false`, for a person to send. Sending through a plugin is
-  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
-  `notify` and `auto_accept_quotes_under_minor`), registered at start only when its
-  name never had a version (`FlowDefinitions.register_new`), so a person's edit or
-  delete stands; `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved
-  item, re-quotes on `requote_needed` (asking a person when the rise reaches the
-  threshold), waits out `order_on_hold` with `wait_for_human`, and hands the attempts
-  to the agent under a grant kept to the order. A trigger to run it is made by a person.
+  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, input
+  `notify`), registered at start only when its name never had a version
+  (`FlowDefinitions.register_new`), so a person's edit or delete stands;
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
+  and on a refusal (`order_on_hold`, `requote_needed`, any other) asks a person with
+  `wait_for_human` to fix it and answer `print`; an unanswered or skipped item is
+  passed over, never the run's end. It does not re-quote, unlike the sketch above:
+  `quote_check` refuses a new quote for an item whose accepted quote stands on an
+  accepted order (`order_not_open`) until a person revises it after acceptance (§3.5),
+  so the accepted price stands until a person decides, and there is no
+  `auto_accept_quotes_under_minor`. It hands the attempts to the agent under a grant
+  kept to the order. A trigger to run it is made by a person.
 
 `order_item_quote` takes two modes (phase 2, plan 2026-10-22 Ruling 11): `manual`
 (`{unit_price_minor, label?}`, the typed price) or `slice` (`{printer_id?,

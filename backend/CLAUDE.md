@@ -613,12 +613,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
-  script, inputs `notify` and `auto_accept_quotes_under_minor`), registered by
+  script, input `notify`), registered by
   `ensure_builtin_flow` at the component's start only when the name never had a version
   (`FlowDefinitions.register_new`, `FlowExistsError`), so a person's edit or delete stands;
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
-  settings) switches it. It prints each approved item through `queue_print` with an
-  `order_item_id` source, re-quotes on `requote_needed`, waits out `order_on_hold`, asks
+  settings) switches it. It prints each approved or failed item through `queue_print`
+  with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
+  other) asks a person to fix it and answer `print`, and an unanswered or skipped item
+  is passed over, never the run's end. It never re-quotes: on an accepted order a new
+  quote opens only after a person's revision after acceptance. It asks
   the agent to record the attempts under a grant kept to the order, and with `notify`
   calls `order_notify_customer` (`read`: it composes the text and sends nothing; a send
   through a plugin is #5660).
