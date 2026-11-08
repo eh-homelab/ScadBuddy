@@ -62,7 +62,7 @@ export const handlers = [
     if (!kek) return problem(request, 409, 'payment credentials need SCADBUDDY_SECRET_KEY_FILE', PROBLEMS + 'kek_missing')
     // The first provider connected is the default (`is_default`, at most one row).
     const was = state.providers.find((p) => p.id === id)
-    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null }
+    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null, reports_currency: false }
     state.providers = [...state.providers.filter((p) => p.id !== id), row]
     return HttpResponse.json(statusOf(id))
   }),

@@ -81,19 +81,19 @@ describe('Settings → Payments (#4957)', () => {
     mockConnectProvider('a', 'CAD')
     renderSettingsSection(<Payments />, { route })
     const fake = within(await screen.findByRole('region', { name: 'Fake' }))
-    expect(await fake.findByText('Connected in CAD; orders are in USD. Payment links for orders created from now on will fail; existing orders keep their currency.')).toBeInTheDocument()
+    expect(await fake.findByText('Connected in CAD; orders are in USD. Payment links for orders in USD will fail; orders in CAD still work.')).toBeInTheDocument()
   })
 
   it('says nothing when the account takes the orders currency, or any', async () => {
     mockConnectProvider('a', 'USD')
     const first = renderSettingsSection(<Payments />, { route })
     expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
-    expect(screen.queryByText(/Payment links for orders created from now on will fail/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Payment links for orders in/)).not.toBeInTheDocument()
     first.unmount()
     mockConnectProvider('a')
     renderSettingsSection(<Payments />, { route })
     expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
-    expect(screen.queryByText(/Payment links for orders created from now on will fail/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Payment links for orders in/)).not.toBeInTheDocument()
   })
 
   it('asks to reconnect an account in one currency whose currency was never checked (#5666)', async () => {

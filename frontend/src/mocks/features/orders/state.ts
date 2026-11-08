@@ -81,7 +81,7 @@ export type ConnectedProvider = {
   /** #5666 — the one currency the account takes, when it has one (a Square location's). */
   currency: string | null
   /** #5666 — the provider's account takes one currency (`ProviderStatus.reports_currency`). */
-  reports_currency?: boolean
+  reports_currency: boolean
 }
 
 export type State = {

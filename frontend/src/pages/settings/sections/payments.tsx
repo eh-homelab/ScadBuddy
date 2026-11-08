@@ -181,7 +181,7 @@ function CurrencyWarning({ currency, reported }: { currency: string | null; repo
   if (!currency || !orders || currency === orders) return null
   return (
     <p role="status" className="text-[13px] text-warn">
-      Connected in {currency}; orders are in {orders}. Payment links for orders created from now on will fail; existing orders keep their currency.
+      Connected in {currency}; orders are in {orders}. Payment links for orders in {orders} will fail; orders in {currency} still work.
     </p>
   )
 }

@@ -941,7 +941,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Payments warns when `orders_currency` moved away from it since, and the settings
   route does not refuse that move; a provider whose account takes one currency
   (`PaymentProvider.reports_currency`, Square's) with a row of no currency, connected
-  before it was kept, is asked to reconnect) and
+  before it was kept, is asked to reconnect; such a provider whose `verify` names no
+  currency is refused, `CurrencyUnknownError`, 409 `currency_unknown`) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus
