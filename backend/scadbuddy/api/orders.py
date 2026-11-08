@@ -1752,8 +1752,9 @@ async def _archive_item(
 ) -> NewItem:
     """A past print's item (#4777, order operations spec §3.2): a model item of the output
     that printed the archive, else a library file item of the file that printed it, else
-    one of a copy of its printed file in the native library. An output or file gone since
-    falls through to the copy. Each keeps the archives of its print run."""
+    one of a copy of its printed file in the native library. An output or file gone since,
+    or an output whose template was deleted, falls through to the copy. Each keeps the
+    archives of its print run."""
     store = orders.store
     run = await asyncio.to_thread(store.archive_run_plates, archive_id)
     origin_ids = tuple(sorted({found for _, found in run if found is not None} | {archive_id}))
@@ -1778,7 +1779,11 @@ async def _archive_item(
                 fetcher=fetcher,
             )
         except ApiError as error:
-            if error.status != status.HTTP_422_UNPROCESSABLE_CONTENT:
+            # An output gone since (422), or kept while its template is deleted (409
+            # `template_deleted`), falls through: the archive's file is still Bambuddy's.
+            if error.status != status.HTTP_422_UNPROCESSABLE_CONTENT and error.type != (
+                PROBLEMS + "template_deleted"
+            ):
                 raise
         else:
             return NewModelItem(resolved=resolved, output_id=origin.output_id, **common)
