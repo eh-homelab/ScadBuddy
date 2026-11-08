@@ -118,6 +118,7 @@ def test_the_request_stores_the_hash_never_the_token(shop: PayShop) -> None:
 
 def test_an_open_request_reads_what_the_pay_page_needs(shop: PayShop) -> None:
     order, _, token = tokened(shop)
+    assert order.number is not None
     assert checkout(shop, token) == VenmoCheckout(
         amount_minor=1000,
         currency="USD",
