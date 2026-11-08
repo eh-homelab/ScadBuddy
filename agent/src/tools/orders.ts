@@ -150,8 +150,8 @@ const address = z
   .strict()
 const AUTO_TAX =
   'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
-  'and recomputes it. Sent back as read (with its `id` and `auto`, or a `tax` charge with its label, whatever the ' +
-  'amount) it stays the auto row and is recomputed. A typed tax takes another label; it replaces the auto row.'
+  'and recomputes it. Sent back as read, with its `id` and `auto`, it stays the auto row and is recomputed, ' +
+  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
@@ -625,7 +625,9 @@ export const orderTools: Tool[] = [
       'deposit requests, clears a waiver, and asks the customer for what of the deposit is not paid yet on the ' +
       'default provider, so it is outward: a person must approve it first (it returns a pending action). Until the ' +
       'deposit is paid or waived, a revision is not sent and a test print is not claimed (`deposit_unpaid`). 409 ' +
-      '`payment_in_flight` while a deposit payment is pending; `order_not_submitted` on a storefront cart.',
+      '`payment_in_flight` while a deposit payment is pending; `order_not_submitted` on a storefront cart; ' +
+      "`deposit_policy_currency` when the only policy rules that apply are in the shop's currency and the order is " +
+      'not (set an amount instead).',
     input: z.object({
       order_id: orderId,
       amount_minor: money.min(1).nullable().optional().describe("The deposit in the order's currency; null for none"),

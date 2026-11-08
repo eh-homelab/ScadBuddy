@@ -448,7 +448,7 @@ describe('order tools (#4249)', () => {
     const charges = [{ id: 'c1', kind: 'tax', label: 'Tax 10%', amount_minor: 100, auto: true, shipping_option_id: null }]
     await tool('order_update').execute({ order_id: ORDER, charges }, ctx())
     expect(sent).toEqual({ charges })
-    expect(tool('order_update').description).toContain('takes another label')
+    expect(tool('order_update').description).toContain('whatever its label, is a typed tax')
   })
 
   it('names the deposit and balance refusals and side effects (#5281)', () => {

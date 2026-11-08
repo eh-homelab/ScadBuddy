@@ -71,7 +71,14 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.money import NO_RULES, OrderRules, deposit_for, tax_base, tax_minor
+from scadbuddy.orders.money import (
+    NO_RULES,
+    OrderRules,
+    deposit_for,
+    skipped_for_currency,
+    tax_base,
+    tax_minor,
+)
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartRow,
@@ -741,7 +748,8 @@ class Lifecycle:
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
         customer's) and charges while `draft` or `quoted`. A cart's charges are the
-        visitor's alone (`order_not_submitted`, ``check_visitors_cart``)."""
+        visitor's alone (`order_not_submitted`, ``check_visitors_cart``). The shipping
+        address is not cleared while an option that ships stays (`_no_option_ships`)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if edit.charges is not None:
@@ -773,6 +781,8 @@ class Lifecycle:
                             "address_not_found",
                             f"{name}: no address {wanted} of the order's customer",
                         )
+            if edit.shipping_address_id is None:
+                self._no_option_ships(conn, order, edit.charges)
             order = self.store.update_order_fields(
                 conn,
                 order.id,
@@ -801,11 +811,29 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def _no_option_ships(
+        self, conn: Conn, order: Order, charges: Sequence[ChargeInput] | None
+    ) -> None:
+        """Refuses (`shipping_address_required`) clearing the shipping address while a
+        shipping option that ships stays on the order (#5281): ``charges`` the edit writes,
+        else the order's own. Choose a pickup, or remove the option, first."""
+        kept = self.store.charges(order.id, conn=conn) if charges is None else charges
+        named = {c.shipping_option_id for c in kept if c.shipping_option_id is not None}
+        if not named:
+            return
+        ships = [o for o in self.rules().shipping_options if o.id in named and o.ships]
+        if ships:
+            raise LifecycleError(
+                "shipping_address_required",
+                f"order {order.label} ships by {ships[0].label}: it keeps its shipping address;"
+                " choose an option that does not ship, or remove the option, first",
+            )
+
     def _typed(self, conn: Conn, order: Order, charges: Sequence[ChargeInput]) -> list[ChargeInput]:
         """The charges a replace writes: ``charges`` less the auto tax row sent back as it
-        was read (``auto``, its ``id``, or a `tax` charge with its label, whatever its
-        amount: a read from before the items changed is stale), which the order keeps and
-        ``_retax`` recomputes. A `tax` charge with another label is typed and replaces the
+        was read, marked by ``auto`` or its ``id`` (whatever its amount: a read from
+        before the items changed is stale), which the order keeps and ``_retax``
+        recomputes. Any other `tax` charge, whatever its label, is typed and replaces the
         auto row."""
         auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
 
@@ -814,7 +842,7 @@ class Lifecycle:
                 return True
             if auto is None:
                 return False
-            return charge.id == auto.id or (charge.kind == "tax" and charge.label == auto.label)
+            return charge.id == auto.id
 
         return [charge for charge in charges if not is_auto(charge)]
 
@@ -1167,22 +1195,40 @@ class Lifecycle:
         return order
 
     def apply_deposit_policy(self, order_id: str, by: Actor) -> Order:
-        """``set_deposit`` with the deposit the shop's policy asks of the order now."""
+        """``set_deposit`` with the deposit the shop's policy asks of the order now. A rule
+        skipped only because the order is not in the shop's currency (a fixed amount or a
+        ``total_above`` threshold) is named on the `deposit.set` audit row as ``skipped``
+        (its index in the policy). When such rules are all that would apply, nothing is
+        written: `deposit_policy_currency` says to set the deposit by hand."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
             rules = self.rules()
             items = self.store.items(order.id, conn=conn)
+            context: dict[str, Any] = {
+                "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
+                "first_order": order.customer_id is None
+                or not self.store.accepted_before(conn, order.customer_id, order.id),
+                "currency": order.currency,
+                "shop_currency": rules.shop_currency,
+            }
             amount = deposit_for(
                 rules.deposit_policy,
                 total_minor=totals_of(self.store, conn, order.id).total_minor,
-                has_request=any(i.kind == "request" and i.status != "cancelled" for i in items),
-                first_order=order.customer_id is None
-                or not self.store.accepted_before(conn, order.customer_id, order.id),
-                currency=order.currency,
-                shop_currency=rules.shop_currency,
+                **context,
             )
-            updated = self._set_deposit(conn, order, by, amount, policy=True)
+            skipped = skipped_for_currency(rules.deposit_policy, **context)
+            if amount is None and skipped:
+                raise LifecycleError(
+                    "deposit_policy_currency",
+                    f"order {order.label} is in {order.currency}: the deposit policy's rules"
+                    f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
+                    " by hand",
+                )
+            audit: dict[str, Any] = {"policy": True}
+            if skipped:
+                audit["skipped"] = skipped
+            updated = self._set_deposit(conn, order, by, amount, **audit)
             if updated is None:
                 return order
             order = updated
@@ -1563,6 +1609,7 @@ class Lifecycle:
         if found.status != "paid":
             payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
         self._close_balance(conn, order, payment)
+        self._close_deposit(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)

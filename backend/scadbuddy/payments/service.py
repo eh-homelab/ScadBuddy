@@ -221,6 +221,25 @@ class Payments:
             await self._close_page(found.id, found.provider, hosted.provider_ref)
         return linked
 
+    async def run_linking[T](self, order_id: str, call: Callable[[], T]) -> T:
+        """Runs ``call``, a lifecycle call that may open a request on a provider (a balance
+        request, #5281), then links each request it opened. An older request whose link
+        failed is left to ``POST …/link``, so an edit does not call the provider again."""
+        before = await self.request_ids(order_id)
+        result = await asyncio.to_thread(call)
+        await self.link_opened(order_id, before)
+        return result
+
+    async def request_ids(self, order_id: str) -> set[str]:
+        """The order's request ids now, for ``link_opened``."""
+        return {r.id for r in await asyncio.to_thread(self._requests, order_id)}
+
+    async def link_opened(self, order_id: str, before: set[str]) -> None:
+        """Link each open request on a provider that is not in ``before``."""
+        for found in await asyncio.to_thread(self._requests, order_id):
+            if found.id not in before and found.status == "open" and found.provider is not None:
+                await self.link(found.id)
+
     async def link_pending(self, order_id: str) -> list[PaymentRequestView]:
         """Link every open request of the order that has a provider and no page yet."""
 
@@ -391,8 +410,9 @@ class Payments:
         )
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
         if order_id is not None:
-            # #5700: the open balance requests this payment settled (`_close_balance`)
-            # are marked; close their pages after the commit, as a manual payment does.
+            # #5700: the open balance and deposit requests this payment settled
+            # (`_close_balance`, `_close_deposit`) are marked; close their pages after the
+            # commit, as a manual payment does.
             after = await asyncio.to_thread(self._requests, order_id)
             await self._close_pages(
                 r for r in after if r.close_pending_at is not None and r.id not in before

@@ -702,7 +702,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `…_order_deposits_tax.sql`): `orders.deposit_minor`, `.deposit_waived_reason` and
   `.balance_waived_reason`; `order_charges.auto` (the one tax row ScadBuddy computes,
   `Lifecycle._retax`) and `.shipping_option_id`. `set_deposit` and `apply_deposit_policy`
-  (`PUT /orders/{id}/deposit`, `POST …/deposit/policy`, gap 7) work while `draft` or
+  (`PUT /orders/{id}/deposit`, `POST …/deposit/policy`, gap 7; a policy rule skipped
+  for the order's currency is named as `skipped` on the `deposit.set` row, and only such
+  rules is 409 `deposit_policy_currency`) work while `draft` or
   `quoted`: they cancel the open and failed `deposit` requests and open one for the
   deposit less what is paid on the default provider (gap 4); a pending one refuses them
   (`payment_in_flight`). Until the deposit is paid (gap 3) or waived (`POST
@@ -725,8 +727,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
   request, and it cancels nothing). Every route whose lifecycle call reaches `_retax`
-  links such a request after the commit (`api/orders.py` `_run_linked`, and
-  `link_pending` in the archive quote and shipping-option routes): adding items, an
+  links such a request after the commit, and only the requests that call opened, so an
+  older one whose link failed waits for `POST …/link` (`Payments.run_linking` under
+  `api/orders.py` `_run_linked` and the shipping-option route; `request_ids` and
+  `link_opened` around the archive quote): adding items, an
   item's edit, delete, cancel and reopen, a revision and its answer, a manual or archive
   quote and its acceptance, a duplicate, the charges, and the order's reopen. The slice
   quote's run (an operation) does not: a request it opens is linked by the next linked
@@ -736,16 +740,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   row is `orders_tax_percent` of the items plus, with `orders_tax_shipping`, the shipping
   charges, rounded half up; a typed `tax` charge removes it (gap 6). A charges replace
   (`PATCH` and `…/charges/after-acceptance`) writes the typed charges only: the auto row
-  sent back as read (`auto`, its `id`, or a `tax` charge with its label, whatever the
-  amount) is dropped and the auto row is kept and recomputed (`Lifecycle._typed`); a
-  typed tax takes another label, and a charge's `shipping_option_id` is kept when
+  sent back as read (marked by `auto` or its `id`, whatever the amount) is dropped and
+  the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
+  whatever its label, is typed, and a charge's `shipping_option_id` is kept when
   sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address
-  (`shipping_address_required`), a pickup does not (gap 15). Routes in
+  (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
+  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  that reaches the deposit pays the open `deposit` requests, a provider's as a manual one
+  (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST

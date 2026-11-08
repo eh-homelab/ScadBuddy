@@ -214,10 +214,9 @@ class ChargeInput(BaseModel):
     #: The shipping option a ``shipping`` charge was chosen from (#5281), if any; no
     #: other kind names one (``order_charges_option_is_shipping``).
     shipping_option_id: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,40}$")
-    #: A charge sent back as it was read (#5281): the auto tax row, marked by ``auto``, by
-    #: its ``id`` or by its label (`Tax N%`, any amount), is never written as a typed one;
-    #: the order keeps its own and recomputes it. Any other ``id`` is ignored: the list is
-    #: replaced whole.
+    #: A charge sent back as it was read (#5281): the auto tax row, marked by ``auto`` or
+    #: its ``id`` (any amount), is never written as a typed one; the order keeps its own
+    #: and recomputes it. Any other ``id`` is ignored: the list is replaced whole.
     id: str | None = Field(default=None, max_length=100)
     auto: bool | None = None
 

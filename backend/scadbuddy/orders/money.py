@@ -126,3 +126,27 @@ def deposit_for(
             amounts.append(rule.amount_minor)
     best = max(amounts, default=0)
     return best if best > 0 else None
+
+
+def skipped_for_currency(
+    policy: Sequence[DepositRule],
+    *,
+    has_request: bool,
+    first_order: bool,
+    currency: str,
+    shop_currency: str,
+) -> list[int]:
+    """The indexes of the rules of ``policy`` that ``deposit_for`` skips only because the
+    order is not in ``shop_currency`` (review of #5726): every ``total_above`` rule (its
+    threshold is in the shop's currency), and a fixed amount whose criterion applies."""
+    if currency == shop_currency:
+        return []
+
+    def applies(rule: DepositRule) -> bool:
+        return has_request if rule.criterion == "has_request" else first_order
+
+    return [
+        index
+        for index, rule in enumerate(policy)
+        if rule.criterion == "total_above" or (rule.amount_minor is not None and applies(rule))
+    ]
