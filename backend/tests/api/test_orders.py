@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.api.test_customers import ADA
@@ -163,6 +164,8 @@ def test_patch_edits_notes_due_addresses_and_charges(client: TestClient) -> None
         "total_minor": 300,
         "paid_minor": 0,
         "balance_minor": 300,
+        "deposit_due_minor": 0,
+        "shipping_held": False,
     }
     cleared = client.patch(f"/api/v1/orders/{order['id']}", json={"shipping_address_id": None})
     assert cleared.status_code == 200
@@ -219,3 +222,30 @@ def test_payments_hold_and_the_audit_line(client: TestClient) -> None:
     assert (
         client.post(f"/api/v1/orders/{order['id']}/payments", json={"amount": 1}).status_code == 422
     )
+
+
+@pytest.mark.parametrize("kind", ["fee", "tax", "discount"])
+def test_only_a_shipping_charge_names_a_shipping_option(client: TestClient, kind: str) -> None:
+    order = create_order(client, create_customer(client)["id"])
+    charge = {"kind": kind, "label": "x", "amount_minor": 1, "shipping_option_id": "post"}
+    refused = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [charge]})
+    assert refused.status_code == 422, refused.text
+    assert "shipping_option_id" in refused.text
+    shipping = {**charge, "kind": "shipping"}
+    assert (
+        client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [shipping]}).status_code
+        == 200
+    )
+    bad_id = {**shipping, "shipping_option_id": "Not An Id"}
+    refused = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [bad_id]})
+    assert refused.status_code == 422
+
+
+def test_a_charge_body_cannot_set_auto(client: TestClient) -> None:
+    """The auto tax row (#5281) is ScadBuddy's: a row sent with ``auto`` is the auto row
+    sent back as read, so it is dropped and never written."""
+    order = create_order(client, create_customer(client)["id"])
+    charge = {"kind": "tax", "label": "x", "amount_minor": 1, "auto": True}
+    patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [charge]})
+    assert patched.status_code == 200, patched.text
+    assert client.get(f"/api/v1/orders/{order['id']}").json()["charges"] == []

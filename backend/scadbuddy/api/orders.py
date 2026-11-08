@@ -144,7 +144,7 @@ from scadbuddy.orders.store import (
     encode_cursor,
 )
 from scadbuddy.orders.totals import OrderTotals, order_totals
-from scadbuddy.payments.component import PaymentsDep
+from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
@@ -200,10 +200,13 @@ class OrderCreate(BaseModel):
 
 class OrderPatch(BaseModel):
     """Notes and the due date in any open state; the address ids (the order's own
-    customer's) and the charges, replaced whole, while `draft` or `quoted`. Past that,
-    charges are 409 ``order_not_editable``, which names
-    `PUT /orders/{id}/charges/after-acceptance` (#5351). A field left out is untouched;
-    ``null`` clears the due date or an address."""
+    customer's) and the typed charges, replaced whole, while `draft` or `quoted`.
+    The auto tax row (#5281) is not part of the list: leave it out and the order keeps it
+    and recomputes it; sent back as read (marked by `auto` or its `id`, whatever the
+    amount) it stays the auto row and is recomputed. Any other `tax` charge, whatever its
+    label, is a typed tax and replaces the auto row. Past that, charges are 409
+    ``order_not_editable``, which names `PUT /orders/{id}/charges/after-acceptance`
+    (#5351). A field left out is untouched; ``null`` clears the due date or an address."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -228,7 +231,11 @@ class OrderPatch(BaseModel):
 
 class ChargesBody(BaseModel):
     """`PUT /orders/{id}/charges/after-acceptance` (#5351): the charges part of
-    `PATCH /orders/{id}`, replaced whole."""
+    `PATCH /orders/{id}`, the typed charges replaced whole. The auto tax row (#5281) is
+    not part of the list: leave it out and the order keeps it and recomputes it; sent back
+    as read (marked by `auto` or its `id`, whatever the amount) it stays the auto row and
+    is recomputed. Any other `tax` charge, whatever its label, is a typed tax and replaces
+    the auto row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -539,6 +546,16 @@ async def _run[T](call: Callable[[], T]) -> T:
     """A lifecycle call off the event loop, its refusal as a problem."""
     try:
         return await asyncio.to_thread(call)
+    except LifecycleError as error:
+        raise refused(error) from None
+
+
+async def _run_linked[T](call: Callable[[], T], order_id: str, payments: PaymentsComponent) -> T:
+    """``_run``, then a link for each request it opened on a provider (#5281): a reopened
+    order's balance request, or one a total grown past a paid deposit opens. An older
+    request whose link failed is left to ``POST …/link`` (``Payments.run_linking``)."""
+    try:
+        return await payments.service.run_linking(order_id, call)
     except LifecycleError as error:
         raise refused(error) from None
 
@@ -1057,7 +1074,13 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             charges=charges,
             payments=payments,
             shipments=store.shipments(order.id),
-            totals=order_totals([(item, item.quotes) for item in items], charges, payments),
+            totals=order_totals(
+                [(item, item.quotes) for item in items],
+                charges,
+                payments,
+                order=order,
+                requests=requests,
+            ),
             attachments=store.attachments(order.id),
             projects=store.projects(order.id),
             payment_requests=requests,
@@ -1070,11 +1093,15 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
 
 
 @router.patch("/{order_id}", response_model=Order, summary="Edit an order")
-async def patch_order(order_id: str, body: OrderPatch, orders: OrdersDep) -> Order:
+async def patch_order(
+    order_id: str, body: OrderPatch, orders: OrdersDep, service: PaymentsDep
+) -> Order:
     check_path(order_id)
     by = current_actor()
     try:
-        return await _run(lambda: orders.lifecycle.edit_order(order_id, by, body.edit()))
+        return await _run_linked(
+            lambda: orders.lifecycle.edit_order(order_id, by, body.edit()), order_id, service
+        )
     except ApiError as error:
         if error.type == PROBLEMS + "address_not_found":
             field = error.detail.split(":", 1)[0]
@@ -1092,19 +1119,24 @@ async def patch_order(order_id: str, body: OrderPatch, orders: OrdersDep) -> Ord
     summary="Change the charges of an accepted order",
 )
 async def put_charges_after_acceptance(
-    order_id: str, body: ChargesBody, orders: OrdersDep
+    order_id: str, body: ChargesBody, orders: OrdersDep, service: PaymentsDep
 ) -> Order:
-    """#5351: the charges, replaced whole, on an order that is `accepted`,
-    `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. It changes
-    what the customer pays: a fee or a discount (negative) keeps an agreed total when an
-    item is added after acceptance. The audit row ``charges.replaced_after_acceptance``
-    holds the charges before and after. 409 ``order_not_accepted`` while the order is
-    `draft` or `quoted` (use `PATCH /orders/{id}`), ``order_not_editable`` once it is
-    `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
+    """#5351: the typed charges, replaced whole, on an order that is `accepted`,
+    `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. The auto
+    tax row (#5281) is not part of the list: it is kept and recomputed, also when sent
+    back marked by `auto` or its `id`; any other `tax` charge is typed and replaces it. It
+    changes what the customer pays: a fee or a discount (negative) keeps an agreed total
+    when an item is added after acceptance. The audit row
+    ``charges.replaced_after_acceptance`` holds the charges before and after. 409
+    ``order_not_accepted`` while the order is `draft` or `quoted` (use `PATCH
+    /orders/{id}`), ``order_not_editable`` once it is `shipped`,
+    ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
     check_path(order_id)
     by = current_actor()
-    return await _run(
-        lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges)
+    return await _run_linked(
+        lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges),
+        order_id,
+        service,
     )
 
 
@@ -1250,10 +1282,18 @@ PROJECTS_WAIT_SECONDS = 20.0
         "missing."
     ),
 )
-async def accept_order(order_id: str, orders: OrdersDep) -> Order:
+async def accept_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
+    """The requests the accept cancels have their pages closed after the commit; the
+    balance request it opens is then linked."""
     check_path(order_id)
     by = current_actor()
-    accepted = await _run(lambda: orders.lifecycle.accept_order(order_id, by))
+    try:
+        accepted = await service.service.run_closing(
+            order_id, lambda: orders.lifecycle.accept_order(order_id, by)
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
+    await service.service.link_pending(accepted.id)
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would
     # leave it unrecorded, and the next ensure would make a second of the same name.
     ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
@@ -1323,14 +1363,15 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
         "shipments give it (`shipped`, as it closed, unless a row changed since). A "
         "cancelled one goes back to the status it was cancelled from, with the items "
         "that cancel took (an item cancelled on its own before stays cancelled), and "
-        "then follows its rows. 409 `order_not_ended` for an order neither closed nor "
-        "cancelled."
+        "then follows its rows. A cancelled order back past `quoted` that had asked for "
+        "money asks for the balance again: a `balance` request opens and is linked "
+        "(#5281). 409 `order_not_ended` for an order neither closed nor cancelled."
     ),
 )
-async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
+async def reopen_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
     check_path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.reopen_order(order_id, by))
+    return await _run_linked(lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service)
 
 
 @router.post(
@@ -1419,6 +1460,7 @@ async def add_item(
     fetcher: FetcherDep,
     settings: SettingsStoreDep,
     library: PrintLibraryDep,
+    service: PaymentsDep,
 ) -> OrderItem:
     """From an output (``output_id``: its commit, inputs, libraries and colours), or by
     hand (``slug``, ``commit``, ``inputs``); either way the reference is checked
@@ -1447,6 +1489,7 @@ async def add_item(
         fetcher=fetcher,
         settings=settings,
         library=library,
+        payments=service,
     )
 
 
@@ -1468,6 +1511,7 @@ async def add_item_after_acceptance(
     fetcher: FetcherDep,
     settings: SettingsStoreDep,
     library: PrintLibraryDep,
+    service: PaymentsDep,
 ) -> OrderItem:
     """#5349: the same body as `POST /orders/{id}/items`, on an order that is
     `accepted`, `in_production` or `ready`. It changes what the customer gets. The item
@@ -1491,6 +1535,7 @@ async def add_item_after_acceptance(
         fetcher=fetcher,
         settings=settings,
         library=library,
+        payments=service,
     )
 
 
@@ -1512,6 +1557,7 @@ async def add_items(
     fetcher: FetcherDep,
     settings: SettingsStoreDep,
     library: PrintLibraryDep,
+    service: PaymentsDep,
 ) -> list[OrderItem]:
     """#4777 (order operations spec 2026-11-07 §3.1): up to 50 items, each the body of
     `POST /orders/{id}/items` and added as that route adds it, in order, in one
@@ -1533,6 +1579,7 @@ async def add_items(
         fetcher=fetcher,
         settings=settings,
         library=library,
+        payments=service,
         batch=True,
     )
 
@@ -1555,6 +1602,7 @@ async def add_items_after_acceptance(
     fetcher: FetcherDep,
     settings: SettingsStoreDep,
     library: PrintLibraryDep,
+    service: PaymentsDep,
 ) -> list[OrderItem]:
     """`POST /orders/{id}/items/batch` with the rules of
     `POST /orders/{id}/items/after-acceptance` (#5349) for every item."""
@@ -1571,6 +1619,7 @@ async def add_items_after_acceptance(
         fetcher=fetcher,
         settings=settings,
         library=library,
+        payments=service,
         batch=True,
     )
 
@@ -1589,6 +1638,7 @@ async def _add_item(
     fetcher: FetcherDep,
     settings: SettingsStore,
     library: PrintLibrary,
+    payments: PaymentsComponent,
 ) -> OrderItem:
     [item] = await _add_items(
         order_id,
@@ -1603,6 +1653,7 @@ async def _add_item(
         fetcher=fetcher,
         settings=settings,
         library=library,
+        payments=payments,
         batch=False,
     )
     return item
@@ -1622,6 +1673,7 @@ async def _add_items(
     fetcher: FetcherDep,
     settings: SettingsStore,
     library: PrintLibrary,
+    payments: PaymentsComponent,
     batch: bool,
 ) -> list[OrderItem]:
     """Each body read as `POST /orders/{id}/items` reads it, then all added in one
@@ -1660,8 +1712,12 @@ async def _add_items(
                 **{**error.extensions, **_in_item(error.extensions, index)},
                 item_index=index,
             ) from None
-    return await _run(
-        lambda: orders.lifecycle.add_items(order_id, by, entries, after_acceptance=after_acceptance)
+    return await _run_linked(
+        lambda: orders.lifecycle.add_items(
+            order_id, by, entries, after_acceptance=after_acceptance
+        ),
+        order_id,
+        payments,
     )
 
 
@@ -1869,6 +1925,7 @@ async def patch_item(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    service: PaymentsDep,
 ) -> OrderItem:
     check_path(order_id, item_id)
     given = body.model_fields_set
@@ -1886,7 +1943,7 @@ async def patch_item(
         )
     output_id: str | UnsetType | None = body.output_id if "output_id" in given else UNSET
     by = current_actor()
-    return await _run(
+    return await _run_linked(
         lambda: orders.lifecycle.update_item(
             order_id,
             item_id,
@@ -1902,7 +1959,9 @@ async def patch_item(
             requires_printing=body.requires_printing,
             accept=body.accept,
             approval=body.approval,
-        )
+        ),
+        order_id,
+        service,
     )
 
 
@@ -1911,13 +1970,17 @@ async def patch_item(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a draft line item",
 )
-async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Response:
+async def delete_item(
+    order_id: str, item_id: str, orders: OrdersDep, service: PaymentsDep
+) -> Response:
     """Only while the item is `draft` (Ruling 10): else 409 ``item_not_draft`` names the
     cancel route, and the caller decides. A draft item with time or cost entries is 409
     ``item_has_entries`` (#5326): remove them, or cancel it."""
     check_path(order_id, item_id)
     by = current_actor()
-    await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))
+    await _run_linked(
+        lambda: orders.lifecycle.delete_item(order_id, item_id, by), order_id, service
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1932,19 +1995,27 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
         "`order_closed`/`order_cancelled`."
     ),
 )
-async def reopen_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
+async def reopen_item(
+    order_id: str, item_id: str, orders: OrdersDep, service: PaymentsDep
+) -> OrderItem:
     check_path(order_id, item_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.reopen_item(order_id, item_id, by))
+    return await _run_linked(
+        lambda: orders.lifecycle.reopen_item(order_id, item_id, by), order_id, service
+    )
 
 
 @router.post(
     "/{order_id}/items/{item_id}/cancel", response_model=OrderItem, summary="Cancel a line item"
 )
-async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
+async def cancel_item(
+    order_id: str, item_id: str, orders: OrdersDep, service: PaymentsDep
+) -> OrderItem:
     check_path(order_id, item_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.cancel_item(order_id, item_id, by))
+    return await _run_linked(
+        lambda: orders.lifecycle.cancel_item(order_id, item_id, by), order_id, service
+    )
 
 
 # -- design revisions (#5280, spec 2026-11-02 §4.3) -----------------------------------------
@@ -1978,6 +2049,7 @@ async def add_revision(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    service: PaymentsDep,
 ) -> Revision:
     return await _add_revision(
         order_id,
@@ -1991,6 +2063,7 @@ async def add_revision(
         paths=paths,
         config=config,
         fetcher=fetcher,
+        payments=service,
     )
 
 
@@ -2011,6 +2084,7 @@ async def add_revision_after_acceptance(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    service: PaymentsDep,
 ) -> Revision:
     """#5350: the same body as `POST /orders/{id}/items/{item}/revisions`, for an item
     with an accepted quote on an order that is `accepted`, `in_production` or `ready`.
@@ -2038,6 +2112,7 @@ async def add_revision_after_acceptance(
         paths=paths,
         config=config,
         fetcher=fetcher,
+        payments=service,
     )
 
 
@@ -2054,6 +2129,7 @@ async def _add_revision(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    payments: PaymentsComponent,
 ) -> Revision:
     check_path(order_id, item_id)
     given = body.model_fields_set
@@ -2071,7 +2147,7 @@ async def _add_revision(
         )
     output_id: str | UnsetType | None = body.output_id if "output_id" in given else UNSET
     by = current_actor()
-    return await _run(
+    return await _run_linked(
         lambda: orders.lifecycle.add_revision(
             order_id,
             item_id,
@@ -2081,7 +2157,9 @@ async def _add_revision(
             filaments=body.filaments,
             note=body.note,
             after_acceptance=after_acceptance,
-        )
+        ),
+        order_id,
+        payments,
     )
 
 
@@ -2123,11 +2201,14 @@ async def answer_revision(
     revision_id: str,
     body: RevisionAnswerInput,
     orders: OrdersDep,
+    service: PaymentsDep,
 ) -> Revision:
     check_path(order_id, item_id, revision_id)
     by = current_actor()
-    return await _run(
-        lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by)
+    return await _run_linked(
+        lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by),
+        order_id,
+        service,
     )
 
 
@@ -2141,11 +2222,15 @@ async def answer_revision(
     summary="Record a typed price",
 )
 async def record_quote(
-    order_id: str, item_id: str, body: ManualQuoteInput, orders: OrdersDep
+    order_id: str, item_id: str, body: ManualQuoteInput, orders: OrdersDep, service: PaymentsDep
 ) -> Quote:
     check_path(order_id, item_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.record_manual_quote(order_id, item_id, body, by))
+    return await _run_linked(
+        lambda: orders.lifecycle.record_manual_quote(order_id, item_id, body, by),
+        order_id,
+        service,
+    )
 
 
 @router.post(
@@ -2155,7 +2240,7 @@ async def record_quote(
     summary="Quote an item from a past print",
 )
 async def quote_item_from_archive(
-    order_id: str, item_id: str, body: ArchiveQuoteRequest, orders: OrdersDep
+    order_id: str, item_id: str, body: ArchiveQuoteRequest, orders: OrdersDep, service: PaymentsDep
 ) -> Quote:
     """An `archive` quote (#4777, order operations spec §3.2): priced from what a past
     print used, at the price book in force, with no re-slice. Every plate archive of the
@@ -2171,9 +2256,12 @@ async def quote_item_from_archive(
     no grams or time."""
     check_path(order_id, item_id)
     by = current_actor()
-    return await quote_from_archive(
+    before = await service.service.request_ids(order_id)
+    quote = await quote_from_archive(
         orders.lifecycle, orders.integrations, orders.price_book, order_id, item_id, body, by
     )
+    await service.service.link_opened(order_id, before)
+    return quote
 
 
 @router.post(
@@ -2220,10 +2308,14 @@ async def quote_item(
     response_model=OrderItem,
     summary="Accept a quote",
 )
-async def accept_quote(order_id: str, item_id: str, quote_id: str, orders: OrdersDep) -> OrderItem:
+async def accept_quote(
+    order_id: str, item_id: str, quote_id: str, orders: OrdersDep, service: PaymentsDep
+) -> OrderItem:
     check_path(order_id, item_id, quote_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by))
+    return await _run_linked(
+        lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by), order_id, service
+    )
 
 
 # -- printing an item (§5.4) ------------------------------------------------------------------
@@ -2369,6 +2461,7 @@ async def duplicate_item(
     body: DuplicateBody,
     orders: OrdersDep,
     catalogue: CatalogueDep,
+    service: PaymentsDep,
 ) -> OrderItem:
     check_path(order_id, item_id)
     by = current_actor()
@@ -2385,10 +2478,12 @@ async def duplicate_item(
             type_=TEMPLATE_DELETED,
             slug=slug,
         )
-    return await _run(
+    return await _run_linked(
         lambda: orders.lifecycle.duplicate_item(
             order_id, item_id, by, after_acceptance=body.after_acceptance
-        )
+        ),
+        order_id,
+        service,
     )
 
 

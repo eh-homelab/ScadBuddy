@@ -336,7 +336,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     expect([row!.reported, Number(row!.reported_usd)]).toEqual([true, 0])
   })
 
-  it("folds a closed-out share into the next order's share when the session works again", async () => {
+  it("folds a closed-out share into the next turn's share when the session works again", async () => {
     const id = await session(0.003)
     await revise(id, 'q', 'q1')
     await db.sql`UPDATE ai_sessions SET updated_at = now() - interval '2 hours' WHERE id = ${id}`

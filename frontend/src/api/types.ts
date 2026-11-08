@@ -477,6 +477,11 @@ export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
 export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
+/** #5282 (spec 2026-11-02 §5.3) — a storefront listing, as the back office's Storefront page edits it. */
+/** Every field is always sent: the ones the spec marks optional have defaults. */
+export type StorefrontListing = Required<Schemas['Listing']>
+export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
+export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
 /** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
 export type NativeSpool = Schemas['NativeSpool']
 export type NativeSpoolCreate = Schemas['NativeSpoolCreate']

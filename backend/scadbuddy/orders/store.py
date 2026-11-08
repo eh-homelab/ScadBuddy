@@ -51,6 +51,7 @@ from scadbuddy.orders.models import (
     ItemStatus,
     LibraryFileRef,
     MachineRateBreakdown,
+    Money,
     Order,
     OrderEvent,
     OrderFilter,
@@ -138,7 +139,8 @@ _ADDRESS = (
 _ORDER = (
     "id, number, customer_id, status, currency, on_hold, shipping_address_id,"
     " billing_address_id, shipping_address, billing_address, notes, due_at, accepted_at,"
-    " closed_at, cancelled_at, created_at, updated_at, created_by, source, submitted_at,"
+    " closed_at, cancelled_at, created_at, updated_at, created_by, deposit_minor,"
+    " deposit_waived_reason, balance_waived_reason, source, submitted_at,"
     " storefront_visitor_id"
 )
 
@@ -175,7 +177,7 @@ _FULFILMENT = (
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
 )
-_CHARGE = "id, order_id, kind, label, amount_minor, position"
+_CHARGE = "id, order_id, kind, label, amount_minor, position, auto, shipping_option_id"
 _PAYMENT = (
     "id, order_id, amount_minor, method, reference, received_at, notes, created_at,"
     " provider, payment_request_id"
@@ -981,6 +983,37 @@ class OrderStore:
         if row is None:
             raise OrderNotFoundError(order_id)
         return Order.model_validate(row)
+
+    def set_deposit_fields(
+        self,
+        conn: Conn,
+        order_id: str,
+        *,
+        deposit_minor: Money | UnsetType | None = UNSET,
+        deposit_waived_reason: str | UnsetType | None = UNSET,
+        balance_waived_reason: str | UnsetType | None = UNSET,
+    ) -> Order:
+        """The deposit and the two waivers (#5281): each one given is set, None clears it."""
+        fields = {
+            "deposit_minor": deposit_minor,
+            "deposit_waived_reason": deposit_waived_reason,
+            "balance_waived_reason": balance_waived_reason,
+        }
+        row = _update(conn, "orders", order_id, fields, _ORDER)
+        if row is None:
+            raise OrderNotFoundError(order_id)
+        return Order.model_validate(row)
+
+    def accepted_before(self, conn: Conn, customer_id: str, order_id: str) -> bool:
+        """Whether the customer has another order that was accepted (#5281's
+        ``first_order`` deposit rule reads it)."""
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM orders WHERE customer_id = %s AND id <> %s"
+            " AND accepted_at IS NOT NULL) AS has",
+            (customer_id, order_id),
+        ).fetchone()
+        assert row is not None
+        return bool(row["has"])
 
     def set_order_status(
         self, conn: Conn, order_id: str, status: OrderStatus, at: datetime | None = None
@@ -2147,7 +2180,8 @@ class OrderStore:
     def charges(self, order_id: str, *, conn: Conn | None = None) -> list[Charge]:
         with self._read(conn) as c:
             rows = c.execute(
-                f"SELECT {_CHARGE} FROM order_charges WHERE order_id = %s ORDER BY position, id",
+                f"SELECT {_CHARGE} FROM order_charges WHERE order_id = %s"
+                " ORDER BY auto, position, id",
                 (order_id,),
             ).fetchall()
         return [Charge.model_validate(r) for r in rows]
@@ -2155,16 +2189,41 @@ class OrderStore:
     def replace_charges(
         self, conn: Conn, order_id: str, charges: Sequence[ChargeInput]
     ) -> list[Charge]:
-        """The charges, replaced whole (§4's `PATCH` row)."""
-        conn.execute("DELETE FROM order_charges WHERE order_id = %s", (order_id,))
+        """The typed charges, replaced whole (§4's `PATCH` row). The auto tax row
+        (#5281) is not one of them: it stays, and the typed rows come before it."""
+        conn.execute("DELETE FROM order_charges WHERE order_id = %s AND NOT auto", (order_id,))
         for position, charge in enumerate(charges):
             conn.execute(
-                "INSERT INTO order_charges (order_id, kind, label, amount_minor, position)"
-                " VALUES (%s, %s, %s, %s, %s)",
-                (order_id, charge.kind, charge.label, charge.amount_minor, position),
+                "INSERT INTO order_charges"
+                " (order_id, kind, label, amount_minor, position, shipping_option_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    order_id,
+                    charge.kind,
+                    charge.label,
+                    charge.amount_minor,
+                    position,
+                    charge.shipping_option_id,
+                ),
             )
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
         return self.charges(order_id, conn=conn)
+
+    def set_auto_tax(
+        self, conn: Conn, order_id: str, *, label: str, amount_minor: Money | None
+    ) -> None:
+        """The order's auto tax row (#5281) set to ``amount_minor``, or deleted with
+        None. One row at most (``order_charges_auto_tax``)."""
+        if amount_minor is None:
+            conn.execute("DELETE FROM order_charges WHERE order_id = %s AND auto", (order_id,))
+            return
+        conn.execute(
+            "INSERT INTO order_charges (order_id, kind, label, amount_minor, position, auto)"
+            " VALUES (%s, 'tax', %s, %s, 0, true)"
+            " ON CONFLICT (order_id) WHERE auto"
+            " DO UPDATE SET label = EXCLUDED.label, amount_minor = EXCLUDED.amount_minor",
+            (order_id, label, amount_minor),
+        )
 
     def payments(self, order_id: str, *, conn: Conn | None = None) -> list[Payment]:
         with self._read(conn) as c:

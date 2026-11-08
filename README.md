@@ -329,7 +329,8 @@ on shutdown.
     2 and the `LISTEN` connection (#5226). On top of the pools come short-lived
     connections of their own, one per lock or claim held at that moment: the models and
     flows repository write locks (`library/repo_lock.py`), an order's project lock
-    (`orders/store.py`), a library copy's target locks (`print_library/copy_store.py`),
+    (`orders/store.py`), a storefront publish's lock (at most 2 at once,
+    `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
     output backfill's claim, the service credential rotation and the flow keys. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
@@ -570,7 +571,9 @@ and `MERCHANT_PROFILE_READ`
 ([permissions](https://developer.squareup.com/docs/oauth-api/square-permissions)).
 ScadBuddy checks that the location is active and that it takes payments in the shop's
 order currency ([Location](https://developer.squareup.com/reference/square/objects/Location)):
-a location in another currency is refused. The page then shows
+a location in another currency is refused. When the order currency is changed later,
+the page warns that new payment links will fail until Square is connected again with a
+location in that currency. The page then shows
 "Connected as Square location … (sandbox)" or "(production)". Each payment request is a
 Square payment link for the request's amount, named for the order, with the request in
 its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).

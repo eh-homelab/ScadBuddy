@@ -329,6 +329,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_cancel: () => [],
   order_reopen: () => [],
   order_request_payment: () => [],
+  // Deposits, the waivers and the shipping option (#5281): the order's audit line records them.
+  order_deposit_set: () => [],
+  order_deposit_waive: () => [],
+  order_balance_waive: () => [],
+  order_shipping_option_set: () => [],
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
