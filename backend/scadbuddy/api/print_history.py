@@ -515,8 +515,9 @@ async def _part_settings(
     waits for it (#5733). The settings are None when nothing names a run exactly (a send
     recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
     under another name) or the run is pruned. A failed read of them is logged and gives
-    None, so the print record still loads. A failed fetch cancels the read."""
-    # A task group, so a failed fetch cancels the read and waits for it: the request's
+    None, so the print record still loads. A failed fetch cancels the read, and a read
+    that fails with an error `_guarded` does not catch cancels the fetch."""
+    # A task group, so a failed task cancels the other and waits for it: the request's
     # database read never outlives the request (#5739). The caller sees the error itself.
     try:
         async with asyncio.TaskGroup() as group:
