@@ -337,7 +337,14 @@ sent), and gives, for each slot the template sets on the copy
 (`PrintCheck.slot_part_settings`). A check that does not ask reads nothing more, since the
 read can be one more Bambuddy call. The values are `None` when the preset cannot be read;
 the controls are then empty. They stay off until a check that asked for the choices as they
-stand has answered. A value set back to the slot's default, or reset, is unset, and only
+stand has answered. The request's own `part_settings` do not change the process, so the
+dialog asks only until the values are read for the other choices as they stand
+(`lib/usePrintCheck.ts` `processKey`, #5686): a settled edit of a setting checks again
+without reading the preset again. An answer whose values are `None` (the preset could not
+be read, or the check refused before it read the process) is not a read: the next check
+asks again. A re-check that fails keeps the values already read for
+those choices, so the controls stay on; a change of printer, nozzle or other choice drops
+them, and another process's values are never shown. A value set back to the slot's default, or reset, is unset, and only
 what is set is sent (`lib/partSettings.ts` `sentPartSettings`, `withSetting`,
 `slotBaseline`). So on a slot whose template sets 5 top shell layers over the process's 3,
 choosing 3 sends 3. A remembered or quoted value equal to the slot's default is dropped once

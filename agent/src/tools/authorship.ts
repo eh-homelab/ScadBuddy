@@ -11,6 +11,11 @@ import type { Principal } from '../auth/principal.js'
 export const AUTHOR_HEADER = 'X-ScadBuddy-Agent-Author'
 export const AUTHOR_SESSION_HEADER = 'X-ScadBuddy-Agent-Author-Session'
 export const TOOL_HEADER = 'X-ScadBuddy-Agent-Tool'
+/**
+ * The flow run a call is made from (#4252), from the activity's own context, never its
+ * input: the order's audit line names it, and a run it starts is linked to it.
+ */
+export const FLOW_RUN_HEADER = 'X-ScadBuddy-Flow-Run'
 
 /** The backend's bound (core/authorship.py MAX_PRINCIPAL). */
 const MAX_PRINCIPAL = 300
@@ -33,11 +38,17 @@ export function principalHeader(id: string): string {
   return out || 'unknown'
 }
 
-export function authorHeaders(principal: Principal, session?: string, tool?: string): Record<string, string> {
+export function authorHeaders(
+  principal: Principal,
+  session?: string,
+  tool?: string,
+  flowRun?: string,
+): Record<string, string> {
   return {
     [AUTHOR_HEADER]: principalHeader(principal.id),
     ...(session && /^[A-Za-z0-9_-]{1,64}$/.test(session) ? { [AUTHOR_SESSION_HEADER]: session } : {}),
     ...(tool && /^[A-Za-z0-9_-]{1,64}$/.test(tool) ? { [TOOL_HEADER]: tool } : {}),
+    ...(flowRun && /^[A-Za-z0-9_-]{1,64}$/.test(flowRun) ? { [FLOW_RUN_HEADER]: flowRun } : {}),
   }
 }
 

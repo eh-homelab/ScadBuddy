@@ -40,9 +40,11 @@ def spec(*rules: dict[str, Any], **fields: Any) -> GrantSpec:
     )
 
 
-async def run_row(store: FlowStore, *, session: str | None = None) -> str:
+async def run_row(
+    store: FlowStore, *, session: str | None = None, run_id: str | None = None
+) -> str:
     definition = await define(store, "grants")
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     author: dict[str, Any] = {"kind": "browser"}
     if session is not None:
         author = {"kind": "agent", "principal": "token:t", "session": session}
@@ -390,6 +392,18 @@ async def test_orphan_grants_are_swept(store: FlowStore) -> None:
     assert await store.orphan_grants(timedelta(hours=1)) == []
     await store.delete_grant(orphan)
     assert await store.get_grant(orphan) is None
+
+
+async def test_orphan_run_links_are_swept(store: FlowStore) -> None:
+    """Review of #5668: a start that failed after its link was written leaves one with no
+    run row; the sweep drops it."""
+    orphan = str(uuid.uuid4())
+    await store.link_run(orphan, order_id="ord-1")
+    kept = await run_row(store)
+    await store.link_run(kept, order_id="ord-1")
+    assert await store.orphan_grants(timedelta(0)) == [orphan]
+    await store.delete_grant(orphan)
+    assert await store.orphan_grants(timedelta(0)) == []
 
 
 async def test_a_line_items_prints_count_the_accepted_quotes_plates(store: FlowStore) -> None:

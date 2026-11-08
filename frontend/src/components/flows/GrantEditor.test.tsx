@@ -7,7 +7,28 @@ import { useGlobalAgentTools } from '../../agent/global'
 import type { FlowGrantSpec } from '../../api/types'
 import { renderPage } from '../../test/utils'
 import { grantProblems } from '../../lib/grants'
-import { GrantEditor } from './GrantEditor'
+import { readFileSync } from 'node:fs'
+import { GrantEditor, MAX_ORDERS, ORDER_ID } from './GrantEditor'
+
+/** The `orders` list's bounds as the backend exports them (`flows/grants.py` `OrderIds`). */
+function specOrders(): { pattern: string; maxItems: number } {
+  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (cause) {
+    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
+  }
+  type Orders = { anyOf?: { type?: string; maxItems?: number; items?: { pattern?: string } }[] }
+  const spec = JSON.parse(text) as {
+    components?: { schemas?: Record<string, { properties?: { orders?: Orders } }> }
+  }
+  const array = spec.components?.schemas?.GrantRule?.properties?.orders?.anyOf?.find((o) => o.type === 'array')
+  if (!array?.items?.pattern || typeof array.maxItems !== 'number') {
+    throw new Error(`the grant rule's orders bounds are not in the spec at ${path}`)
+  }
+  return { pattern: array.items.pattern, maxItems: array.maxItems }
+}
 
 // #2481 (spec 2026-10-11 §3.1) — the grant a person attaches to a run: one rule per host
 // function and outward tool, printers and models from the existing reads, maxima, an
@@ -108,6 +129,12 @@ describe('GrantEditor', () => {
     expect(within(print).getByLabelText('Order ids')).toHaveValue('any')
     await user.click(screen.getByRole('button', { name: 'Use grant' }))
     expect(onSubmit.mock.calls[0]![0].rules).toEqual([{ fn: 'queue_print', orders: ['any'] }])
+  })
+
+  it("checks order ids as the backend's spec does (review of #5645)", () => {
+    const { pattern, maxItems } = specOrders()
+    expect(ORDER_ID.source).toBe(pattern)
+    expect(MAX_ORDERS).toBe(maxItems)
   })
 
   it('refuses an order id the backend would refuse', async () => {

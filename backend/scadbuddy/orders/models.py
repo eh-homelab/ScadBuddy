@@ -128,6 +128,8 @@ class Actor(BaseModel):
     kind: Literal["browser", "agent", "provider", "visitor"]
     principal: str | None = None
     session: str | None = None
+    #: The flow run the agent's call was made from (#4252, spec §7.4), when it was.
+    run_id: str | None = None
 
 
 # -- customers (§3.1) -------------------------------------------------------------------

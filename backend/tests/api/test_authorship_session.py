@@ -83,12 +83,22 @@ def _bearer(app: FastAPI, settings: Settings, caller: Any) -> dict[str, str]:
 def test_a_person_s_order_names_them(client: TestClient, app: FastAPI) -> None:
     principal = _sign_in(client, app)
     order = create_order(client, create_customer(client)["id"])
-    assert order["created_by"] == {"kind": "browser", "principal": principal, "session": None}
+    assert order["created_by"] == {
+        "kind": "browser",
+        "principal": principal,
+        "session": None,
+        "run_id": None,
+    }
 
 
 def test_signed_out_is_the_browser_user(client: TestClient) -> None:
     order = create_order(client, create_customer(client)["id"])
-    assert order["created_by"] == {"kind": "browser", "principal": None, "session": None}
+    assert order["created_by"] == {
+        "kind": "browser",
+        "principal": None,
+        "session": None,
+        "run_id": None,
+    }
 
 
 def test_a_person_s_author_header_is_counted(client: TestClient, app: FastAPI) -> None:

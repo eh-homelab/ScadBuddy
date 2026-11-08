@@ -62,6 +62,9 @@ from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 AUTHOR_HEADER = "x-scadbuddy-agent-author"
 AUTHOR_SESSION_HEADER = "x-scadbuddy-agent-author-session"
 TOOL_HEADER = "x-scadbuddy-agent-tool"
+#: The flow run a call is made from (#4252): the agent's, from its activity's own
+#: context; the projects worker's, the run its token was minted for.
+FLOW_RUN_HEADER = "x-scadbuddy-flow-run"
 
 AGENT_AUTHOR_NAME = "ScadBuddy agent"
 AGENT_AUTHOR_EMAIL = "agent@scadbuddy.localhost"
@@ -83,6 +86,10 @@ class AgentAuthor:
     session: str | None
     #: The agent tool that made the call (``X-ScadBuddy-Agent-Tool``), for activity.
     tool: str | None = None
+    #: The flow run the call is made from (``X-ScadBuddy-Flow-Run``, #4252): a label
+    #: on the audit line, and a run's parent when it starts a run, which the route
+    #: checks against the run's own record.
+    flow_run: str | None = None
 
 
 _author: ContextVar[AgentAuthor | None] = ContextVar("scadbuddy_agent_author", default=None)
@@ -171,6 +178,7 @@ def author_from(headers: Headers) -> AgentAuthor | None:
     principal = headers.get(AUTHOR_HEADER)
     session = headers.get(AUTHOR_SESSION_HEADER)
     tool = headers.get(TOOL_HEADER)
+    flow_run = headers.get(FLOW_RUN_HEADER)
     if principal is None and session is None:
         return None  # a tool alone labels nothing
     if principal is not None and not _PRINCIPAL.match(principal):
@@ -183,7 +191,9 @@ def author_from(headers: Headers) -> AgentAuthor | None:
         )
     if session is not None and not _SESSION.match(session):
         raise InvalidAuthorError("the agent session id must be 1 to 64 of [A-Za-z0-9_-]")
-    return AgentAuthor(principal=principal, session=session, tool=tool)
+    if flow_run is not None and not _SESSION.match(flow_run):
+        raise InvalidAuthorError(f"{FLOW_RUN_HEADER} must be 1 to 64 of [A-Za-z0-9_-]")
+    return AgentAuthor(principal=principal, session=session, tool=tool, flow_run=flow_run)
 
 
 @dataclass(frozen=True)

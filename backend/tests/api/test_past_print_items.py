@@ -6,10 +6,12 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import orders as api_orders
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.models import FilamentInput
 from scadbuddy.orders.problems import PROBLEMS
+from scadbuddy.orders.reference import TemplateDeletedError
 from scadbuddy.orders.store import OrderStore
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
@@ -60,6 +62,27 @@ def test_an_archive_of_an_output_adds_that_outputs_item(client: TestClient) -> N
         [81, 82],
     )
     assert item["reference"]["slug"] == SLUG
+
+
+def test_an_archive_of_a_deleted_templates_output_falls_through_to_the_copy(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    output = make_output(client, SLUG)
+    linked(orders_of(client).store, f"output:{output}", "run-1", {1: 81})
+    # The model's delete takes its outputs with it (a 422 the add already passes over);
+    # an output kept while its template is a tombstone answers `template_deleted`.
+
+    async def tombstone(*args: object, **kwargs: object) -> None:
+        raise TemplateDeletedError(SLUG)
+
+    monkeypatch.setattr(api_orders, "resolve_reference", tombstone)
+    # Its printed file is still Bambuddy's: the add goes on to the copy, which needs the
+    # native library.
+    refused = add(client, order["id"], archive_id=81)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"] == PROBLEMS + "archive_copy_not_native"
 
 
 def test_an_archive_is_the_items_only_source(client: TestClient) -> None:

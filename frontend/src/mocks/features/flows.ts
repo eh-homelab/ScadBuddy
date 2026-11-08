@@ -960,8 +960,13 @@ export const handlers = [
     return HttpResponse.json({ run_id: found.id, workflow_run_id: found.workflow_run_id, event_id: eventId })
   }),
   http.get('/api/v1/workflow-runs', ({ request }) => {
-    const session = new URL(request.url).searchParams.get('session')
-    const listed = session ? runs.filter((r) => r.started_by['session'] === session) : runs
+    const query = new URL(request.url).searchParams
+    const session = query.get('session')
+    // #4252: the runs an order is for.
+    const order = query.get('order_id')
+    const listed = runs.filter(
+      (r) => (!session || r.started_by['session'] === session) && (!order || r.order_id === order),
+    )
     return HttpResponse.json(listed.map((r) => ({ ...r, display_name: detailsOf(r.name).display_name })))
   }),
   http.get('/api/v1/workflow-runs/:id', ({ params }) => {
