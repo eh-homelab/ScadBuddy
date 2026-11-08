@@ -2348,14 +2348,34 @@ class DuplicateBody(BaseModel):
         "archives, quantity, title, notes and SKU. No quote is copied, except a custom "
         "item's price, which is its own field (#4954). Refused as an add is: 409 "
         "`item_locked` past `quoted` without `after_acceptance`, `order_not_accepted` "
-        "with it before acceptance, `order_on_hold`; 404 for an item not the order's."
+        "with it before acceptance, `order_on_hold`, `order_not_submitted` on a visitor's "
+        "cart; `template_deleted` for a model item whose template was deleted since (the "
+        "copy could not be quoted); 404 for an item not the order's. The copy uses the "
+        "parts the item uses per unit."
     ),
 )
 async def duplicate_item(
-    order_id: str, item_id: str, body: DuplicateBody, orders: OrdersDep
+    order_id: str,
+    item_id: str,
+    body: DuplicateBody,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
 ) -> OrderItem:
     check_path(order_id, item_id)
     by = current_actor()
+    found = await asyncio.to_thread(orders.store.item, item_id)
+    slug = (
+        found.reference.slug if found and found.reference and found.order_id == order_id else None
+    )
+    # A model item names its template, as an add checks it (Ruling 6): a copy of a deleted
+    # one could not be quoted. The lifecycle refuses the rest (404 included).
+    if slug is not None and not await asyncio.to_thread(catalogue.exists, slug):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"template {slug!r} was deleted; restore it before ordering it",
+            type_=TEMPLATE_DELETED,
+            slug=slug,
+        )
     return await _run(
         lambda: orders.lifecycle.duplicate_item(
             order_id, item_id, by, after_acceptance=body.after_acceptance

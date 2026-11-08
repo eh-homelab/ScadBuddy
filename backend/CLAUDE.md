@@ -852,12 +852,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `orders/pastPrints.ts`, `orders.ts` `addArchiveItem` and `priceBook.ts`.
   The items card's writes (#4955, §4.2): `POST …/items/{item}/duplicate`
   (`Lifecycle.duplicate_item`, body `{after_acceptance}`: the item's kind, current design,
-  past print archives, quantity, title, notes and SKU, added as `add_items` adds one; no
-  quote copied but a custom item's own price; audit `item.duplicated`) and `POST
+  past print archives, quantity, title, notes, SKU and per-unit parts, added as `add_items`
+  adds one; no quote copied but a custom item's own price; 409 `template_deleted` for a
+  model item whose template is gone, checked by the route; audit `item.duplicated`) and `POST
   /orders/{id}/fulfil` (`Lifecycle.fulfil_items`, `FulfilLine`s: per item an attempt by hand
   of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
   `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
-  `failed`, or named twice, refuses all).
+  `failed`, or named twice, refuses all). Both refuse a visitor's cart (`order_not_submitted`).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
