@@ -32,12 +32,14 @@ function load(): Promise<PlaidGlobal> {
     const script = document.createElement('script')
     script.src = PLAID_LINK_SCRIPT
     script.async = true
-    script.onload = () => (window.Plaid ? resolve(window.Plaid) : reject(new Error('Plaid Link did not load')))
-    script.onerror = () => {
+    // A failed load, or a script that defined no `Plaid`, can be tried again.
+    const fail = () => {
       loading = null
       script.remove()
       reject(new Error('Plaid Link did not load'))
     }
+    script.onload = () => (window.Plaid ? resolve(window.Plaid) : fail())
+    script.onerror = fail
     document.head.appendChild(script)
   })
   return loading

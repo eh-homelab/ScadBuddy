@@ -120,6 +120,10 @@ def test_saving_keys_without_a_kek_is_409(settings: Settings) -> None:
         refused = client.put(f"{BANK}/keys", json=KEYS)
         assert refused.status_code == 409
         assert refused.json()["type"] == PROBLEMS + "kek_missing"
+        # Unlink too: the row is kept for when the key file is back.
+        unlink = client.delete(f"{BANK}/link")
+        assert unlink.status_code == 409
+        assert unlink.json()["type"] == PROBLEMS + "kek_missing"
 
 
 def test_an_agent_cannot_change_the_link(settings: Settings) -> None:

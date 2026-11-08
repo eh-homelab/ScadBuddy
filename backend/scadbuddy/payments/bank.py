@@ -7,6 +7,7 @@ provider. No exception, log line, ``repr`` or answer here carries a key or the t
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -46,6 +47,14 @@ class BankNotConfiguredError(LookupError):
 class BankLinkedError(Exception):
     def __init__(self) -> None:
         super().__init__("a bank account is already linked; unlink it first")
+
+
+class BankKeysChangedError(Exception):
+    def __init__(self) -> None:
+        super().__init__(
+            "the Plaid keys were replaced or forgotten while the account was being linked;"
+            " link it again"
+        )
 
 
 class BankNotLinkedError(LookupError):
@@ -207,25 +216,52 @@ class BankLinks:
         linked: its access token belongs to the keys that linked it."""
         if self._kek is None:
             raise KekMissingError()
-        row = self._read()
+        row = await asyncio.to_thread(self._read)
         if row is not None and row["item_id"] is not None:
             raise BankLinkedError()
         keys = PlaidKeys(environment=body.environment, client_id=body.client_id, secret=body.secret)
         await plaid.link_token(keys, user_id=row["id"] if row else "check", webhook=None)
+        await asyncio.to_thread(self._store_keys, body)
+        return await asyncio.to_thread(self.status)
+
+    def _store_keys(self, body: BankKeys) -> None:
+        secrets = {"client_id": body.client_id, "secret": body.secret}
         with self._store.transaction() as conn:
             row = self._row(conn, lock=True)
-            if row is not None and row["item_id"] is not None:
+            if row is None:
+                row_id = str(uuid.uuid4())
+                sealed = self._seal(row_id, secrets)
+                inserted = conn.execute(
+                    "INSERT INTO bank_links (id, environment, secret_sealed, dek_sealed, kek_id)"
+                    " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (singleton) DO NOTHING RETURNING id",
+                    (
+                        row_id,
+                        body.environment,
+                        sealed.secret_sealed,
+                        sealed.dek_sealed,
+                        sealed.kek_id,
+                    ),
+                ).fetchone()
+                if inserted is not None:
+                    return
+                # A save at the same time inserted the one row first: update it instead,
+                # sealed under its own id.
+                row = self._row(conn, lock=True)
+                assert row is not None
+            if row["item_id"] is not None:
                 raise BankLinkedError()
-            row_id = str(row["id"]) if row else str(uuid.uuid4())
-            sealed = self._seal(row_id, {"client_id": body.client_id, "secret": body.secret})
+            sealed = self._seal(str(row["id"]), secrets)
             conn.execute(
-                "INSERT INTO bank_links (id, environment, secret_sealed, dek_sealed, kek_id)"
-                " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET environment ="
-                " EXCLUDED.environment, secret_sealed = EXCLUDED.secret_sealed, dek_sealed ="
-                " EXCLUDED.dek_sealed, kek_id = EXCLUDED.kek_id, saved_at = clock_timestamp()",
-                (row_id, body.environment, sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id),
+                "UPDATE bank_links SET environment = %s, secret_sealed = %s, dek_sealed = %s,"
+                " kek_id = %s, saved_at = clock_timestamp() WHERE id = %s",
+                (
+                    body.environment,
+                    sealed.secret_sealed,
+                    sealed.dek_sealed,
+                    sealed.kek_id,
+                    row["id"],
+                ),
             )
-        return self.status()
 
     def forget_keys(self) -> None:
         with self._store.transaction() as conn:
@@ -239,7 +275,7 @@ class BankLinks:
     # -- the link ---------------------------------------------------------------------
 
     async def link_token(self) -> str:
-        row, _, keys = self._keys(self._read())
+        row, _, keys = self._keys(await asyncio.to_thread(self._read))
         if row["item_id"] is not None:
             raise BankLinkedError()
         return await plaid.link_token(keys, user_id=str(row["id"]), webhook=None)
@@ -247,7 +283,7 @@ class BankLinks:
     async def link(self, public_token: str, account_id: str) -> BankStatus:
         """Exchange Link's public token and keep the chosen account. An account that is
         not checking or savings, or a link that lost a race, removes its Item at Plaid."""
-        row, secrets, keys = self._keys(self._read())
+        row, secrets, keys = self._keys(await asyncio.to_thread(self._read))
         if row["item_id"] is not None:
             raise BankLinkedError()
         exchanged = await plaid.exchange(keys, public_token)
@@ -257,15 +293,13 @@ class BankLinks:
             await _remove_quietly(keys, exchanged.access_token)
             raise
         try:
-            same = self._keep_link(row, secrets, exchanged, account)
+            await asyncio.to_thread(self._keep_link, row, secrets, exchanged, account)
         except Exception:
-            # The token was never stored: no Item may be left at Plaid without it.
+            # The token was never stored (another link, new keys, or a failed write): no
+            # Item may be left at Plaid without it.
             await _remove_quietly(keys, exchanged.access_token)
             raise
-        if not same:
-            await _remove_quietly(keys, exchanged.access_token)
-            raise BankLinkedError()
-        return self.status()
+        return await asyncio.to_thread(self.status)
 
     def _keep_link(
         self,
@@ -273,36 +307,32 @@ class BankLinks:
         secrets: dict[str, str],
         exchanged: plaid.Exchanged,
         account: plaid.PlaidAccount,
-    ) -> bool:
-        """Store the link; False when another link or new keys came first."""
+    ) -> None:
+        """Store the link. `BankLinkedError` when another link came first,
+        `BankKeysChangedError` when the keys were replaced or forgotten meanwhile."""
         with self._store.transaction() as conn:
             now = self._row(conn, lock=True)
-            same = (
-                now is not None
-                and now["item_id"] is None
-                and bytes(now["secret_sealed"]) == bytes(row["secret_sealed"])
+            if now is not None and now["item_id"] is not None:
+                raise BankLinkedError()
+            if now is None or bytes(now["secret_sealed"]) != bytes(row["secret_sealed"]):
+                raise BankKeysChangedError()
+            sealed = self._seal(str(row["id"]), {**secrets, "access_token": exchanged.access_token})
+            conn.execute(
+                "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s,"
+                " item_id = %s, account_id = %s, account_name = %s, account_type = %s,"
+                " account_mask = %s, linked_at = clock_timestamp() WHERE id = %s",
+                (
+                    sealed.secret_sealed,
+                    sealed.dek_sealed,
+                    sealed.kek_id,
+                    exchanged.item_id,
+                    account.account_id,
+                    account.name,
+                    account.subtype,
+                    account.mask,
+                    row["id"],
+                ),
             )
-            if same:
-                sealed = self._seal(
-                    str(row["id"]), {**secrets, "access_token": exchanged.access_token}
-                )
-                conn.execute(
-                    "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s,"
-                    " item_id = %s, account_id = %s, account_name = %s, account_type = %s,"
-                    " account_mask = %s, linked_at = clock_timestamp() WHERE id = %s",
-                    (
-                        sealed.secret_sealed,
-                        sealed.dek_sealed,
-                        sealed.kek_id,
-                        exchanged.item_id,
-                        account.account_id,
-                        account.name,
-                        account.subtype,
-                        account.mask,
-                        row["id"],
-                    ),
-                )
-        return same
 
     async def unlink(self) -> BankUnlinked:
         """Remove the Item at Plaid, then drop the token. When Plaid does not answer, the
@@ -310,11 +340,14 @@ class BankLinks:
         When Plaid refuses the keys themselves (a rotated secret) or they will not open
         (another key file), the link is dropped here only and the shop is told to remove
         the Item in the Plaid Dashboard, as ``PaymentCredentials.disconnect`` never needs
-        the secret either."""
+        the secret either. No key file at all (`KekMissingError`) may be temporary, so
+        it refuses and drops nothing."""
+        if self._kek is None:
+            raise KekMissingError()
         try:
-            linked = self.access()
-        except (CredentialUnreadableError, KekMissingError):
-            self._drop_unreadable()
+            linked = await asyncio.to_thread(self.access)
+        except CredentialUnreadableError:
+            await asyncio.to_thread(self._drop_unreadable)
             return BankUnlinked(removed_at_plaid=False, note=REMOVE_AT_PLAID)
         if linked is None:
             raise BankNotLinkedError()
@@ -323,9 +356,9 @@ class BankLinks:
         except PlaidError as error:
             if error.code not in plaid.KEYS_REFUSED:
                 raise
-            self._drop_link(linked.item_id)
+            await asyncio.to_thread(self._drop_link, linked.item_id)
             return BankUnlinked(removed_at_plaid=False, note=REMOVE_AT_PLAID)
-        self._drop_link(linked.item_id)
+        await asyncio.to_thread(self._drop_link, linked.item_id)
         return BankUnlinked(removed_at_plaid=True, note=None)
 
     def _drop_unreadable(self) -> None:

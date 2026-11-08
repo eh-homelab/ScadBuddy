@@ -603,8 +603,9 @@ the account's name, type and mask (its last 2-4 characters) only, never an accou
 routing number. "Unlink" removes the Item at Plaid
 ([`/item/remove`](https://plaid.com/docs/api/items/#itemremove)) and drops the token; the
 keys stay until "Forget keys". When Plaid refuses the stored keys (a secret rotated in the
-Dashboard) or they will not open (another key file), "Unlink" drops the link here only
-and says to remove the Item in the Plaid Dashboard. The page's Content-Security-Policy allows Link's one
+Dashboard) or they are sealed under another key file, "Unlink" drops the link here only
+and says to remove the Item in the Plaid Dashboard. Without `SCADBUDDY_SECRET_KEY_FILE`,
+"Unlink" is refused and the link stays, since the file may be mounted again. The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 

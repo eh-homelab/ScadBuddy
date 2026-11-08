@@ -37,6 +37,8 @@ export function BankAccount() {
   async function run(action: () => Promise<BankStatus | null | void>) {
     setBusy(true)
     setError(null)
+    // The unlink note describes the last unlink only; `unlink()` sets it again.
+    setNote(null)
     try {
       const next = await action()
       setStatus(next ?? (await api.bankLink()))

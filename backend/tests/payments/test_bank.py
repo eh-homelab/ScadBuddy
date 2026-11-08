@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +16,11 @@ import respx
 
 from scadbuddy.core.secrets import kek_from_base64
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.payments import plaid
 from scadbuddy.payments.bank import (
     BankAccount,
     BankKeys,
+    BankKeysChangedError,
     BankLinkedError,
     BankLinks,
     BankNotConfiguredError,
@@ -235,18 +238,122 @@ async def test_unlink_with_keys_plaid_refuses_unlinks_here_and_says_so(
         await bank.save_keys(KEYS)
 
 
-@pytest.mark.parametrize("kek", [OTHER_KEK, None], ids=["another key", "no key"])
 async def test_unlink_with_keys_that_will_not_open_unlinks_here(
-    rows: OrderStore, pool: PgPool, kek: object
+    rows: OrderStore, pool: PgPool
 ) -> None:
     with respx.mock as router:
         await linked(BankLinks(rows, KEK), router)
     with respx.mock:  # nothing may reach Plaid
-        unlinked = await BankLinks(rows, kek).unlink()  # type: ignore[arg-type]
+        unlinked = await BankLinks(rows, OTHER_KEK).unlink()
     assert unlinked.removed_at_plaid is False
     assert unlinked.note is not None and "Plaid Dashboard" in unlinked.note
     # The sealed token cannot be opened to reseal the keys: the row goes, keys and all.
     assert raw_row(pool) is None
+
+
+async def test_unlink_without_a_kek_is_refused_and_keeps_the_link(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """A key file not mounted may be mounted again: nothing is dropped meanwhile."""
+    with respx.mock as router:
+        await linked(BankLinks(rows, KEK), router)
+    with respx.mock, pytest.raises(KekMissingError):  # nothing may reach Plaid
+        await BankLinks(rows, None).unlink()
+    raw = raw_row(pool)
+    assert raw is not None and raw["item_id"] is not None
+    assert BankLinks(rows, KEK).access() is not None
+
+
+async def test_two_first_saves_at_once_keep_one_row(
+    rows: OrderStore, pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both saves read no row; the second's insert meets the first's ``singleton`` and
+    updates that row, sealed under its id, instead of failing."""
+    first, second = BankLinks(rows, KEK), BankLinks(rows, KEK)
+    with respx.mock as router:
+        plaid_answers(router)
+        await first.save_keys(KEYS)
+        real = BankLinks._row
+
+        def unseen(self: BankLinks, conn: Any, *, lock: bool = False) -> Any:
+            if not lock:
+                return real(self, conn, lock=lock)
+            # The second save's locked read ran before the first save committed.
+            monkeypatch.setattr(BankLinks, "_row", real)
+            return None
+
+        monkeypatch.setattr(BankLinks, "_row", unseen)
+        other = BankKeys(environment="sandbox", client_id="client-2", secret="plaid-s3cret-2")
+        await second.save_keys(other)
+    with pool.connection() as conn:
+        counted = conn.execute("SELECT count(*) AS n FROM bank_links").fetchone()
+    assert counted is not None and counted["n"] == 1
+    # The row opens under its own id, with the second save's keys.
+    linked_keys = first._keys(first._read())[2]
+    assert linked_keys.client_id == "client-2"
+
+
+async def test_a_link_beaten_by_new_keys_says_so(
+    rows: OrderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keys were replaced while Link was open: not "already linked"."""
+    bank = BankLinks(rows, KEK)
+    with respx.mock as router:
+        routes = plaid_answers(router)
+        await bank.save_keys(KEYS)
+        real = plaid.exchange
+
+        async def replaced(*args: Any, **kwargs: Any) -> Any:
+            await BankLinks(rows, KEK).save_keys(KEYS)
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(plaid, "exchange", replaced)
+        with pytest.raises(BankKeysChangedError):
+            await bank.link("public-sandbox-1", CHECKING)
+        assert routes["/item/remove"].called
+
+
+async def test_a_link_beaten_by_forgotten_keys_says_so(
+    rows: OrderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bank = BankLinks(rows, KEK)
+    with respx.mock as router:
+        plaid_answers(router)
+        await bank.save_keys(KEYS)
+        real = plaid.exchange
+
+        async def forgotten(*args: Any, **kwargs: Any) -> Any:
+            BankLinks(rows, KEK).forget_keys()
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(plaid, "exchange", forgotten)
+        with pytest.raises(BankKeysChangedError):
+            await bank.link("public-sandbox-1", CHECKING)
+
+
+async def test_the_database_is_called_off_the_event_loop(
+    rows: OrderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every Postgres call of save_keys, link_token, link and unlink runs in a thread, as
+    ``Payments.link`` does."""
+    loop_thread = threading.get_ident()
+    on_loop: list[str] = []
+    real = BankLinks._row
+
+    def watched(self: BankLinks, conn: Any, *, lock: bool = False) -> Any:
+        if threading.get_ident() == loop_thread:
+            on_loop.append("locked" if lock else "read")
+        return real(self, conn, lock=lock)
+
+    monkeypatch.setattr(BankLinks, "_row", watched)
+    bank = BankLinks(rows, KEK)
+    with respx.mock as router:
+        plaid_answers(router)
+        await bank.save_keys(KEYS)
+        await bank.link_token()
+        await bank.link("public-sandbox-1", CHECKING)
+        await bank.unlink()
+    assert on_loop == []
 
 
 async def test_a_link_whose_write_fails_removes_its_item(

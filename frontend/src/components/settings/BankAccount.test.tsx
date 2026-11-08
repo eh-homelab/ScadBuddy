@@ -89,6 +89,18 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     expect(await screen.findByRole('button', { name: 'Link a bank account' })).toBeInTheDocument()
   })
 
+  it('clears the unlink note when the next action starts (link)', async () => {
+    mockBankLink({ linked: true })
+    setMockKeysRefused(true)
+    stubLink({ accounts: [{ id: MOCK_CHECKING }] })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Unlink' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Remove it in the Plaid Dashboard.')
+    await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
+    expect(await screen.findByText('Plaid Checking')).toBeInTheDocument()
+    expect(screen.queryByText(/Remove it in the Plaid Dashboard/)).not.toBeInTheDocument()
+  })
+
   it('forgets the keys', async () => {
     mockBankLink({ linked: false })
     const { user } = renderSettingsSection(<BankAccount />, { route })

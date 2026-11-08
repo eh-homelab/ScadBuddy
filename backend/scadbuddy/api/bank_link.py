@@ -15,6 +15,7 @@ from fastapi import APIRouter, Response, status
 from scadbuddy.core.problems import ApiError
 from scadbuddy.payments.bank import (
     BankKeys,
+    BankKeysChangedError,
     BankLinkCreate,
     BankLinkedError,
     BankNotConfiguredError,
@@ -43,6 +44,7 @@ def _problem(error: Exception) -> ApiError:
         KekMissingError: "kek_missing",
         BankNotConfiguredError: "bank_not_configured",
         BankLinkedError: "bank_linked",
+        BankKeysChangedError: "bank_keys_changed",
         BankNotLinkedError: "bank_not_linked",
         CredentialUnreadableError: "credential_unreadable",
     }[type(error)]
@@ -54,6 +56,7 @@ _REFUSALS = (
     KekMissingError,
     BankNotConfiguredError,
     BankLinkedError,
+    BankKeysChangedError,
     BankNotLinkedError,
     CredentialUnreadableError,
 )
@@ -115,7 +118,9 @@ async def create_bank_link_token(payments: PaymentsDep) -> LinkToken:
     summary="Link the account the shop chose in Plaid Link",
     description=(
         "Exchanges Link's public token and keeps the account's name, type and mask. 422"
-        " for an account that is not checking or savings (its Item is removed at Plaid)."
+        " for an account that is not checking or savings (its Item is removed at Plaid);"
+        " 409 `bank_linked` when another link came first, `bank_keys_changed` when the keys"
+        " were replaced or forgotten while Link was open (its Item is removed either way)."
     ),
 )
 async def create_bank_link(body: BankLinkCreate, payments: PaymentsDep) -> BankStatus:
@@ -131,10 +136,11 @@ async def create_bank_link(body: BankLinkCreate, payments: PaymentsDep) -> BankS
     summary="Unlink the bank account",
     description=(
         "Removes the Item at Plaid, then drops the access token; the keys stay. When"
-        " Plaid does not answer, 422 and the link stays. When Plaid refuses the keys"
-        " themselves, or they will not open, the link is dropped here only:"
-        " `removed_at_plaid` is false and `note` tells the shop to remove the Item in the"
-        " Plaid Dashboard."
+        " Plaid does not answer, 422 and the link stays. 409 `kek_missing` without"
+        " SCADBUDDY_SECRET_KEY_FILE, and the link stays: the file may be mounted again."
+        " When Plaid refuses the keys themselves, or they are sealed under another key"
+        " file, the link is dropped here only: `removed_at_plaid` is false and `note`"
+        " tells the shop to remove the Item in the Plaid Dashboard."
     ),
 )
 async def delete_bank_link(payments: PaymentsDep) -> BankUnlinked:
