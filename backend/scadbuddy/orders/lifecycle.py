@@ -71,7 +71,7 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.money import NO_RULES, OrderRules, tax_base, tax_minor
+from scadbuddy.orders.money import NO_RULES, OrderRules, deposit_for, tax_base, tax_minor
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartRow,
@@ -845,6 +845,7 @@ class Lifecycle:
                 payments.set_request_status(conn, named.id, "paid", payment_id=payment.id)
             if payment.amount_minor > 0:
                 self._close_balance(conn, order, payment)
+                self._close_deposit(conn, order, payment)
             self._event(
                 conn,
                 order,
@@ -946,6 +947,123 @@ class Lifecycle:
             self._event(conn, order, by, "payment_request.cancelled", request_id=request_id)
         self._told(_Change(order))
         return cancelled
+
+    # -- deposits (#5281, storefront spec §9) ---------------------------------------------
+    # A deposit is set while the order is `draft` or `quoted`. Until it is paid or waived,
+    # a revision is not sent and a test print is not claimed (`deposit_unpaid`). A deposit
+    # request a change cancels is `payment_request.cancelled` on the audit line, as a
+    # request's own cancel is; the payments service closes its provider's page after the
+    # commit, as it does for an order's cancel (`Payments.cancel_order`).
+
+    def _deposit_editable(self, order: Order) -> None:
+        self._not_ended(order)
+        if order.status not in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "order_not_editable",
+                f"order {order.number} is {order.status}: its deposit is set while draft or quoted",
+            )
+
+    def _set_deposit(
+        self, conn: Conn, order: Order, by: Actor, amount: Money | None, **audit: Any
+    ) -> Order:
+        """Cancels the open deposit requests, sets the deposit, clears its waiver, and asks
+        for what of it is not paid yet, on the default provider."""
+        for found in payments.requests_for_order(conn, order.id):
+            if found.kind == "deposit" and found.status == "open":
+                payments.set_request_status(conn, found.id, "cancelled")
+                self._event(conn, order, by, "payment_request.cancelled", request_id=found.id)
+        updated = self.store.set_deposit_fields(
+            conn, order.id, deposit_minor=amount, deposit_waived_reason=None
+        )
+        self._event(conn, order, by, "deposit.set", amount_minor=amount, **audit)
+        due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
+        if due > 0:
+            opened = payments.insert_request(
+                conn,
+                order_id=order.id,
+                kind="deposit",
+                provider=payments.default_provider(conn, self.offered_providers),
+                amount_minor=due,
+                currency=order.currency,
+                created_by=by,
+            )
+            self.store.insert_event(
+                conn,
+                order.id,
+                by,
+                "payment_request.opened",
+                {"request_id": opened.id, "kind": "deposit", "amount_minor": due},
+            )
+        return updated
+
+    def set_deposit(self, order_id: str, by: Actor, amount_minor: Money | None) -> Order:
+        """The order's deposit, or None for none, while `draft` or `quoted`
+        (`order_not_editable` past it). It cancels the open `deposit` request and clears
+        a waiver; a deposit above what is paid opens a `deposit` request for the rest."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._deposit_editable(order)
+            if amount_minor is not None and amount_minor < 1:
+                raise LifecycleError("amount_minor", "a deposit is above zero", unprocessable=True)
+            order = self._set_deposit(conn, order, by, amount_minor)
+        self._told(_Change(order))
+        return order
+
+    def apply_deposit_policy(self, order_id: str, by: Actor) -> Order:
+        """``set_deposit`` with the deposit the shop's policy asks of the order now."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._deposit_editable(order)
+            rules = self.rules()
+            items = self.store.items(order.id, conn=conn)
+            amount = deposit_for(
+                rules.deposit_policy,
+                total_minor=totals_of(self.store, conn, order.id).total_minor,
+                has_request=any(i.kind == "request" and i.status != "cancelled" for i in items),
+                first_order=not self.store.accepted_before(conn, order.customer_id, order.id),
+                currency=order.currency,
+                shop_currency=rules.shop_currency,
+            )
+            order = self._set_deposit(conn, order, by, amount, policy=True)
+        self._told(_Change(order))
+        return order
+
+    def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
+        """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
+        1 to 500 characters). The open deposit request stays open."""
+        reason = reason.strip()
+        if not 1 <= len(reason) <= 500:
+            raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            order = self.store.set_deposit_fields(conn, order.id, deposit_waived_reason=reason)
+            self._event(conn, order, by, "deposit.waived", reason=reason)
+        self._told(_Change(order))
+        return order
+
+    def _deposit_paid(self, conn: Conn, order: Order) -> None:
+        """Refuses (`deposit_unpaid`) while a deposit is set, not waived, and not paid."""
+        if order.deposit_minor is None or order.deposit_waived_reason is not None:
+            return
+        paid = totals_of(self.store, conn, order.id).paid_minor
+        if paid < order.deposit_minor:
+            raise LifecycleError(
+                "deposit_unpaid",
+                f"order {order.number}'s deposit is not paid: {paid} of"
+                f" {order.deposit_minor} received; record the payment or proceed without it",
+            )
+
+    def _close_deposit(self, conn: Conn, order: Order, payment: Payment) -> None:
+        """Once the payments reach the deposit, ``payment`` closes the open deposit
+        requests (status `open` only)."""
+        if order.deposit_minor is None:
+            return
+        if totals_of(self.store, conn, order.id).paid_minor < order.deposit_minor:
+            return
+        for found in payments.requests_for_order(conn, order.id):
+            if found.kind == "deposit" and found.status == "open":
+                payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
 
     def set_request_link(
         self, request_id: str, *, hosted: HostedRequest | None, error: str | None
@@ -2672,6 +2790,7 @@ class Lifecycle:
                 )
             if revision.sent_at is not None:
                 return revision
+            self._deposit_paid(conn, order)
             if not self.store.subject_attachments(revision_subject(revision.id), conn=conn):
                 raise LifecycleError(
                     "revision_empty", f"revision {revision.number} has no file to send"
@@ -3351,6 +3470,7 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._test_printable(conn, order, item_id, revision_id)
+            self._deposit_paid(conn, order)
             attempt = self.store.insert_fulfilment(
                 conn,
                 item.id,

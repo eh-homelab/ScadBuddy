@@ -18,7 +18,7 @@ from scadbuddy.payments.models import HostedRequest, PaymentRequestView, Provide
 from scadbuddy.payments.store import request
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop
+from tests.orders.test_lifecycle import BY, Shop, connect
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -51,16 +51,6 @@ class PayShop(Shop):
             error=None,
         )
         return order, req
-
-
-def connect(rows: OrderStore, provider: str = "fake", *, default: bool = False) -> None:
-    """A credential row: the provider is connected (its secret is never opened here)."""
-    with rows.transaction() as conn:
-        conn.execute(
-            "INSERT INTO payment_credentials (provider, account_label, secret_sealed, dek_sealed,"
-            " kek_id, is_default) VALUES (%s, 'Fake', '\\x00', '\\x00', 'k', %s)",
-            (provider, default),
-        )
 
 
 @pytest.fixture

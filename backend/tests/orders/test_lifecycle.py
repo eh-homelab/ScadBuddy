@@ -45,6 +45,8 @@ from scadbuddy.orders.money import OrderRules
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, price
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.payments import store as payments_store
+from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 
@@ -145,6 +147,22 @@ class RulesShop(Shop):
         super().__init__(rows, refs)
         self.now = rules
         self.lifecycle = Lifecycle(rows, self.bus, refs, rules=lambda: self.now)
+
+
+def connect(rows: OrderStore, provider: str = "fake", *, default: bool = False) -> None:
+    """A credential row: the provider is connected (its secret is never opened here)."""
+    with rows.transaction() as conn:
+        conn.execute(
+            "INSERT INTO payment_credentials (provider, account_label, secret_sealed, dek_sealed,"
+            " kek_id, is_default) VALUES (%s, 'Fake', '\\x00', '\\x00', 'k', %s)",
+            (provider, default),
+        )
+
+
+def requests_for(shop: Shop, order: Order) -> list[PaymentRequestView]:
+    """The order's payment requests, oldest first."""
+    with shop.rows.transaction() as conn:
+        return payments_store.requests_for_order(conn, order.id)
 
 
 @pytest.fixture
