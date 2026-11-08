@@ -1,4 +1,5 @@
 import { FilamentsEditor } from '../../../components/orders/FilamentsEditor'
+import { MachineRates } from '../../../components/orders/MachineRates'
 import { DepositPolicyEditor } from '../../../components/settings/DepositPolicyEditor'
 import { ShippingOptionsEditor } from '../../../components/settings/ShippingOptionsEditor'
 import { RuntimeRows, SavedSection } from '../formParts'
@@ -24,6 +25,8 @@ export function Component() {
       <RuntimeRows form={form} section="orders" />
       {/* #4250 — the price book's filaments, saved on their own: each edit is a row. */}
       <FilamentsEditor />
+      {/* #4625 — each printer's machine rate, from its inputs, saved on its own. */}
+      <MachineRates />
       {/* #5281 — the deposit policy and the shipping options, each saved on its own. */}
       <DepositPolicyEditor />
       <ShippingOptionsEditor />
