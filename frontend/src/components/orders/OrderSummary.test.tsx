@@ -45,6 +45,21 @@ describe('OrderSummary (#4955)', () => {
     expect(lines().at(-1)?.[0]).toBe('Balance due (provisional)')
   })
 
+  it('shows a badge beside a charge label when the caller gives one', () => {
+    render(
+      <OrderSummary
+        currency="USD"
+        exponent={2}
+        totals={totals()}
+        charges={[charge('shipping', 'Post', 500, 0), charge('tax', 'Sales tax', 484, 1)]}
+        chargeBadge={(c) => (c.kind === 'tax' ? <span data-testid="badge">auto</span> : null)}
+      />,
+    )
+    const term = screen.getByText('Tax · Sales tax').closest('dt')!
+    expect(within(term).getByTestId('badge')).toHaveTextContent('auto')
+    expect(screen.getAllByTestId('badge')).toHaveLength(1)
+  })
+
   it('says when there are no charges', () => {
     render(<OrderSummary currency="USD" exponent={2} totals={totals({ charges_minor: 0 })} charges={[]} />)
     expect(lines().map(([term]) => term)).toEqual(['Subtotal', 'Total', 'Paid', 'Balance due'])
