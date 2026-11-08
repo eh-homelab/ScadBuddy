@@ -325,6 +325,34 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     ])
   })
 
+  it("closes out an idle session's share under a hundredth of a cent without sending it", async () => {
+    const id = await session(0.00005)
+    await revise(id, 't', 't1')
+    await db.sql`UPDATE ai_sessions SET updated_at = now() - interval '2 hours' WHERE id = ${id}`
+    await costs.report(id)
+    expect(posted).toEqual([])
+    const [row] = await db.sql<{ reported: boolean; reported_usd: number }[]>`
+      SELECT reported_at IS NOT NULL AS reported, reported_usd FROM ai_session_order_costs WHERE session_id = ${id}`
+    expect([row!.reported, Number(row!.reported_usd)]).toEqual([true, 0])
+  })
+
+  it("folds a closed-out share into the next order's share when the session works again", async () => {
+    const id = await session(0.003)
+    await revise(id, 'q', 'q1')
+    await db.sql`UPDATE ai_sessions SET updated_at = now() - interval '2 hours' WHERE id = ${id}`
+    answer = 'deferred'
+    await costs.report(id)
+    // The session comes back: a new turn spends 1.00 and revises another order.
+    answer = 'recorded'
+    await db.sql`UPDATE ai_sessions SET cost_usd = 1.003, updated_at = now() WHERE id = ${id}`
+    await revise(id, 'n', 'n1')
+    await costs.report(id)
+    expect(posted.map((p) => [p.orderId, p.costUsd])).toEqual([
+      ['q', '0.00300000'],
+      ['n', '1.00300000'],
+    ])
+  })
+
   it('reports nothing for a session with no spend since', async () => {
     const id = await session(0)
     await revise(id, 'a', 'a1')
