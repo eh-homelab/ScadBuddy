@@ -246,6 +246,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     for (const slot of slots) await selectOption(user, slot, /^Bambu PLA/)
     const support = within(dialog).getByRole('group', { name: 'Support filaments' })
     await user.type(within(support).getByLabelText('Support slot'), '1')
+    expect(within(support).getByLabelText('Support slot')).toHaveAccessibleDescription('A slot the slice uses')
     await user.click(within(support).getByRole('button', { name: 'Add support filament' }))
     expect(within(support).getByRole('alert')).toHaveTextContent('Slot 1 is a colour slot')
     await user.clear(within(support).getByLabelText('Support slot'))
