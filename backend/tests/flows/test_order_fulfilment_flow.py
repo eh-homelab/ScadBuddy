@@ -6,15 +6,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.flows.reconcile import created_by
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.flows.typecheck import check_script
+from scadbuddy.orders import component
 from scadbuddy.orders.builtin_flow import (
     INPUTS_SCHEMA,
     NAME,
@@ -45,6 +48,11 @@ async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     [first] = definitions.history.versions(NAME)
     assert definitions.history.script_at(NAME, first.commit) == SCRIPT
     assert definitions.history.inputs_at(NAME, first.commit) == INPUTS_SCHEMA
+    # Its authorship is in the commit too (review of #5682): git, reconcile and the row agree.
+    assert first.builtin == NAME
+    [listed] = await definitions.versions(NAME, limit=1)
+    assert listed.created_by == {"kind": "builtin", "name": NAME}
+    assert created_by(first.agent, first.builtin) == {"kind": "builtin", "name": NAME}
     # A second start, or a second replica, registers nothing.
     assert await ensure_builtin_flow(definitions) is False
     # The shop's version 2 stands.
@@ -55,6 +63,37 @@ async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     await definitions.delete(NAME, {"kind": "browser"})
     assert await ensure_builtin_flow(definitions) is False
     assert len(definitions.history.versions(NAME)) == 2
+
+
+@pytest.mark.parametrize(
+    ("switch", "flows", "registered"),
+    [(True, "defs", True), (False, "defs", False), (True, None, False)],
+)
+async def test_the_component_registers_it_only_when_switched_on_with_flows(
+    monkeypatch: pytest.MonkeyPatch, switch: bool, flows: str | None, registered: bool
+) -> None:
+    """Review of #5682: `_run` skips the built-in with `orders_builtin_flow` off, or
+    without flows."""
+    calls: list[object] = []
+
+    async def ensure(definitions: object) -> bool:
+        calls.append(definitions)
+        return True
+
+    async def remove() -> None:
+        return None
+
+    monkeypatch.setattr(component, "ensure_builtin_flow", ensure)
+    monkeypatch.setattr(component, "listen_for_prints", lambda *args: remove)
+    orders = SimpleNamespace(
+        flows=flows,
+        core=SimpleNamespace(settings=SimpleNamespace(orders_builtin_flow=switch), events=None),
+        lifecycle=None,
+        integrations=None,
+    )
+    async with component._run(cast(component.OrdersComponent, orders)):
+        pass
+    assert calls == (["defs"] if registered else [])
 
 
 class _Host:
@@ -243,3 +282,12 @@ def test_only_a_timeout_counts_as_nobody_answering() -> None:
     host = _Host([_item("a")], [_refused("x")], [ValueError("bad timeout")])
     with pytest.raises(ValueError, match="bad timeout"):
         host.run()
+
+
+def test_a_lan_print_with_no_spools_chosen_says_to_print_it_from_the_page() -> None:
+    """Review of #5682: on the native (LAN) path the flow's empty plan is the run's, so
+    the run refuses each slot; printing again would refuse the same way."""
+    refused = {"status": "failed", "problem": None, "error": "Slot 1 has no spool chosen."}
+    host = _Host([_item("a")], [refused], ["skip"])
+    host.run()
+    assert "print the item from the order's page, then answer skip" in host.questions[0]

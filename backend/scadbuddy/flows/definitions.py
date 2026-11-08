@@ -295,6 +295,9 @@ class FlowDefinitions:
         only_new: bool = False,
     ) -> Definition:
         self._require()
+        # A built-in's authorship goes in its commit too, so git, reconcile and the row
+        # agree (review of #5682).
+        builtin = author.get("name") if author.get("kind") == "builtin" else None
         version_id = str(uuid.uuid4())
         rows: list[Any] = []
 
@@ -327,6 +330,7 @@ class FlowDefinitions:
                 display_name=display_name,
                 description=description,
                 only_new=only_new,
+                builtin=builtin if isinstance(builtin, str) else None,
             )
         except DetailsNotSavedError as error:
             # The version is committed and indexed: answer it, never fail it (#3186).
@@ -456,7 +460,7 @@ class FlowDefinitions:
                 version=commit.version,
                 message=commit.message,
                 body=commit.body,
-                created_by=created_by(commit.agent),
+                created_by=created_by(commit.agent, commit.builtin),
                 created_at=commit.date,
                 current=index == 0,
             )

@@ -158,6 +158,16 @@ async def print_item(order, item):
         else:
             reason = out["error"] or "no reason given"
             question = f"The print of {item['title']} did not go: {out['status']}, {reason}. "
+            if "no spool chosen" in reason:
+                # The flow sends no spools: off the LAN the check fills each slot from the
+                # item's filaments, but on the native (LAN) path the plan is the request's
+                # (`orders/operations.py`), so the run refuses each slot. Printing again
+                # would refuse the same way; a person chooses the spools on the order's
+                # page (review of #5682).
+                question += (
+                    "This printer needs its spools chosen: print the item from the order's "
+                    "page, then answer skip. "
+                )
             if out.get("may_have_queued"):
                 question += (
                     "It may be on the printer's queue anyway: check the queue before you "
