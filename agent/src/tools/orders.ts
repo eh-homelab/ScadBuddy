@@ -602,12 +602,16 @@ export const orderTools: Tool[] = [
         backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }),
         `get order ${order_id}`,
       )
-      const customer_id = detail.order.customer_id
+      const { customer_id, number } = detail.order
+      // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
+      if (customer_id == null || number == null) {
+        throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+      }
       const customer = await ok(
         backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
         `get customer ${customer_id}`,
       )
-      return json(composeNotice(template, detail, customer, note))
+      return json(composeNotice(template, { order: { ...detail.order, number }, totals: detail.totals }, customer, note))
     },
   }),
   defineTool({
