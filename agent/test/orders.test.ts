@@ -1052,6 +1052,47 @@ describe('pricing tools (#4250)', () => {
   })
 })
 
+// #4625, order operations spec §6: each printer's machine rate, read and kept.
+describe('machine rate tools (#4625)', () => {
+  const PRINTER = '00000000-0000-4000-8000-000000000001'
+  const VIEW = { printer: PRINTER, printer_name: 'H2C', inputs: null, breakdown: { source: 'price_book', rate_per_hour: '0.9' } }
+  const INPUTS = {
+    profile: { purchase_price: '1440', life_hours: '3000', watts: '120', kwh_price: '0.25' },
+    wear_parts: [{ name: 'Nozzle', cost: '14', life_hours: '200' }],
+    maintenance: [{ task: 'Lubricate rods', minutes: '20', consumables: '2', interval_hours: '100' }],
+  }
+
+  it('reads with read and keeps with write', () => {
+    expect(['machine_rate_get', 'machine_rate_set'].map((n) => tool(n).risk)).toEqual(['read', 'write'])
+  })
+
+  it('reads a printer’s rate, replaces its inputs and removes them', async () => {
+    const sent: { method: string; body: unknown }[] = []
+    const path = `${BACKEND}/api/v1/printers/${PRINTER}/machine-rate`
+    server.use(
+      http.get(path, () => HttpResponse.json(VIEW)),
+      http.put(path, async ({ request }) => {
+        sent.push({ method: 'PUT', body: await request.json() })
+        return HttpResponse.json({ ...VIEW, inputs: INPUTS })
+      }),
+      http.delete(path, () => {
+        sent.push({ method: 'DELETE', body: null })
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    expect(firstText(await tool('machine_rate_get').execute({ printer: PRINTER }, ctx()))).toEqual(VIEW)
+    const set = await tool('machine_rate_set').execute({ printer: PRINTER, inputs: INPUTS }, ctx())
+    expect(firstText(set)).toEqual({ ...VIEW, inputs: INPUTS })
+    await tool('machine_rate_set').execute({ printer: PRINTER, remove: true }, ctx())
+    expect(sent).toEqual([
+      { method: 'PUT', body: INPUTS },
+      { method: 'DELETE', body: null },
+    ])
+    await expect(tool('machine_rate_set').execute({ printer: PRINTER }, ctx())).rejects.toThrow(ToolError)
+    await expect(tool('machine_rate_set').execute({ printer: PRINTER, inputs: INPUTS, remove: true }, ctx())).rejects.toThrow(ToolError)
+  })
+})
+
 // #4722 (spec 2026-10-18 §7.3): a file from the session workspace onto an order or an item,
 // streamed into the multipart route as every workspace upload is (tools/workspaceUploads.ts).
 describe('order attachment tools (#4722)', () => {

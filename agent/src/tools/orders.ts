@@ -1772,6 +1772,92 @@ export const orderTools: Tool[] = [
     },
   }),
   defineTool({
+    name: 'machine_rate_get',
+    label: "Read a printer's machine rate",
+    description:
+      "A registry printer's machine rate (list_printers' `id`): its inputs (`inputs`, null with none) and the rate " +
+      'they give now with each part (`breakdown`): each maintenance task\'s minutes at the labour rate plus its ' +
+      'consumables over its interval in print-hours, each wear part\'s cost over its life, the power (watts / 1000 x ' +
+      'the price of a kWh) and the purchase price over the life, in the shop\'s currency. A printer linked to Bambuddy ' +
+      'takes its tasks and intervals from Bambuddy (`intervals` `bambuddy`, or `stored` when Bambuddy did not ' +
+      "answer). A printer with no inputs is the price book's machine rate (`source` `price_book`). A slice quote " +
+      'for the printer is priced at this rate and records each part.',
+    input: z.object({ printer: ID.describe("The registry printer (list_printers' `id`)") }),
+    risk: 'read',
+    routes: ['GET /api/v1/printers/{printer_id}/machine-rate'],
+    handler: async ({ printer }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/printers/{printer_id}/machine-rate', { params: { path: { printer_id: printer } } }),
+          `read printer ${printer}'s machine rate`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'machine_rate_set',
+    label: "Set a printer's machine rate",
+    description:
+      "Keep a registry printer's machine rate inputs (machine_rate_get): `inputs` replaces them whole: `profile` " +
+      '(purchase_price, life_hours (null: no depreciation), watts, kwh_price, labour_rate_per_hour (null: the ' +
+      "shop's labour rate)), `wear_parts` ({name, cost, life_hours}) and `maintenance` ({task, minutes, " +
+      'consumables, interval_hours}; a printer linked to Bambuddy names its Bambuddy tasks and keeps Bambuddy\'s ' +
+      "intervals). `remove: true` drops them, so the printer is priced at the price book's machine rate again. " +
+      'Decimals are strings. A recorded quote keeps the rate it was priced at.',
+    input: z.object({
+      printer: ID.describe("The registry printer (list_printers' `id`)"),
+      inputs: z
+        .object({
+          profile: z
+            .object({
+              purchase_price: decimal.optional(),
+              life_hours: decimal.nullable().optional(),
+              watts: decimal.optional(),
+              kwh_price: decimal.optional(),
+              labour_rate_per_hour: decimal.nullable().optional(),
+            })
+            .strict(),
+          wear_parts: z
+            .array(z.object({ name: z.string().min(1).max(100), cost: decimal, life_hours: decimal }).strict())
+            .max(50)
+            .default([]),
+          maintenance: z
+            .array(
+              z
+                .object({
+                  task: z.string().min(1).max(100),
+                  minutes: decimal.optional(),
+                  consumables: decimal.optional(),
+                  interval_hours: decimal.nullable().optional(),
+                })
+                .strict(),
+            )
+            .max(50)
+            .default([]),
+        })
+        .strict()
+        .optional(),
+      remove: z.boolean().default(false),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/printers/{printer_id}/machine-rate', 'DELETE /api/v1/printers/{printer_id}/machine-rate'],
+    title: ({ printer, remove }) => (remove ? `Remove printer ${printer}'s machine rate` : `Set printer ${printer}'s machine rate`),
+    handler: async ({ printer, inputs, remove }, { backend }) => {
+      if (remove && inputs !== undefined) throw new ToolError('give inputs or remove: true, not both')
+      const path = { printer_id: printer }
+      if (remove) {
+        await ok(backend.DELETE('/api/v1/printers/{printer_id}/machine-rate', { params: { path } }), `remove printer ${printer}'s machine rate`)
+        return json({ removed: printer })
+      }
+      if (inputs === undefined) throw new ToolError('nothing to change: give inputs, or remove: true')
+      return json(
+        await ok(
+          backend.PUT('/api/v1/printers/{printer_id}/machine-rate', { params: { path }, body: inputs as never }),
+          `set printer ${printer}'s machine rate`,
+        ),
+      )
+    },
+  }),
+  defineTool({
     name: 'price_book_import_spools',
     label: "Import filaments from Bambuddy's spools",
     description:
