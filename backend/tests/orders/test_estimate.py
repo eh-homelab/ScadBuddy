@@ -12,11 +12,12 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from scadbuddy.orders.estimate import EstimatedPart, part_volumes, rough_estimate
+from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, part_volumes, rough_estimate
 from scadbuddy.orders.models import Filament, PricingPolicy
 from scadbuddy.orders.pricing import Plate, PlateFilament, PricingError, price
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
+from scadbuddy.storefront.routes import ESTIMATE_FIELDS
 
 NOW = datetime(2026, 11, 8, tzinfo=UTC)
 POLICY = PricingPolicy(
@@ -113,3 +114,8 @@ def test_part_volumes_reads_every_plate(tmp_path: Path) -> None:
     )
     parts = part_volumes(model, 2, [])
     assert [(p.plate, round(p.volume_mm3 or 0)) for p in parts] == [(1, 8000), (2, 9000)]
+
+
+def test_the_edge_sends_on_every_public_estimate_field() -> None:
+    """The edge's allowlist (`storefront/routes.py`) is the public shape, field for field."""
+    assert set(StoreEstimate.model_fields) == ESTIMATE_FIELDS

@@ -489,6 +489,33 @@ def test_a_render_and_its_estimate_are_forwarded(
         assert len(route.calls.last.request.headers[VISITOR_HEADER]) == 43
 
 
+def test_the_estimate_relays_only_the_price(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #5758, Blocking 2: the edge sends on only the public fields of an
+    estimate, so a CRUD answer that carries the price book's rates never reaches a visitor."""
+    public = {
+        "estimate": True,
+        "price_minor": 500,
+        "currency": "USD",
+        "minor_exponent": 2,
+        "grams": "12.50",
+        "parts": [],
+        "unknown_parts": 0,
+    }
+    leaky = {
+        **public,
+        "filament_minor": 40,
+        "factor": "1.1",
+        "lines": [{"kind": "markup", "label": "Markup, 30 %", "amount_minor": 90}],
+    }
+    crud_mock.get(f"{RENDERS}/{JOB}/estimate").respond(200, json=leaky, headers=CRUD)
+    r = edge.get(f"/api/store/v1/renders/{JOB}/estimate")
+    assert r.status_code == 200 and r.json() == public
+    assert "per kg" not in r.text and "Markup" not in r.text and "filament_minor" not in r.text
+
+
 def test_another_visitors_render_passes_through_as_404(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

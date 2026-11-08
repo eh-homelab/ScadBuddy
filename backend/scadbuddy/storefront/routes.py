@@ -112,9 +112,17 @@ async def render_status(job_id: str, crud: Crud, visitor_id: Visitor, client: Cl
     return await crud.render_status(_job(job_id), visitor_id=visitor_id, client=client)
 
 
+#: The fields of an estimate a visitor reads (`orders/estimate.py` `StoreEstimate`): the
+#: edge sends on these only, so no cost, markup or rate reaches a visitor.
+ESTIMATE_FIELDS: Final = frozenset(
+    {"estimate", "price_minor", "currency", "minor_exponent", "grams", "parts", "unknown_parts"}
+)
+
+
 @visitor_router.get("/renders/{job_id}/estimate")
 async def render_estimate(job_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    return await crud.render_estimate(_job(job_id), visitor_id=visitor_id, client=client)
+    answer = await crud.render_estimate(_job(job_id), visitor_id=visitor_id, client=client)
+    return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
 
 
 class _Relayed(StreamingResponse):
@@ -123,7 +131,7 @@ class _Relayed(StreamingResponse):
     collector."""
 
     def __init__(self, stream: CrudStream, *, headers: dict[str, str]) -> None:
-        super().__init__(stream.response.aiter_bytes(), media_type=GLB_MEDIA_TYPE, headers=headers)
+        super().__init__(stream.aiter_bytes(), media_type=GLB_MEDIA_TYPE, headers=headers)
         self._stream = stream
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
