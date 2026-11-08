@@ -759,23 +759,32 @@ USER root
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
 # above (the release's checksums.txt). ci.yml's `agent` job installs the same version
 # and amd64 digest for the agent's Temporal tests (#1055); bump them together.
-# When the GitHub release URL still fails after its retries, Temporal's own download
-# site serves the same tarball (#5706); the sha256 check is the same for both.
+# When the GitHub release URL still fails after its retries, a second URL serves the
+# same tarball (#5706); the sha256 check is the same for both. For amd64 it is
+# Temporal's own download site. For arm64 it is the release asset through the REST API
+# (TEMPORAL_CLI_ASSET_ARM64, the asset id of that tarball: a version bump changes it
+# too), because on 2026-11-08 temporal.download answered arm64 with HTTP 618
+# "jwt:expired" four times out of four, while the API asset URL answered 200 to an
+# anonymous `curl -H "Accept: application/octet-stream"` with the pinned sha256
+# (measured with curl and sha256sum).
 ARG TARGETARCH
 ARG TEMPORAL_CLI_VERSION=1.9.1
 ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 ARG TEMPORAL_CLI_SHA256_ARM64=6c57c352d52fc3df34412376fd9ba6f74b7e3ace8e426e6cba8600156d36a145
+ARG TEMPORAL_CLI_ASSET_ARM64=564294917
 RUN case "$TARGETARCH" in \
-      amd64) sha="$TEMPORAL_CLI_SHA256_AMD64" ;; \
-      arm64) sha="$TEMPORAL_CLI_SHA256_ARM64" ;; \
+      amd64) sha="$TEMPORAL_CLI_SHA256_AMD64" \
+             fallback="https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=amd64" ;; \
+      arm64) sha="$TEMPORAL_CLI_SHA256_ARM64" \
+             fallback="https://api.github.com/repos/temporalio/cli/releases/assets/${TEMPORAL_CLI_ASSET_ARM64}" ;; \
       *) echo "ERROR: no pinned Temporal CLI for '${TARGETARCH}'." >&2; exit 1 ;; \
     esac \
     && { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
            --output /tmp/temporal-cli.tar.gz \
            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_${TARGETARCH}.tar.gz" \
          || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
-           --output /tmp/temporal-cli.tar.gz \
-           "https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=${TARGETARCH}"; } \
+           --header "Accept: application/octet-stream" --output /tmp/temporal-cli.tar.gz \
+           "$fallback"; } \
     && printf '%s  /tmp/temporal-cli.tar.gz\n' "$sha" > /tmp/temporal-cli.sha256 \
     && sha256sum --check --strict /tmp/temporal-cli.sha256 \
     && tar -xzf /tmp/temporal-cli.tar.gz -C /usr/local/bin temporal \
