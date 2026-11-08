@@ -158,8 +158,8 @@ export const CREDENTIAL_NAME_MAX = 60
 
 /**
  * A credential's name as stored (#3710): trimmed, and null when nothing is left. It is
- * shown in Settings only. It never goes into a log, an audit row or a prompt
- * (`credentialLabel` leaves it out). It is refused (CredentialError 400) past
+ * shown only in text for the person (`credentialDisplayLabel`, quoted as data). It never
+ * goes into a log, an audit row or a prompt (`credentialLabel` leaves it out). It is refused (CredentialError 400) past
  * CREDENTIAL_NAME_MAX characters, or with a control, format or line/paragraph separator
  * character (\p{Cc}, \p{Cf}, \p{Zl}, \p{Zp}): a name is one line of plain text, and a bidi
  * override could make a row read as another. The table's check repeats the length, trim
@@ -344,11 +344,28 @@ export function openCredential(
   return { kind: row.kind, secret }
 }
 
-/** For logs and audit: which credential, never its secret. */
-export function credentialLabel(c: Pick<StoredCredential, 'priority' | 'kind' | 'base_url' | 'last4'>): string {
+type Labelled = Pick<StoredCredential, 'priority' | 'kind' | 'base_url' | 'last4'>
+
+/** The kind and the last four characters: "API key …abcd". */
+function credentialWhat(c: Labelled): string {
   const what =
     c.kind === 'gateway' ? `gateway ${c.base_url ?? ''}` : c.kind === 'claude_oauth_token' ? 'OAuth token' : 'API key'
-  return `credential ${c.priority + 1} (${what}${c.last4 ? ` …${c.last4}` : ''})`
+  return `${what}${c.last4 ? ` …${c.last4}` : ''}`
+}
+
+/** For logs, audit rows and the model: which credential, never its secret or its name. */
+export function credentialLabel(c: Labelled): string {
+  return `credential ${c.priority + 1} (${credentialWhat(c)})`
+}
+
+/**
+ * For text the person sees only (#3710): `credentialLabel` with the credential's name, as a
+ * JSON string so it reads as quoted data whatever it holds. Never for a log, an audit row or
+ * anything sent to the model. Without a name it is `credentialLabel`.
+ */
+export function credentialDisplayLabel(c: Labelled & Pick<StoredCredential, 'name'>): string {
+  if (!c.name) return credentialLabel(c)
+  return `credential ${c.priority + 1} ${JSON.stringify(c.name)} (${credentialWhat(c)})`
 }
 
 /** Whether the mounted key opens `c`: sealed under it, in the current format. */
@@ -364,11 +381,18 @@ export function soonestRecovery(list: readonly StoredCredential[], kek: KekStatu
   return times.length ? new Date(Math.min(...times)) : undefined
 }
 
-/** Why no credential is usable, one clause per credential. */
-export function describeUnusable(list: readonly StoredCredential[], kek: KekStatus): string {
+/**
+ * Why no credential is usable, one clause per credential. `label` names each one:
+ * `credentialLabel` by default; `credentialDisplayLabel` for text only the person sees.
+ */
+export function describeUnusable(
+  list: readonly StoredCredential[],
+  kek: KekStatus,
+  label: (c: StoredCredential) => string = credentialLabel,
+): string {
   if (list.length === 0) return 'no Claude credential is configured'
   const clauses = list.map((c) => {
-    const name = credentialLabel(c)
+    const name = label(c)
     if (!opensWith(c, kek)) return `${name} cannot be opened with the mounted key-encryption key`
     if (c.status === 'disabled') return `${name} is disabled${c.last_error ? ` (${c.last_error})` : ''}`
     if (c.status === 'cooling_down') return `${name} is rate limited until ${c.cooldown_until ?? 'later'}`

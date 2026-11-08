@@ -558,3 +558,36 @@ describe('who asked (#1109)', () => {
     expect(screen.queryByTestId('agent-question-asked-by')).not.toBeInTheDocument()
   })
 })
+
+describe('a move to another credential (#3710)', () => {
+  it('says, as text, which credential failed and which one the turn continues on', () => {
+    const item: FeedItem = {
+      kind: 'credential',
+      id: 'credential-1',
+      from: 'credential 1 "<b>Personal</b>" (OAuth token …GwAA)',
+      to: 'credential 2 (API key …JwAA)',
+      outcome: 'refused',
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    const line = screen.getByTestId('agent-credential-fallback')
+    expect(line).toHaveTextContent(
+      'credential 1 "<b>Personal</b>" (OAuth token …GwAA) was refused, so it is off until it is reset in Settings. The turn continues on credential 2 (API key …JwAA).',
+    )
+    expect(line.querySelector('b')).toBeNull()
+  })
+
+  it('says until when a rate-limited one is skipped, and that another simply failed', () => {
+    const base = { kind: 'credential' as const, id: 'c', from: 'credential 1 (API key …aaaa)', to: 'credential 2 (API key …bbbb)' }
+    const { unmount } = render(
+      <FeedItemView item={{ ...base, outcome: 'rate_limited', until: '2099-01-01T12:30:00.000Z' }} onDecide={vi.fn()} onAnswer={vi.fn()} />,
+    )
+    expect(screen.getByTestId('agent-credential-fallback')).toHaveTextContent(
+      /^credential 1 \(API key …aaaa\) is rate limited until .+\. The turn continues on credential 2/,
+    )
+    unmount()
+    render(<FeedItemView item={{ ...base, outcome: 'failed' }} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    expect(screen.getByTestId('agent-credential-fallback')).toHaveTextContent(
+      /^credential 1 \(API key …aaaa\) failed\. The turn continues on credential 2/,
+    )
+  })
+})

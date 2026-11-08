@@ -624,6 +624,7 @@ export class TurnHost {
         result,
         refused: result && stopped === undefined ? run.refused : undefined,
         failure: run.failure,
+        failureShown: run.failureShown,
         secrets: run.secrets,
         turnUsd: run.spentUsd,
         // WebFetch's own model calls are in no result, so they are added in every outcome (#2684).
