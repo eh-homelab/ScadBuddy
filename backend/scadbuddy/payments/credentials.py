@@ -236,7 +236,10 @@ class PaymentCredentials:
 
     def clear_webhook_error(self, provider: str, *, since: datetime) -> None:
         """Clear the last failure once a webhook that began at ``since`` succeeded; a
-        failure written after it began (a webhook handled at the same time) stands."""
+        failure written after it began (a webhook handled at the same time) stands. One
+        trade-off of ``WEBHOOK_ERROR_QUIET``: a same-category failure skipped inside the
+        quiet window after this success began keeps the older stamp, so it is cleared with
+        it; the next failure of any category after the clear is written at once."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = NULL,"

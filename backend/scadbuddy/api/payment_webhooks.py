@@ -4,8 +4,9 @@ was (#4958). It is the one back-office route the public
 reaches (``auth/routes.py`` ``PUBLIC_ENDPOINTS``): the provider's signature is its only
 credential. The route reads the raw body itself, as the signature covers those exact
 bytes; a body above ``MAX_WEBHOOK_BYTES`` is 413 before anything parses it. A bad
-signature is 400 and records nothing; a provider call the reading needed that failed is
-503 and records nothing. Neither the body nor the headers are logged.
+signature is 400 and records no event or money (only its category on the credential row,
+#5684); a provider call the reading needed that failed is 503 and records no event or
+money either. Neither the body nor the headers are logged.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -60,10 +61,10 @@ async def _body(request: Request) -> bytes:
     summary="A payment provider's signed event",
     description=(
         "Public: the provider's signature is the credential. 400 for a bad signature"
-        " (nothing is recorded), 404 for a provider not connected, 413 above 256 KiB,"
+        " (no event or money is recorded), 404 for a provider not connected, 413 above 256 KiB,"
         " 503 when the stored credential cannot be opened, and 503 `provider_unavailable`"
-        " when reading the event needed the provider's API and that call failed (nothing"
-        " is recorded, so the provider sends it again). A replayed event answers"
+        " when reading the event needed the provider's API and that call failed (no event"
+        " or money is recorded, so the provider sends it again). A replayed event answers"
         " `replayed` and records nothing more."
     ),
 )
