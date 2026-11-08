@@ -24,6 +24,7 @@ from scadbuddy.payments.provider import ProviderUnavailableError
 from scadbuddy.payments.service import Payments
 from tests.api.test_auth_enforce import ENABLED, HEADER, PUBLIC, _app, _sign_in
 from tests.api.test_order_payments import (
+    _due,
     connect_fake,
     payable_order,
     request_payment,
@@ -456,3 +457,46 @@ def test_the_webhook_route_answers_before_the_close_runs(
     assert client.portal is not None
     client.portal.call(client.app, scope, receive, send)
     assert seen == ["status 200", "answered", f"close {balance['provider_ref']}"]
+
+
+def test_a_background_close_whose_note_fails_is_closed_by_the_next_sweep(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5728 review: the provider closed the page, but the database refused the note.
+    The mark stays, so the next sweep closes the page and clears it."""
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    app: Any = client.app
+    service: Payments = getattr(app.state, STATE_ATTR).components.get(PAYMENTS).service
+    later: list[Callable[[], Awaitable[object]]] = []
+
+    async def receive() -> str:
+        return await service.handle_webhook("fake", headers, body, after=later.append)
+
+    async def run(job: Callable[[], Awaitable[object]]) -> None:
+        await job()
+
+    def refused(*args: Any) -> None:
+        raise psycopg.OperationalError("the database went away")
+
+    assert asyncio.run(receive()) == "recorded"
+    with monkeypatch.context() as patched:
+        patched.setattr(service, "_note_close", refused)
+        with pytest.raises(psycopg.OperationalError):
+            for job in later:
+                asyncio.run(run(job))
+    assert FAKE.cancelled == [balance["provider_ref"]]
+
+    def marked() -> dict[str, Any]:
+        found = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+        return next(r for r in found if r["id"] == balance["id"])
+
+    assert marked()["close_pending_at"] is not None
+    _due(client, balance["id"])
+    assert asyncio.run(service.retry_closes()) == 1
+    assert FAKE.cancelled == [balance["provider_ref"]] * 2
+    assert marked()["close_pending_at"] is None
