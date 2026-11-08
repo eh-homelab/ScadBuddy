@@ -4,8 +4,9 @@ The orders component registers it at start as version 1 of an ordinary flow, onl
 no flow of that name has ever had a version (`FlowDefinitions.register_new`): the shop
 edits it into version 2 or deletes it, and a later build never rewrites it (a new
 built-in is a new name). It runs on an `order.changed` trigger the shop makes, matched
-to `accepted`, with a standing grant naming `queue_print` and `order_item_fulfil`;
-nothing here makes that trigger or approves that grant.
+to `accepted`, with a standing grant naming `queue_print`, `order_item_fulfil` and
+`order_attach` (an agent call's grant only narrows the run's); nothing here makes that
+trigger or approves that grant.
 
 A print refused `requote_needed` (the accepted quote's sliced file is gone or changed)
 asks a person and never re-quotes: on an accepted order a new quote is open only after a
@@ -104,7 +105,9 @@ async def ask(question):
 
 async def print_request(item):
     """The print dialog's body for `item`: its model's (or file's) remembered choices,
-    the dialog's defaults otherwise. Its spools are filled from the item's filaments."""
+    the dialog's defaults otherwise. Its spools are filled from the item's filaments. A
+    library file's choices come from the library that serves, Bambuddy's or ScadBuddy's
+    own (`api/library_print.py` `get_library_choices`)."""
     if item.get("library_file") is not None:
         source = {"library_file_id": item["library_file"]["id"]}
     else:
@@ -260,7 +263,11 @@ async def main():
             "made, and tell me what failed.",
             ["print"],
             FULFILMENT_REPORT,
-            grant={"rules": [{"fn": "tool", "tool": "order_item_fulfil", "orders": [order_id]}]},
+            # Both writes the prompt asks for, kept to this order (review of #5682).
+            grant={"rules": [
+                {"fn": "tool", "tool": "order_item_fulfil", "orders": [order_id]},
+                {"fn": "tool", "tool": "order_attach", "orders": [order_id]},
+            ]},
         )
     message = None
     if settings["notify"]:

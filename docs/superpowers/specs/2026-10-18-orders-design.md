@@ -1091,8 +1091,12 @@ What this relies on, and what the design adds for it:
   and no check). A run is one workflow with no continue-as-new, and each read adds a
   timer and the whole order to its history, so the backoff keeps the longest wait to
   about 170 reads. An item a failed print left `queued` anyway counts as printed. Only then does it hand the attempts to the agent
-  under a grant kept to the order, and it composes `ready` only when the re-read order
-  is `ready`. A trigger to run it is made by a person.
+  under a grant kept to the order (`order_item_fulfil` and `order_attach`, for each
+  attempt's photo and timelapse; the trigger's standing grant names both, with
+  `queue_print`, since an agent call's grant only narrows the run's), and it composes
+  `ready` only when the re-read order is `ready`. A `library_file` item's print choices
+  come from the library that serves, Bambuddy's or ScadBuddy's own. A trigger to run it
+  is made by a person.
 
 `order_item_quote` takes two modes (phase 2, plan 2026-10-22 Ruling 11): `manual`
 (`{unit_price_minor, label?}`, the typed price) or `slice` (`{printer_id?,

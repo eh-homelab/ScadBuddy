@@ -174,6 +174,8 @@ class _Host:
         self.printed: list[str] = []
         self.slept: list[float] = []
         self.questions: list[str] = []
+        self.sources: list[dict[str, Any]] = []
+        self.grants: list[Any] = []
 
     async def trigger(self) -> dict[str, Any]:
         return {"kind": "order.changed", "order_id": "o1"}
@@ -191,6 +193,9 @@ class _Host:
             order = {"id": "o1", "number": "ORD-1", "status": status}
             return json.dumps({"order": order, "items": items})
         if name == "get_print_choices":
+            self.sources.append(args)
+            if args.get("library_file_id") is not None:
+                return json.dumps(self.choices)
             if args.get("output_id") is None:
                 # The tool's own failure (`ToolFailedError` in a real run).
                 raise RuntimeError("no such output")
@@ -217,6 +222,7 @@ class _Host:
 
     async def agent(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         self.calls.append("agent")
+        self.grants.append(kwargs.get("grant"))
         return {"summary": "ok"}
 
     def run(self) -> Any:
@@ -396,3 +402,23 @@ def test_a_print_that_queued_anyway_is_waited_for_and_never_sent_twice() -> None
     assert host.printed == ["a"]
     assert result["skipped"] == []
     assert "agent" in host.calls
+
+
+def test_the_agent_may_attach_the_photo_and_timelapse_to_this_order_only() -> None:
+    """Review of #5682: the prompt asks the agent to attach each attempt's photo and
+    timelapse, so the grant names `order_attach` too, both rules kept to the order."""
+    host = _Host([_item("a")], [_OK], [])
+    host.run()
+    [grant] = host.grants
+    assert {rule["tool"] for rule in grant["rules"]} == {"order_item_fulfil", "order_attach"}
+    assert all(rule["orders"] == ["o1"] for rule in grant["rules"])
+
+
+def test_a_library_file_item_reads_its_choices_by_its_file() -> None:
+    """Review of #5682: a `library_file` item's choices come from the library that
+    serves, Bambuddy's or ScadBuddy's own (`get_library_choices`)."""
+    item = {**_item("a"), "kind": "library_file", "output_id": None, "library_file": {"id": 7}}
+    host = _Host([item], [_OK], [])
+    host.run()
+    assert host.sources == [{"library_file_id": 7}]
+    assert host.printed == ["a"]
