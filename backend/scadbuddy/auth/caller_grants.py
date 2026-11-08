@@ -44,7 +44,9 @@ _READ = ("SELECT",)
 #: printer merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `_ensure_row`)
 #: runs on the API through `POST …/print/printers/ensure-bambuddy` since #4625, so the
 #: worker writes none of the tables `PRINTER_REFERENCES` names for it; the merge's grants
-#: below stay until #5298 Task 29 revokes them (an older pod may still merge in a rollout).
+#: below stay until #5298 Task 29 revokes them (an older pod may still merge in a rollout;
+#: its merge, lacking the machine-rate hook, lets `ON DELETE CASCADE` drop the gone
+#: synthetic row's machine-rate inputs instead of moving them).
 #: Never add a `PRINTER_REFERENCES` table here.
 PRINT_GRANTS: Grants = {
     # The merge's rewrite of a printer's stored choices and plates (`printers/store.py`

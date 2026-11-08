@@ -755,13 +755,22 @@ def price_quote(
 ) -> Priced:
     """Task 2's arithmetic over the item's filaments as they are now, the book's policy
     copied into the lines. ``support`` prices each slot that is no colour slot of the
-    item with its own line (§6.3). A slot with no filament is a 422 naming it."""
+    item with its own line (§6.3). A slot with no filament, or a support slot no plate
+    uses, is a 422 naming it."""
     filaments: dict[int, Filament] = {}
     for slot in item.colours:
         if slot.filament_id is not None:
             record = store.filament(slot.filament_id)
             if record is not None:
                 filaments[slot.slot] = record
+    used = {filament.slot for plate in plates for filament in plate.filaments}
+    for number in sorted(support or {}):
+        if number not in used and number not in filaments:
+            raise _unprocessable(
+                "support_filaments",
+                f"slot {number} (slot {number + 1}) is used on no sliced plate; a support"
+                " filament is given only for a slot the slice uses",
+            )
     supports: set[int] = set()
     for number, filament_id in (support or {}).items():
         record = store.filament(filament_id)

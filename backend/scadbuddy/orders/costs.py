@@ -14,8 +14,9 @@ else at the price book's ``cost_per_kg`` of the item's colour slots' filaments, 
 the quote's grams per slot when known and equally otherwise, marked ``estimated``. Its seconds
 (``actual_seconds``, else the quote's seconds times the units, ``estimated``) are priced at
 the quote's ``machine_time`` line over its seconds, else at today's machine rate of the
-printer it printed on (#4625; a printer merged away since by the serial it kept), else
-the default printer's, else today's ``pricing_machine_rate_per_hour``,
+printer it printed on (#4625; a printer merged away since by the serial it kept; a
+printer with no profile at today's ``pricing_machine_rate_per_hour``), else, for one naming
+no registry printer, the default printer's, else today's ``pricing_machine_rate_per_hour``,
 ``estimated``. A figure with no source is left out and
 the attempt is ``unknown``.
 
@@ -100,9 +101,9 @@ class CostRates(BaseModel):
 
     shop_currency: str
     machine_rate_per_hour: str = "0"
-    #: Each registry printer's machine rate where it has a profile (#4625, from its
-    #: stored intervals): an attempt printed on one is priced at it instead of
-    #: ``machine_rate_per_hour``.
+    #: Each registry printer's machine rate (#4625: from its stored intervals, or the
+    #: book's with no profile): an attempt printed on one is priced at it instead of
+    #: ``machine_rate_per_hour``, the fallback for an attempt naming no registry printer.
     printer_rates: dict[str, str] = {}
     #: The same rates by each printer's serial: an attempt whose printer was merged away
     #: since (its row deleted) is priced at the rate of the row now holding its serial.

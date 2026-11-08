@@ -583,15 +583,21 @@ class MachineRates:
         return self._stored_rate(stored, labour)
 
     def money_rates(self) -> tuple[str, dict[str, str], dict[str, str]]:
-        """The money view's machine rates (job cost spec §4.1): for an attempt with no
-        quote's rate, its printer's rate (:meth:`stored_rates`; by its serial when its row
-        was merged away), else the configured default printer's, else the book's
-        ``machine_rate_per_hour``. The fallback, by registry id, by serial. Blocking."""
+        """The money view's machine rates (job cost spec §4.1), for an attempt with no
+        quote's rate: every registry printer's, by id and by serial (a printer merged
+        away is found by the serial it kept), its stored rate (:meth:`stored_rates`) or,
+        with no profile, the book's ``machine_rate_per_hour`` (§6.2); and the fallback for
+        an attempt naming no registry printer: the configured default printer's rate,
+        else the book's. The fallback, by registry id, by serial. Blocking."""
         rates, by_serial = self._stored_rates()
-        fallback = self.settings.snapshot().runtime.pricing_machine_rate_per_hour
+        book = self.settings.snapshot().runtime.pricing_machine_rate_per_hour
+        for row in self.printers.list():
+            rates.setdefault(row.id, book)
+            by_serial.setdefault(row.serial, rates[row.id])
+        fallback = book
         default = self.resolve(None, None)
-        if default is not None and default.id in rates:
-            fallback = rates[default.id]
+        if default is not None:
+            fallback = rates.get(default.id, book)
         return fallback, rates, by_serial
 
     def resolve(self, printer: str | None, printer_id: int | None) -> PrinterRow | None:

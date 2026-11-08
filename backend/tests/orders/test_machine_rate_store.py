@@ -224,6 +224,22 @@ def test_the_money_views_fallback_is_the_default_printers_rate(
     assert machine.money_rates() == ("0.7", {lan.id: "0.7"}, by_serial)
 
 
+def test_a_printer_with_no_profile_is_the_books_rate_in_the_money_view(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """Spec §6.2: a registry printer with no profile is the book's rate, never the
+    default printer's; only an attempt naming no known printer takes the default's."""
+    settings_store.save(SettingsPatch(pricing_machine_rate_per_hour="0.9"))
+    lan = lan_printer(printers)
+    bare = linked_printer(printers)
+    store.replace(lan.id, INPUTS)
+    settings_store.save(SettingsPatch(default_printer=lan.id))
+    fallback, by_id, by_serial = rates(store, printers, settings_store).money_rates()
+    assert fallback == "0.7"
+    assert by_id == {lan.id: "0.7", bare.id: "0.9"}
+    assert by_serial == {lan.serial: "0.7", bare.serial: "0.9"}
+
+
 async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals(
     store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
 ) -> None:

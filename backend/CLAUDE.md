@@ -790,9 +790,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   default printer) and records `printer` and `machine_rate_breakdown`. A quote's
   `support_filaments` price each sliced slot that is no colour slot of the item as its own
   `Support, …` filament line (`support_check` in the quote's check). The money view
-  prices an attempt with no quote's rate at its printer's stored rate (by its kept
-  `printer_serial` when that row was merged away, `CostRates.serial_rates`), else the
-  default printer's, else the book's (`CostRates.printer_rates`, `MachineRates.money_rates`).
+  prices an attempt with no quote's rate at its printer's stored rate, or the book's for a
+  printer with no profile (by its kept `printer_serial` when that row was merged away,
+  `CostRates.serial_rates`); an attempt naming no registry printer at the default
+  printer's, else the book's (`CostRates.printer_rates`, `MachineRates.money_rates`).
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
