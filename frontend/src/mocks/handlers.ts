@@ -23,6 +23,7 @@ import type {
   NeedsBackfillProblem,
   ModelPatch,
   ModelPrintChoices,
+  PartSettings,
   ModelSummary,
   MergePreview,
   ModelVersion,
@@ -88,6 +89,19 @@ const base = '/api/v1'
 const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
 const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
 
+/**
+ * #5627 — the process's part settings the output check answers: `0.20mm Standard @BBL
+ * H2C`'s top shell layers (5, print-flow spec §4's measurement); the rest are examples.
+ */
+export const MOCK_PROCESS_PARTS: PartSettings = {
+  top_shell_layers: 5,
+  bottom_shell_layers: 3,
+  wall_loops: 2,
+  sparse_infill_density: 15,
+  sparse_infill_pattern: 'grid',
+  ironing_type: 'no ironing',
+}
+
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
@@ -97,6 +111,7 @@ export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   tier: null,
   process_name: null,
   print_sequence: null,
+  part_settings: null,
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
@@ -3520,6 +3535,8 @@ export const handlers = [
           ? []
           : mockRackPicks(body.rack_position ?? null, [body.plate_id ?? 1]),
       lan_awaiting_clear: false,
+      // #5627 — the settings per slot the copy was laid out with, for the print record.
+      part_settings: body.part_settings ?? null,
     } satisfies PrintRunResult
     // #470: the server answers 202 with a run. This one has already finished, so the
     // client reads its result without polling; GET /print/runs/:id answers it too.
@@ -3575,7 +3592,13 @@ export const handlers = [
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
     // #836 — the mock H2C's rack preview, so the dialog's rack step can be exercised.
     const body = (await request.json()) as { rack_position?: number | null }
-    return HttpResponse.json(mockRackCheck(body.rack_position ?? null))
+    // #5627 — the process's own part settings, which "Settings for this colour" opens on,
+    // only for a check that asks for them.
+    const asked = new URL(request.url).searchParams.get('process_values') === 'true'
+    return HttpResponse.json({
+      ...mockRackCheck(body.rack_position ?? null),
+      process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
+    })
   }),
 
   // --- #79 projects -----------------------------------------------------------------

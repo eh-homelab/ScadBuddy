@@ -27,6 +27,8 @@ type PrintRunResult struct {
 	lan_waiting []int32
 	// The library_file_id property
 	library_file_id *int32
+	// The part_settings property
+	part_settings i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The path property
 	path *PrintRunResult_path
 	// The printer_id property
@@ -744,6 +746,16 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		return nil
 	}
+	res["part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPartSettings(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["path"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetEnumValue(ParsePrintRunResult_path)
 		if err != nil {
@@ -891,6 +903,12 @@ func (m *PrintRunResult) GetLibraryFileId() *int32 {
 	return m.library_file_id
 }
 
+// GetPartSettings gets the part_settings property value. The part_settings property
+// returns a UntypedNodeable when successful
+func (m *PrintRunResult) GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.part_settings
+}
+
 // GetPath gets the path property value. The path property
 // returns a *PrintRunResult_path when successful
 func (m *PrintRunResult) GetPath() *PrintRunResult_path {
@@ -997,6 +1015,12 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 	}
 	{
 		err := writer.WriteInt32Value("library_file_id", m.GetLibraryFileId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("part_settings", m.GetPartSettings())
 		if err != nil {
 			return err
 		}
@@ -1122,6 +1146,11 @@ func (m *PrintRunResult) SetLibraryFileId(value *int32) {
 	m.library_file_id = value
 }
 
+// SetPartSettings sets the part_settings property value. The part_settings property
+func (m *PrintRunResult) SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.part_settings = value
+}
+
 // SetPath sets the path property value. The path property
 func (m *PrintRunResult) SetPath(value *PrintRunResult_path) {
 	m.path = value
@@ -1178,6 +1207,7 @@ type PrintRunResultable interface {
 	GetLanStopped() LanStoppedable
 	GetLanWaiting() []int32
 	GetLibraryFileId() *int32
+	GetPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetPath() *PrintRunResult_path
 	GetPrinterId() PrintRunResult_PrintRunResult_printer_idable
 	GetProjectId() PrintRunResult_PrintRunResult_project_idable
@@ -1195,6 +1225,7 @@ type PrintRunResultable interface {
 	SetLanStopped(value LanStoppedable)
 	SetLanWaiting(value []int32)
 	SetLibraryFileId(value *int32)
+	SetPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetPath(value *PrintRunResult_path)
 	SetPrinterId(value PrintRunResult_PrintRunResult_printer_idable)
 	SetProjectId(value PrintRunResult_PrintRunResult_project_idable)

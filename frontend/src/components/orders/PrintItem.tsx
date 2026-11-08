@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { Order, OrderItemDetail, PrintRunRequest, Revision } from '../../api/types'
+import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Revision } from '../../api/types'
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
+import { quoteToPrint } from './price'
 import { Button } from '@/components/ui/button'
 
 /** The order states past acceptance, in which an item is made (§3.5). */
@@ -39,6 +40,9 @@ function offersTestPrint(order: Order, item: OrderItemDetail): boolean {
 export function PrintItem({ order, item, onChanged, testRevision }: { order: Order; item: OrderItemDetail; onChanged: () => void; testRevision?: Revision }) {
   const [open, setOpen] = useState(false)
   const source = orderItemSource(item)
+  // #5627 — the settings the print sends and slices with: the accepted quote's per colour,
+  // or for a test print the newest slice quote of that revision (`test_print_check`).
+  const quoted = quoteToPrint(item, testRevision?.id)
   if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !source) return null
   return (
     <>
@@ -54,6 +58,7 @@ export function PrintItem({ order, item, onChanged, testRevision }: { order: Ord
           itemPrint={{
             orderId: order.id,
             itemId: item.id,
+            quoted: (quoted?.part_settings ?? null) as PartSettingsMap | null,
             start: async (body) => {
               if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
               else await api.printItem(order.id, item.id, body)

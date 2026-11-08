@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
-import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices, PrintSequence } from '../api/types'
+import type {
+  ChoicesView,
+  NozzleChoice,
+  OutputPlate,
+  PartSettings,
+  PartSettingsMap,
+  PresetRef,
+  PrintChoices,
+  PrintSequence,
+} from '../api/types'
+import { sentPartSettings } from './partSettings'
 import type { PlateChoice } from './plateChoice'
 import { DEFAULT_NOZZLES, defaultsOf, refKey } from './printChoices'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
@@ -46,6 +56,11 @@ export function usePrintChoices(
   source: PrintSource | undefined,
   /** §7 — set while a re-arrange carries the dialog's choices onto its new output. */
   carry?: CarryBox,
+  /**
+   * #5627 — the settings per slot an open starts with in place of the model's remembered
+   * ones: an order item's accepted quote's (its print) or newest slice quote's (a quote).
+   */
+  partSeed?: PartSettingsMap | null,
 ) {
   const key = sourceKey(source)
   const latest = useLatest(source)
@@ -90,6 +105,21 @@ export function usePrintChoices(
    * by subject with the other choices (#4970), so a fresh open seeds it from the read.
    */
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  /**
+   * #5627 — the slicer settings per filament slot, by slot id: only what is changed from
+   * the slot's default (the process's value, or a template's for the slot). An output or a library file (#5628) takes them, and its open seeds them
+   * from the quote's or the remembered ones. A sliced file prints as it was sliced, so it
+   * takes none and the dialog shows no controls for it.
+   */
+  const [partSettings, setPartSettings] = useState<PartSettingsMap>({})
+  /**
+   * #5627 — the settings the open seeded (remembered, quoted or a batch step's), per slot,
+   * until the user changes that slot: the only ones the dialog drops once it knows they
+   * equal the slot's default. A value the user set is never dropped.
+   */
+  const [seededParts, setSeededParts] = useState<PartSettingsMap>({})
+  // Read when the first read lands, as the other seeds are.
+  const partSeedLatest = useLatest(partSeed)
   /** #83 — the output's plates, and the ones to print: every plate unless chosen (#3652). */
   const [plates, setPlates] = useState<OutputPlate[]>([])
   const [plate, setPlate] = useState<PlateChoice>('all')
@@ -121,7 +151,7 @@ export function usePrintChoices(
    * that printer's defaults instead.
    */
   const defaulted = useRef(false)
-  function seedDialog(next: ChoicesView) {
+  function seedDialog(next: ChoicesView, partSeedNow: PartSettingsMap | null | undefined) {
     const last = next.model_choices
     const remembered = last?.nozzles ?? []
     // A remembered choice wins, a Standard one included: the run still warns when the
@@ -136,6 +166,10 @@ export function usePrintChoices(
     setTier(nextTier)
     setProcessName(nextProcess)
     setPrintSequence(nextSequence)
+    const seedSource = partSeedNow === undefined ? last?.part_settings : partSeedNow
+    const seeds = next.sliced ? {} : (sentPartSettings(seedSource) ?? {})
+    setPartSettings(seeds)
+    setSeededParts(seeds)
     // A named process, a different flow per side and a print sequence (#4970) are
     // Advanced choices; opening in Simple would send them unseen. One flow for both is
     // Simple's own choice (#2166).
@@ -161,7 +195,7 @@ export function usePrintChoices(
           carry.markReady()
         } else if (!seeded.current) {
           seeded.current = true
-          seedDialog(next)
+          seedDialog(next, partSeedLatest.current)
         } else if (defaulted.current) {
           const defaults = defaultsOf(next)
           setNozzles(defaults)
@@ -181,7 +215,7 @@ export function usePrintChoices(
       .finally(() => {
         if (token === attempt.current) setLoading(false)
       })
-  }, [open, key, askedPrinter, askedRegistry, latest, carry])
+  }, [open, key, askedPrinter, askedRegistry, latest, carry, partSeedLatest])
   useEffect(() => {
     reload()
   }, [reload])
@@ -197,6 +231,8 @@ export function usePrintChoices(
     setOverrides({})
     setSides({})
     setPrintSequence(null)
+    setPartSettings({})
+    setSeededParts({})
     seeded.current = false
   }, [resetKey, carry])
 
@@ -228,9 +264,21 @@ export function usePrintChoices(
     setOverrides({})
     setSides({})
     setPrintSequence(null)
+    setPartSettings({})
+    setSeededParts({})
     seeded.current = false
     defaulted.current = false
   }
+
+  /** #5627 — one slot's settings, only what is changed from the slot's default. */
+  const setSlotPartSettings = useCallback((slotId: number, settings: PartSettings) => {
+    setPartSettings((current) => ({ ...current, [String(slotId)]: settings }))
+    setSeededParts((current) => {
+      if (!(String(slotId) in current)) return current
+      const { [String(slotId)]: _changed, ...rest } = current
+      return rest
+    })
+  }, [])
 
   /** #2166 — Simple's one choice: High Flow or Standard, on both sides. */
   function changeFlow(flow: NozzleChoice['flow']) {
@@ -324,6 +372,11 @@ export function usePrintChoices(
     setPlate,
     printSequence,
     setPrintSequence,
+    partSettings,
+    setPartSettings,
+    seededParts,
+    setSeededParts,
+    setSlotPartSettings,
     toggleAdvanced,
     reset,
   }

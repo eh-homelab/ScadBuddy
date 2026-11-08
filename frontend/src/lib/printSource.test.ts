@@ -40,7 +40,7 @@ describe('printSource', () => {
     expect(run).toHaveBeenCalledWith(89, {}, undefined, undefined)
     const check = vi.spyOn(api, 'checkLibraryPrint').mockResolvedValue({ errors: [], warnings: [] })
     await sourceApi(LIBRARY).check({} as never)
-    expect(check).toHaveBeenCalledWith(89, {})
+    expect(check).toHaveBeenCalledWith(89, {}, undefined)
     expect(remember).toHaveBeenCalledWith(89, { filament_plan: [] })
     expect(sourceApi(LIBRARY).plateThumbnailUrl(2)).toBe('/api/v1/print/library/89/plates/2/thumbnail')
   })

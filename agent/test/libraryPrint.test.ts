@@ -65,6 +65,13 @@ describe('one source per call', () => {
     expect(() => t.parse({})).toThrow(/slug or library_file_id/)
     expect(() => t.parse({ slug: 'lid', library_file_id: FILE })).toThrow(/slug or library_file_id/)
   })
+
+  it("remember_model_print_choices keeps a model's or a library file's part settings (#5627, #5628)", () => {
+    const t = tool('remember_model_print_choices')
+    const part_settings = { '2': { top_shell_layers: 8 } }
+    expect(() => t.parse({ slug: 'lid', part_settings })).not.toThrow()
+    expect(() => t.parse({ library_file_id: FILE, part_settings })).not.toThrow()
+  })
 })
 
 describe('the library routes', () => {
@@ -176,6 +183,7 @@ describe('the library routes', () => {
       tier: 'fine',
       process_name: null,
       print_sequence: 'by object',
+      part_settings: null,
     })
   })
 
@@ -197,6 +205,7 @@ describe('the library routes', () => {
       tier: null,
       process_name: null,
       print_sequence: null,
+      part_settings: null,
     })
     // And the listing says so, rather than sending the user to Settings.
     const listing = tool('get_remembered_choices').description

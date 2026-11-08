@@ -112,6 +112,14 @@ class LocalOutputs:
         settings, _, refusal = await self._settings(meta)
         return settings, refusal
 
+    async def part_settings(self, meta: OutputMeta) -> PartSettingsMap | None:
+        """`naming`'s ``part_settings`` only (#5627): the dialog's check reads them only
+        when it asks for the slots' defaults. ``None`` when the model.json refuses them."""
+        _, declared, refusal = await self._settings(meta)
+        if refusal is not None or not declared:
+            return None
+        return await asyncio.to_thread(self._part_settings, meta, declared)
+
     async def _settings(
         self, meta: OutputMeta
     ) -> tuple[dict[str, str], dict[str, PartSettings], str | None]:

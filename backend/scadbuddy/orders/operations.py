@@ -29,7 +29,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.output_reader import LocalOutputs, invalid_meta, require
-from scadbuddy.bambuddy.part_settings import dumped
+from scadbuddy.bambuddy.part_settings import dumped, normalised
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
@@ -370,7 +370,8 @@ def print_body(
     if project_id is not None:
         body = {**body, "project_id": project_id, "folder_id": None}
     run = PrintRunRequest.model_validate(body)
-    if run.part_settings is None and part_settings is not None:
+    # One that sets nothing (`{}`, #5627) is none sent too: it prints the quote's.
+    if normalised(run.part_settings) is None and part_settings is not None:
         # Validated as the request's would be, so the run keys them alike.
         run = PrintRunRequest.model_validate({**body, "part_settings": part_settings})
     return run

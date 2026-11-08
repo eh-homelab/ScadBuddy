@@ -321,6 +321,45 @@ one that sends others is `requote_needed` (`printing.py` `_same_part_settings`).
 `PrintRunRequest.part_settings` is in `run_key` only when it sets something, so every
 older run keeps its key.
 
+The dialog sets them (#5627). In the filament step, each slot row of an output or a
+library file (#5628) has a "Settings for this colour" disclosure
+(`components/print/PartSettingsDisclosure.tsx`). A sliced file has none. Each control
+opens on the slot's default: what the slot prints with when the request sets nothing.
+That is the process's value, with a template's `part_print_settings` for the slot (#5626)
+laid over it, per key, as the run lays the request over the template's
+(`run_part_settings`). Once a slot's disclosure is open, the dialog's check asks for them
+(`?process_values=true` on `POST …/check`). The check reads the process's values with the
+preset's other values (`PrintCheck.process_part_settings`,
+`part_settings.process_part_settings`; a fractional density is rounded to a whole
+percent, and named in `PrintCheck.process_inexact`, so choosing that whole percent is still
+sent), and gives, for each slot the template sets on the copy
+(`template_part_settings`), the process's values with the template's over them
+(`PrintCheck.slot_part_settings`). A check that does not ask reads nothing more, since the
+read can be one more Bambuddy call. The values are `None` when the preset cannot be read;
+the controls are then empty. They stay off until a check that asked for the choices as they
+stand has answered. A value set back to the slot's default, or reset, is unset, and only
+what is set is sent (`lib/partSettings.ts` `sentPartSettings`, `withSetting`,
+`slotBaseline`). So on a slot whose template sets 5 top shell layers over the process's 3,
+choosing 3 sends 3. A remembered or quoted value equal to the slot's default is dropped once
+the defaults are read (`withoutSeededDefaults`); a value the user set in the dialog is never
+dropped. The check,
+the background slice, the run, a batch step and the quote send the same field
+(`sliceOverrides`), so the check lists a slot the file lacks. A print remembers them with
+the model's or file's other choices (`ModelPrintChoices.part_settings`, left out of the
+entry when none are set). They are kept per model or file only, never at the print options'
+global or printer scope: a slot number names one file's colour. A quote opens on the item's
+newest slice quote's settings. An item's print opens on the accepted quote's (a test print
+on the newest slice quote's) and sends the quote's own settings, so its body matches the
+background slice's. Other settings would print what was not priced, so Print is held while
+the dialog's settings differ from them. An item print from the API that sends none, or `{}`,
+prints with the quote's (`print_body` reads `{}` as none sent). The run's result
+records them (`PrintRunResult.part_settings`), and `GET /prints/{archive_id}` lists them as
+`part_settings`, found through the queue item's send and its run. A print started over
+the LAN has no queue item, so its record lists none. Every answer gives a slot's settings
+with only what is set (`part_settings.parts_set_only`, on the read models: the run result,
+the print record, the remembered choices and the check), so a reprint can send them again as
+they are. A request's own dump keeps every key, so `run_key` is what it was before #5627.
+
 Bambu Studio honours them. Its 3MF loader reads every `<part>` metadata key that is not
 one of its own (name, subtype, source, matrix …) into the volume's config
 (`src/libslic3r/Format/bbs_3mf.cpp` lines 5464-5471 in `_generate_volumes_new`, tag
@@ -405,7 +444,11 @@ copy carries, so a change to them makes a new copy. A slice quote records only t
 request's settings (`order_item_quotes.part_settings`); a print reads the template's as
 they are at that time, as with `print_settings`.
 
-Not yet: the print dialog's controls for them (#5627).
+The print dialog's controls (#5627, above) open on each slot's default, the template's
+settings laid over the process's values (`PrintCheck.slot_part_settings`), and send only
+what the user changes from it. The template's still lie under that request in
+`run_part_settings`. A run records only the request's settings
+(`PrintRunResult.part_settings`).
 
 ### The two warnings
 

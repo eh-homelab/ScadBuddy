@@ -200,6 +200,11 @@ class PrintLinkStore:
         """The subject's sends, in the order they were recorded."""
         return await asyncio.to_thread(self._sends_for, subject)
 
+    async def send(self, queue_item_id: int) -> PrintSend | None:
+        """The send that queued ``queue_item_id`` (#5627), or ``None`` for an item no send
+        recorded."""
+        return await asyncio.to_thread(self._send, queue_item_id)
+
     async def last_run(self, subject: PrintSubject) -> list[PrintSend]:
         """The sends of the subject's newest run (#1751), as an output's last print is
         its own run's plates: an earlier run, settled or not, is not among them."""
@@ -330,6 +335,15 @@ class PrintLinkStore:
                 (subject.key, run_id, run_id),
             ).fetchall()
         return [PrintSend.model_validate(dict(row)) for row in rows]
+
+    def _send(self, queue_item_id: int) -> PrintSend | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT queue_item_id, plate_id, printer_id, project_id, slice_job_id,"
+                " run_id, first_seen FROM print_sends WHERE queue_item_id = %s",
+                (queue_item_id,),
+            ).fetchone()
+        return None if row is None else PrintSend.model_validate(dict(row))
 
     def _pending_library(self, limit: int, max_age: timedelta) -> list[PendingLibraryPrint]:
         with self._pool.connection() as conn:

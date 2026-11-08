@@ -12,6 +12,7 @@ import type {
   FilamentWarning,
   NozzlePlan as NozzlePlanView,
   Output,
+  PartSettingsMap,
   PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
@@ -44,6 +45,14 @@ import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, single
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
+import {
+  comparedBaseline,
+  samePartSettings,
+  sentPartSettings,
+  slotBaseline,
+  withoutDefaults,
+  withoutSeededDefaults,
+} from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
@@ -70,6 +79,7 @@ import { CopiesField } from './print/CopiesField'
 import { FlowChoice } from './print/FlowChoice'
 import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
 import { NozzleStep } from './print/NozzleStep'
+import { PartSettingsDisclosure } from './print/PartSettingsDisclosure'
 import { PreviewPane } from './print/PreviewPane'
 import { TrayQuestion } from './print/TrayQuestion'
 import { linkKey, linkOf, useDeclinedTrays } from '../lib/trays'
@@ -252,6 +262,11 @@ interface Props {
     orderId: string
     itemId: string
     filaments: Record<string, string | null>
+    /**
+     * #5627 — the settings per slot the dialog opens on: the item's newest slice quote's,
+     * so a new quote keeps them. Left out, the model's remembered ones.
+     */
+    partSettings?: PartSettingsMap | null
     /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
     start: (body: SliceQuoteRequest) => Promise<void>
   }
@@ -266,6 +281,12 @@ interface Props {
   itemPrint?: {
     orderId: string
     itemId: string
+    /**
+     * #5627 — the accepted quote's settings per slot, which the dialog opens on. The print
+     * sends the quote's own settings, so its body matches the background slice's. Other
+     * ones would print what was not priced, so Print is held while the dialog's differ.
+     */
+    quoted?: PartSettingsMap | null
     start: (body: OrderItemPrintRequest) => Promise<void>
   }
 }
@@ -365,7 +386,12 @@ export function PrintPicker({
     : source.kind === 'output'
       ? { output_id: source.output.id }
       : { library_file_id: source.file.id }
-  const picker = usePrintChoices(open, source, carry)
+  const picker = usePrintChoices(
+    open,
+    source,
+    carry,
+    itemPrint ? (itemPrint.quoted ?? null) : quote?.partSettings,
+  )
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
   /**
@@ -499,6 +525,26 @@ export function PrintPicker({
   const first = firstPlate(plate)
   /** Nothing prints while every plate is unticked (#3652). */
   const noPlate = plate !== 'all' && plate.length === 0
+  /**
+   * #5627 — a file the run lays out takes settings per slot (print-flow spec §4): an
+   * output, or a library file (#5628); a sliced file prints as it was sliced.
+   */
+  const takesParts = source !== undefined && choices !== null && !sliced
+  /**
+   * #5627 — a slot's "Settings for this colour" was opened: from then on the check also
+   * reads the process's part settings, which a dialog that never opens one does not pay for.
+   */
+  const [partsOpened, setPartsOpened] = useState(false)
+  /**
+   * #5627 — what the check, the background slice and the run send. An item's print sends
+   * its accepted quote's, as they were quoted: other settings hold Print, and the same body
+   * lets the print reuse the background slice.
+   */
+  const sentParts = !takesParts
+    ? null
+    : itemPrint
+      ? sentPartSettings(itemPrint.quoted)
+      : sentPartSettings(picker.partSettings)
   const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
@@ -866,6 +912,7 @@ export function PrintPicker({
     supports,
     primeTower,
     filamentProfiles: filamentProfiles.active,
+    partSettings: sentParts,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
     acceptedFixes: sliced ? NO_IDS : acceptedFixes,
@@ -1102,11 +1149,39 @@ export function PrintPicker({
           // slices; the check and the background slice must see it as the run does.
           // #1899, #717: supports and the profiles left on are process overrides too, and
           // Checks says when one can't apply.
-          // #3628: and so is the prime tower.
-          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower),
+          // #3628: and so is the prime tower. #5627: the settings per slot change the copy,
+          // and the check refuses a slot the output lacks.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower, sentParts),
         }
       : null
-  const check = usePrintCheck(source, checkRequest)
+  const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
+  const processParts = check.processPartSettings
+  const slotParts = check.slotPartSettings
+  const inexact = check.processInexact
+  /**
+   * #5627 — an item's print with settings other than its accepted quote's. A setting equal
+   * to its slot's default changes nothing, so it is left out on both sides.
+   */
+  const partsUnquoted =
+    itemPrint !== undefined &&
+    takesParts &&
+    !samePartSettings(
+      withoutDefaults(picker.partSettings, processParts, slotParts, inexact),
+      withoutDefaults(itemPrint.quoted, processParts, slotParts, inexact),
+    )
+  /**
+   * #5627 — once the process's values are read, a remembered or quoted setting equal to
+   * its slot's default (the process's value, or the template's for the slot, #5626) is
+   * dropped: it changes nothing, so it is not shown as changed.
+   */
+  const { setPartSettings: dropProcessValues, seededParts } = picker
+  useEffect(() => {
+    if (processParts === null) return
+    dropProcessValues((current) => {
+      const next = withoutSeededDefaults(current, seededParts, processParts, slotParts, inexact)
+      return samePartSettings(next, current) ? current : next
+    })
+  }, [processParts, slotParts, inexact, seededParts, dropProcessValues])
   /**
    * #2169 — the choices on screen, sliced in the background once the check finds nothing
    * the run would refuse. A run of the same choices queues that slice.
@@ -1252,7 +1327,7 @@ export function PrintPicker({
    * again for it), then, once this file's spools are known, the rest.
    */
   const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
-  const { askPrinter, changeNozzles, changeQuality, setPlate } = picker
+  const { askPrinter, changeNozzles, changeQuality, setPlate, setPartSettings, setSeededParts } = picker
   const restoreProfiles = filamentProfiles.restore
   useEffect(() => {
     const seed = batch?.seed
@@ -1300,6 +1375,10 @@ export function PrintPicker({
       setSupports(seed.supports ?? null)
       setPrimeTower(seed.prime_tower ?? null)
       restoreProfiles(seed.filament_profiles ?? [])
+      if (!sliced) {
+        setPartSettings(seed.part_settings ?? {})
+        setSeededParts(seed.part_settings ?? {})
+      }
     }
   }, [
     batch,
@@ -1317,6 +1396,8 @@ export function PrintPicker({
     setPlan,
     setPlate,
     setPrintSequence,
+    setPartSettings,
+    setSeededParts,
     restoreProfiles,
     clearLanCleared,
   ])
@@ -1338,6 +1419,7 @@ export function PrintPicker({
       supports,
       primeTower,
       filamentProfiles: filamentProfiles.active,
+      partSettings: sentParts,
       rackPosition,
       rackAlgorithm: chosenAlgorithm,
     })
@@ -1382,6 +1464,8 @@ export function PrintPicker({
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         filaments: priced,
+        // #5627: what the quote slices with, so its print can send the same.
+        ...(sentParts === null ? {} : { part_settings: sentParts }),
       })
       close()
     } catch (cause) {
@@ -1402,6 +1486,8 @@ export function PrintPicker({
         printer_id: sentPrinterId,
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
+        // #5627: the quote's, as the background slice was made with them.
+        ...(sentParts === null ? {} : { part_settings: sentParts }),
       })
       close()
     } catch (cause) {
@@ -1424,6 +1510,7 @@ export function PrintPicker({
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
+    setPartsOpened(false)
     setPicked(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -1478,7 +1565,9 @@ export function PrintPicker({
             <Button
               type="button"
               onClick={() => void runItemPrint()}
-              disabled={handingBusy || loading || !choices || !planReady || !printChoices || Boolean(sliced)}
+              disabled={
+                handingBusy || loading || !choices || !planReady || !printChoices || Boolean(sliced) || partsUnquoted
+              }
               data-testid="run-item-print"
               {...USER_ONLY}
             >
@@ -1772,7 +1861,45 @@ export function PrintPicker({
                       copies={effectiveCopies}
                       offeredTrays={trays.offered}
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
+                      slotExtra={
+                        takesParts
+                          ? (slotId) => (
+                              <PartSettingsDisclosure
+                                slotId={slotId}
+                                value={picker.partSettings[String(slotId)]}
+                                baseline={slotBaseline(String(slotId), processParts, slotParts)}
+                                compared={comparedBaseline(String(slotId), processParts, slotParts, inexact)}
+                                // Until a check has read the process's values, a value typed
+                                // could not be told from the process's own.
+                                disabled={!check.processValuesRead}
+                                onOpen={() => setPartsOpened(true)}
+                                onChange={(next) => picker.setSlotPartSettings(slotId, next)}
+                              />
+                            )
+                          : undefined
+                      }
                     />
+                  )}
+                  {partsUnquoted && (
+                    <p className="text-sm text-muted-foreground" role="status" data-testid="part-settings-unquoted">
+                      These settings per colour are not the accepted quote&rsquo;s, so the print would not be
+                      what was priced. Quote again with them, or{' '}
+                      <Button
+                        type="button"
+                        variant="link"
+                        size="sm"
+                        className="h-auto px-0"
+                        onClick={() => {
+                          const quoted = sentPartSettings(itemPrint?.quoted) ?? {}
+                          setPartSettings(quoted)
+                          setSeededParts(quoted)
+                        }}
+                        data-testid="part-settings-use-quoted"
+                      >
+                        use the quote&rsquo;s
+                      </Button>
+                      .
+                    </p>
                   )}
                   {quoting && filaments && (
                     <QuoteFilaments
