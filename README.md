@@ -329,7 +329,8 @@ on shutdown.
     2 and the `LISTEN` connection (#5226). On top of the pools come short-lived
     connections of their own, one per lock or claim held at that moment: the models and
     flows repository write locks (`library/repo_lock.py`), an order's project lock
-    (`orders/store.py`), a library copy's target locks (`print_library/copy_store.py`),
+    (`orders/store.py`), a storefront publish's lock (at most 2 at once,
+    `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
     output backfill's claim, the service credential rotation and the flow keys. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main

@@ -13,8 +13,15 @@ import psycopg
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from scadbuddy.core.pg_pool import PoolUse, pools
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.storefront.listings import HOLDER, ListingStore, checked_fixed
+from scadbuddy.orders.storefront.listings import (
+    HOLDER,
+    PUBLISH_LOCKS_MAX,
+    PUBLISH_LOCKS_NAME,
+    ListingStore,
+    checked_fixed,
+)
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
@@ -312,7 +319,7 @@ def test_one_publish_of_a_listing_at_a_time(store: ListingStore) -> None:
 def test_a_running_publish_holds_no_pooled_connection(store: ListingStore, pg_pool: PgPool) -> None:
     """The publish lock is on a connection of its own: a publish's git, schema build and
     uploads never keep one of the rows pool's connections."""
-    listings = [store.create(body(title=f"L{n}")) for n in range(3)]
+    listings = [store.create(body(title=f"L{n}")) for n in range(PUBLISH_LOCKS_MAX)]
     before = pg_pool.get_stats().get("pool_size", 0) - pg_pool.get_stats().get("pool_available", 0)
     ends = [store.begin_publish(listing.id) for listing in listings]
     try:
@@ -321,3 +328,28 @@ def test_a_running_publish_holds_no_pooled_connection(store: ListingStore, pg_po
     finally:
         for end in ends:
             end()
+
+
+def test_publishes_at_once_are_capped_and_counted(store: ListingStore, pg_pool: PgPool) -> None:
+    """The publish locks' own connections are few, and the pool registry counts them."""
+    listings = [store.create(body(title=f"L{n}")) for n in range(PUBLISH_LOCKS_MAX + 1)]
+
+    def counted() -> PoolUse:
+        [use] = [
+            use
+            for use in pools()
+            if use.name == PUBLISH_LOCKS_NAME and use.conninfo == pg_pool.conninfo
+        ]
+        return use
+
+    assert counted().max_size == PUBLISH_LOCKS_MAX
+    ends = [store.begin_publish(listing.id) for listing in listings[:PUBLISH_LOCKS_MAX]]
+    try:
+        assert counted().open == PUBLISH_LOCKS_MAX
+        with refused_as("listing_publish_busy", 503):
+            store.begin_publish(listings[-1].id)
+    finally:
+        for end in ends:
+            end()
+    assert counted().open == 0
+    store.begin_publish(listings[-1].id)()

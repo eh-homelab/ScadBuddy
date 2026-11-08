@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.pg_pool import record_connection
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
@@ -61,11 +63,13 @@ if TYPE_CHECKING:
 
 #: The ``blob_refs`` holder kind of a published listing's snapshot and media.
 HOLDER: Final = "storefront_listing"
-#: Refused unless the store is S3: the public site serves listing media as presigned
-#: GETs, and a visitor's render reads the snapshot from the content store (plan).
-NEEDS_S3: Final = f"{STOREFRONT_PROBLEMS}storefront_needs_s3"
 #: Seconds to wait for the publish lock's own connection.
 PUBLISH_LOCK_CONNECT_TIMEOUT: Final = 5
+#: The most publishes one process runs at once, each holding one connection of its own
+#: for its lock; one more is refused (503 ``listing_publish_busy``).
+PUBLISH_LOCKS_MAX: Final = 2
+#: The publish locks' name in `core/pg_pool.py`'s registry and in ``pg_stat_activity``.
+PUBLISH_LOCKS_NAME: Final = "scadbuddy-storefront-publish"
 
 _COLUMNS = (
     "id, slug, commit, title, description, position, published, params, fixed, colours,"
@@ -118,9 +122,42 @@ def _check_choices(body: ListingInput) -> None:
             )
 
 
+class _PublishLocks:
+    """The publish locks' own connections: at most :data:`PUBLISH_LOCKS_MAX`, recorded in
+    `core/pg_pool.py`'s registry as a pool of that size."""
+
+    name = PUBLISH_LOCKS_NAME
+
+    def __init__(self, conninfo: str) -> None:
+        self.conninfo = conninfo
+        self._open = 0
+        self._lock = threading.Lock()
+        record_connection(self)
+
+    @property
+    def max_size(self) -> int:
+        return PUBLISH_LOCKS_MAX
+
+    def open_connections(self) -> int:
+        return self._open
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._open >= PUBLISH_LOCKS_MAX:
+                return False
+            self._open += 1
+            return True
+
+    def give_back(self) -> None:
+        with self._lock:
+            self._open -= 1
+
+
 class ListingStore:
     def __init__(self, pool: Pool) -> None:
         self.pool = pool
+        conninfo = pool.conninfo
+        self._publish_locks = _PublishLocks(conninfo if isinstance(conninfo, str) else "")
 
     def create(self, body: ListingInput) -> Listing:
         """A new listing, unpublished, after every other one; 422
@@ -324,14 +361,29 @@ class ListingStore:
         never drops the holds a running one took. The lock is a session advisory lock on
         a connection of its own, never the rows pool's: a publish's git, schema build and
         uploads take seconds, and publishes running at once would otherwise keep the
-        pooled connections every other route needs. The returned function unlocks and
-        closes it; closing the connection alone also ends the lock."""
-        conninfo = self.pool.conninfo
-        conn = psycopg.connect(
-            conninfo() if callable(conninfo) else conninfo,
-            autocommit=True,
-            connect_timeout=PUBLISH_LOCK_CONNECT_TIMEOUT,
-        )
+        pooled connections every other route needs. At most :data:`PUBLISH_LOCKS_MAX`
+        such connections are open at once; one more publish is 503
+        ``listing_publish_busy``. The returned function unlocks and closes it; closing
+        the connection alone also ends the lock."""
+        locks = self._publish_locks
+        if not locks.take():
+            raise problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "listing_publish_busy",
+                f"{PUBLISH_LOCKS_MAX} listings are being published already;"
+                " try again when one is done",
+            )
+        try:
+            conninfo = self.pool.conninfo
+            conn = psycopg.connect(
+                conninfo() if callable(conninfo) else conninfo,
+                autocommit=True,
+                connect_timeout=PUBLISH_LOCK_CONNECT_TIMEOUT,
+                application_name=PUBLISH_LOCKS_NAME,
+            )
+        except BaseException:
+            locks.give_back()
+            raise
         key = (f"{HOLDER}:{listing_id}",)
         try:
             row = conn.execute(
@@ -345,6 +397,7 @@ class ListingStore:
                 )
         except BaseException:
             conn.close()
+            locks.give_back()
             raise
 
         def end() -> None:
@@ -352,6 +405,7 @@ class ListingStore:
                 conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", key)
             finally:
                 conn.close()
+                locks.give_back()
 
         return end
 
@@ -582,11 +636,14 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
     back; 409 ``listing_changed`` when it
     was edited while it was being published; 409 ``listing_publishing`` while another
-    publish of it runs (it is refused, not queued)."""
+    publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
+    :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise _not_found(listing_id)
     snapshots = core.store.snapshots
+    # The public site serves listing media as presigned GETs, and a visitor's render
+    # reads the snapshot from the content store (plan).
     if core.store.backend != "s3" or snapshots is None:
         raise problem(
             status.HTTP_409_CONFLICT,
