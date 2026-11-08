@@ -70,6 +70,32 @@ describe('AddItemDialog (#4251)', () => {
     expect(order.items.find((i) => i.kind === 'library_file')?.library_file).toEqual({ id: 120, filename: 'drawer-label.3mf', library: 'bambuddy' })
   })
 
+  it('adds a past print, filtered by printer, status and name (#4777)', async () => {
+    const add = vi.spyOn(api, 'addOrderItem')
+    const listed = vi.spyOn(api, 'listFarmArchives')
+    const onClose = vi.fn()
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={onClose} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Past prints' }))
+    const list = await within(dialog).findByRole('list', { name: 'Past prints' })
+    await waitFor(() => expect(within(list).getAllByRole('button')).toHaveLength(5))
+    expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeDisabled()
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Status' }), 'Failed')
+    await waitFor(() => expect(within(list).getAllByRole('button')).toHaveLength(1))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Status' }), 'Any status')
+    await user.type(within(dialog).getByLabelText('Search past prints'), 'name tag')
+    await waitFor(() => expect(within(list).getAllByRole('button')).toHaveLength(2))
+    // The route's own filters go to the route.
+    await user.type(within(dialog).getByLabelText('From'), '2026-11-02')
+    await waitFor(() => expect(listed).toHaveBeenLastCalledWith({ date_from: '2026-11-02' }, { limit: 50 }))
+    await user.click(await within(dialog).findByTestId('past-9102'))
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { archive_id: 9102, quantity: 1 })
+    const order = await api.order(ORDER_DRAFT)
+    expect(order.items.at(-1)?.origin_archive_ids).toEqual([9101, 9102])
+  })
+
   it("does not send a design request's title as a library file's (#5544)", async () => {
     const add = vi.spyOn(api, 'addOrderItem')
     const onClose = vi.fn()

@@ -34,6 +34,8 @@ describe('orders mock (#4249)', () => {
     )
     expect(refused?.problem.status).toBe(422)
     expect(refused?.problem['item_index']).toBe(1)
+    // As `api/orders.py` `_in_item`: the field's place is inside the item.
+    expect((refused?.problem['errors'] as { loc: unknown[] }[]).map((e) => e.loc.slice(0, 3))).toEqual([['body', 'items', 1]])
     expect(state.items).toHaveLength(before + 2)
     expect((await failure(api.addOrderItems(ORDER_DRAFT, [])))?.problem.status).toBe(422)
     // The plain batch is refused on an accepted order; its own route takes it.

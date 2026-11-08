@@ -110,6 +110,12 @@ const itemAddInput = z.object({
     .min(1)
     .optional()
     .describe('A file of the library (from search_library or list_library), as print_output takes it: the item prints it'),
+  archive_id: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe('A past print (a Bambuddy archive, from list_print_archives), alone: leave `kind` and every other source out'),
   ...reference.shape,
   quantity: z.number().int().min(1).default(1),
   title: z
@@ -130,7 +136,7 @@ const itemBody = itemAddInput.omit({ order_id: true })
 type ItemBody = z.infer<typeof itemBody>
 
 /** The single-item fields a call with `items` must leave out. */
-const SINGLE_FIELDS = ['kind', 'output_id', 'library_file_id', 'slug', 'commit', 'inputs', 'title', 'sku', 'unit_price_minor', 'requires_printing'] as const
+const SINGLE_FIELDS = ['kind', 'output_id', 'library_file_id', 'archive_id', 'slug', 'commit', 'inputs', 'title', 'sku', 'unit_price_minor', 'requires_printing'] as const
 
 const itemsAddInput = itemAddInput
   .extend({
@@ -164,6 +170,7 @@ function itemAddTitle({
   slug,
   output_id,
   library_file_id,
+  archive_id,
   kind,
   title,
 }: {
@@ -171,6 +178,7 @@ function itemAddTitle({
   slug?: string
   output_id?: string
   library_file_id?: number
+  archive_id?: number
   kind?: string
   title?: string
 }): string {
@@ -179,7 +187,9 @@ function itemAddTitle({
       ? (title ?? `a ${kind} item`)
       : library_file_id !== undefined
         ? (title ?? `library file ${library_file_id}`)
-        : (slug ?? output_id ?? 'an item')
+        : archive_id !== undefined
+          ? (title ?? `past print ${archive_id}`)
+          : (slug ?? output_id ?? 'an item')
   return `Add ${what} to order ${order_id}`
 }
 
@@ -787,7 +797,12 @@ export const orderTools: Tool[] = [
       'or `inputs`; the item names the file (no template), defaults its title to the file\'s name, is priced by ' +
       'order_item_quote (a slice of the file, or `manual`), prints the file, and has no revisions. A file the ' +
       'library does not have or does not print is 422; one deleted later is 409 `library_file_gone` on quote ' +
-      'and print. `sku` is the shop\'s stock code, on any kind. ' +
+      'and print. `archive_id` adds a past print (#4777): a Bambuddy archive from list_print_archives, alone (no ' +
+      '`kind` or other source). The item is a model item of the output that printed it, a library file item of the ' +
+      'file that printed it, or else a library file item of a copy of its printed file in the native library (one ' +
+      'copy per archive, reused); it keeps `origin_archive_ids` and is priced from the print with ' +
+      "order_item_quote's `archive`. An archive Bambuddy no longer has is 409 `archive_gone`; a copy needed while " +
+      'the Bambuddy library serves is 409 `archive_copy_not_native`. `sku` is the shop\'s stock code, on any kind. ' +
       'An accepted, in-production or ready order answers 409 `item_locked`: use order_item_add_after_acceptance. ' +
       '`items` adds several in one request (#4777; e.g. outputs found with list_recent_outputs), all or none.',
     input: itemsAddInput,
@@ -1027,13 +1042,18 @@ export const orderTools: Tool[] = [
     name: 'order_item_quote',
     label: 'Quote an order line item',
     description:
-      'Quote a line item, in one of two modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
+      'Quote a line item, in one of three modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
       'it is now). `slice`: render the item if it has no matching output, slice every plate with the print ' +
       "dialog's own choices (printer, a spool per slot, nozzles and quality, as print_output takes them) and price " +
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
-      'item is quoted; order_item_accept_quote pins it. When the unit price leaves a margin below the thin ' +
+      'item is quoted; order_item_accept_quote pins it. `archive` (#4777): priced from what a past print used, ' +
+      'with no re-slice: every plate archive of its print run, grams per slot as the slicer estimated them and the ' +
+      "actual seconds, at the price book in force, each slot at `filaments`' filament (written onto the item first). " +
+      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). Refused ' +
+      '409 `archive_plates_missing` (a plate of the run has no archive), `archive_not_succeeded` (a failed or ' +
+      'cancelled print: quote by slice or by hand) and `archive_gone`. When the unit price leaves a margin below the thin ' +
       "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
       '`price_warning`: `unit_cost_minor` and `jobs`, `below_cost` (true: the price is below the real cost; ' +
       'false: it is above it, but the margin is thin), the `main_reason` (the cost part that most exceeded what ' +
@@ -1047,17 +1067,40 @@ export const orderTools: Tool[] = [
         .strict()
         .optional(),
       slice: sliceQuote.optional(),
+      archive: z
+        .object({
+          archive_id: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("The past print: one the item was taken from or one its output or file printed; omitted, the item's first"),
+          filaments: z
+            .object({})
+            .catchall(ID)
+            .default({})
+            .describe('Price-book filament per colour slot, `{slot: filament_id}` (slot from 0), as `slice` takes them'),
+          filament_id: ID.optional().describe(
+            'For an item with no colour slots yet (a library file item): the filament of every slot the print used',
+          ),
+        })
+        .strict()
+        .optional(),
     }),
     risk: 'write',
     routes: [
       'POST /api/v1/orders/{order_id}/items/{item_id}/quotes',
       'POST /api/v1/orders/{order_id}/items/{item_id}/quote',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/quotes/archive',
       'GET /api/v1/orders/history/unit-cost',
     ],
-    title: ({ order_id, item_id, slice }) => `${slice ? 'Quote from a slice' : 'Price'} item ${item_id} of order ${order_id}`,
-    handler: async ({ order_id, item_id, manual, slice }, ctx) => {
-      if ((manual === undefined) === (slice === undefined)) {
-        throw new ToolError('give exactly one of `manual` (a typed price) or `slice` (the print dialog\'s choices)')
+    title: ({ order_id, item_id, slice, archive }) =>
+      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, manual, slice, archive }, ctx) => {
+      if ([manual, slice, archive].filter((mode) => mode !== undefined).length !== 1) {
+        throw new ToolError(
+          'give exactly one of `manual` (a typed price), `slice` (the print dialog\'s choices) or `archive` (a past print)',
+        )
       }
       const path = { order_id, item_id }
       const quote =
@@ -1066,9 +1109,17 @@ export const orderTools: Tool[] = [
               ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
               `quote item ${item_id}`,
             )
-          : await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
-              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
-            )
+          : archive !== undefined
+            ? await ok(
+                ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes/archive', {
+                  params: { path },
+                  body: archive as never,
+                }),
+                `quote item ${item_id} from a past print`,
+              )
+            : await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
+                ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
+              )
       const warning = await priceWarning(ctx, order_id, quote)
       return json(warning === undefined ? quote : { ...(quote as object), price_warning: warning })
     },

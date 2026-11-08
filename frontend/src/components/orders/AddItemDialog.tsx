@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api/client'
-import type { LibrarySearchHit, ModelSummary, Order, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
+import type { ArchiveOutcome, LibrarySearchHit, ModelSummary, Order, OrderItemCreate, Output, RevisionCreate } from '../../api/types'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -15,6 +15,7 @@ import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
 import { LibraryFilePicker } from './LibraryFilePicker'
 import { RecentRendersPicker, type RenderPick } from './RecentRendersPicker'
+import { PastPrintsPicker } from './PastPrintsPicker'
 
 /** The radio value of "the current version with its default settings". */
 const CURRENT = 'current'
@@ -76,7 +77,8 @@ function revisionBody(current: Pinned | null, choice: string, note: string): Rev
  * asks the person to confirm that it changes an accepted order first. It also takes a "Design request" (#5280): a title and the
  * customer's words, whose design a revision supplies later, and a "Library file" (#5544): a
  * file of the library, found as the Library page's search finds it, which the item prints, and "Recent renders"
- * (#4777): saved outputs of every model, several picked at once, each with a quantity, added in one request. With `revise` it is the
+ * (#4777): saved outputs of every model, several picked at once, each with a quantity, added in one request, and "Past prints"
+ * (#4777): a Bambuddy archive, which the backend makes an item of what printed it. With `revise` it is the
  * design picker of an item's new revision instead (`slug`: the item's template, if any); with
  * `mode` `after_acceptance` that revision changes an accepted item (#5350), after a confirm.
  */
@@ -103,8 +105,9 @@ export function AddItemDialog({
   const [query, setQuery] = useState('')
   const [slug, setSlug] = useState<string | null>(revise?.slug ?? null)
   // What the item is made from: a template, a design request (#5280), a library file (#5544)
-  // or recent renders of any model (#4777).
-  const [source, setSource] = useState<'template' | 'request' | 'library' | 'recent'>('template')
+  // recent renders of any model or a past print (#4777).
+  const [source, setSource] = useState<'template' | 'request' | 'library' | 'recent' | 'past'>('template')
+  const [archive, setArchive] = useState<ArchiveOutcome | null>(null)
   const [renders, setRenders] = useState<Map<string, RenderPick>>(new Map())
   const request = source === 'request'
   const [file, setFile] = useState<LibrarySearchHit | null>(null)
@@ -139,6 +142,7 @@ export function AddItemDialog({
       setSlug(revise?.slug ?? null)
       setSource('template')
       setFile(null)
+      setArchive(null)
       setRenders(new Map())
       setNote('')
       setPicked('')
@@ -150,7 +154,7 @@ export function AddItemDialog({
     }
   }, [open, revise?.slug])
   // A new pick asks again: the confirm names what was picked when it was armed.
-  useEffect(() => setConfirming(false), [source, file, renders, slug, choice, quantity, title, note])
+  useEffect(() => setConfirming(false), [source, file, archive, renders, slug, choice, quantity, title, note])
   /** Another template, or none, starting from its own default pick in the same render. */
   function pickTemplate(next: string | null) {
     setSlug(next)
@@ -184,6 +188,30 @@ export function AddItemDialog({
       setError(null)
       try {
         await addItems(orderId, items, mode)
+        onAdded()
+        onClose()
+      } catch (err) {
+        setError(refusalText(err))
+        setConfirming(false)
+        setBusy(false)
+      }
+      return
+    }
+    if (source === 'past') {
+      if (!archive) {
+        setError('Pick a past print.')
+        return
+      }
+      const count = parseQuantity(quantity)
+      if (count === null) {
+        setError(QUANTITY_HINT)
+        return
+      }
+      if (!confirmed()) return
+      setBusy(true)
+      setError(null)
+      try {
+        await addItem(orderId, { archive_id: archive.id, quantity: count, ...(title.trim() ? { title: title.trim() } : {}) }, mode)
         onAdded()
         onClose()
       } catch (err) {
@@ -271,7 +299,7 @@ export function AddItemDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && !busy && onClose()}>
-      <DialogContent className={source === 'recent' ? 'sm:max-w-2xl' : 'sm:max-w-lg'}>
+      <DialogContent className={source === 'recent' || source === 'past' ? 'sm:max-w-2xl' : 'sm:max-w-lg'}>
         <DialogHeader>
           <DialogTitle>{revise ? 'New revision' : 'Add item'}</DialogTitle>
           <DialogDescription>
@@ -283,7 +311,9 @@ export function AddItemDialog({
                   ? 'A file of the library becomes a line item of this order. The item prints that file.'
                   : source === 'recent'
                     ? 'Saved renders of any model become line items of this order, each with its exact settings and colours.'
-                    : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
+                    : source === 'past'
+                      ? 'A past print becomes a line item: of the render or library file that printed it, else of a copy of its file in the library.'
+                      : 'A template becomes a line item of this order, pinned to one revision and its settings.'}
           </DialogDescription>
         </DialogHeader>
         <div className="flex min-w-0 flex-col gap-3">
@@ -294,6 +324,9 @@ export function AddItemDialog({
               </Button>
               <Button type="button" size="sm" variant={source === 'recent' ? 'secondary' : 'outline'} aria-pressed={source === 'recent'} onClick={() => pickSource('recent')}>
                 Recent renders
+              </Button>
+              <Button type="button" size="sm" variant={source === 'past' ? 'secondary' : 'outline'} aria-pressed={source === 'past'} onClick={() => pickSource('past')}>
+                Past prints
               </Button>
               <Button type="button" size="sm" variant={source === 'library' ? 'secondary' : 'outline'} aria-pressed={source === 'library'} onClick={() => pickSource('library')}>
                 Library file
@@ -324,6 +357,26 @@ export function AddItemDialog({
               setRenders(next)
               setError(null)
             }} />
+          )}
+          {source === 'past' && (
+            <>
+              <PastPrintsPicker open={open} picked={archive} disabled={busy} onPick={(next) => {
+                setArchive(next)
+                setError(null)
+              }} />
+              {archive && (
+                <div className="flex flex-wrap gap-3">
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="add-past-quantity">Quantity</Label>
+                    <Input id="add-past-quantity" inputMode="numeric" className="w-24" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+                  </div>
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <Label htmlFor="add-past-title">Title (optional)</Label>
+                    <Input id="add-past-title" maxLength={200} placeholder={archive.print_name ?? undefined} value={title} onChange={(e) => setTitle(e.target.value)} />
+                  </div>
+                </div>
+              )}
+            </>
           )}
           {source === 'library' && (
             <>
@@ -459,7 +512,7 @@ export function AddItemDialog({
           </Button>
           <Button
             type="button"
-            disabled={busy || (request ? !title.trim() : source === 'library' ? !file : source === 'recent' ? renders.size === 0 : !model || !choice)}
+            disabled={busy || (request ? !title.trim() : source === 'library' ? !file : source === 'past' ? !archive : source === 'recent' ? renders.size === 0 : !model || !choice)}
             onClick={() => void add()}
           >
             {confirming
