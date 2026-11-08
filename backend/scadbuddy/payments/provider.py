@@ -1,6 +1,6 @@
 """The provider seam (#4957): what a payment provider must offer ScadBuddy. A provider
-adapter (the fake one, Stripe's in ``stripe.py``) holds no state; the shop's credential comes
-in with each call."""
+adapter (the fake one, Stripe's in ``stripe.py``, PayPal's in ``paypal.py``) holds no state
+but PayPal's in-memory access token (#4959); the shop's credential comes in with each call."""
 
 from __future__ import annotations
 

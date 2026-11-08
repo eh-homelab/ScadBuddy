@@ -1,0 +1,59 @@
+{
+  "id": "WH-9RE12345AB678901C-2BC34567DE890123F",
+  "event_version": "1.0",
+  "create_time": "2026-11-07T12:00:01.000Z",
+  "resource_type": "refund",
+  "resource_version": "2.0",
+  "event_type": "PAYMENT.CAPTURE.REFUNDED",
+  "summary": "A $ 20.0 USD capture payment was refunded",
+  "resource": {
+    "id": "4MX31235014924744",
+    "amount": {
+      "currency_code": "USD",
+      "value": "20.00"
+    },
+    "status": "COMPLETED",
+    "seller_payable_breakdown": {
+      "gross_amount": {
+        "currency_code": "USD",
+        "value": "20.00"
+      },
+      "net_amount": {
+        "currency_code": "USD",
+        "value": "20.00"
+      },
+      "total_refunded_amount": {
+        "currency_code": "USD",
+        "value": "20.00"
+      }
+    },
+    "invoice_id": "ORD-2026-7-req-1",
+    "custom_id": "req-1",
+    "create_time": "2026-11-07T11:00:00Z",
+    "update_time": "2026-11-07T11:00:00Z",
+    "links": [
+      {
+        "rel": "self",
+        "method": "GET",
+        "href": "https://api-m.sandbox.paypal.com/v2/payments/refunds/4MX31235014924744"
+      },
+      {
+        "rel": "up",
+        "method": "GET",
+        "href": "https://api-m.sandbox.paypal.com/v2/payments/captures/9XY12345AB678901C"
+      }
+    ]
+  },
+  "links": [
+    {
+      "href": "https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events/WH-9RE12345AB678901C-2BC34567DE890123F",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events/WH-9RE12345AB678901C-2BC34567DE890123F/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ]
+}

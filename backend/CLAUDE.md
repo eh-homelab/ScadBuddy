@@ -875,6 +875,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
   `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
   own code, no SDK; the facts it rests on, each with its Stripe link, are its docstring),
+  `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
+  captures it from the webhook path and the capture's events record it; each webhook is
+  checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
+  cached in memory, never stored; a cancel marks the order's `custom_id` so it is never
+  captured; the facts, each with its PayPal link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409

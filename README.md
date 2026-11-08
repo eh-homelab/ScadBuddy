@@ -515,6 +515,27 @@ bank payment shows as `pending` until Stripe says it settled, and as `failed` wh
 did not. The Stripe fee is recorded on the order's costs once Stripe's balance
 transaction gives it.
 
+#### PayPal (#4959)
+
+In the PayPal Developer Dashboard, open the REST app (sandbox or live) and add a webhook
+with the URL `https://<public host>/api/v1/payments/webhooks/paypal` and these events:
+`CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.PENDING`,
+`PAYMENT.CAPTURE.DECLINED` and `PAYMENT.CAPTURE.REFUNDED`
+([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)). Then, in
+Settings → Payments, connect PayPal with the environment (`sandbox` or `live`), the app's
+client ID and secret, and the webhook's ID. ScadBuddy checks the credentials and that the
+webhook sends those events. The page then shows "Connected as PayPal app … (sandbox)" or
+"(live)". Each payment request is a PayPal order for the request's amount. The customer
+pays with a PayPal balance or a card on PayPal's page. When the customer approves the
+payment, ScadBuddy captures it. PayPal then says whether the capture completed, is
+pending, or was declined. Every webhook is checked with PayPal's verify-webhook-signature
+call before ScadBuddy reads it
+([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
+The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
+is recorded once, for its own amount, when PayPal says it completed. PayPal has no call
+that voids an order. A cancelled request therefore marks its order so that ScadBuddy
+never captures it, and the customer is never charged.
+
 ### Authentication on the deployment (#4975)
 
 What signing in is and what each `SCADBUDDY_AUTH_MODE` does is under "Signing in"

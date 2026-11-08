@@ -79,8 +79,8 @@ def form(request: httpx.Request) -> dict[str, list[str]]:
 
 
 def test_the_registry_offers_stripe() -> None:
-    assert providers(fake=False) == {"stripe": STRIPE}
-    assert set(providers(fake=True)) == {"stripe", "fake"}
+    assert providers(fake=False)["stripe"] is STRIPE
+    assert "fake" in providers(fake=True)
 
 
 def test_stripe_asks_for_two_secrets() -> None:
