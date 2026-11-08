@@ -17,8 +17,9 @@ recorded and answers None, as a second reader does over SQL.
 
 `RemotePrinterStore` is the worker's `PrinterStore` with `ensure_bambuddy_written` over
 the route (#5298 Task 29's first route, taken early by #4625): a merge it makes runs on
-the API, which may write every table `PRINTER_REFERENCES` names. Its other methods stay
-on the worker's SQL until Task 29.
+the API, which may write every table `PRINTER_REFERENCES` names. `link_bambuddy`, the
+other method that merges, refuses: it runs on the API only. Its remaining methods stay on
+the worker's SQL until Task 29.
 
 `RemoteEvents` is the print worker's `EventBus` (Q5): `publish` hands an event to an
 outbox, never blocks and is safe from any thread, as `PgNotifyEventBus.publish` is; a

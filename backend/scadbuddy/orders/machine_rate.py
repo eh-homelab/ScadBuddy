@@ -23,6 +23,7 @@ A printer with no profile is priced at the book's ``machine_rate_per_hour``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Collection, Sequence
@@ -34,7 +35,7 @@ from typing import Annotated, Literal, Self
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -518,9 +519,9 @@ class MachineRates:
             if live and self.integrations.linked:
                 try:
                     tasks = await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
-                except (ApiError, NotLinkedError, ValueError):
-                    # A reply that does not validate (ValidationError is a ValueError) or
-                    # is not JSON is Bambuddy not answering usefully.
+                except (ApiError, NotLinkedError, ValidationError, json.JSONDecodeError):
+                    # A reply that does not validate, or is not JSON, is Bambuddy not
+                    # answering usefully. Any other ValueError is a bug and propagates.
                     logger.warning(
                         "Bambuddy's maintenance tasks could not be read; the stored"
                         " intervals price the machine rate",

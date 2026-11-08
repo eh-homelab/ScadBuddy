@@ -48,11 +48,17 @@ INPUTS = MachineRateInputs(
 
 class FakeBambuddy:
     def __init__(
-        self, tasks: list[MaintenanceTask] | None, *, garbled: bool = False, not_json: bool = False
+        self,
+        tasks: list[MaintenanceTask] | None,
+        *,
+        garbled: bool = False,
+        not_json: bool = False,
+        bug: bool = False,
     ) -> None:
         self.tasks = tasks
         self.garbled = garbled
         self.not_json = not_json
+        self.bug = bug
         self.asked: list[int] = []
 
     @property
@@ -69,6 +75,9 @@ class FakeBambuddy:
         if self.not_json:
             # A 200 whose body is not JSON, as ``response.json()`` raises.
             json.loads("<html>")
+        if self.bug:
+            # A bug in the read, not a reply from Bambuddy.
+            int("not a number")
         return self.tasks
 
 
@@ -279,6 +288,15 @@ async def test_a_reply_that_is_not_json_falls_back_to_the_stored_intervals(
     assert broken.asked == [7]
     assert rate.intervals == "stored"
     assert rate.maintenance_per_hour == "0.24"
+
+
+async def test_a_bug_in_the_read_is_not_taken_for_bambuddy_not_answering(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    with pytest.raises(ValueError, match="invalid literal"):
+        await rates(store, printers, settings_store, FakeBambuddy([], bug=True)).breakdown(printer)
 
 
 async def test_the_views_inputs_are_from_the_same_read_as_its_breakdown(
