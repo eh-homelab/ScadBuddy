@@ -20,10 +20,16 @@ PayPal's documented behaviour this relies on:
   account by default. ``custom_id`` is not shown to the payer
   (https://developer.paypal.com/docs/api/orders/v2/#orders_create).
 - An approved order is captured with ``POST /v2/checkout/orders/{id}/capture``
-  (https://developer.paypal.com/docs/api/orders/v2/#orders_capture). Orders v2 has no call
-  that voids an order. ``PATCH /v2/checkout/orders/{id}`` changes
-  ``purchase_units[].custom_id`` of an order that is ``CREATED`` or ``APPROVED``, never a
-  ``COMPLETED`` one (https://developer.paypal.com/docs/api/orders/v2/#orders_patch).
+  (https://developer.paypal.com/docs/api/orders/v2/#orders_capture). Its 422 answers include
+  ``ORDER_ALREADY_CAPTURED`` (one capture per order), ``INSTRUMENT_DECLINED`` and
+  ``TRANSACTION_REFUSED`` (https://developer.paypal.com/api/rest/reference/orders/v2/errors/).
+  No PayPal source says a ``PAYMENT.CAPTURE.DECLINED`` event follows a capture refused this
+  way, so ``capture_request`` answers ``declined`` and the request reads ``failed``.
+- Orders v2 has no call that voids an order. ``PATCH /v2/checkout/orders/{id}`` "Updates an
+  order with a ``CREATED`` or ``APPROVED`` status"
+  (https://developer.paypal.com/docs/api/orders/v2/#orders_patch), so an order still
+  ``PAYER_ACTION_REQUIRED`` (not yet approved) cannot be marked. ScadBuddy does not rely on
+  the mark: it captures an approval only while its own request is open or failed.
 - HUF, JPY and TWD take no decimals; a decimal amount is an error
   (https://developer.paypal.com/api/rest/reference/currency-codes/).
 - The events: ``CHECKOUT.ORDER.APPROVED`` (a buyer approved an order),
@@ -40,7 +46,11 @@ PayPal's documented behaviour this relies on:
   there while a capture is pending.
 - A refund's resource has its own ``id``, ``amount`` and ``status`` (``CANCELLED``,
   ``FAILED``, ``PENDING``, ``COMPLETED``), and an ``up`` link to its capture, but no order id
-  (https://developer.paypal.com/docs/api/payments/v2/#refunds_get).
+  (https://developer.paypal.com/docs/api/payments/v2/#refunds_get). PayPal sends
+  ``PAYMENT.REFUND.PENDING`` and ``PAYMENT.REFUND.FAILED``, and names no event for a pending
+  refund that later completes (https://developer.paypal.com/api/rest/webhooks/event-names/).
+  So a ``PAYMENT.CAPTURE.REFUNDED`` whose refund is pending reads the refund again; one still
+  pending is not recorded, and the shop records it by hand (README).
 - A webhook carries ``PAYPAL-AUTH-ALGO``, ``PAYPAL-CERT-URL``, ``PAYPAL-TRANSMISSION-ID``,
   ``PAYPAL-TRANSMISSION-SIG`` and ``PAYPAL-TRANSMISSION-TIME``.
   ``POST /v1/notifications/verify-webhook-signature`` takes them, the webhook id and the
@@ -69,6 +79,7 @@ from pydantic import ValidationError
 
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.payments.models import (
+    CaptureOutcome,
     HostedRequest,
     PaymentRequestView,
     ProviderEvent,
@@ -91,11 +102,11 @@ API: Final[Mapping[str, str]] = {
 TIMEOUT: Final = httpx.Timeout(20.0)
 #: A token is fetched again this long before PayPal says it expires.
 TOKEN_MARGIN_SECONDS: Final = 60
-#: The ``custom_id`` a cancelled request's order carries: ScadBuddy will not capture a
-#: later approval of it. The mark is set once, after the cancel commits, and a failed PATCH
-#: is logged, not retried: that order stays unmarked, and a later approval of it is
-#: captured. Such a capture, and one completed or under way before the mark, is recorded as
-#: a payment on the cancelled request.
+#: The ``custom_id`` a cancelled request's order carries, as defence in depth: ScadBuddy
+#: captures an approval only while its request is open or failed (``capture_request``), so
+#: an unmarked order of a cancelled request is not captured either. The mark is set once,
+#: after the cancel commits; a failed PATCH is logged, not retried. A capture completed or
+#: under way before the cancel is recorded as a payment on the cancelled request.
 CANCELLED: Final = "scadbuddy-cancelled"
 #: Currencies PayPal takes in whole units only.
 NO_DECIMALS: Final = frozenset({"HUF", "JPY", "TWD"})
@@ -115,6 +126,8 @@ NEEDED_EVENTS: Final = (
     ("PAYMENT.CAPTURE.DECLINED", "PAYMENT.CAPTURE.DENIED"),
     ("PAYMENT.CAPTURE.REFUNDED",),
 )
+#: A capture's 422 issues that mean the customer's method was declined.
+_DECLINED: Final = frozenset({"INSTRUMENT_DECLINED", "TRANSACTION_REFUSED"})
 _CAPTURE_KINDS: Final[Mapping[str, ProviderEventKind]] = {
     "PAYMENT.CAPTURE.COMPLETED": "paid",
     "PAYMENT.CAPTURE.PENDING": "pending",
@@ -292,14 +305,20 @@ class PayPalProvider:
         except _RefusedError as refused:
             raise _shown(refused) from None
 
-    async def _read(self, credential: Credential, method: str, path: str, **kwargs: Any) -> Any:
+    async def _read(
+        self, credential: Credential, method: str, path: str, *, gone: bool = False, **kwargs: Any
+    ) -> Any:
         """A call a webhook needs after its signature held: any failure is
-        `ProviderUnavailableError`, so nothing is recorded and PayPal sends it again."""
+        `ProviderUnavailableError`, so nothing is recorded and PayPal sends it again. With
+        ``gone``, a 404 is None: a retry would find nothing either."""
         try:
             return await self._call(credential, method, path, **kwargs)
         except _NoAnswerError:
             logger.warning("PayPal did not answer %s %s", method, path)
         except _RefusedError as refused:
+            if gone and refused.status == 404:
+                logger.info("PayPal has no %s", path)
+                return None
             # The status says why PayPal keeps failing it; it goes to the log only.
             logger.warning("PayPal answered %s to %s %s", refused.status, method, path)
         raise ProviderUnavailableError("PayPal did not answer a call the event needs")
@@ -392,11 +411,11 @@ class PayPalProvider:
             raise ProviderError("PayPal's answer named no approval link") from None
 
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
-        """Mark the order so ScadBuddy will not capture a later approval of it. An order
-        already completed, voided or gone is no error. A failure here leaves the order
-        unmarked (the service logs it and does not retry), so a later approval is still
-        captured; that capture, and one completed or under way before the mark, is recorded
-        as a payment on the cancelled request."""
+        """Mark the order as cancelled, as defence in depth: ScadBuddy captures an
+        approval only while its request is open or failed. An order already completed,
+        voided or gone is no error, and neither is one still awaiting the payer, which
+        PATCH cannot change (it updates CREATED or APPROVED orders only). A failure here
+        is logged by the service and not retried."""
         path = f"/v2/checkout/orders/{_path_id(provider_ref)}"
         patch = [
             {
@@ -423,7 +442,7 @@ class PayPalProvider:
             if refused.status == 404:
                 return
             raise _shown(refused) from None
-        if order.get("status") not in ("COMPLETED", "VOIDED"):
+        if order.get("status") not in ("COMPLETED", "VOIDED", "PAYER_ACTION_REQUIRED"):
             raise ProviderError("PayPal did not mark the order cancelled")
 
     async def parse_webhook(
@@ -504,44 +523,61 @@ class PayPalProvider:
     async def _approved(
         self, credential: Credential, event_id: str, order: dict[str, Any]
     ) -> ProviderEvent:
-        """Capture the approved order. The capture's own events record what it did, so
-        this event records nothing itself. The event is a snapshot: a retry of an
-        approval sent before a cancel carries no mark. So the order is read again just
-        before the capture, and captured only while it is ``APPROVED`` with no unit
-        marked cancelled."""
+        """``approved`` for an order ScadBuddy made that is ``APPROVED`` with no unit marked
+        cancelled; the service then decides whether to capture it (``capture_request``).
+        The event is a snapshot: a retry of an approval sent before a cancel carries no
+        mark, so the order is read again. One PayPal no longer has is ``other``."""
         order_id = _path_id(order["id"])
         other = ProviderEvent(event_id=event_id, kind="other", provider_ref=order_id)
-        now = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        now = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}", gone=True)
+        if now is None:
+            return other
         units = now.get("purchase_units")
         if now.get("status") != "APPROVED" or not isinstance(units, list):
             return other
         if not all(isinstance(u, dict) and _ours(u) for u in units):
             # Cancelled here, or another integration's order on the same REST app.
             return other
-        path = f"/v2/checkout/orders/{order_id}/capture"
+        return ProviderEvent(event_id=event_id, kind="approved", provider_ref=order_id)
+
+    async def capture_request(
+        self, credential: Credential, provider_ref: str, event_id: str
+    ) -> CaptureOutcome:
+        """Capture the approved order. Keyed on the approval: its retry captures once, and
+        a new approval after a decline is a new capture; ``ORDER_ALREADY_CAPTURED`` counts
+        as captured. A declined method is ``declined``. 401, 5xx or no answer is
+        ``ProviderUnavailableError`` (PayPal sends the approval again); any other refusal
+        would meet the same answer again, so it is a logged ``ProviderError``."""
+        path = f"/v2/checkout/orders/{_path_id(provider_ref)}/capture"
         try:
-            # Keyed on the approval: its retry captures once, and a new approval after a
-            # decline is a new capture; ORDER_ALREADY_CAPTURED still stops a second one.
             await self._call(credential, "POST", path, request_id=f"capture-{event_id}")
-        except _RefusedError as refused:
-            if refused.status != 422:
-                logger.warning("PayPal answered %s to POST %s", refused.status, path)
-                raise ProviderUnavailableError("PayPal did not capture the order") from None
-            if refused.issue != "ORDER_ALREADY_CAPTURED":
-                # The customer can approve the same link again with another method.
-                logger.warning("PayPal did not capture order %s: %s", order_id, refused.issue)
+            return "captured"
         except _NoAnswerError:
             logger.warning("PayPal did not answer POST %s", path)
             raise ProviderUnavailableError("PayPal did not capture the order") from None
-        return other
+        except _RefusedError as refused:
+            logger.warning("PayPal answered %s %s to POST %s", refused.status, refused.issue, path)
+            if refused.status == 401 or refused.status >= 500:
+                raise ProviderUnavailableError("PayPal did not capture the order") from None
+            if refused.status == 422 and refused.issue == "ORDER_ALREADY_CAPTURED":
+                return "captured"
+            if refused.status == 422 and refused.issue in _DECLINED:
+                return "declined"
+            raise _shown(refused) from None
 
     async def _refund(
         self, credential: Credential, event_id: str, refund: dict[str, Any]
     ) -> ProviderEvent:
         """A completed refund, keyed by its own id, for its own amount. Its order comes
-        from its capture."""
+        from its capture. One not completed yet is read again: PayPal names no event for a
+        pending refund that completes later."""
         if refund.get("status") != "COMPLETED":
-            return ProviderEvent(event_id=event_id, kind="other")
+            again = await self._read(
+                credential, "GET", f"/v2/payments/refunds/{_path_id(refund['id'])}"
+            )
+            if again.get("status") != "COMPLETED":
+                return ProviderEvent(event_id=event_id, kind="other")
+            refund = again
         up = next(
             (
                 link.get("href")

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,9 +30,11 @@ from scadbuddy.payments.models import (
     HostedRequest,
     PaymentRequestKind,
     PaymentRequestView,
+    ProviderEvent,
 )
 from scadbuddy.payments.provider import (
     BadSignatureError,
+    CapturingProvider,
     Credential,
     EventTooEarlyError,
     PaymentProvider,
@@ -293,6 +295,11 @@ class Payments:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
+        capture = getattr(adapter, "capture_request", None)
+        if event.kind == "approved" and capture is None:
+            # Only a provider that can capture sends ``approved`` (#4959).
+            logger.warning("%s sent an approval but cannot capture; ignored", provider)
+            event = event.model_copy(update={"kind": "other"})
         try:
             outcome = await asyncio.to_thread(
                 self._orders.lifecycle.record_provider_event, provider, event
@@ -301,7 +308,52 @@ class Payments:
             # Nothing was written: a 503 makes the provider send the event again.
             raise ProviderUnavailableError(str(early)) from None
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
+        if event.kind == "approved" and capture is not None and outcome != "ignored":
+            await self._capture(provider, cast(CapturingProvider, adapter), credential, event)
         return outcome
+
+    async def _capture(
+        self,
+        provider: str,
+        adapter: CapturingProvider,
+        credential: Credential,
+        event: ProviderEvent,
+    ) -> None:
+        """#4959: capture an approval after its ``pending`` committed, with no lock held.
+        A replay captures only a request still ``pending`` (the process may have stopped
+        before its capture); the event id keys the provider's capture, so one that did
+        land is not made twice. A capture that does not happen puts the request back to
+        ``failed``; one the provider did not answer also forgets the event, so the
+        provider's retry is read again."""
+        assert event.provider_ref is not None
+
+        def pending() -> PaymentRequestView | None:
+            with self._orders.store.transaction() as conn:
+                return payments.request_by_ref(conn, provider, event.provider_ref or "")
+
+        found = await asyncio.to_thread(pending)
+        if found is None or found.status != "pending":
+            return
+
+        def failed(*, forget_event: bool) -> Awaitable[None]:
+            return asyncio.to_thread(
+                lambda: self._orders.lifecycle.capture_failed(
+                    provider, found.id, event.event_id, forget_event=forget_event
+                )
+            )
+
+        try:
+            captured = await adapter.capture_request(credential, event.provider_ref, event.event_id)
+        except ProviderUnavailableError:
+            await failed(forget_event=True)
+            raise
+        except ProviderError as refused:
+            logger.warning("payment request %s was not captured: %s", found.id, refused)
+            await failed(forget_event=False)
+            return
+        if captured == "declined":
+            logger.info("%s declined the capture of payment request %s", provider, found.id)
+            await failed(forget_event=False)
 
     # -- the shop's accounts ----------------------------------------------------------
 

@@ -10,7 +10,12 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from scadbuddy.payments.models import HostedRequest, PaymentRequestView, ProviderEvent
+from scadbuddy.payments.models import (
+    CaptureOutcome,
+    HostedRequest,
+    PaymentRequestView,
+    ProviderEvent,
+)
 
 
 @dataclass(frozen=True)
@@ -80,4 +85,21 @@ class PaymentProvider(Protocol):
         """Raises `BadSignatureError` before it parses anything. Once the signature holds
         it may call the provider (#4958: Stripe's fee and a refund's session); a failed
         call is `ProviderUnavailableError`."""
+        ...
+
+
+class CapturingProvider(PaymentProvider, Protocol):
+    """A provider whose customer approves a payment that ScadBuddy then captures
+    (PayPal, #4959). Only such a provider's ``parse_webhook`` returns ``approved``. The
+    service moves an open or failed request to ``pending`` under the order lock, commits,
+    and only then calls ``capture_request``; a cancelled or paid request is never
+    captured."""
+
+    async def capture_request(
+        self, credential: Credential, provider_ref: str, event_id: str
+    ) -> CaptureOutcome:
+        """Capture the approved payment, keyed on ``event_id`` so a retry captures once.
+        ``ProviderUnavailableError`` when the provider did not answer (the request goes
+        back to ``failed`` and the event is read again on the provider's retry);
+        ``ProviderError`` for a refusal a retry would meet again."""
         ...

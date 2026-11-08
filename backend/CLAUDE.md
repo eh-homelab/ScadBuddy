@@ -877,11 +877,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
   own code, no SDK; the facts it rests on, each with its Stripe link, are its docstring),
   `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
-  captures it from the webhook path and the capture's events record it; each webhook is
-  checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
-  cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
-  approval is not captured (a failed mark is logged, not retried, and such a capture, like one
-  made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  is the `approved` event, and ScadBuddy captures it (`CapturingProvider.capture_request`):
+  under the order lock the lifecycle moves an open or failed request of an order that
+  still takes money to `pending` and commits, then `Payments._capture` calls PayPal with no
+  lock held; a capture that does not happen puts the request back to `failed` in a second
+  transaction (`Lifecycle.capture_failed`), and one PayPal did not answer also forgets the
+  event, so PayPal's retry is read again. The capture's events record the money. Each
+  webhook is checked by PayPal's verify-webhook-signature call with the raw body; the
+  OAuth token is cached in memory, never stored; a cancel ends open and failed requests
+  (`CAPTURABLE`) and marks the order's `custom_id` as defence in depth; the facts, each
+  with its PayPal link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -909,7 +914,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
-  manual payment, and a disconnect is refused while one is pending. `parse_webhook` is
+  manual payment, and a disconnect is refused while one is pending. A cancel (of the
+  request or its order) ends a `failed` request as well as an open one. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,

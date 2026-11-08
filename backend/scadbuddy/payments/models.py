@@ -15,7 +15,15 @@ PaymentRequestKind = Literal["deposit", "balance"]
 #: ``failed``: that payment did not settle. Neither records money.
 PaymentRequestStatus = Literal["open", "pending", "paid", "expired", "cancelled", "failed"]
 #: ``fee``: the provider's fee for a payment it already told, once it is known (#4958).
-ProviderEventKind = Literal["paid", "pending", "failed", "refunded", "expired", "fee", "other"]
+#: ``approved``: the customer approved a payment that ScadBuddy must capture (#4959). Only a
+#: provider with ``capture_request`` sends it, and the service captures only while the
+#: request is open or failed.
+ProviderEventKind = Literal[
+    "paid", "pending", "failed", "refunded", "expired", "fee", "approved", "other"
+]
+#: ``capture_request``'s answer: the money is captured (or was already), or the provider
+#: declined the customer's method, so the request reads ``failed``.
+CaptureOutcome = Literal["captured", "declined"]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]

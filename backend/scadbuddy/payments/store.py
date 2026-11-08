@@ -128,6 +128,13 @@ def insert_event(conn: Conn, provider: str, event: ProviderEvent) -> int | None:
     return None if row is None else int(row["id"])
 
 
+def forget_event(conn: Conn, provider: str, event_id: str) -> None:
+    """Drop an event's row, so the provider's next delivery of it is read again."""
+    conn.execute(
+        "DELETE FROM payment_events WHERE provider = %s AND event_id = %s", (provider, event_id)
+    )
+
+
 def finish_event(
     conn: Conn,
     event_row: int,

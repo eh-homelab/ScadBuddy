@@ -1,0 +1,12 @@
+{
+  "name": "NOT_AUTHORIZED",
+  "details": [
+    {
+      "issue": "PERMISSION_DENIED",
+      "description": "You do not have permission to access or perform operations on this resource."
+    }
+  ],
+  "message": "Authorization failed due to insufficient permissions.",
+  "debug_id": "e5c6d7f809102",
+  "links": []
+}

@@ -110,6 +110,9 @@ logger = logging.getLogger(__name__)
 
 #: The states a person's decision has ended (nothing else may move).
 ENDED: frozenset[OrderStatus] = frozenset({"closed", "cancelled"})
+#: The payment requests a customer's approval can still be captured for (#4959), and so
+#: the ones a cancel ends.
+CAPTURABLE: frozenset[str] = frozenset({"open", "failed"})
 #: The states past a person's acceptance, which `derive` writes.
 DERIVED: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready", "shipped"})
 #: An item nothing more happens to.
@@ -845,6 +848,17 @@ class Lifecycle:
             )
         return found
 
+    def _cancellable_request(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
+        """An open request, or a failed one (#4959: a customer can approve a failed
+        PayPal order again, so it is ended too). A pending one is refused: money is on
+        its way."""
+        found = self._request_of(conn, order, request_id)
+        if found.status not in CAPTURABLE:
+            raise LifecycleError(
+                "payment_request_not_open", f"payment request {request_id} is {found.status}"
+            )
+        return found
+
     def _open_request(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
         found = self._request_of(conn, order, request_id)
         if found.status != "open":
@@ -910,7 +924,7 @@ class Lifecycle:
     ) -> PaymentRequestView:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._open_request(conn, order, request_id)
+            self._cancellable_request(conn, order, request_id)
             cancelled = payments.set_request_status(conn, request_id, "cancelled")
             self._event(conn, order, by, "payment_request.cancelled", request_id=request_id)
         self._told(_Change(order))
@@ -995,6 +1009,27 @@ class Lifecycle:
             self._told(change)
         return outcome
 
+    def capture_failed(
+        self, provider: str, request_id: str, event_id: str, *, forget_event: bool
+    ) -> None:
+        """#4959: the capture after an ``approved`` event did not happen. A request still
+        ``pending`` goes back to ``failed``, which the shop sees. ``forget_event`` deletes
+        the event's row, so the provider's retry of it is read again rather than
+        ``replayed``."""
+        by = Actor(kind="provider", principal=f"payment:{provider}")
+        with self.store.transaction() as conn:
+            found = payments.request(conn, request_id)
+            if found is None:
+                return
+            order = self._lock(conn, found.order_id)
+            found = payments.request(conn, request_id) or found
+            if found.status == "pending":
+                payments.set_request_status(conn, found.id, "failed")
+                self._event(conn, order, by, "payment_request.failed", request_id=found.id)
+            if forget_event:
+                payments.forget_event(conn, provider, event_id)
+        self._told(_Change(order))
+
     def _paid_by(self, conn: Conn, order: Order, found: PaymentRequestView, provider: str) -> bool:
         """Whether this provider's own payment already paid the request. A request paid
         by hand, cancelled or expired takes a provider's payment: that money is real."""
@@ -1032,6 +1067,26 @@ class Lifecycle:
                 return "ignored", None
             payments.set_request_status(conn, found.id, event.kind)
             self._event(conn, order, by, f"payment_request.{event.kind}", request_id=found.id)
+            return "recorded", None
+        if event.kind == "approved":
+            # #4959: ScadBuddy decides whether an approval is captured. Only an open or
+            # failed request moves to ``pending``; the service calls the provider after
+            # this commits, never under the lock. A cancelled or paid request's approval
+            # is left uncaptured.
+            # An order that no longer takes money (ended, or a cart) is never
+            # captured, whatever its request reads.
+            if order.status in ENDED or order.unsubmitted or found.status not in CAPTURABLE:
+                logger.info(
+                    "approval of payment request %s left uncaptured: it is %s, its order %s",
+                    found.id,
+                    found.status,
+                    order.status,
+                )
+                return "ignored", None
+            payments.set_request_status(conn, found.id, "pending")
+            self._event(
+                conn, order, by, "payment_request.pending", request_id=found.id, approved=True
+            )
             return "recorded", None
         if event.kind == "fee":
             return self._late_fee(conn, order, found, provider, event, by)
@@ -1340,8 +1395,11 @@ class Lifecycle:
             # §3.4: cancelling the order releases every quote's sliced file.
             change.released = self._quote_ids(conn, (item.id for item in every))
             change.ended = True
-            # No one pays a cancelled order: its open requests end with it.
-            for open_request in payments.open_requests_for_order(conn, order.id):
+            # No one pays a cancelled order: its open and failed requests end with it
+            # (#4959: a failed one can still be approved again and captured).
+            for open_request in payments.requests_for_order(conn, order.id):
+                if open_request.status not in CAPTURABLE:
+                    continue
                 payments.set_request_status(conn, open_request.id, "cancelled")
                 self._event(
                     conn, order, by, "payment_request.cancelled", request_id=open_request.id
