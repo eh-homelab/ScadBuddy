@@ -1,0 +1,65 @@
+{
+  "id": "WH-1AP99999AB678901C-2BC34567DE890123F",
+  "event_version": "1.0",
+  "create_time": "2026-11-07T10:00:00.000Z",
+  "resource_type": "checkout-order",
+  "resource_version": "2.0",
+  "event_type": "CHECKOUT.ORDER.APPROVED",
+  "summary": "An order has been approved by buyer",
+  "resource": {
+    "id": "5O190127TN364715T",
+    "intent": "CAPTURE",
+    "status": "APPROVED",
+    "payment_source": {
+      "paypal": {
+        "email_address": "buyer@example.com",
+        "account_id": "QYR5Z8XDVJNXQ"
+      }
+    },
+    "purchase_units": [
+      {
+        "reference_id": "default",
+        "amount": {
+          "currency_code": "USD",
+          "value": "7.00"
+        },
+        "payee": {
+          "email_address": "merchant@example.com",
+          "merchant_id": "QDGTZ7B92B9QT"
+        },
+        "description": "Order ORD-2026-7",
+        "custom_id": "scadbuddy-cancelled",
+        "invoice_id": "ORD-2026-7-req-1"
+      }
+    ],
+    "payer": {
+      "email_address": "buyer@example.com",
+      "payer_id": "QYR5Z8XDVJNXQ"
+    },
+    "create_time": "2026-11-07T09:59:00Z",
+    "links": [
+      {
+        "href": "https://api-m.sandbox.paypal.com/v2/checkout/orders/5O190127TN364715T",
+        "rel": "self",
+        "method": "GET"
+      },
+      {
+        "href": "https://api-m.sandbox.paypal.com/v2/checkout/orders/5O190127TN364715T/capture",
+        "rel": "capture",
+        "method": "POST"
+      }
+    ]
+  },
+  "links": [
+    {
+      "href": "https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1AP99999AB678901C-2BC34567DE890123F",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1AP99999AB678901C-2BC34567DE890123F/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ]
+}

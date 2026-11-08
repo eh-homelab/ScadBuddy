@@ -6,6 +6,7 @@ import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
+import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
@@ -361,26 +362,10 @@ export function OrderPage() {
 
           <Card size="sm">
             <CardContent className="flex flex-col gap-3">
-              <h2 className="text-sm font-medium">Money</h2>
+              {/* #4955 step 4 — the summary: subtotal, each charge, total, paid and balance. */}
+              <h2 className="text-sm font-medium">Summary</h2>
               <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
-              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
-                <dt className="text-muted-foreground">Items</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>
-                {(totals.pending_minor ?? 0) !== 0 && (
-                  <>
-                    <dt className="pl-3 text-xs text-muted-foreground">of which not accepted</dt>
-                    <dd className="sb-num text-right text-xs text-muted-foreground">{formatMoney(totals.pending_minor ?? 0, order.currency, order.minor_exponent)}</dd>
-                  </>
-                )}
-                <dt className="text-muted-foreground">Charges</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.charges_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="font-medium">Total</dt>
-                <dd className="sb-num text-right font-medium">{formatMoney(totals.total_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="text-muted-foreground">Paid</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.paid_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="text-muted-foreground">{(totals.pending_minor ?? 0) !== 0 ? 'Balance due (provisional)' : 'Balance due'}</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.balance_minor, order.currency, order.minor_exponent)}</dd>
-              </dl>
+              <OrderSummary currency={order.currency} exponent={order.minor_exponent} totals={totals} charges={charges} />
               {(totals.unpriced_items ?? []).length > 0 && (
                 <p className="text-xs text-warn" data-testid="order-unpriced">
                   Not in the total, with no price yet: {(totals.unpriced_items ?? []).map((id) => titles.get(id) ?? id).join(', ')}

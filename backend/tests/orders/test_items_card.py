@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import pytest
 
-from scadbuddy.orders.lifecycle import FulfilLine, Lifecycle, LifecycleError
+from scadbuddy.orders.lifecycle import FulfilLine, FulfilmentInput, Lifecycle, LifecycleError
 from scadbuddy.orders.models import LibraryFileRef
+from scadbuddy.orders.parts import ItemPart, PartInput
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
@@ -152,3 +154,67 @@ def test_bulk_fulfil_refuses_a_held_or_open_order_and_a_repeated_item(shop: Shop
     with pytest.raises(LifecycleError) as open_order:
         shop.lifecycle.fulfil_items(draft.id, [FulfilLine(item_id=item.id, quantity=1)], BY)
     assert open_order.value.slug == "order_not_accepted"
+
+
+# -- the review of #5697, and visitor carts (#5282) --------------------------------------------
+
+
+def test_a_custom_item_duplicated_after_acceptance_is_quoted_not_accepted(shop: Shop) -> None:
+    order, _ = shop.accepted()
+    custom = shop.lifecycle.add_custom_item(
+        order.id,
+        BY,
+        title="Rush fee",
+        quantity=1,
+        unit_price_minor=900,
+        accept=False,
+        after_acceptance=True,
+    )
+    copy = shop.lifecycle.duplicate_item(order.id, custom.id, BY, after_acceptance=True)
+    assert copy.status == "quoted"
+    assert [(q.unit_price_minor, q.accepted) for q in shop.rows.quotes(copy.id)] == [(900, False)]
+
+
+def test_a_request_item_is_duplicated(shop: Shop) -> None:
+    order = shop.order()
+    request = shop.lifecycle.add_request_item(order.id, BY, title="Tag 49", quantity=2)
+    copy = shop.lifecycle.duplicate_item(order.id, request.id, BY)
+    assert (copy.kind, copy.title, copy.quantity, copy.reference) == ("request", "Tag 49", 2, None)
+
+
+def test_a_duplicate_keeps_the_parts_set_by_hand(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    body = PartInput(name="Key ring", pack_size=100, pack_price_minor=599, on_hand=50)
+    ring = shop.lifecycle.parts.create(body, currency="USD", by=BY).id
+    shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(part_id=ring, per_unit=2)], BY)
+    copy = shop.lifecycle.duplicate_item(order.id, item.id, BY)
+    rows = shop.lifecycle.parts.item_parts([copy.id])[copy.id]
+    assert [(r.part_id, r.per_unit) for r in rows] == [(ring, 2)]
+
+
+def test_bulk_fulfil_returns_a_failed_item_and_refuses_a_printed_one(shop: Shop) -> None:
+    order_id, first, second = accepted_two(shop, shop.lifecycle)
+    shop.lifecycle.record_fulfilment(
+        order_id, first, FulfilmentInput(quantity=2, outcome="failed"), BY
+    )
+    assert shop.rows.item(first).status == "failed"  # type: ignore[union-attr]
+    shop.lifecycle.fulfil_items(order_id, [FulfilLine(item_id=first, quantity=2)], BY)
+    assert shop.rows.item(first).status == "fulfilled"  # type: ignore[union-attr]
+    with shop.rows.transaction() as conn:
+        shop.rows.update_item(conn, second, status="printed")
+    with pytest.raises(LifecycleError) as printed:
+        shop.lifecycle.fulfil_items(order_id, [FulfilLine(item_id=second, quantity=1)], BY)
+    assert (printed.value.slug, printed.value.items) == ("item_not_approved", [second])
+
+
+def test_a_visitors_cart_is_neither_duplicated_nor_fulfilled(shop: Shop, pool: PgPool) -> None:
+    visitor = VisitorStore(pool).ensure("v" * 43)
+    cart = shop.lifecycle.ensure_draft(visitor.id, visitor_actor(visitor), currency="USD")
+    item = shop.lifecycle.add_request_item(cart.id, visitor_actor(visitor), title="Tag", quantity=1)
+    with pytest.raises(LifecycleError) as copied:
+        shop.lifecycle.duplicate_item(cart.id, item.id, BY)
+    assert copied.value.slug == "order_not_submitted"
+    with pytest.raises(LifecycleError) as fulfilled:
+        shop.lifecycle.fulfil_items(cart.id, [FulfilLine(item_id=item.id, quantity=1)], BY)
+    assert fulfilled.value.slug == "order_not_submitted"

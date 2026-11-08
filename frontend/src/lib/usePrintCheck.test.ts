@@ -221,6 +221,23 @@ describe('usePrintCheck', () => {
     expect(result.current.processPartSettings).toEqual({ top_shell_layers: 5 })
   })
 
+  it("reads the process's values again when the dialog opens again (#5698)", async () => {
+    check.mockResolvedValue({ errors: [], warnings: [], rack: null, process_part_settings: { top_shell_layers: 5 } })
+    const { rerender } = renderHook(({ asks }: { asks: boolean }) => usePrintCheck(SOURCE, request('0.4'), asks), {
+      initialProps: { asks: true },
+    })
+    await settle()
+    expect(check.mock.calls[0]![2]).toBe(true)
+
+    // Closed: the dialog stops asking. Opened again with the same choices: it asks again,
+    // so a preset edited in Bambuddy meanwhile is read.
+    rerender({ asks: false })
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    rerender({ asks: true })
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    expect(check.mock.calls.at(-1)![2]).toBe(true)
+  })
+
   it('keeps the values when a late answer for a source left behind lands (#5686)', async () => {
     check.mockResolvedValue({ errors: [], warnings: [], rack: null, process_part_settings: { top_shell_layers: 5 } })
     let answer!: (value: PrintCheck) => void

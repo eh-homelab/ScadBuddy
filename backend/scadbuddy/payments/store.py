@@ -121,11 +121,32 @@ def set_request_link(
 def insert_event(conn: Conn, provider: str, event: ProviderEvent) -> int | None:
     """The new row's id, or None when this provider already sent this event."""
     row = conn.execute(
-        "INSERT INTO payment_events (provider, event_id, kind) VALUES (%s, %s, %s)"
+        "INSERT INTO payment_events (provider, event_id, kind, reverses)"
+        " VALUES (%s, %s, %s, %s)"
         " ON CONFLICT (provider, event_id) DO NOTHING RETURNING id",
-        (provider, event.event_id, event.kind),
+        (provider, event.event_id, event.kind, event.reverses),
     ).fetchone()
     return None if row is None else int(row["id"])
+
+
+def reversed_by_failure(conn: Conn, provider: str, event_id: str) -> bool:
+    """Whether this provider already told the failure of the refund event ``event_id``."""
+    row = conn.execute(
+        "SELECT 1 FROM payment_events WHERE provider = %s AND reverses = %s LIMIT 1",
+        (provider, event_id),
+    ).fetchone()
+    return row is not None
+
+
+def told_event(conn: Conn, provider: str, event_id: str) -> tuple[bool, str | None]:
+    """Whether this provider's event was told, and the payment it recorded, if any."""
+    row = conn.execute(
+        "SELECT outcome, payment_id FROM payment_events WHERE provider = %s AND event_id = %s",
+        (provider, event_id),
+    ).fetchone()
+    if row is None:
+        return False, None
+    return True, row["payment_id"] if row["outcome"] == "recorded" else None
 
 
 def finish_event(

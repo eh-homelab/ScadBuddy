@@ -45,6 +45,9 @@ describe('OrderPage (#4249)', () => {
     const totals = screen.getByTestId('order-totals')
     expect(totals).toHaveTextContent('30.00')
     expect(totals).toHaveTextContent('35.00')
+    // #4955 step 4: the summary card names each charge on its own line.
+    expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
+    expect(within(totals).getByText('Shipping · Post')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
   })
 
