@@ -21,8 +21,8 @@ import {
 // or a gateway base URL plus the gateway's credential. Stored sealed in `ai_credentials` (db/migrations/), one row
 // each, in priority order: a query uses the first one that is usable and
 // falls back to the next (harness/fallback.ts). Only `kind`, `base_url`, the
-// last four characters and the row's health are ever read back out through a
-// route.
+// last four characters, the optional name (#3710) and the row's health are ever
+// read back out through a route.
 //
 // Health (#1093): `status` is `active`, `cooling_down` (rate limited until
 // `cooldown_until`) or `disabled` (refused for good until a person resets it
@@ -46,6 +46,8 @@ export type Credential =
 /** What routes may return. */
 export type CredentialSummary = {
   kind: CredentialKind
+  /** The person's label for it (#3710), or null; see `normaliseCredentialName`. */
+  name: string | null
   base_url: string | null
   last4: string
   updated_at: string
@@ -117,6 +119,12 @@ export type CredentialRepo = {
   reorder(ids: readonly string[]): Promise<StoredCredential[]>
   /** Makes a credential `active` again, ending a cooldown or a disable. */
   reset(id: string): Promise<StoredCredential | undefined>
+  /**
+   * Sets or clears a credential's name (#3710), and nothing else: the secret, its health and
+   * its epoch stay. Undefined when there is no such credential; CredentialError 400 for a name
+   * `normaliseCredentialName` refuses.
+   */
+  rename(id: string, name: string | null): Promise<StoredCredential | undefined>
   /** Records what a query learned; ignored (undefined) when the row is gone or its epoch moved on. */
   record(id: string, epoch: number, event: CredentialEvent): Promise<CredentialTransition | undefined>
 }
@@ -126,6 +134,8 @@ export type CredentialUpdate = {
   base_url?: string | null
   /** Omitted: keep the stored secret (see `put`). */
   secret?: string
+  /** Read by `create` only; `rename` changes the name of a stored one (#3710). */
+  name?: string | null
 }
 
 /** A request the store refuses; `status` is the HTTP status the route answers with. */
@@ -142,6 +152,30 @@ export class CredentialError extends Error {
 export const MAX_CREDENTIALS = 100
 
 export const TOO_MANY_MESSAGE = `at most ${MAX_CREDENTIALS} Claude credentials can be stored; delete one first`
+
+/** The most characters (code points) a credential's name has, after trimming (#3710). */
+export const CREDENTIAL_NAME_MAX = 60
+
+/**
+ * A credential's name as stored (#3710): trimmed, and null when nothing is left. It is
+ * shown in Settings only. It never goes into a log, an audit row or a prompt
+ * (`credentialLabel` leaves it out). It is refused (CredentialError 400) past
+ * CREDENTIAL_NAME_MAX characters, or with a control, format or line/paragraph separator
+ * character (\p{Cc}, \p{Cf}, \p{Zl}, \p{Zp}): a name is one line of plain text, and a bidi
+ * override could make a row read as another. The table's check repeats the length, trim
+ * and control-character rules.
+ */
+export function normaliseCredentialName(raw: string | null | undefined): string | null {
+  const name = (raw ?? '').trim()
+  if (!name) return null
+  if ([...name].length > CREDENTIAL_NAME_MAX) {
+    throw new CredentialError(`name must be at most ${CREDENTIAL_NAME_MAX} characters`, 400)
+  }
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) {
+    throw new CredentialError('name must be one line of plain text, with no control or formatting characters', 400)
+  }
+  return name
+}
 
 /** The id the single credential had before #1093; that row keeps it. */
 export const LEGACY_ROW_ID = 'default'
@@ -175,6 +209,7 @@ type Row = {
   id: string
   priority: number
   kind: CredentialKind
+  name: string | null
   base_url: string | null
   secret_sealed: Buffer
   dek_sealed: Buffer
@@ -217,6 +252,7 @@ function stored(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): StoredCredentia
     id: row.id,
     priority: row.priority,
     kind: row.kind,
+    name: row.name,
     base_url: row.base_url,
     last4: row.last4,
     updated_at: row.updated_at.toISOString(),
@@ -382,7 +418,7 @@ export class CredentialStore implements CredentialRepo {
   /** Rows as of the database's clock: an expired cooldown reads as `active`. */
   private async rows(db: Db, id?: string): Promise<StoredCredential[]> {
     const rows = await db<Omit<Row, 'secret_sealed' | 'dek_sealed'>[]>`
-      SELECT id, priority, kind, base_url, last4, updated_at, kek_id,
+      SELECT id, priority, kind, name, base_url, last4, updated_at, kek_id,
              get_byte(secret_sealed, 0) AS seal_version,
              CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
              CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
@@ -417,7 +453,7 @@ export class CredentialStore implements CredentialRepo {
 
   async revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
     const rows = await this.sql<Row[]>`
-      SELECT id, priority, kind, base_url, last4, updated_at, kek_id, secret_sealed, dek_sealed,
+      SELECT id, priority, kind, name, base_url, last4, updated_at, kek_id, secret_sealed, dek_sealed,
              get_byte(secret_sealed, 0) AS seal_version,
              CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
              CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
@@ -467,12 +503,13 @@ export class CredentialStore implements CredentialRepo {
     const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_credentials`
     if ((count?.n ?? 0) >= MAX_CREDENTIALS) throw new CredentialError(TOO_MANY_MESSAGE, 409)
     const id = randomUUID()
+    const name = normaliseCredentialName(update.name)
     const plan = planPut(update, undefined, kek, id)
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
     const { kind, baseUrl, envelope, last4: tail } = plan.write
     await tx`
-      INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
-      VALUES (${id}, (SELECT COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), ${kind}, ${baseUrl},
+      INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed, dek_sealed, kek_id, last4)
+      VALUES (${id}, (SELECT COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), ${kind}, ${name}, ${baseUrl},
               ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail})`
     await notifyWarmEvict(tx, '*')
     return await this.one(tx, id)
@@ -524,6 +561,13 @@ export class CredentialStore implements CredentialRepo {
       WHERE id = ${id}`
     if (updated.count === 0) return undefined
     await notifyWarmEvict(this.sql, '*')
+    return await this.get(id)
+  }
+
+  async rename(id: string, name: string | null): Promise<StoredCredential | undefined> {
+    // No warm eviction: a Claude Code process never sees the name.
+    const updated = await this.sql`UPDATE ai_credentials SET name = ${normaliseCredentialName(name)} WHERE id = ${id}`
+    if (updated.count === 0) return undefined
     return await this.get(id)
   }
 

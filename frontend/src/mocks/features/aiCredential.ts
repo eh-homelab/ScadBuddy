@@ -1,9 +1,10 @@
 import { HttpResponse, delay, http } from 'msw'
-import type {
-  AiCredentialCreate,
-  AiCredentialEntry,
-  AiCredentialList,
-  AiCredentialSave,
+import {
+  AI_CREDENTIAL_NAME_MAX,
+  type AiCredentialCreate,
+  type AiCredentialEntry,
+  type AiCredentialList,
+  type AiCredentialSave,
 } from '../../api/aiCredential'
 
 /**
@@ -13,7 +14,9 @@ import type {
  * secret again), and the connection test's limits as the route has them: one test at a time, and
  * 10 s from the end of one to the start of the next, refused with 429 and a `Retry-After` of at
  * least 1 s. Like the service, it keeps only the last four characters of a secret, and none of a
- * short one. A secret containing `bad` fails its connection test.
+ * short one. A secret containing `bad` fails its connection test. A name (#3710) is trimmed, empty
+ * is none, and one past 60 characters or with a control or format character is refused, as agent
+ * `normaliseCredentialName` does.
  *
  * The seed has a working key first and a rate-limited gateway second, so the list shows both
  * states; `setCredentials` lets a test start from any list.
@@ -25,6 +28,7 @@ const COOLDOWN_MS = 10_000
 function entry(over: Partial<AiCredentialEntry> & Pick<AiCredentialEntry, 'id' | 'priority'>): AiCredentialEntry {
   return {
     kind: 'anthropic_api_key',
+    name: null,
     base_url: null,
     last4: '',
     updated_at: '2026-09-28T14:02:00Z',
@@ -129,6 +133,19 @@ function checked(body: AiCredentialSave): { baseUrl: string | null; secret?: str
   return { baseUrl, secret }
 }
 
+/** agent credentials.ts `normaliseCredentialName`: the stored name, or the refusal. */
+function named(raw: string | null | undefined): { name: string | null } | Response {
+  const name = (raw ?? '').trim()
+  if (!name) return { name: null }
+  if ([...name].length > AI_CREDENTIAL_NAME_MAX) {
+    return detail(`name must be at most ${AI_CREDENTIAL_NAME_MAX} characters`, 400)
+  }
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) {
+    return detail('name must be one line of plain text, with no control or formatting characters', 400)
+  }
+  return { name }
+}
+
 /** agent secrets.ts `last4()`: nothing for a secret shorter than 12 characters. */
 const last4 = (secret: string) => (secret.length >= 12 ? secret.slice(-4) : '')
 
@@ -144,6 +161,8 @@ export const handlers = [
     const ok = checked(body)
     if (ok instanceof Response) return ok
     if (ok.secret === undefined) return detail('secret: Required', 400)
+    const name = named(body.name)
+    if (name instanceof Response) return name
     // Agent MAX_CREDENTIALS and TOO_MANY_MESSAGE.
     if (state.credentials.length >= 100) {
       return detail('at most 100 Claude credentials can be stored; delete one first', 409)
@@ -152,6 +171,7 @@ export const handlers = [
       id: `c${state.nextId++}`,
       priority: state.credentials.length,
       kind: body.kind,
+      name: name.name,
       base_url: ok.baseUrl,
       last4: last4(ok.secret),
       updated_at: new Date().toISOString(),
@@ -208,6 +228,16 @@ export const handlers = [
     if (!find(params.id)) return detail(`no credential ${String(params.id)}`, 404)
     state.credentials = state.credentials.filter((c) => c.id !== params.id).map((c, priority) => ({ ...c, priority }))
     return HttpResponse.json(listView())
+  }),
+
+  http.put(`${base}/entries/:id/name`, async ({ params, request }) => {
+    const current = find(params.id)
+    if (!current) return detail(`no credential ${String(params.id)}`, 404)
+    const name = named(((await request.json()) as { name: string | null }).name)
+    if (name instanceof Response) return name
+    const renamed: AiCredentialEntry = { ...current, name: name.name }
+    state.credentials = state.credentials.map((c) => (c.id === renamed.id ? renamed : c))
+    return HttpResponse.json(renamed)
   }),
 
   http.post(`${base}/entries/:id/reset`, ({ params }) => {

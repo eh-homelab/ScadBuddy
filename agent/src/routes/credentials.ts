@@ -20,8 +20,8 @@ import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/credentials (issue #255; several credentials since #1093). The
 // ingress routes /api/v1/ai/* to this service (spec §4.2). No route ever
-// returns a secret: reads give `kind`, `base_url`, the last four characters
-// and the credential's health (spec §8.6, "never returned by any route").
+// returns a secret: reads give `kind`, `base_url`, the last four characters,
+// the optional name (#3710) and the credential's health (spec §8.6, "never returned by any route").
 // Error bodies use `{ detail }`, the backend's FastAPI shape, so the frontend
 // handles both services' errors the same way.
 //
@@ -35,9 +35,9 @@ import { ready, type RouteModule } from './module.js'
 //     priority: PUT saves over it (creating one when there is none), DELETE
 //     removes it (so the next one moves up), test tests it.
 //
-//   /api/v1/ai/credentials/entries[/:id[/test|/reset]], /api/v1/ai/credentials/order
-//     Every credential (#1093): list, create, save, delete, test, reset, and
-//     the order a query tries them in.
+//   /api/v1/ai/credentials/entries[/:id[/test|/reset|/name]], /api/v1/ai/credentials/order
+//     Every credential (#1093): list, create, save, delete, test, reset, rename
+//     (#3710), and the order a query tries them in.
 
 export type CredentialRouteDeps = {
   /** Undefined when there is no database (spec §9, "No database"). */
@@ -76,6 +76,8 @@ export type CredentialEntryView = {
   /** 0 is tried first. */
   priority: number
   kind: StoredCredential['kind']
+  /** The person's label for it (#3710), or null: plain text, at most CREDENTIAL_NAME_MAX characters. */
+  name: string | null
   base_url: string | null
   last4: string
   updated_at: string
@@ -108,7 +110,12 @@ const SaveBody = z.strictObject({
   secret: z.string().min(1).max(4096).optional(),
 })
 
-const CreateBody = SaveBody.extend({ secret: z.string().min(1).max(4096) })
+/** `name` is bounded again by `normaliseCredentialName` after trimming; this bounds the body. */
+const NameField = z.string().max(1024).nullable()
+
+const CreateBody = SaveBody.extend({ secret: z.string().min(1).max(4096), name: NameField.optional() })
+
+const RenameBody = z.strictObject({ name: NameField })
 
 const OrderBody = z.strictObject({ ids: z.array(z.string().min(1).max(64)).max(MAX_CREDENTIALS) })
 
@@ -151,6 +158,7 @@ export function entryView(stored: StoredCredential, kek: KekStatus): CredentialE
     id: stored.id,
     priority: stored.priority,
     kind: stored.kind,
+    name: stored.name,
     base_url: stored.base_url,
     last4: stored.last4,
     updated_at: stored.updated_at,
@@ -232,10 +240,11 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     }
   }
 
-  const update = (body: z.infer<typeof SaveBody>) => ({
+  const update = (body: z.infer<typeof SaveBody> & { name?: string | null | undefined }) => ({
     kind: body.kind,
     ...(body.base_url === undefined ? {} : { base_url: body.base_url }),
     ...(body.secret === undefined ? {} : { secret: body.secret }),
+    ...(body.name === undefined ? {} : { name: body.name }),
   })
   const kekOrUndefined = kek.ok ? kek.kek : undefined
 
@@ -320,6 +329,17 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
       return c.json(listView(await repo.list(), kek))
     }),
   )
+
+  // #3710: sets or clears the name only, so no secret is typed again.
+  app.put(`${entries}/:id/name`, limit, async (c) => {
+    const parsed = await jsonBody(c, RenameBody)
+    if (!parsed.ok) return parsed.response
+    return withStore(c, async (repo) => {
+      const id = c.req.param('id')
+      const renamed = await repo.rename(id, parsed.body.name)
+      return renamed ? c.json(entryView(renamed, kek)) : c.json({ detail: `no credential ${id}` }, 404)
+    })
+  })
 
   app.post(`${entries}/:id/reset`, (c) =>
     withStore(c, async (repo) => {

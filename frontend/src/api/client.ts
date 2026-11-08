@@ -3424,6 +3424,13 @@ export const api = {
   deleteAiCredential: (id: string) =>
     request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
 
+  /** Sets the name (#3710), or clears it with null or ''; the key and its status stay. */
+  renameAiCredential: (id: string, name: string | null) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/name`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    }),
+
   /** Back to `active`, for one disabled or cooling down. */
   resetAiCredential: (id: string) =>
     request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),

@@ -413,6 +413,8 @@ and [`agent/src/credentials.ts`](../../agent/src/credentials.ts).
 - **Never returned.** No route returns the secret. Reads give `kind`, `base_url` and the
   last four characters, and none for a secret under 12 characters (`view()` in
   [`agent/src/routes/credentials.ts`](../../agent/src/routes/credentials.ts); `last4()`).
+  The list (`entryView()`) also gives each credential's optional name (#3710). The name
+  is not secret, is not in the AAD, and never goes into a log, an audit row or a prompt.
 - **Wrong key vs. tampering.** `openSecret()` compares `kek_id` first, so "wrong key"
   is reported as such. Anything else that fails authentication raises `SealError`,
   which never carries plaintext.
