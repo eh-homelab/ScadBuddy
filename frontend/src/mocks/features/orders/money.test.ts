@@ -53,5 +53,35 @@ describe('the mock money rules (#5281, `orders/money.py`)', () => {
     await api.reopenOrder(ORDER_ACCEPTED)
     expect(state.paymentRequests.filter((r) => r.order_id === ORDER_ACCEPTED && r.status === 'open').map((r) => [r.kind, r.amount_minor])).toEqual([['balance', 3500]])
   })
+
+  // #5726 review: the auto row is matched by its id or `auto` only.
+  it('keeps a typed tax with the auto label as a typed tax', async () => {
+    setMockSettings({ ...mockSettings(), orders_tax_percent: '10', orders_tax_shipping: true })
+    await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }] })
+    await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }, { kind: 'tax', label: 'Tax 10%', amount_minor: 50 }] })
+    expect(autoTax()).toEqual([])
+    expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT && c.kind === 'tax').map((c) => [c.label, c.amount_minor, c.auto])).toEqual([['Tax 10%', 50, false]])
+  })
+
+  // #5726 review: only rules skipped for the currency would apply: set it by hand.
+  it('refuses the policy when only rules in the shop currency would apply', async () => {
+    state.orders.find((o) => o.id === ORDER_DRAFT)!.currency = 'EUR'
+    setMockSettings({ ...mockSettings(), orders_deposit_policy: [{ criterion: 'total_above', above_minor: 0, amount_minor: 2000 }] })
+    const refused = await api.applyDepositPolicy(ORDER_DRAFT).then(() => null, (error: unknown) => error as ApiError)
+    expect(refused?.problem.type).toBe(`${PROBLEMS}deposit_policy_currency`)
+    expect(state.orders.find((o) => o.id === ORDER_DRAFT)!.deposit_minor ?? null).toBeNull()
+  })
+
+  // #5726 review: an option that ships keeps the order's shipping address.
+  it('refuses to clear the shipping address while an option that ships is set', async () => {
+    setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }, { id: 'pickup', label: 'Pickup', amount_minor: 0, ships: false }] })
+    await api.setShippingOption(ORDER_DRAFT, 'post')
+    const refused = await api.updateOrder(ORDER_DRAFT, { shipping_address_id: null }).then(() => null, (error: unknown) => error as ApiError)
+    expect(refused?.problem.type).toBe(`${PROBLEMS}shipping_address_required`)
+    // Cleared together with the charges, it goes: the edit's charges name no option that ships.
+    await api.updateOrder(ORDER_DRAFT, { shipping_address_id: null, charges: [] })
+    await api.setShippingOption(ORDER_DRAFT, 'pickup')
+    await expect(api.updateOrder(ORDER_DRAFT, { shipping_address_id: null })).resolves.toBeDefined()
+  })
 })
 

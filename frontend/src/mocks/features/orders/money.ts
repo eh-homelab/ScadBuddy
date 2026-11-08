@@ -118,12 +118,33 @@ export function retax(orderId: string): void {
 }
 
 /**
- * `Lifecycle._typed`: the charges a replace writes, less the auto row sent back as read
- * (`auto`, its `id`, or a `tax` charge with its label).
+ * `Lifecycle._typed`: the charges a replace writes, less the auto row sent back as read,
+ * marked by `auto` or its `id`. Any other `tax` charge, whatever its label, is typed.
  */
-export function typedCharges<T extends { kind: string; label: string; id?: string | null; auto?: boolean | null }>(orderId: string, charges: T[]): T[] {
+export function typedCharges<T extends { id?: string | null; auto?: boolean | null }>(orderId: string, charges: T[]): T[] {
   const auto = chargesOf(orderId).find((c) => c.auto)
-  return charges.filter((c) => !(c.auto || (auto && (c.id === auto.id || (c.kind === 'tax' && c.label === auto.label)))))
+  return charges.filter((c) => !(c.auto || (auto && c.id === auto.id)))
+}
+
+/** `money.skipped_for_currency`: the rules `depositFor` skips only for the order's currency. */
+function skippedForCurrency(policy: readonly DepositRule[], { hasRequest, firstOrder, currency, shopCurrency }: { hasRequest: boolean; firstOrder: boolean; currency: string; shopCurrency: string }): number[] {
+  if (currency === shopCurrency) return []
+  const applies = (rule: DepositRule) => (rule.criterion === 'has_request' ? hasRequest : firstOrder)
+  return policy.flatMap((rule, index) => (rule.criterion === 'total_above' || (rule.amount_minor != null && applies(rule)) ? [index] : []))
+}
+
+/**
+ * `Lifecycle._no_option_ships`: clearing the shipping address is refused while a shipping
+ * option that ships stays on the order (the edit's `charges`, else the order's own).
+ */
+export function noOptionShips(order: Order, charges: { shipping_option_id?: string | null }[] | null | undefined) {
+  const kept = charges ?? chargesOf(order.id)
+  const named = new Set(kept.map((c) => c.shipping_option_id).filter((id): id is string => id != null))
+  if (named.size === 0) return
+  const ships = (mockSettings().storefront_shipping_options ?? []).filter((o) => named.has(o.id) && o.ships)
+  if (ships.length > 0) {
+    throw new Refused('shipping_address_required', `order ${order.number} ships by ${ships[0]!.label}: it keeps its shipping address; choose an option that does not ship, or remove the option, first`)
+  }
 }
 
 /** `replace_charges`: the typed charges replaced whole; the auto row stays. */
@@ -195,7 +216,7 @@ function depositEditable(order: Order) {
 }
 
 /** `Lifecycle._set_deposit`. */
-function setDeposit(order: Order, amount: number | null, policy = false): Order {
+function setDeposit(order: Order, amount: number | null, policy = false, skipped: number[] = []): Order {
   const deposits = requestsOf(order.id).filter((r) => r.kind === 'deposit')
   if (deposits.some((r) => r.status === 'pending')) throw new Refused('payment_in_flight', `order ${order.number}'s deposit payment is in flight; wait until it settles`)
   const due = amount === null ? 0 : amount - totalsOf(order).paid_minor
@@ -211,7 +232,7 @@ function setDeposit(order: Order, amount: number | null, policy = false): Order 
   order.deposit_minor = amount
   order.deposit_waived_reason = null
   order.updated_at = now()
-  event(order, 'deposit.set', { amount_minor: amount, ...(policy ? { policy: true } : {}) })
+  event(order, 'deposit.set', { amount_minor: amount, ...(policy ? { policy: true } : {}), ...(skipped.length > 0 ? { skipped } : {}) })
   if (due > 0) openRequest(order, 'deposit', due)
   return order
 }
@@ -243,14 +264,22 @@ export const handlers = [
       depositEditable(order)
       const settings = mockSettings()
       const items = state.items.filter((i) => i.order_id === order.id)
-      const amount = depositFor(settings.orders_deposit_policy ?? [], {
-        total: totalsOf(order).total_minor,
+      const policy = settings.orders_deposit_policy ?? []
+      const context = {
         hasRequest: items.some((i) => i.kind === 'request' && i.status !== 'cancelled'),
         firstOrder: order.customer_id == null || !state.orders.some((o) => o.customer_id === order.customer_id && o.id !== order.id && o.accepted_at != null),
         currency: order.currency,
         shopCurrency: settings.orders_currency ?? 'USD',
-      })
-      return setDeposit(order, amount, true)
+      }
+      const amount = depositFor(policy, { total: totalsOf(order).total_minor, ...context })
+      const skipped = skippedForCurrency(policy, context)
+      if (amount === null && skipped.length > 0) {
+        throw new Refused(
+          'deposit_policy_currency',
+          `order ${order.number} is in ${order.currency}: the deposit policy's rules [${skipped.join(', ')}] that would apply are in ${context.shopCurrency}; set the deposit by hand`,
+        )
+      }
+      return setDeposit(order, amount, true, skipped)
     }),
   ),
   http.post('/api/v1/orders/:id/deposit/waive', async ({ request, params }) => {

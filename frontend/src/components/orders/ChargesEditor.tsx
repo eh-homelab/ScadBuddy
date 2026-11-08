@@ -69,8 +69,8 @@ export function ChargesEditor({
   useEffect(() => {
     told.current?.(dirty)
   }, [dirty])
-  // The backend takes a `tax` row with the auto row's label for the auto row sent back as
-  // read, and drops it (`Lifecycle._typed`): such a row needs another label.
+  // A typed tax beside the auto row with the same label would read as one line on the
+  // order and its summary: it needs another label.
   const clashes = (row: Row) => auto !== undefined && row.kind === 'tax' && row.label.trim() === auto.label
   const clash = rows.some(clashes)
   const autoRow = auto && (
@@ -183,7 +183,7 @@ export function ChargesEditor({
             </Button>
             {clashes(row) && auto && (
               <p role="alert" aria-label={`Charge ${index + 1} label problem`} className="w-full text-xs text-warn">
-                {`A typed tax needs a label other than “${auto.label}”, the automatic tax; this tax then replaces it.`}
+                {`Two tax lines must not share a label: “${auto.label}” is the automatic tax. Give this one another label.`}
               </p>
             )}
           </div>

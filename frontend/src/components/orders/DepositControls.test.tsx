@@ -94,5 +94,15 @@ describe('DepositControls (#5281)', () => {
     await user.click(screen.getByRole('button', { name: 'Proceed without deposit' }))
     expect(screen.getByLabelText('Reason')).toHaveValue('')
   })
+
+  // #5726 review: `deposit_policy_currency`, as the backend words it.
+  it("says why the policy cannot set the deposit of an order in another currency", async () => {
+    state.orders.find((o) => o.id === ORDER_DRAFT)!.currency = 'EUR'
+    setMockSettings({ ...mockSettings(), orders_deposit_policy: [{ criterion: 'total_above', above_minor: 0, amount_minor: 2000 }] })
+    const { user } = renderPage(<Host id={ORDER_DRAFT} />)
+    await user.click(await screen.findByRole('button', { name: 'Use the policy' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/is in EUR: the deposit policy's rules \[0\] that would apply are in USD; set the deposit by hand/)
+    expect(screen.getByText('No deposit.')).toBeInTheDocument()
+  })
 })
 

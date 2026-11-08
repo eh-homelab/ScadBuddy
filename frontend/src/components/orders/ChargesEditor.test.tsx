@@ -163,7 +163,7 @@ describe('ChargesEditor', () => {
       )
     })
 
-    // Review fix round 1, important 1: the backend drops a typed tax with the auto row's label.
+    // Review fix round 1, important 1; #5726 review: two tax lines with one label read as one.
     it("refuses a typed tax with the auto row's label until it has another", async () => {
       setMockSettings({ ...mockSettings(), orders_tax_percent: '10', orders_tax_shipping: true })
       await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }] })
@@ -175,7 +175,7 @@ describe('ChargesEditor', () => {
       await choose(user, within(region).getByRole('combobox', { name: 'Charge 2 kind' }), 'tax')
       await user.type(within(region).getByLabelText('Charge 2 label'), 'Tax 10%')
       await user.type(within(region).getByLabelText('Charge 2 amount'), '0')
-      expect(within(region).getByRole('alert', { name: 'Charge 2 label problem' })).toHaveTextContent('A typed tax needs a label other than “Tax 10%”, the automatic tax; this tax then replaces it.')
+      expect(within(region).getByRole('alert', { name: 'Charge 2 label problem' })).toHaveTextContent('Two tax lines must not share a label: “Tax 10%” is the automatic tax. Give this one another label.')
       expect(within(region).getByRole('button', { name: 'Save charges' })).toBeDisabled()
       await user.clear(within(region).getByLabelText('Charge 2 label'))
       await user.type(within(region).getByLabelText('Charge 2 label'), 'Sales tax')

@@ -32,7 +32,7 @@ import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
 import { archiveCopies, pastPrint } from './pastPrints'
-import { balanceUnpaid, closeDeposit, openBalance, replaceCharges, retax, typedCharges } from './money'
+import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -1027,6 +1027,7 @@ export const handlers = [
         if (typeof wanted === 'string' && !owner?.addresses.some((a) => a.id === wanted)) {
           return fieldProblem(request, field, `no address ${wanted} of the order's customer`)
         }
+        if (field === 'shipping_address_id' && field in body && wanted == null) noOptionShips(order, body.charges)
         if (field in body) order[field] = wanted ?? null
       }
       if (body.notes != null) order.notes = body.notes

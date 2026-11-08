@@ -446,5 +446,15 @@ describe('OrderPage, the shipping option and the charges (#5281)', () => {
     await waitFor(() => expect(within(charges).getByLabelText('Charge 1 label')).toHaveValue('Tracked post'))
     expect(within(charges).getByRole('button', { name: 'Add charge' })).toBeEnabled()
   })
+
+  // #5726 review: an option that ships keeps the address; the refusal shows on the page.
+  it('shows why the shipping address cannot be cleared while the option ships', async () => {
+    await api.setShippingOption(ORDER_DRAFT, 'post')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await choose(user, screen.getByRole('combobox', { name: 'Shipping address' }), 'No address')
+    expect(await screen.findByText(/ships by Tracked post: it keeps its shipping address/)).toBeInTheDocument()
+    expect(state.orders.find((o) => o.id === ORDER_DRAFT)!.shipping_address_id).not.toBeNull()
+  })
 })
 
