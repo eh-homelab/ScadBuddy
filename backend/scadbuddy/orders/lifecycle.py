@@ -71,7 +71,7 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.money import NO_RULES, OrderRules
+from scadbuddy.orders.money import NO_RULES, OrderRules, tax_base, tax_minor
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartRow,
@@ -571,6 +571,30 @@ class Lifecycle:
         self._event(conn, order, by, "order.status", from_status=order.status, to=status)
         return moved
 
+    def _retax(self, conn: Conn, order: Order, rules: OrderRules | None = None) -> None:
+        """The order's auto tax row (#5281, storefront spec §9) as its rows now say, on an
+        order `draft` through `ready`: ``orders_tax_percent`` of the items' subtotal, plus
+        the shipping charges with ``orders_tax_shipping``, rounded half up. None at 0
+        percent, at an amount of 0, or while a typed `tax` charge stands. A shipped or
+        ended order's row stays as it was. Each transition that changes the items, their
+        quotes or the charges calls it once, before it rederives; ``rules`` is the
+        transition's one read of them, when it has one."""
+        if order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
+            return
+        rules = self.rules() if rules is None else rules
+        typed = [charge for charge in self.store.charges(order.id, conn=conn) if not charge.auto]
+        amount = 0
+        if rules.tax_percent > 0 and not any(charge.kind == "tax" for charge in typed):
+            items = totals_of(self.store, conn, order.id).subtotal_minor
+            base = tax_base(items, typed, tax_shipping=rules.tax_shipping)
+            amount = tax_minor(base, rules.tax_percent)
+        self.store.set_auto_tax(
+            conn,
+            order.id,
+            label=f"Tax {rules.tax_percent}%",
+            amount_minor=amount or None,
+        )
+
     # -- orders (§3.2) --------------------------------------------------------------------
 
     def create_order(
@@ -665,6 +689,7 @@ class Lifecycle:
             if edit.charges is not None:
                 self.store.replace_charges(conn, order.id, edit.charges)
                 self._event(conn, order, by, "charges.replaced", count=len(edit.charges))
+                self._retax(conn, order)
         self._told(_Change(order))
         return order
 
@@ -695,7 +720,9 @@ class Lifecycle:
                 )
             self._not_on_hold(order)
             before = self.store.charges(order.id, conn=conn)
-            after = self.store.replace_charges(conn, order.id, charges)
+            self.store.replace_charges(conn, order.id, charges)
+            self._retax(conn, order)
+            after = self.store.charges(order.id, conn=conn)
             self._event(
                 conn,
                 order,
@@ -705,6 +732,65 @@ class Lifecycle:
                 before=[_charge_line(charge) for charge in before],
                 after=[_charge_line(charge) for charge in after],
             )
+            order = self.store.order(order.id, conn=conn) or order
+        self._told(_Change(order))
+        return order
+
+    def set_shipping_option(self, order_id: str, by: Actor, option_id: str | None) -> Order:
+        """The shipping option (#5281, storefront spec §8) as the order's one `shipping`
+        charge: every `shipping` charge replaced by the option's label and price, naming
+        it; None removes them. The other charges keep their order. Only while `draft` or
+        `quoted`, as ``edit_order``'s charges (`order_not_editable` past it, naming the
+        route after acceptance). An id not in ``storefront_shipping_options`` is a 422
+        on ``option_id``; an option that ships needs the order's shipping address
+        (`shipping_address_required`), a pickup does not. The audit row is
+        ``shipping.option_set``."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            if order.status not in OPEN_FOR_EDITS:
+                route = (
+                    f"; change the charges with PUT /orders/{order.id}/charges/after-acceptance"
+                    if order.status in TAKES_ITEMS
+                    else ""
+                )
+                raise LifecycleError(
+                    "order_not_editable",
+                    f"order {order.number} is {order.status}: its shipping option is"
+                    f" set while draft or quoted{route}",
+                )
+            rules = self.rules()
+            charges: list[ChargeInput] = [
+                charge
+                for charge in self.store.charges(order.id, conn=conn)
+                if not charge.auto and charge.kind != "shipping"
+            ]
+            if option_id is not None:
+                option = next((o for o in rules.shipping_options if o.id == option_id), None)
+                if option is None:
+                    raise LifecycleError(
+                        "option_id",
+                        f"option_id: no shipping option {option_id} (shipping_option_not_found)",
+                        unprocessable=True,
+                    )
+                if option.ships and order.shipping_address_id is None:
+                    raise LifecycleError(
+                        "shipping_address_required",
+                        f"order {order.number} has no shipping address: {option.label} ships"
+                        " it; set the address first, or choose an option that does not ship",
+                    )
+                charges.append(
+                    ChargeInput(
+                        kind="shipping",
+                        label=option.label,
+                        amount_minor=option.amount_minor,
+                        shipping_option_id=option.id,
+                    )
+                )
+            self.store.replace_charges(conn, order.id, charges)
+            self._event(conn, order, by, "shipping.option_set", option_id=option_id)
+            self._retax(conn, order, rules)
+            order = self._rederive(conn, order, by)
             order = self.store.order(order.id, conn=conn) or order
         self._told(_Change(order))
         return order
@@ -1355,6 +1441,7 @@ class Lifecycle:
                     attempted,
                 )
             reopened = self.store.reopen_order_row(conn, order.id, target)
+            self._retax(conn, reopened)
             self._event(
                 conn,
                 order,
@@ -1404,6 +1491,7 @@ class Lifecycle:
                 )
             item = self.store.update_item(conn, item.id, status=status)
             self._event(conn, order, by, "item.reopened", item_id=item.id, to=status)
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
             self._hold(conn, self._standing(conn, item.id))
         self._told(_Change(order, [(item, None)]))
@@ -1701,6 +1789,7 @@ class Lifecycle:
                 output_id=output_id,
                 after_acceptance=after_acceptance,
             )
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return revision
@@ -1876,6 +1965,8 @@ class Lifecycle:
             items = [
                 self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
             ]
+            # Once for the whole add, not once per item.
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None) for item in items]))
         return items
@@ -2202,6 +2293,7 @@ class Lifecycle:
             if price is not None:
                 item = self._custom_price(conn, order, item, price, by, accept=accept)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -2294,6 +2386,7 @@ class Lifecycle:
                     items=[item.id],
                 )
             self._event(conn, order, by, "item.deleted", item_id=item.id)
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
 
@@ -2307,6 +2400,7 @@ class Lifecycle:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             item = self.store.update_item(conn, item.id, status="cancelled")
             self._event(conn, order, by, "item.cancelled", item_id=item.id)
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
             # §3.4: cancelling the item releases every quote's sliced file.
             released = self._quote_ids(conn, [item.id])
@@ -2373,6 +2467,7 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="quoted")
             changed.append((item, None))
         self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+        self._retax(conn, order)
         order = self._rederive(conn, order, by)
         released = [
             other.id
@@ -2521,6 +2616,7 @@ class Lifecycle:
             conn, item.id, status="approved", revised_after_acceptance=False
         )
         self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+        self._retax(conn, order)
         order = self._rederive(conn, order, by)
         released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
         return order, item, released
