@@ -171,6 +171,18 @@ describe('order tools (#4249)', () => {
     })
   })
 
+  it('writes the total from its integer, never through a float (review of #5682)', () => {
+    const order = (minor_exponent: number) => ({ number: 'ORD-1', currency: 'X', minor_exponent })
+    const text = (total_minor: number, exponent: number) =>
+      composeNotice('accepted', { order: order(exponent), totals: { total_minor } }, { display_name: 'Ada', contacts: [] })
+        .text
+    // 9007199254740001 / 100 is 90071992547400.02 as a float.
+    expect(text(9007199254740001, 2)).toContain('(90071992547400.01 X)')
+    expect(text(5, 3)).toContain('(0.005 X)')
+    expect(text(-250, 2)).toContain('(-2.50 X)')
+    expect(text(1200, 0)).toContain('(1200 X)')
+  })
+
   it('says when a customer has no contacts to send a notice to (review of #5682)', () => {
     const detail = { order: { number: 'ORD-1', currency: 'USD', minor_exponent: 2 }, totals: { total_minor: 100 } }
     const notice = composeNotice('ready', detail, { display_name: 'Ada', contacts: [] })

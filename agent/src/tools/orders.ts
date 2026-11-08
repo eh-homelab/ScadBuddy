@@ -61,6 +61,16 @@ interface NoticeCustomer {
   contacts: { kind: string; value: string; primary?: boolean }[]
 }
 
+/** `minor` integer units as a major amount with `exponent` places, from the integer's
+ *  digits: a division through a float misplaces the last digit of a large total
+ *  (review of #5682). */
+function majorText(minor: number, exponent: number): string {
+  const sign = minor < 0 ? '-' : ''
+  const digits = String(Math.abs(minor)).padStart(exponent + 1, '0')
+  if (exponent === 0) return `${sign}${digits}`
+  return `${sign}${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`
+}
+
 /** The message for `template`, addressed to the customer's primary contacts (every
  *  contact when none is primary). Plain text, never sent from here. */
 export function composeNotice(
@@ -77,7 +87,7 @@ export function composeNotice(
   warning?: string
 } {
   const { number, currency, minor_exponent } = detail.order
-  const total = `${(detail.totals.total_minor / 10 ** minor_exponent).toFixed(minor_exponent)} ${currency}`
+  const total = `${majorText(detail.totals.total_minor, minor_exponent)} ${currency}`
   const lines: Record<NotifyTemplate, [string, string]> = {
     quoted: [`Your quote for order ${number}`, `Your quote for order ${number} is ready: ${total}. Reply to accept it.`],
     accepted: [`Order ${number} accepted`, `We have accepted order ${number} (${total}) and will start on it.`],
