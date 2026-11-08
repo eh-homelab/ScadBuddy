@@ -178,6 +178,8 @@ def _refusal(status: int, found: Mapping[str, Any]) -> _RefusedError:
 class SquareProvider:
     id = "square"
     label = "Square"
+    #: A location takes payments in one currency.
+    reports_currency = True
     fields: Sequence[ProviderField] = (
         ProviderField(
             name="environment", label="Environment (sandbox or production)", secret=False
