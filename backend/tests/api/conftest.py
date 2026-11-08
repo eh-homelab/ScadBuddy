@@ -213,13 +213,14 @@ def app(settings: Settings) -> FastAPI:
     return create_app(settings)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """#5754: the app's own payment-close sweep does nothing. The prune Schedule runs it
     once at boot (`PRUNE_SWEEPS`, `ensure_workflow_schedule`'s trigger), with the
     sweeps off too, at a time the test does not choose. It claims a due page as the
     test's own `Payments.retry_closes` does, so the test's next call finds the page not
-    due, or closed already. A test that drives `retry_closes` itself takes this."""
+    due, or closed already. Every api test gets this: none relies on the app's own
+    close sweep, and a test that drives `retry_closes` itself must not race it."""
 
     async def off(state: AppState) -> None:
         return None

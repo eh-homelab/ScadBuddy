@@ -38,7 +38,7 @@ def fake_status(client: TestClient) -> dict[str, Any]:
     return next(s for s in found if s["id"] == "fake")
 
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("app_payment_sweep_off")]
+pytestmark = pytest.mark.requires_postgres
 
 HOOK = "/api/v1/payments/webhooks/fake"
 

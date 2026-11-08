@@ -24,7 +24,7 @@ from scadbuddy.payments.store import CLOSE_GIVE_UP_ATTEMPTS
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("app_payment_sweep_off")]
+pytestmark = pytest.mark.requires_postgres
 
 FAKE_CONNECT = {"settings": {"account": "a"}, "secrets": {"signing_secret": "s3cret"}}
 PROBLEMS = "https://scadbuddy.dev/problems/orders/"
