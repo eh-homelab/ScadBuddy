@@ -61,7 +61,8 @@ function processKey(request: string | null): string | null {
  * `part_settings` alone does not read the preset again. A check that asked and got none
  * (`process_part_settings: null`: the preset could not be read, or the check refused
  * first) does not count, so the next check asks again. A dialog that stops asking
- * (it closed) drops what was read, so it reads the preset again when it opens again.
+ * (it closed, its source takes no settings per part, or its choices are not loaded)
+ * drops what was read, so it reads the preset again when it asks again.
  */
 export function usePrintCheck(
   source: PrintSource | undefined,
@@ -77,7 +78,10 @@ export function usePrintCheck(
   const [read, setRead] = useState<Answer | null>(null)
   // #5698: no values are asked for while the dialog is closed (its controls are not
   // shown), so what was read is dropped then, and the dialog reads the preset again
-  // when it opens again: a preset edited in Bambuddy meanwhile is picked up.
+  // when it opens again: a preset edited in Bambuddy meanwhile is picked up. The same
+  // happens while it is open, when it stops asking because the source takes no settings
+  // per part (a sliced file) or its choices are not loaded yet (`PrintPicker`
+  // `takesParts`); the next check that asks reads the preset once more.
   if (!processValues && read !== null) setRead(null)
   const readNow = useLatest(read)
   const state = useAsync<Answer | null>(async () => {
