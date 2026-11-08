@@ -154,7 +154,8 @@ def test_a_crud_refusal_passes_through_with_its_retry_after(
     assert r.status_code == 429
     assert r.headers["Retry-After"] == "7"
     assert r.headers["content-type"] == "application/problem+json"
-    assert r.json() == limited
+    # The edge's own path, not the CRUD route's.
+    assert r.json() == {**limited, "instance": "/api/store/v1/listings"}
 
 
 def test_a_trusted_proxy_names_the_client_and_is_parsed_once(

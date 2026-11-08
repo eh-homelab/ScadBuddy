@@ -3,8 +3,12 @@ database code: the edge imports it, and the edge never imports `scadbuddy.orders
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
+#: A listing id (``gen_random_uuid()::text``). Both sides answer any other 404
+#: ``listing_not_found`` before a lookup.
+LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 #: The visitor id the edge verified in the cookie: 32 random bytes, URL-safe base64.
 VISITOR_HEADER: Final = "X-ScadBuddy-Visitor"
 #: The browser's address as the edge found it (`core/proxies.py` `client_address`).

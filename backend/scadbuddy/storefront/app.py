@@ -14,7 +14,8 @@ Its lifespan waits until the CRUD service serves every area the edge calls
 (`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait, and the edge then
 closes its client and never serves. A CRUD route's refusal
 with a public storefront problem (`wire.py` `public_problem`, a render limit's 429 among
-them) is answered with its status, problem and ``Retry-After``; any other refusal is
+them) is answered with its status, problem (its ``instance`` the edge's own path) and
+``Retry-After``; any other refusal is
 logged and answered 502 with no detail, since it names the edge's own fault (a
 credential, a header). A CRUD service out of reach past the client's budget is a 503.
 """
@@ -125,8 +126,10 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
             )
             return problem_response(request, 502, "The shop could not answer this request.")
         headers = {"Retry-After": error.retry_after} if error.retry_after else None
+        # The edge's own path: the CRUD route's would tell a visitor the internal one.
+        shown = {**error.problem, "instance": request.url.path}
         return JSONResponse(
-            error.problem, status_code=error.status, headers=headers, media_type=PROBLEM_MEDIA_TYPE
+            shown, status_code=error.status, headers=headers, media_type=PROBLEM_MEDIA_TYPE
         )
 
     @app.exception_handler(CrudUnavailableError)

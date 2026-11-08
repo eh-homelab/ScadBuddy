@@ -135,11 +135,10 @@ class ListingOrder(BaseModel):
 
 class _Shown(BaseModel):
     """What the page shows beside a bound: the schema's label (its caption, else its
-    name), help and group, and whether it is a ``// color`` parameter, whose choices are
-    the colours of the listing's filaments."""
+    name) and group, and whether it is a ``// color`` parameter, whose choices are the
+    colours of the listing's filaments. The schema has no help text to show."""
 
     label: str
-    help: str | None = None
     group: str = ""
     colour: bool = False
 
@@ -149,7 +148,9 @@ class PublicNumber(NumberBound, _Shown):
 
 
 class PublicChoice(ChoiceBound, _Shown):
-    pass
+    #: A colour's choices are the listing filaments the price book still has, so none
+    #: may be left.
+    choices: list[ParamValue]
 
 
 class PublicText(TextBound, _Shown):

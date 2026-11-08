@@ -5,8 +5,10 @@ against `orders/reference.py` `resolve_reference` needs git and the API: it is i
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -16,9 +18,16 @@ from scadbuddy.orders.storefront.inputs import (
     listing_reference,
     listing_values,
 )
-from scadbuddy.orders.storefront.wire import Listing, ListingSnapshot
+from scadbuddy.orders.storefront.listings import public_listing
+from scadbuddy.orders.storefront.wire import (
+    Listing,
+    ListingSnapshot,
+    PublicChoice,
+    PublicListing,
+)
 from scadbuddy.render.job_models import render_key
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
+from scadbuddy.store.content import ContentStore
 
 NOW = datetime(2026, 11, 7, tzinfo=UTC)
 PLA_RED = "pla-red"
@@ -113,6 +122,13 @@ def listing() -> Listing:
         ({"width": "40"}, "range"),
         ({"width": True}, "range"),
         ({"width": float("nan")}, "range"),
+        ({"width": 10**400}, "range"),
+        ({"width": -(10**400)}, "range"),
+        # A JSON number of 400 digits, as a body would parse it.
+        ({"width": json.loads("1" + "0" * 399)}, "range"),
+        ({"width": 10**16}, "range"),
+        ({"width": float("inf")}, "range"),
+        ({"shape": 10**400}, "choice"),
         ({"width": 20.5}, "step"),
         ({"count": 2.5}, "step"),
         ({"colour": "#00ff00"}, "colour"),
@@ -175,3 +191,29 @@ def test_a_slot_takes_only_a_listing_filament(listing: Listing, chosen: dict[int
     with pytest.raises(InputOutsideListingError) as refused:
         listing_reference(listing, values, chosen, filaments=FILAMENTS)
     assert (refused.value.name, refused.value.reason) == ("colours.0", "colour")
+
+
+def _public(listing: Listing, filaments: dict[str, Filament]) -> PublicListing:
+    # No media, so the content store is never read.
+    return asyncio.run(public_listing(cast(ContentStore, None), listing, filaments))
+
+
+def test_an_archived_filaments_colour_is_not_offered(listing: Listing) -> None:
+    without_blue = {k: v for k, v in FILAMENTS.items() if k != PLA_BLUE}
+    shown = _public(listing, without_blue)
+    assert [f.id for f in shown.colours] == [PLA_RED]
+    colour = shown.params["colour"]
+    assert isinstance(colour, PublicChoice) and colour.choices == ["#ff0000"]
+    # A choice of a parameter that is not a colour is left as it is.
+    shape = shown.params["shape"]
+    assert isinstance(shape, PublicChoice) and shape.choices == ["round"]
+
+
+def test_every_colour_archived_offers_none(listing: Listing) -> None:
+    colour = _public(listing, {PETG_GREEN: FILAMENTS[PETG_GREEN]}).params["colour"]
+    assert isinstance(colour, PublicChoice) and colour.choices == []
+
+
+def test_a_public_param_has_no_help(listing: Listing) -> None:
+    """The schema has no help text (`Parameter` has none), so the view shows none."""
+    assert "help" not in _public(listing, FILAMENTS).params["width"].model_dump()

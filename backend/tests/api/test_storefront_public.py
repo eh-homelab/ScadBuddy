@@ -150,7 +150,6 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "max": 80,
             "step": 1,
             "label": "width",
-            "help": None,
             "group": "Main",
             "colour": False,
         },
@@ -158,7 +157,6 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "kind": "choice",
             "choices": ["#FF0000"],
             "label": "colour",
-            "help": None,
             "group": "Main",
             "colour": True,
         },
@@ -285,3 +283,10 @@ def test_a_lost_medium_is_left_out_and_logged(
     assert record.levelno == logging.WARNING
     assert (record.listing_id, record.blob_key) == (published["id"], key)  # type: ignore[attr-defined]
     assert "Signature" not in record.getMessage() and "http" not in record.getMessage()
+
+
+@pytest.mark.parametrize("listing_id", ["not-a-listing", "a%00b", "%2E%2E"])
+def test_a_listing_id_that_is_not_one_is_404(crud: CrudCaller, listing_id: str) -> None:
+    r = crud.get(f"/listings/{listing_id}")
+    assert r.status_code == 404, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_not_found"

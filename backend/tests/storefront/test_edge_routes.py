@@ -16,9 +16,17 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
+from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.storefront.app import create_app
-from scadbuddy.storefront.ratelimit import READ_LIMIT, WINDOW, WRITE_LIMIT, RequestLimit
+from scadbuddy.storefront.ratelimit import (
+    MAX_CLIENTS,
+    READ_LIMIT,
+    WINDOW,
+    WRITE_LIMIT,
+    RequestLimit,
+    client_key,
+)
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
@@ -67,9 +75,13 @@ def test_one_listing_is_forwarded(edge: TestClient, crud_mock: respx.Router) -> 
 
 
 def test_an_unknown_listing_passes_through(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
-    crud_mock["listing"].respond(404, json=NOT_FOUND, headers=CRUD)
+    inner = f"/api/v1/internal/crud/storefront/listings/{LISTING_ID}"
+    crud_mock["listing"].respond(404, json={**NOT_FOUND, "instance": inner}, headers=CRUD)
     r = edge.get(f"/api/store/v1/listings/{LISTING_ID}")
-    assert r.status_code == 404 and r.json() == NOT_FOUND
+    # The visitor sees the edge's own path, never the CRUD side's.
+    assert r.status_code == 404
+    assert r.json() == {**NOT_FOUND, "instance": f"/api/store/v1/listings/{LISTING_ID}"}
+    assert "internal" not in r.text
 
 
 @pytest.mark.parametrize("listing_id", ["..", "not-a-listing", "%2E%2E", "A" * 36])
@@ -143,8 +155,6 @@ async def _ok(request: Request) -> PlainTextResponse:
 
 
 def limited(clock: Clock, trusted: str = "") -> TestClient:
-    from scadbuddy.core.proxies import parse_cidr_list
-
     app = FastAPI(routes=[Route("/api/store/v1/x", _ok, methods=["GET", "POST"])])
     app.add_middleware(
         RequestLimit, prefix="/api/store/v1", trusted=parse_cidr_list(trusted), clock=clock
@@ -249,3 +259,93 @@ def test_a_loopback_shop_takes_loopback_writes(
             assert r.status_code != 403
         r = client.post("/api/store/v1/renders", json={}, headers={"Origin": PUBLIC_URL})
         assert r.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("address", "key"),
+    [
+        ("203.0.113.9", "203.0.113.9"),
+        ("2001:db8:1:2:aaaa::1", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),
+        ("2001:db8:1:3::1", "2001:db8:1:3::/64"),
+        # An IPv4 address mapped into IPv6 is that IPv4 address.
+        ("::ffff:203.0.113.9", "203.0.113.9"),
+        ("[2001:db8:1:2::1]", "2001:db8:1:2::/64"),
+        ("not an address", "not an address"),
+    ],
+)
+def test_a_client_is_keyed_by_its_address_or_its_ipv6_64(address: str, key: str) -> None:
+    assert client_key(address) == key
+
+
+def test_two_addresses_in_one_64_share_a_limit() -> None:
+    clock = Clock()
+    limit = RequestLimit(_ok, prefix="/api/store/v1", trusted=(), clock=clock)  # type: ignore[arg-type]
+    for n in range(WRITE_LIMIT):
+        assert limit.note(f"2001:db8:1:2::{n + 1:x}", write=True) is None
+    assert limit.note("2001:db8:1:2:dead:beef::1", write=True) is not None
+    assert limit.note("2001:db8:1:3::1", write=True) is None
+
+
+def test_a_full_table_refuses_a_new_client_and_keeps_the_old() -> None:
+    clock = Clock()
+    limit = RequestLimit(
+        _ok,  # type: ignore[arg-type]
+        prefix="/api/store/v1",
+        trusted=(),
+        clock=clock,
+        max_clients=3,
+    )
+    for n in range(3):
+        assert limit.note(f"198.51.100.{n}", write=True) is None
+    retry = limit.note("198.51.100.9", write=True)
+    assert retry is not None and retry >= 1
+    assert limit.clients() == {"198.51.100.0", "198.51.100.1", "198.51.100.2"}
+    # The old clients keep their history: one more write each still counts.
+    for _ in range(WRITE_LIMIT - 1):
+        assert limit.note("198.51.100.0", write=True) is None
+    assert limit.note("198.51.100.0", write=True) is not None
+    # Once the old ones are idle past the window, a new client fits at once.
+    clock.now += WINDOW + 1
+    assert limit.note("198.51.100.9", write=True) is None
+    assert limit.clients() == {"198.51.100.9"}
+
+
+def test_a_full_table_answers_429_as_the_limit_does() -> None:
+    clock = Clock()
+    app = FastAPI(routes=[Route("/api/store/v1/x", _ok, methods=["GET"])])
+    app.add_middleware(
+        RequestLimit,
+        prefix="/api/store/v1",
+        trusted=parse_cidr_list("203.0.113.0/24"),
+        clock=clock,
+        max_clients=1,
+    )
+    client = TestClient(app, client=CLIENT)
+    assert (
+        client.get("/api/store/v1/x", headers={"X-Forwarded-For": "198.51.100.1"}).status_code
+        == 200
+    )
+    r = client.get("/api/store/v1/x", headers={"X-Forwarded-For": "198.51.100.2"})
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}rate_limited"
+
+
+def test_the_table_stays_flat_over_many_clients() -> None:
+    """60,000 clients, one request each, 10 ms apart: only the last window's are kept."""
+    clock = Clock()
+    limit = RequestLimit(_ok, prefix="/api/store/v1", trusted=(), clock=clock)  # type: ignore[arg-type]
+    most = 0
+    for n in range(60_000):
+        clock.now += 0.01
+        assert limit.note(f"10.{n >> 16 & 255}.{n >> 8 & 255}.{n & 255}", write=False) is None
+        most = max(most, len(limit.clients()))
+    assert most <= 2 * WINDOW / 0.01 + 1
+    assert most < MAX_CLIENTS
+
+
+def test_a_client_that_only_reads_has_no_write_history() -> None:
+    clock = Clock()
+    limit = RequestLimit(_ok, prefix="/api/store/v1", trusted=(), clock=clock)  # type: ignore[arg-type]
+    limit.note("198.51.100.1", write=False)
+    assert limit.history("198.51.100.1") == (1, None)

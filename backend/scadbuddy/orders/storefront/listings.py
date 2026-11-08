@@ -70,7 +70,7 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.store.s3 import S3ContentBackend
-from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
+from scadbuddy.storefront.wire import LISTING_ID, STOREFRONT_PROBLEMS
 
 logger = logging.getLogger(__name__)
 
@@ -662,7 +662,11 @@ def public_content(core: Core) -> ContentStore:
     )
 
 
-def _public_param(name: str, bound: ParamBound, by_name: Mapping[str, Parameter]) -> PublicParam:
+def _public_param(
+    name: str, bound: ParamBound, by_name: Mapping[str, Parameter], colours: Collection[str]
+) -> PublicParam:
+    """``bound`` with what the page shows. A colour's choices keep only ``colours`` (the
+    listing filaments the price book still has, casefolded)."""
     parameter = by_name.get(name)
     shown = {
         "label": (parameter.caption if parameter is not None else None) or name,
@@ -670,6 +674,10 @@ def _public_param(name: str, bound: ParamBound, by_name: Mapping[str, Parameter]
         "colour": parameter is not None and parameter.type == "color",
     }
     fields = {**bound.model_dump(), **shown}
+    if isinstance(bound, ChoiceBound) and shown["colour"]:
+        fields["choices"] = [
+            c for c in bound.choices if isinstance(c, str) and c.casefold() in colours
+        ]
     if isinstance(bound, NumberBound):
         return PublicNumber.model_validate(fields)
     if isinstance(bound, ChoiceBound):
@@ -704,6 +712,8 @@ async def public_listing(
     `PUBLIC_MEDIA_TTL`. A media file the index lost is left out, and logged."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    offered = [filaments[i] for i in listing.colours if i in filaments]
+    colours = {f.colour.casefold() for f in offered}
     media: list[PublicMedia] = []
     for item in listing.media:
         url = await _media_url(content, listing.id, item.blob_key)
@@ -713,10 +723,12 @@ async def public_listing(
         id=listing.id,
         title=listing.title,
         description=listing.description,
-        params={name: _public_param(name, b, by_name) for name, b in listing.params.items()},
+        params={
+            name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()
+        },
         colours=[
             PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
-            for f in (filaments[i] for i in listing.colours if i in filaments)
+            for f in offered
         ],
         media=media,
         updated_at=listing.updated_at,
@@ -725,8 +737,9 @@ async def public_listing(
 
 def published_listing(store: ListingStore, listing_id: str) -> Listing:
     """The listing, when it is published; 404 ``listing_not_found`` for an unpublished
-    or unknown one alike, so a visitor cannot tell them apart."""
-    listing = store.get(listing_id)
+    or unknown one alike, so a visitor cannot tell them apart, and for an id that is not
+    one, before any lookup."""
+    listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
     if listing is None or not listing.published or listing.snapshot is None:
         raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
     return listing

@@ -4,8 +4,7 @@ address. `app.py` answers a CRUD refusal."""
 
 from __future__ import annotations
 
-import re
-from typing import Annotated, Any, Final
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 
@@ -13,10 +12,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
-from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
-
-#: A listing id (``gen_random_uuid()::text``): any other never reaches the CRUD side.
-LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+from scadbuddy.storefront.wire import LISTING_ID, STOREFRONT_PROBLEMS
 
 router = APIRouter()
 visitor_router = APIRouter(prefix=STOREFRONT_PREFIX)

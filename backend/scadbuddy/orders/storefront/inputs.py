@@ -34,6 +34,9 @@ InputReason = Literal["unknown", "locked", "range", "step", "choice", "length", 
 
 #: How far a value may sit from a step, to a float's rounding.
 _STEP_TOLERANCE = 1e-9
+#: The largest number a visitor may send, either sign: far past any print's size, and
+#: well inside a float, so no check below can overflow.
+MAX_MAGNITUDE = 1e15
 #: The reason when a value inside the bound fails the schema's own checks.
 _SCHEMA_REFUSAL: dict[str, InputReason] = {"number": "range", "choice": "choice", "text": "length"}
 
@@ -72,7 +75,10 @@ def _on_step(value: float, start: float, step: float) -> bool:
 def _number_reason(
     parameter: Parameter, bound: NumberBound, value: ParamValue
 ) -> InputReason | None:
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return "range"
+    # Before any float conversion: a JSON integer of 400 digits overflows a float.
+    if abs(value) > MAX_MAGNITUDE or (isinstance(value, float) and not math.isfinite(value)):
         return "range"
     if not bound.min <= value <= bound.max:
         return "range"
@@ -93,7 +99,10 @@ def _reason(
     ):
         return "colour"
     if isinstance(bound, NumberBound):
-        reason = _number_reason(parameter, bound, value)
+        try:
+            reason = _number_reason(parameter, bound, value)
+        except OverflowError:
+            reason = "range"
     elif isinstance(bound, ChoiceBound):
         if parameter.type == "color":
             assert isinstance(value, str)
@@ -111,7 +120,7 @@ def _reason(
     # Last, the schema's own checks, as a render makes them.
     try:
         format_scad_value(parameter, value)
-    except ValueError:
+    except (ValueError, OverflowError):
         return _SCHEMA_REFUSAL[bound.kind]
     return None
 
