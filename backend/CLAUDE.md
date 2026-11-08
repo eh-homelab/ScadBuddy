@@ -1266,9 +1266,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
   names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
   `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
-  `verify_webhook`: ES256 only, the key by `kid` kept in memory, `iat` at most 5 minutes
-  old, the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`); a bad one
-  is 400 and changes nothing, a key Plaid could not give is 503 (Plaid sends it again).
+  `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
+  asked, `iat` at most 5 minutes old, the body's SHA-256 compared in constant time;
+  `BankLinks.handle_webhook`); a bad one is 400 and changes nothing, a key Plaid could not
+  give is 503 (Plaid sends it again). Keys are kept in memory by `kid`, at most
+  `MAX_WEBHOOK_KEYS`, least recently used dropped first; a `kid` Plaid does not have
+  (`INVALID_WEBHOOK_VERIFICATION_KEY_ID`) is 400 and is remembered for
+  `UNKNOWN_KEY_SECONDS`; a `kid` in neither cache asks Plaid at most once per
+  `KEY_LOOKUP_SPACING_SECONDS` process-wide (`_KEY_LOOKUPS`), else 503.
   `SYNC_UPDATES_AVAILABLE` runs `sync_deposits` after the answer (`BackgroundTasks`), the
   sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
   `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`

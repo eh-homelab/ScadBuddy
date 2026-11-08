@@ -17,12 +17,19 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.auth.service_credentials import TokenReader
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.payments import bank as bank_module
 from tests.api.test_auth_enforce import HEADER, _sign_in
 from tests.api.test_order_payments import with_payments
 from tests.api.test_payment_webhooks import enforced_app
 from tests.auth.fake_oidc import FakeIssuer
 from tests.payments.test_bank import ACCESS, CHECKING, CREDIT, SANDBOX, payload, plaid_answers
-from tests.payments.test_bank_webhook import body_of, plaid_key, signed
+from tests.payments.test_bank_webhook import (
+    body_of,
+    lookups_unspaced,  # noqa: F401 (an autouse fixture)
+    plaid_key,
+    signed,
+    unknown_key,
+)
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -30,6 +37,7 @@ PROBLEMS = "https://scadbuddy.dev/problems/payments/"
 BANK = "/api/v1/payments/bank"
 KEYS = {"environment": "sandbox", "client_id": "client-1", "secret": "plaid-s3cret"}
 LINK = {"public_token": "public-sandbox-1", "account_ids": [CHECKING]}
+OTHER_KID = "6c5516e1-92dc-479e-a8ff-5a51992e0002"
 
 
 @pytest.fixture
@@ -225,7 +233,29 @@ def test_a_bad_signature_or_a_missing_key_changes_nothing(
         503,
         PROBLEMS + "provider_unavailable",
     )
+    plaid.routes.clear()
+    unknown_key(plaid)
+    unknown = client.post(f"{BANK}/webhook", content=body, headers=signed(body))
+    # Plaid does not know the kid: a 400, which Plaid does not retry, not a 503.
+    assert (unknown.status_code, unknown.json()["type"]) == (400, PROBLEMS + "bad_signature")
+    plaid.routes.clear()
     plaid_key(plaid)
-    forged = client.post(f"{BANK}/webhook", content=body, headers=signed(b"other"))
+    forged = client.post(f"{BANK}/webhook", content=body, headers=signed(b"other", kid=OTHER_KID))
     assert (forged.status_code, forged.json()["type"]) == (400, PROBLEMS + "bad_signature")
     assert client.get(BANK).json()["login_required"] is False
+
+
+def test_a_lookup_over_the_limit_is_a_503_plaid_retries(
+    client: TestClient, plaid: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bank_module, "KEY_LOOKUP_SPACING_SECONDS", 3600.0)
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.Spacing())
+    plaid_key(plaid)
+    linked(client)
+    body = body_of("webhook.item_login_required.json")
+    assert client.post(f"{BANK}/webhook", content=body, headers=signed(body)).status_code == 200
+    limited = client.post(f"{BANK}/webhook", content=body, headers=signed(body, kid=OTHER_KID))
+    assert (limited.status_code, limited.json()["type"]) == (
+        503,
+        PROBLEMS + "provider_unavailable",
+    )

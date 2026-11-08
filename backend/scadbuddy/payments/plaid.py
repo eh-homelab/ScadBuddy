@@ -62,6 +62,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
@@ -99,6 +100,15 @@ VERIFICATION_HEADER: Final = "plaid-verification"
 WEBHOOK_MAX_AGE_SECONDS: Final = 300
 #: The bank needs the shop to sign in again (Link's update mode).
 LOGIN_REQUIRED: Final = "ITEM_LOGIN_REQUIRED"
+#: ``/webhook_verification_key/get``'s answer for a ``key_id`` Plaid does not have
+#: (https://plaid.com/docs/errors/invalid-input/#invalid_webhook_verification_key_id).
+UNKNOWN_KEY_ID: Final = "INVALID_WEBHOOK_VERIFICATION_KEY_ID"
+#: A webhook key's ``kid``: a UUID, as in Plaid's examples
+#: (https://plaid.com/docs/api/webhooks/webhook-verification/). Anything else is
+#: refused before Plaid is asked.
+KID_SHAPE: Final = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 #: Error codes that mean the Item is already gone at Plaid.
 GONE: Final = frozenset({"ITEM_NOT_FOUND", "INVALID_ACCESS_TOKEN"})
 
@@ -276,7 +286,8 @@ async def transactions_sync(keys: PlaidKeys, access_token: str, cursor: str | No
 
 def webhook_key_id(headers: Mapping[str, str]) -> tuple[str, str]:
     """The webhook's JWT and its ``kid``, read without verifying anything yet. A
-    `BadSignatureError` unless the token is there and says ``ES256``."""
+    `BadSignatureError` unless the token is there, says ``ES256`` and names a ``kid``
+    shaped as Plaid's are (``KID_SHAPE``)."""
     token = next((v for k, v in headers.items() if k.lower() == VERIFICATION_HEADER), "")
     try:
         header = jws.extract_compact(token.encode()).protected
@@ -285,6 +296,8 @@ def webhook_key_id(headers: Mapping[str, str]) -> tuple[str, str]:
     kid = header.get("kid")
     if header.get("alg") != "ES256" or not isinstance(kid, str) or not kid:
         raise BadSignatureError("the webhook's Plaid-Verification is not ES256 with a kid")
+    if not KID_SHAPE.fullmatch(kid):
+        raise BadSignatureError("the webhook's kid is not one Plaid gives")
     return token, kid
 
 

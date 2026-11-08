@@ -22,8 +22,9 @@ from joserfc import jwt
 from joserfc.jwk import ECKey, OctKey
 
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.payments import bank as bank_module
 from scadbuddy.payments import plaid
-from scadbuddy.payments.bank import BankLinks
+from scadbuddy.payments.bank import BankLinks, WebhookKeyLookupLimitedError
 from scadbuddy.payments.plaid import PlaidError
 from scadbuddy.payments.provider import BadSignatureError
 from tests.payments.test_bank import ACCESS, KEK, KEYS, SANDBOX, linked, payload
@@ -48,12 +49,13 @@ def signed(
     alg: str = "ES256",
     iat: float | None = None,
     digest: str | None = None,
+    kid: str = KID,
 ) -> dict[str, str]:
     claims = {
         "iat": int(time.time() if iat is None else iat),
         "request_body_sha256": digest or hashlib.sha256(body).hexdigest(),
     }
-    token = jwt.encode({"alg": alg, "kid": KID, "typ": "JWT"}, claims, key)
+    token = jwt.encode({"alg": alg, "kid": kid, "typ": "JWT"}, claims, key)
     return {"Plaid-Verification": token}
 
 
@@ -72,9 +74,55 @@ def plaid_key(router: respx.MockRouter) -> respx.Route:
     )
 
 
+def any_key(router: respx.MockRouter) -> respx.Route:
+    """``/webhook_verification_key/get`` giving ``KEY``'s public JWK under whichever
+    ``key_id`` it is asked for."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        kid = json.loads(request.content)["key_id"]
+        jwk = {**KEY.as_dict(private=False), "alg": "ES256", "kid": kid, "use": "sig"}
+        return httpx.Response(200, json={"key": jwk, "request_id": "RZ6Omi1bzzwDaLo"})
+
+    return router.post(VERIFY).mock(side_effect=answer)
+
+
+def unknown_key(router: respx.MockRouter) -> respx.Route:
+    """Plaid's answer for a ``key_id`` it does not have
+    (https://plaid.com/docs/errors/invalid-input/#invalid_webhook_verification_key_id)."""
+    return router.post(VERIFY).mock(
+        return_value=httpx.Response(400, json=payload("error.invalid_webhook_key_id.json"))
+    )
+
+
+def kid_of(n: int) -> str:
+    return f"6c5516e1-92dc-479e-a8ff-{n:012x}"
+
+
+class Clock:
+    """``time.monotonic`` for one ``BankLinks``, moved by the test."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture(autouse=True)
+def lookups_unspaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key lookup limit is process-wide; a test that does not test it lifts it."""
+    monkeypatch.setattr(bank_module, "KEY_LOOKUP_SPACING_SECONDS", 0.0)
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.Spacing())
+
+
 @pytest.fixture
-async def bank(rows: OrderStore) -> BankLinks:
-    made = BankLinks(rows, KEK)
+def clock() -> Clock:
+    return Clock()
+
+
+@pytest.fixture
+async def bank(rows: OrderStore, clock: Clock) -> BankLinks:
+    made = BankLinks(rows, KEK, clock=clock)
     with respx.mock as router:
         await linked(made, router)
     return made
@@ -155,6 +203,79 @@ async def test_a_key_plaid_cannot_give_is_a_plaid_error(bank: BankLinks) -> None
         router.post(VERIFY).mock(side_effect=httpx.ConnectError("down"))
         with pytest.raises(PlaidError):
             await bank.handle_webhook(signed(body), body)
+
+
+@pytest.mark.parametrize(
+    "kid",
+    ["1", "../webhook_verification_key", "6C5516E1-92DC-479E-A8FF-5A51992E0001 ", "a" * 4096],
+    ids=["short", "path", "trailing space", "long"],
+)
+async def test_a_kid_not_shaped_like_plaids_asks_plaid_for_nothing(
+    bank: BankLinks, kid: str
+) -> None:
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        key = any_key(router)
+        with pytest.raises(BadSignatureError):
+            await bank.handle_webhook(signed(body, kid=kid), body)
+        assert not key.called
+
+
+async def test_a_kid_plaid_does_not_know_is_refused_and_remembered_for_a_while(
+    bank: BankLinks, clock: Clock
+) -> None:
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        unknown = unknown_key(router)
+        for _ in range(3):
+            with pytest.raises(BadSignatureError):
+                await bank.handle_webhook(signed(body), body)
+        assert unknown.call_count == 1
+        clock.now += bank_module.UNKNOWN_KEY_SECONDS + 1
+        with pytest.raises(BadSignatureError):
+            await bank.handle_webhook(signed(body), body)
+        assert unknown.call_count == 2
+
+
+async def test_key_lookups_are_spaced_process_wide(
+    rows: OrderStore, bank: BankLinks, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bank_module, "KEY_LOOKUP_SPACING_SECONDS", 5.0)
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.Spacing())
+    other = BankLinks(rows, KEK, clock=clock)
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        key = any_key(router)
+        assert await bank.handle_webhook(signed(body, kid=kid_of(1)), body) == "sync"
+        # A second kid within the spacing, from either instance, asks Plaid for nothing.
+        for links in (bank, other):
+            with pytest.raises(WebhookKeyLookupLimitedError):
+                await links.handle_webhook(signed(body, kid=kid_of(2)), body)
+        # A kept key needs no lookup, so it is never limited.
+        assert await bank.handle_webhook(signed(body, kid=kid_of(1)), body) == "sync"
+        assert key.call_count == 1
+        clock.now += 5
+        assert await other.handle_webhook(signed(body, kid=kid_of(2)), body) == "sync"
+        assert key.call_count == 2
+
+
+async def test_a_full_key_cache_drops_its_least_recently_used_key_only(
+    bank: BankLinks,
+) -> None:
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        key = any_key(router)
+        for n in range(bank_module.MAX_WEBHOOK_KEYS):
+            await bank.handle_webhook(signed(body, kid=kid_of(n)), body)
+        # Key 0 is used again, so key 1 is now the least recently used.
+        await bank.handle_webhook(signed(body, kid=kid_of(0)), body)
+        await bank.handle_webhook(signed(body, kid=kid_of(99)), body)
+        assert key.call_count == bank_module.MAX_WEBHOOK_KEYS + 1
+        for n in [0, *range(2, bank_module.MAX_WEBHOOK_KEYS), 99]:
+            await bank.handle_webhook(signed(body, kid=kid_of(n)), body)
+        assert key.call_count == bank_module.MAX_WEBHOOK_KEYS + 1
+        await bank.handle_webhook(signed(body, kid=kid_of(1)), body)
+        assert key.call_count == bank_module.MAX_WEBHOOK_KEYS + 2
 
 
 async def test_reconnect_link_token_is_update_mode(bank: BankLinks) -> None:

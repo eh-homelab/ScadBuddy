@@ -29,6 +29,7 @@ from scadbuddy.payments.bank import (
     BankUnlinked,
     BankWebhookAnswer,
     LinkToken,
+    WebhookKeyLookupLimitedError,
 )
 from scadbuddy.payments.component import PaymentsDep
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
@@ -209,8 +210,9 @@ async def _sync_logged(payments: PaymentsDep) -> None:
     summary="Plaid's signed webhook for the linked Item",
     description=(
         "Public: the `Plaid-Verification` JWT is the credential. 400 when it does not"
-        " verify (nothing changes), 413 above 256 KiB, 503 `provider_unavailable` when"
-        " Plaid could not give its key (Plaid sends it again). `SYNC_UPDATES_AVAILABLE`"
+        " verify or Plaid has no key with its `kid` (nothing changes), 413 above 256 KiB,"
+        " 503 `provider_unavailable` when Plaid could not give its key, or a key lookup"
+        " came within 5 seconds of the last (Plaid sends it again). `SYNC_UPDATES_AVAILABLE`"
         " syncs the deposits once the answer is sent; an `ITEM` `ERROR` with"
         ' `ITEM_LOGIN_REQUIRED` shows "Reconnect"; `LOGIN_REPAIRED` clears it.'
     ),
@@ -227,6 +229,13 @@ async def receive_bank_webhook(
             status.HTTP_400_BAD_REQUEST,
             "the webhook signature does not match",
             type_=PROBLEMS + "bad_signature",
+        ) from None
+    except WebhookKeyLookupLimitedError:
+        logger.warning("a Plaid webhook was not read: its key lookup is over the limit")
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Plaid was asked for a webhook key too recently",
+            type_=PROBLEMS + "provider_unavailable",
         ) from None
     except PlaidError as error:
         logger.warning("a Plaid webhook was not read: %s", error.code)

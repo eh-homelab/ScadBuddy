@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,8 +35,15 @@ _ROW = (
     " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error,"
     " login_required_at"
 )
-#: The verification keys kept in memory, by ``kid``; Plaid rotates them rarely.
+#: The verification keys kept in memory, by ``kid``; Plaid rotates them rarely. A full
+#: cache drops its least recently used key.
 MAX_WEBHOOK_KEYS = 8
+#: The ``kid``s Plaid said it does not have, kept as long as this, at most this many.
+UNKNOWN_KEY_SECONDS = 300.0
+MAX_UNKNOWN_KEYS = 64
+#: A ``kid`` in neither cache asks Plaid at most once per this many seconds, process-wide
+#: (``_KEY_LOOKUPS``): a stream of forged ``kid``s cannot spend the shop's Plaid calls.
+KEY_LOOKUP_SPACING_SECONDS = 5.0
 
 WebhookOutcome = Literal["sync", "login_required", "login_repaired", "ignored"]
 
@@ -165,8 +174,45 @@ class BankUnlinked(BaseModel):
     removed_at_plaid: bool
     #: What the shop must still do, when anything.
     note: str | None
+
+
 class BankWebhookAnswer(BaseModel):
     outcome: WebhookOutcome
+
+
+class WebhookKeyLookupLimitedError(Exception):
+    """A webhook's key is not kept and Plaid was asked for one too recently; Plaid sends
+    the webhook again."""
+
+    def __init__(self) -> None:
+        super().__init__("Plaid was asked for a webhook key too recently")
+
+
+class Spacing:
+    """At most one admission per ``KEY_LOOKUP_SPACING_SECONDS``, across threads."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last = float("-inf")
+
+    def admit(self, now: float) -> bool:
+        with self._lock:
+            if now - self._last < KEY_LOOKUP_SPACING_SECONDS:
+                return False
+            self._last = now
+            return True
+
+
+#: One per process: every ``BankLinks`` shares it.
+_KEY_LOOKUPS = Spacing()
+
+
+def _keep[V](cache: OrderedDict[str, V], key: str, value: V, limit: int) -> None:
+    """Put ``key`` last in ``cache``, dropping the least recently used entry when full."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > limit:
+        cache.popitem(last=False)
 
 
 @dataclass(frozen=True)
@@ -186,12 +232,16 @@ class BankLinks:
         kek: Kek | None,
         *,
         webhook_url: Callable[[], str | None] = lambda: None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._kek = kek
         #: Where Plaid sends the Item's webhooks; read on each link token (live settings).
         self._webhook_url = webhook_url
-        self._webhook_keys: dict[str, dict[str, Any]] = {}
+        self._clock = clock
+        self._webhook_keys: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        #: ``kid`` -> when Plaid's "no such key" stops being trusted (``clock`` time).
+        self._unknown_keys: OrderedDict[str, float] = OrderedDict()
 
     @property
     def store(self) -> OrderStore:
@@ -377,19 +427,15 @@ class BankLinks:
         self, headers: Mapping[str, str], body: bytes, *, now: float | None = None
     ) -> WebhookOutcome:
         """Verify Plaid's webhook, then read it. ``sync``: the caller syncs the deposits
-        after answering. A `BadSignatureError` reads nothing; a `PlaidError` is the key
-        Plaid could not give."""
+        after answering. A `BadSignatureError` reads nothing, including a ``kid`` Plaid
+        does not have; a `PlaidError` is the key Plaid could not give, and
+        `WebhookKeyLookupLimitedError` a lookup refused by ``_KEY_LOOKUPS``."""
         token, kid = plaid.webhook_key_id(headers)
         linked = await asyncio.to_thread(self.access)
         if linked is None:
             # Nothing linked: no keys to ask Plaid with, and nothing to change.
             raise BadSignatureError("no bank account is linked")
-        jwk = self._webhook_keys.get(kid)
-        if jwk is None:
-            jwk = await plaid.verification_key(linked.keys, kid)
-            if len(self._webhook_keys) >= MAX_WEBHOOK_KEYS:
-                self._webhook_keys.clear()
-            self._webhook_keys[kid] = jwk
+        jwk = await self._webhook_key(linked.keys, kid)
         plaid.verify_webhook(token, jwk, body, now=time.time() if now is None else now)
         try:
             event = json.loads(body)
@@ -409,6 +455,29 @@ class BankLinks:
             await asyncio.to_thread(self.mark_login, linked.item_id, required=False)
             return "login_repaired"
         return "ignored"
+
+    async def _webhook_key(self, keys: PlaidKeys, kid: str) -> dict[str, Any]:
+        """``kid``'s JWK: kept, or asked of Plaid within ``_KEY_LOOKUPS``' spacing."""
+        now = self._clock()
+        jwk = self._webhook_keys.get(kid)
+        if jwk is not None:
+            self._webhook_keys.move_to_end(kid)
+            return jwk
+        until = self._unknown_keys.get(kid)
+        if until is not None and now < until:
+            raise BadSignatureError("Plaid has no webhook key with this kid")
+        if not _KEY_LOOKUPS.admit(now):
+            raise WebhookKeyLookupLimitedError()
+        try:
+            jwk = await plaid.verification_key(keys, kid)
+        except PlaidError as error:
+            if error.code != plaid.UNKNOWN_KEY_ID:
+                raise
+            _keep(self._unknown_keys, kid, now + UNKNOWN_KEY_SECONDS, MAX_UNKNOWN_KEYS)
+            raise BadSignatureError("Plaid has no webhook key with this kid") from None
+        self._unknown_keys.pop(kid, None)
+        _keep(self._webhook_keys, kid, jwk, MAX_WEBHOOK_KEYS)
+        return jwk
 
     async def link(self, public_token: str, account_ids: Sequence[str]) -> BankStatus:
         """Exchange Link's public token and keep the one chosen account. No account or
