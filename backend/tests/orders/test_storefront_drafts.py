@@ -16,6 +16,7 @@ import pytest
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 
+from scadbuddy.core.events import OrderChanged, OrderItemChanged
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.lifecycle import (
     LifecycleError,
@@ -349,3 +350,12 @@ def test_the_quote_and_print_checks_refuse_an_unsubmitted_draft(
     for refused in (quoting, printing, testing):
         assert refused.value.status == 409
         assert refused.value.type == "https://scadbuddy.dev/problems/orders/order_not_submitted"
+
+
+def test_a_carts_events_say_it_is_a_cart(shop: Shop, draft_with_item: Order) -> None:
+    # #5282: the flow triggers skip them (`flow_triggers/events.py` `trigger_event`).
+    placed = shop.order()
+    shop.item(placed)
+    told = [e for e in shop.events if isinstance(e, OrderChanged | OrderItemChanged)]
+    assert {e.cart for e in told if e.order_id == draft_with_item.id} == {True}
+    assert {e.cart for e in told if e.order_id == placed.id} == {False}

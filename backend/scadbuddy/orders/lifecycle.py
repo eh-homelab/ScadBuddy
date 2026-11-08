@@ -515,12 +515,20 @@ class Lifecycle:
             self._release_ended(change.released)
         else:
             self._release(change.released)
-        emit(self.bus, OrderChanged(order_id=change.order.id, status=change.order.status))
+        cart = change.order.unsubmitted
+        emit(
+            self.bus,
+            OrderChanged(order_id=change.order.id, status=change.order.status, cart=cart),
+        )
         for item, attempt in change.items:
             emit(
                 self.bus,
                 OrderItemChanged(
-                    order_id=change.order.id, item_id=item.id, status=item.status, attempt=attempt
+                    order_id=change.order.id,
+                    item_id=item.id,
+                    status=item.status,
+                    attempt=attempt,
+                    cart=cart,
                 ),
             )
 
