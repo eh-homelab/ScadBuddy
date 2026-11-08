@@ -166,8 +166,9 @@ async def _slice_hashes(
 ) -> set[str]:
     """The hash of every sliced file of the output in Bambuddy's library, read from
     Bambuddy once and kept. A native slice's id (`is_native_id`) names no file there, so
-    Bambuddy is never asked for it (#5749): `BambuddyUploadStore.native_slice_hashes`
-    gives its hash."""
+    Bambuddy is never asked for it (#5749). Only `link_lan_starts` adds native slices'
+    hashes (`BambuddyUploadStore.native_slice_hashes`): a native slice reaches the
+    archives only as a LAN start, so the queue path (`link_subject_by_hash`) skips it."""
     hashes: set[str] = set()
     for copy in await uploads.for_output(output_id):
         for sliced in copy.sliced:
