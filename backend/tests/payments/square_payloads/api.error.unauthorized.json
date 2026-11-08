@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "category": "AUTHENTICATION_ERROR",
+      "code": "UNAUTHORIZED",
+      "detail": "This request could not be authorized."
+    }
+  ]
+}

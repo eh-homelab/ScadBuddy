@@ -28,6 +28,9 @@ function allowed(order: Order, items: OrderItemDetail[], rules: { shipments: Shi
  * item, and then writes nothing for the rest. */
 const FULFILLABLE = new Set(['approved', 'failed'])
 
+/** The most lines the bulk fulfil takes at once (`api/orders.py` `MAX_BATCH_ITEMS`). */
+export const MAX_BULK_FULFIL = 50
+
 /** How many of the item are still to make: its quantity less its accepted production attempts. */
 function remaining(item: OrderItemDetail): number {
   const made = item.fulfilments.filter((f) => f.purpose === 'production' && f.accepted_at != null).reduce((sum, f) => sum + f.quantity, 0)
@@ -64,13 +67,14 @@ export function ItemsBulk({
   const fulfil = allowed(order, selected, rules, ['fulfil']).filter((item) => FULFILLABLE.has(item.status))
   const print = allowed(order, selected, rules, ['print'])
   const remove = allowed(order, selected, rules, ['delete', 'cancel'])
+  const tooMany = fulfil.length > MAX_BULK_FULFIL
   const [fulfilling, setFulfilling] = useState(false)
   const [printing, setPrinting] = useState<OrderItemDetail[]>([])
   const [removing, setRemoving] = useState(false)
   return (
     <div className="flex w-full flex-wrap items-center gap-2 rounded-md bg-muted/50 px-2 py-1 text-[13px]" data-testid="bulk-actions">
       <span className="mr-1 font-medium">{selected.length} selected</span>
-      <Button type="button" size="sm" variant="outline" disabled={busy || fulfil.length === 0} onClick={() => setFulfilling(true)}>
+      <Button type="button" size="sm" variant="outline" disabled={busy || fulfil.length === 0 || tooMany} onClick={() => setFulfilling(true)}>
         Fulfil…
       </Button>
       <Button type="button" size="sm" variant="outline" disabled={busy || print.length === 0} onClick={() => setPrinting(print)}>
@@ -83,6 +87,7 @@ export function ItemsBulk({
         Clear selection
       </Button>
       {fulfil.length === 0 && print.length === 0 && <span className="text-xs text-muted-foreground">No selected item can be fulfilled or printed now.</span>}
+      {tooMany && <span className="text-xs text-muted-foreground">{`Fulfil takes ${MAX_BULK_FULFIL} items at a time. Select fewer.`}</span>}
       {fulfilling && (
         <FulfilDialog
           orderId={order.id}

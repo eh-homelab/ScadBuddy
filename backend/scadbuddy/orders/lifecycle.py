@@ -1463,17 +1463,24 @@ class Lifecycle:
             self._told(change)
         return outcome
 
-    def _paid_by(self, conn: Conn, order: Order, found: PaymentRequestView, provider: str) -> bool:
-        """Whether this provider's own payment already paid the request. A request paid
-        by hand, cancelled or expired takes a provider's payment: that money is real."""
-        if found.status != "paid" or found.payment_id is None:
-            return False
-        paid = next(
-            (p for p in self.store.payments(order.id, conn=conn) if p.id == found.payment_id),
+    def _provider_payment(
+        self, conn: Conn, order: Order, found: PaymentRequestView, provider: str
+    ) -> Payment | None:
+        """The payment this provider already recorded for the request's hosted page: its
+        provider, request and reference, money in. Read from the payments themselves, not
+        from the request's ``payment_id``: a request paid by hand first points at the cash,
+        and the provider's payment recorded on it after is still told again (#5666,
+        Square's ``payment.updated``)."""
+        return next(
+            (
+                p
+                for p in self.store.payments(order.id, conn=conn)
+                if p.provider == provider
+                and p.payment_request_id == found.id
+                and p.reference == found.provider_ref
+                and p.amount_minor > 0
+            ),
             None,
-        )
-        return (
-            paid is not None and paid.provider == provider and paid.reference == found.provider_ref
         )
 
     def _apply_event(
@@ -1517,8 +1524,17 @@ class Lifecycle:
         ):
             # #5681: the refund's own failure was told first, so the money never left.
             return "ignored", None
-        if event.kind == "paid" and self._paid_by(conn, order, found, provider):
-            # A hosted page is paid once: this is the same money told again.
+        told = (
+            self._provider_payment(conn, order, found, provider) if event.kind == "paid" else None
+        )
+        if told is not None:
+            # A hosted page is paid once: this is the same money told again. A provider
+            # that tells the fee only in a later update of the same payment (#5666:
+            # Square's ``payment.updated``) adds it now, on that payment, once.
+            if event.fee_minor and self._write_fee(
+                conn, order, told.id, provider, event.fee_minor, by
+            ):
+                return "recorded", told
             return "ignored", None
         amount = found.amount_minor if event.amount_minor is None else event.amount_minor
         payment = self.store.insert_payment(
@@ -1647,17 +1663,7 @@ class Lifecycle:
         a poison event is not answered 503 for ever."""
         if not event.fee_minor:
             return "ignored", None
-        payment = next(
-            (
-                p
-                for p in self.store.payments(order.id, conn=conn)
-                if p.provider == provider
-                and p.payment_request_id == found.id
-                and p.reference == found.provider_ref
-                and p.amount_minor > 0
-            ),
-            None,
-        )
+        payment = self._provider_payment(conn, order, found, provider)
         if payment is None:
             young = (
                 event.created_at is not None
