@@ -14,7 +14,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.storefront.listings import HOLDER, ListingStore
+from scadbuddy.orders.storefront.listings import HOLDER, ListingStore, checked_fixed
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
@@ -190,3 +190,86 @@ def test_customer_text_is_bounded() -> None:
             body(**fields)
     with pytest.raises(ValidationError):
         body(commit="abc")
+
+
+# -- checked against the schema (publish's checks, without the template) ---------------
+
+RED, BLUE = "f-red", "f-blue"
+COLOURS = {RED: "#FF0000", BLUE: "#0000FF"}
+SCHEMA = CustomizerSchema.model_validate(
+    {
+        "parameters": [
+            {"name": "width", "type": "number", "initial": 50, "min": 10, "max": 100, "step": 0.5},
+            {"name": "count", "type": "integer", "initial": 3, "min": 1, "max": 9, "step": 1},
+            {"name": "colour", "type": "color", "initial": "#FF0000"},
+            {"name": "font", "type": "font", "initial": "Liberation Sans"},
+        ]
+    }
+)
+
+
+def checked(**fields: Any) -> dict[str, Any]:
+    return checked_fixed(SCHEMA, body(colours=[RED], **fields), COLOURS)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        # Locked at a colour that is not a listing filament's.
+        {"fixed": {"colour": "#00FF00"}},
+        # Locked at the schema's default, which no listing filament has.
+        {"colours": [BLUE]},
+    ],
+)
+def test_a_locked_colour_must_be_a_listing_filament(fields: dict[str, Any]) -> None:
+    with refused_as("listing_colour_unknown", 422):
+        checked_fixed(SCHEMA, body(**{"colours": [RED], **fields}), COLOURS)
+
+
+def test_a_locked_colour_of_a_listing_filament_is_kept() -> None:
+    assert checked(fixed={"colour": "#ff0000"})["colour"] == "#ff0000"
+    assert checked()["colour"] == "#FF0000"
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        # A step that is not a whole multiple of the schema's.
+        {"width": {"kind": "number", "min": 10, "max": 20, "step": 0.75}},
+        # An integer's bounds and step are whole.
+        {"count": {"kind": "number", "min": 1.5, "max": 9, "step": 1}},
+        {"count": {"kind": "number", "min": 1, "max": 9, "step": 1.5}},
+        # A font is never offered, as a file is not.
+        {"font": {"kind": "choice", "choices": ["Liberation Sans"]}},
+    ],
+)
+def test_a_bound_outside_the_schema_is_refused(bound: dict[str, Any]) -> None:
+    with refused_as("listing_bounds_outside_schema", 422):
+        checked(params=bound)
+
+
+def test_a_step_on_the_schemas_is_kept() -> None:
+    fixed = checked(
+        params={
+            "width": {"kind": "number", "min": 10, "max": 20, "step": 1.5},
+            "count": {"kind": "number", "min": 2, "max": 8, "step": 2},
+        }
+    )
+    assert "width" not in fixed and "count" not in fixed
+
+
+def test_a_failed_publish_keeps_only_the_published_holds(
+    store: ListingStore, published: Listing, refs: BlobRefs, pg_pool: PgPool
+) -> None:
+    # What a republish took before it failed: a new copy of a media file.
+    refs.add("listing-media-new", HOLDER, published.id)
+    store.release_unheld(published.id)
+    assert holders(pg_pool, "listing-media-new") == []
+    assert holders(pg_pool, SNAPSHOT.snapshot_key) == [(HOLDER, published.id)]
+    # Unpublished, it keeps nothing.
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_listings SET published = false WHERE id = %s", (published.id,)
+        )
+    store.release_unheld(published.id)
+    assert holders(pg_pool, SNAPSHOT.snapshot_key) == []

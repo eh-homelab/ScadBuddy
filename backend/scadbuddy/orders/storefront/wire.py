@@ -64,6 +64,7 @@ class ListingSnapshot(BaseModel):
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
 
     schema_: CustomizerSchema = Field(alias="schema")
+    #: Always false for now: publish refuses a pipeline template.
     pipeline: bool
     template_name: str
     libraries: list[ModelLibrary]

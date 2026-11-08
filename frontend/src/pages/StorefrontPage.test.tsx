@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { FILAMENT_PLA } from '../mocks/features/orders/state'
+import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { StorefrontPage } from './StorefrontPage'
 
@@ -81,6 +83,25 @@ describe('StorefrontPage (#5282)', () => {
     const [saved] = await api.storefrontListings()
     expect(saved?.colours).toEqual([FILAMENT_PLA])
     expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C'] })
+  })
+
+  it('shows why a publish is refused', async () => {
+    const user = userEvent.setup()
+    const detail = "'name-keychain' is a pipeline template; the storefront cannot list one yet"
+    server.use(
+      http.post('/api/v1/storefront/listings/:id/publish', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_pipeline_unsupported', title: 'Unprocessable Content', status: 422, detail },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'New listing' }))
+    await within(screen.getByTestId('listing-preview')).findByLabelText('Text size')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    expect(screen.queryByText('Published')).toBeNull()
   })
 
   it('switches design requests on', async () => {

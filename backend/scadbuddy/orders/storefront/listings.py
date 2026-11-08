@@ -6,11 +6,14 @@ second editor's stale save is refused (409 ``listing_changed``), and an edit of 
 published listing unpublishes it: a change is not live until the shop publishes again.
 
 ``publish`` checks the listing against its commit's schema and captures what a visitor's
-render needs without git (plan point 2): the schema, whether the template is a pipeline,
-its name and library pins, and its source snapshot. It copies each chosen media file
-into the content store. The snapshot and the media are held in ``blob_refs`` under
-(:data:`HOLDER`, listing id) while the listing is published; unpublishing, an edit and a
-delete drop that hold in the same transaction as the row.
+render needs without git (plan point 2): the schema, the template's name and library
+pins, and its source snapshot. A pipeline template is refused for now (422
+``listing_pipeline_unsupported``): its inputs need not be ``model.scad``'s parameters,
+which are all a listing can bound. It copies each chosen media file into the content
+store. The snapshot and the media are held in ``blob_refs`` under (:data:`HOLDER`,
+listing id) while the listing is published; unpublishing, an edit and a delete drop that
+hold in the same transaction as the row, and a failed publish drops every hold the row
+does not name.
 """
 
 from __future__ import annotations
@@ -276,16 +279,21 @@ class ListingStore:
             _drop_holds(conn, listing_id)
         return _listing(row)
 
-    def release_if_unpublished(self, listing_id: str) -> None:
-        """Drop the listing's holds unless it is published: after a publish lost to an
-        edit, whose own drop may have run before the publish took its holds."""
+    def release_unheld(self, listing_id: str) -> None:
+        """Drop every hold of the listing on a blob its row does not name, under the row
+        lock: after a failed publish, whose copies are held but never recorded. A
+        published listing keeps its snapshot and media; an unpublished one keeps
+        nothing (an edit's own drop may have run before the publish took its holds)."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "SELECT published FROM storefront_listings WHERE id = %s FOR UPDATE",
+                "SELECT published, snapshot, media FROM storefront_listings"
+                " WHERE id = %s FOR UPDATE",
                 (listing_id,),
             ).fetchone()
-            if row is None or not row["published"]:
-                _drop_holds(conn, listing_id)
+            keep: list[str] = []
+            if row is not None and row["published"]:
+                keep = [row["snapshot"]["snapshot_key"], *(m["blob_key"] for m in row["media"])]
+            _drop_holds(conn, listing_id, keep)
 
     def filament_colours(self) -> dict[str, str]:
         """Each price-book filament not archived, by id: its colour (``#RRGGBB``)."""
@@ -312,6 +320,22 @@ def _takes(parameter: Parameter, value: ParamValue) -> bool:
     return True
 
 
+def _whole_multiple(step: float, of: float) -> bool:
+    """Whether ``step`` is a whole number of ``of``s, to a float's rounding."""
+    times = step / of
+    return times >= 1 - 1e-9 and abs(times - round(times)) < 1e-9
+
+
+def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> None:
+    """``value`` as the colour of one of the listing's filaments, or 422."""
+    if not isinstance(value, str) or value.casefold() not in {c.casefold() for c in colours}:
+        raise _unprocessable(
+            "listing_colour_unknown",
+            f"{name!r} is {value!r}, which is not the colour of a listing filament",
+            name,
+        )
+
+
 def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
     """``bound`` as a subset of what the schema lets ``parameter`` take, or 422."""
     name = parameter.name
@@ -323,21 +347,23 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
     if parameter.type == "color":
         if not isinstance(bound, ChoiceBound):
             raise outside
-        wanted = {colour.casefold() for colour in colours}
         for choice in bound.choices:
-            if not isinstance(choice, str) or choice.casefold() not in wanted:
-                raise _unprocessable(
-                    "listing_colour_unknown",
-                    f"{name!r} offers {choice!r}, which is not the colour of a listing filament",
-                    name,
-                )
+            _check_colour(name, choice, colours)
         return
     if isinstance(bound, NumberBound):
         if parameter.type not in _NUMBERS or bound.min > bound.max:
             raise outside
         if not (_takes(parameter, bound.min) and _takes(parameter, bound.max)):
             raise outside
-        if parameter.step is not None and bound.step is not None and bound.step < parameter.step:
+        if parameter.type == "integer" and not all(
+            float(n).is_integer() for n in (bound.min, bound.max, bound.step or 1)
+        ):
+            raise outside
+        if (
+            parameter.step is not None
+            and bound.step is not None
+            and not _whole_multiple(bound.step, parameter.step)
+        ):
             raise outside
         return
     if isinstance(bound, TextBound):
@@ -346,8 +372,8 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
         if parameter.max_length is not None and bound.max_length > parameter.max_length:
             raise outside
         return
-    # A choice: a template's own `file` samples are not offered to the public.
-    if parameter.type == "file" or not all(_takes(parameter, c) for c in bound.choices):
+    # A choice: a font or a template's own `file` samples are never offered to the public.
+    if parameter.type in ("file", "font") or not all(_takes(parameter, c) for c in bound.choices):
         raise outside
 
 
@@ -387,13 +413,17 @@ def checked_fixed(
             continue
         if parameter.initial is not None and _takes(parameter, parameter.initial):
             fixed[parameter.name] = parameter.initial
+    # A locked colour is printed in a listing filament, set or defaulted alike.
+    for name, value in fixed.items():
+        if by_name[name].type == "color":
+            _check_colour(name, value, offered)
     return fixed
 
 
 async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
     """The commit's schema, pipeline flag, name and library pins, without the snapshot
-    key; 422 ``listing_reference`` for a slug or commit
-    that is not a revision of a template."""
+    key; 422 ``listing_reference`` for a slug or commit that is not a revision of a
+    template, 422 ``listing_pipeline_unsupported`` for a pipeline template."""
     fetcher = CheckoutFetcher(core.libraries, core.installs, core.checkouts)
     try:
         resolved = await resolve_reference(
@@ -424,10 +454,17 @@ async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
             status.HTTP_503_SERVICE_UNAVAILABLE, f"the schema could not be built: {error}"
         ) from None
     directory = source.scad.parent
+    if await asyncio.to_thread(declares_pipeline, directory, slug):
+        # A pipeline's inputs need not be `model.scad`'s parameters, which is all a
+        # listing can bound yet.
+        raise _unprocessable(
+            "listing_pipeline_unsupported",
+            f"{slug!r} is a pipeline template; the storefront cannot list one yet",
+        )
     reference = resolved.reference
     return ListingSnapshot(
         schema=schema,
-        pipeline=await asyncio.to_thread(declares_pipeline, directory, slug),
+        pipeline=False,
         template_name=reference.template_name,
         libraries=list(reference.libraries),
         snapshot_key="",
@@ -478,8 +515,9 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
-    ``listing_colour_unknown``, ``listing_media_unknown`` or ``listing_reference`` for a
-    listing its commit or the price book does not back; 409 ``listing_changed`` when it
+    ``listing_colour_unknown``, ``listing_media_unknown``, ``listing_reference`` or
+    ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
+    back; 409 ``listing_changed`` when it
     was edited while it was being published."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
@@ -508,7 +546,7 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
             expected_updated_at=listing.updated_at,
         )
     except BaseException:
-        await asyncio.to_thread(store.release_if_unpublished, listing.id)
+        await asyncio.to_thread(store.release_unheld, listing.id)
         raise
 
 
