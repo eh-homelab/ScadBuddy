@@ -16,7 +16,13 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // The backend writes one entry per order and session, so an order already reported in this
 // session records nothing more. A report that failed (the backend out of reach, a 5xx) stays
 // for the next turn's end; one refused for good (a 4xx: the order gone, a currency no rate
-// reaches) is dropped and carried none of the spend, which the next order's report gets.
+// reaches) is dropped and carried none of the spend, which the next order's report gets. A
+// share the backend found under one minor unit of the order's currency (it answers no entry)
+// stays to report, with the next turn's spend. One turn's reports share one deadline
+// (REPORT_DEADLINE_MS, well under the finish activity's 30 s); what it leaves waits for the
+// next turn's end. A report whose answer was lost after the backend wrote it is sent again
+// with the larger spend since; the backend keeps the first entry, so that extra spend is
+// counted as carried and is in no entry.
 // Neither `record` nor `report` ever throws: a cost report never fails a call or a turn.
 
 export const REVISION_TOOLS: ReadonlySet<string> = new Set(['order_item_revision_add', 'order_item_revision_add_after_acceptance'])
@@ -32,18 +38,25 @@ export type AssistantCostReport = {
   costUsd: string
 }
 
-/** `recorded` (written now or before), `refused` (a 4xx: never sent again), `failed` (sent again at the next report). */
-export type ReportAnswer = 'recorded' | 'refused' | 'failed'
-export type PostCost = (report: AssistantCostReport) => Promise<ReportAnswer>
+/**
+ * `recorded` (written now or before), `refused` (a 4xx: never sent again), `deferred` (under one
+ * minor unit: nothing written, sent again with more spend), `failed` (sent again at the next report).
+ */
+export type ReportAnswer = 'recorded' | 'refused' | 'deferred' | 'failed'
+export type PostCost = (report: AssistantCostReport, timeoutMs: number) => Promise<ReportAnswer>
 
 export const ASSISTANT_COST_PATH = (orderId: string) => `/api/v1/internal/crud/agent/orders/${encodeURIComponent(orderId)}/assistant-cost`
-/** How long one report waits for the backend: it runs at a turn's end, before the next turn. */
+/** How long one order's report waits for the backend: it runs at a turn's end, before the next turn. */
 export const REPORT_TIMEOUT_MS = 5_000
+/** How long all of one turn's reports may take, within the finish activity's 30 s. */
+export const REPORT_DEADLINE_MS = 15_000
+/** Less time left than this, and the rest wait for the next turn's end. */
+const MIN_POST_MS = 1_000
 
 /** A PostCost over the backend's CRUD route; `fetchImpl` carries the service credential (withServiceCredential). */
-export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch, timeoutMs = REPORT_TIMEOUT_MS): PostCost {
+export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch): PostCost {
   const base = backendUrl.replace(/\/+$/, '')
-  return async (report) => {
+  return async (report, timeoutMs = REPORT_TIMEOUT_MS) => {
     try {
       const response = await fetchImpl(`${base}${ASSISTANT_COST_PATH(report.orderId)}`, {
         method: 'POST',
@@ -56,8 +69,11 @@ export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch, time
         }),
         signal: AbortSignal.timeout(timeoutMs),
       })
+      if (response.ok) {
+        const answer = (await response.json()) as { entry?: unknown }
+        return answer.entry === null ? 'deferred' : 'recorded'
+      }
       await response.body?.cancel()
-      if (response.ok) return 'recorded'
       // A 4xx from the route itself (its CRUD header) is final; anything else, a proxy's or
       // a missing route on an older API, is tried again.
       return response.status < 500 && response.headers.get('x-scadbuddy-crud') === '1' ? 'refused' : 'failed'
@@ -77,11 +93,13 @@ export class OrderCosts implements TouchedSink {
   private readonly sql: Sql
   private readonly post: PostCost
   private readonly onError: ((err: unknown) => void) | undefined
+  private readonly now: () => number
 
-  constructor(sql: Sql, post: PostCost, onError?: (err: unknown) => void) {
+  constructor(sql: Sql, post: PostCost, onError?: (err: unknown) => void, options: { now?: () => number } = {}) {
     this.sql = sql
     this.post = post
     this.onError = onError
+    this.now = options.now ?? Date.now
   }
 
   /** A revision that succeeded, unless its order was already reported in this session. Never throws. */
@@ -104,6 +122,7 @@ export class OrderCosts implements TouchedSink {
 
   /** Sends the session's spend since its last report to each order still to report. Never throws. */
   async report(sessionId: string): Promise<void> {
+    const deadline = this.now() + REPORT_DEADLINE_MS
     try {
       const pending = await this.sql<Pending[]>`
         SELECT order_id, order_item_id FROM ai_session_order_costs
@@ -122,14 +141,19 @@ export class OrderCosts implements TouchedSink {
         // Under a hundredth of a cent nothing is sent (the backend would write nothing):
         // the order stays to report, with the next turn's spend.
         if (share < 1e-4) continue
-        const answer = await this.post({
-          orderId,
-          orderItemId: items.length === 1 ? items[0]! : null,
-          sessionId,
-          principal: row.principal,
-          costUsd: share.toFixed(8),
-        })
-        if (answer === 'failed') continue
+        const left = deadline - this.now()
+        if (left < MIN_POST_MS) break
+        const answer = await this.post(
+          {
+            orderId,
+            orderItemId: items.length === 1 ? items[0]! : null,
+            sessionId,
+            principal: row.principal,
+            costUsd: share.toFixed(8),
+          },
+          Math.min(REPORT_TIMEOUT_MS, left),
+        )
+        if (answer === 'failed' || answer === 'deferred') continue
         const carried = answer === 'recorded' ? share / items.length : 0
         await this.sql`
           UPDATE ai_session_order_costs SET reported_at = now(), reported_usd = ${carried}

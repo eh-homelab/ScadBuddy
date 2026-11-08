@@ -115,6 +115,28 @@ def test_a_spend_under_one_minor_unit_writes_nothing(shop: Shop) -> None:
     assert shop.rows.cost_entries(order.id) == []
 
 
+def test_a_repeat_report_under_one_minor_unit_returns_the_first_entry(shop: Shop) -> None:
+    order, _ = shop.accepted()
+    rate = UsdRate(Decimal("1"), "USD")
+    first, _ = shop.lifecycle.add_assistant_cost(
+        order.id,
+        session_id=SESSION,
+        order_item_id=None,
+        cost_usd=Decimal("1"),
+        usd_rate=rate,
+        by=AGENT,
+    )
+    again, written = shop.lifecycle.add_assistant_cost(
+        order.id,
+        session_id=SESSION,
+        order_item_id=None,
+        cost_usd=Decimal("0.001"),
+        usd_rate=rate,
+        by=AGENT,
+    )
+    assert (again, written) == (first, False)
+
+
 def test_an_item_of_another_order_is_refused(shop: Shop) -> None:
     order, _ = shop.accepted()
     _, other = shop.accepted()

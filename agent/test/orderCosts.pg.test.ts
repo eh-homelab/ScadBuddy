@@ -17,7 +17,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
   let db: Database
   let drop: () => Promise<void>
   let posted: AssistantCostReport[]
+  let timeouts: number[]
   let answer: ReportAnswer
+  let clock: number
+  let postTakes: number
   let costs: OrderCosts
   const failures: unknown[] = []
 
@@ -25,15 +28,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     posted = []
+    timeouts = []
     answer = 'recorded'
+    clock = 0
+    postTakes = 0
     failures.length = 0
     costs = new OrderCosts(
       db.sql,
-      async (report) => {
+      async (report, timeoutMs) => {
         posted.push(report)
+        timeouts.push(timeoutMs)
+        clock += postTakes
         return answer
       },
       (err) => failures.push(err),
+      { now: () => clock },
     )
   })
   afterEach(async () => {
@@ -114,5 +123,32 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     await revise(id, 'a', 'a1')
     await costs.report(id)
     expect(posted).toEqual([])
+  })
+
+  it('keeps a share the backend found under one minor unit for the next report', async () => {
+    const id = await session(0.003)
+    await revise(id, 'a', 'a1')
+    answer = 'deferred'
+    await costs.report(id)
+    answer = 'recorded'
+    await spend(id, 0.5)
+    await costs.report(id)
+    expect(posted.map((p) => [p.orderId, p.costUsd])).toEqual([
+      ['a', '0.00300000'],
+      ['a', '0.50000000'],
+    ])
+  })
+
+  it('sends every report of one turn within one deadline, the rest at the next', async () => {
+    const id = await session(4)
+    for (const order of ['a', 'b', 'c', 'd']) await revise(id, order, `${order}1`)
+    postTakes = 6_000
+    await costs.report(id)
+    // 15 s in all: two whole posts, a third with the 3 s left, then none.
+    expect(posted.map((p) => p.orderId)).toEqual(['a', 'b', 'c'])
+    expect(timeouts).toEqual([5_000, 5_000, 3_000])
+    posted.length = 0
+    await costs.report(id)
+    expect(posted.map((p) => [p.orderId, p.costUsd])).toEqual([['d', '1.00000000']])
   })
 })

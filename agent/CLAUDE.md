@@ -34,8 +34,9 @@ assistant's spend on an order. A session's successful `order_item_revision_add` 
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too) reports the session's `cost_usd` since
 its last report, split equally between its orders still to report, to `POST
-…/crud/agent/orders/{id}/assistant-cost` (5 s timeout). A route's 4xx drops that order's
-report; a 5xx, a transport failure or a non-CRUD answer keeps it for the next turn's end.
+…/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s for the turn's reports in all). A
+route's 4xx drops that order's report; a 5xx, a transport failure, a non-CRUD answer, an
+answer with no entry (under one minor unit) or the deadline keeps it for the next turn's end.
 
 ## Commands
 

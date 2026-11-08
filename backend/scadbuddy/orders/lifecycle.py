@@ -1319,8 +1319,9 @@ class Lifecycle:
         """The assistant's spend in one session (§4.4, #5330): one ``assistant`` entry,
         source ``ai_session:<id>``, in the order's currency at ``usd_rate`` (converted
         under the order's lock, as a time entry's rate is), its note keeping the USD
-        figure. A spend under one minor unit writes nothing and answers ``None``; a
-        second report of the session returns the first entry and writes nothing."""
+        figure. A second report of the session returns the first entry and writes
+        nothing, whatever its amount; a first report under one minor unit writes nothing
+        and answers ``None``, so the agent keeps it to report with more spend."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             items = self._entry_item(conn, order, order_item_id)
@@ -1332,14 +1333,15 @@ class Lifecycle:
                     f"{usd_rate.currency}",
                 )
             amount = to_minor(cost_usd * factor, order.currency)
+            source = f"ai_session:{session_id}"
             if amount < 1:
-                return None, False
+                return self.store.cost_entry_of_source(conn, order.id, "assistant", source), False
             body = CostEntryInput(
                 order_item_id=order_item_id,
                 kind="assistant",
                 amount_minor=amount,
                 note=f"assistant session {session_id}: {cost_usd} USD",
-                source=f"ai_session:{session_id}",
+                source=source,
             )
             entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
             if not written:
