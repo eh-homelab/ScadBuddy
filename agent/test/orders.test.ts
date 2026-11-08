@@ -898,7 +898,7 @@ describe('pricing tools (#4250)', () => {
     await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM }, ctx())
     expect(body).toEqual({})
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM } as never)).toContain(
-      "with its quote's print setup",
+      "with its slice quote's print setup (refused when the quote records none)",
     )
   })
 

@@ -625,7 +625,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   approved grant kept) only when the grant is in force and admits, by function and tool,
   every call the new script makes that its version did not (`script_calls`; `agent(`
   never); any other trigger gets `NEWER_NOTICE` in `flow_triggers.notice`, which an edit of
-  its version clears;
+  its version clears, and only while it still runs the version read; it runs again after a
+  person approves a built-in trigger's grant (`move_after_approval`);
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
   settings) switches it. It prints each approved or failed item through `queue_print`
   with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any

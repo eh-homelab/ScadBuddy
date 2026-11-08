@@ -48,7 +48,10 @@ DESCRIPTION = (
 #: Who registered it: the build, never a person or an agent.
 AUTHOR: dict[str, Any] = {"kind": "builtin", "name": NAME}
 #: Shown on a trigger of an older built-in version that the upgrade did not move.
-NEWER_NOTICE = "A newer built-in flow exists; re-approve to use it."
+NEWER_NOTICE = (
+    "A newer built-in flow exists: move this trigger to the newest version and approve its"
+    " grant to use it."
+)
 #: A script's calls a grant can admit (`flows/grants.py` `HostFn`), and `agent(`, which
 #: no rule admits: `queue_print(...)`, `arrange(...)`, `tool("<name>", ...)`.
 _CALL = re.compile(r"""\b(queue_print|arrange|agent)\s*\(|\btool\(\s*["']([A-Za-z0-9_]+)["']""")
@@ -414,9 +417,11 @@ async def move_triggers(definitions: FlowDefinitions, triggers: TriggerStore) ->
     the built-in's own; the trigger runs a version the built-in registered; its grant is
     approved and in force; and each call the new script makes that its version's did not
     is one the grant admits by function and tool (`agent(` never is). The bounds the rules
-    set still apply to every call. A trigger left behind gets :data:`NEWER_NOTICE`; a
-    person moves it, which returns its grant to `requested`. Every trigger of the flow is
-    the shop's: a build makes none. How many moved."""
+    set still apply to every call. A trigger left behind gets :data:`NEWER_NOTICE`, only
+    while it still runs the version read (another replica or a person may have moved it
+    meanwhile); a trigger on the newest loses any notice. A person moves one, which
+    returns its grant to `requested`. Every trigger of the flow is the shop's: a build
+    makes none. How many moved."""
     versions = await asyncio.to_thread(definitions.history.versions, NAME)
     if not versions or versions[0].builtin != NAME:
         return 0
@@ -428,14 +433,30 @@ async def move_triggers(definitions: FlowDefinitions, triggers: TriggerStore) ->
     moved = 0
     for trigger in await triggers.list_triggers(name=NAME, limit=None):
         if trigger.definition_id == newest.version_id:
+            if trigger.notice is not None:
+                await triggers.set_notice(trigger.id, None, newest.version_id)
             continue
         if await _move(definitions, triggers, trigger, builtin, newest, calls):
             moved += 1
         else:
-            await triggers.set_notice(trigger.id, NEWER_NOTICE)
+            await triggers.set_notice(trigger.id, NEWER_NOTICE, trigger.definition_id)
     if moved:
         logger.info("moved %d trigger(s) to the built-in %s flow's newest version", moved, NAME)
     return moved
+
+
+async def move_after_approval(
+    definitions: FlowDefinitions, triggers: TriggerStore, trigger: Trigger
+) -> None:
+    """After a person approves ``trigger``'s grant: when it is the built-in flow's, move
+    its triggers now (:func:`move_triggers`), not only at the API's next start (#5732
+    review). A failure is logged; the approval stands either way."""
+    if trigger.name != NAME or not definitions.history.available:
+        return
+    try:
+        await move_triggers(definitions, triggers)
+    except Exception:
+        logger.exception("could not move the built-in %s flow's triggers", NAME)
 
 
 async def _move(

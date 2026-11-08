@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,9 @@ from scadbuddy.orders.builtin_flow import (
     NEWER_NOTICE,
     SCRIPT,
     ensure_builtin_flow,
+    move_after_approval,
+    move_triggers,
+    script_calls,
 )
 from scadbuddy.render.projection import JobProjection
 from tests.test_flow_trigger_events import _Client, new_cart
@@ -242,6 +246,66 @@ async def test_a_trigger_on_the_older_built_in_runs_the_new_one(
     assert await ensure_builtin_flow(definitions, triggers) is False
     again = await triggers.get(trigger.id)
     assert again is not None and again.updated_at == moved.updated_at
+
+
+def test_every_call_of_the_script_is_seen_by_the_widening_check() -> None:
+    """#5732 review: `script_calls` reads `tool("<literal>", ...)` only, so a built-in
+    that named a tool by a variable would slip past it. Each `tool(` call is a literal."""
+    tool_calls = len(re.findall(r"\btool\(", SCRIPT))
+    assert tool_calls == len(re.findall(r"""\btool\(\s*["'][A-Za-z0-9_]+["']""", SCRIPT))
+    assert {fn for fn, _ in script_calls(SCRIPT)} >= {"queue_print", "tool", "agent"}
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_replicas_moving_together_leave_no_notice(
+    definitions: FlowDefinitions, triggers: TriggerStore
+) -> None:
+    """#5732 review: a replica that finds the trigger moved by another (or by a person)
+    meanwhile sets no notice on it, and a notice left on a trigger of the newest version
+    is cleared."""
+    await _registered_old(definitions)
+    [old] = definitions.history.versions(NAME)
+    trigger = await _approved_trigger(triggers, old.version_id)
+    assert await ensure_builtin_flow(definitions) is True
+
+    counts = await asyncio.gather(
+        move_triggers(definitions, triggers), move_triggers(definitions, triggers)
+    )
+    assert sorted(counts) == [0, 1]
+    moved = await triggers.get(trigger.id)
+    assert moved is not None and moved.notice is None
+
+    # A notice that outlived its reason (a start before this fix) goes at the next start.
+    await triggers.set_notice(trigger.id, NEWER_NOTICE, moved.definition_id)
+    await move_triggers(definitions, triggers)
+    cleared = await triggers.get(trigger.id)
+    assert cleared is not None and cleared.notice is None
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_a_grant_approved_later_moves_the_trigger_then(
+    definitions: FlowDefinitions, triggers: TriggerStore
+) -> None:
+    """#5732 review: a trigger left behind for want of an approved grant moves once a
+    person approves one, not only at the API's next start."""
+    await _registered_old(definitions)
+    [old] = definitions.history.versions(NAME)
+    trigger = await _approved_trigger(triggers, old.version_id)
+    await triggers.revoke_grant(trigger.id, "browser")
+    assert await ensure_builtin_flow(definitions, triggers) is True
+    left = await triggers.get(trigger.id)
+    assert left is not None and left.notice == NEWER_NOTICE
+
+    spec = GrantSpec(expires_at=datetime.now(UTC) + timedelta(days=6), rules=BUILTIN_RULES)
+    seen = await asyncio.to_thread(triggers.live_hash, left)
+    assert await triggers.attach_grant(trigger.id, spec, "approved", {"kind": "browser"}, seen)
+    await move_after_approval(definitions, triggers, left)
+    moved = await triggers.get(trigger.id)
+    assert moved is not None
+    assert moved.definition_id == definitions.history.versions(NAME)[0].version_id
+    assert moved.notice is None
 
 
 @pytest.mark.requires_postgres

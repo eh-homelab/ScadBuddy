@@ -1390,7 +1390,7 @@ export const orderTools: Tool[] = [
       partSettingsPhrase(part_settings) +
       setupPhrase(setup) +
       // #4673: no choices of its own is the quote's whole setup.
-      (setup.choices === undefined ? " with its quote's print setup" : ''),
+      (setup.choices === undefined ? " with its slice quote's print setup (refused when the quote records none)" : ''),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined

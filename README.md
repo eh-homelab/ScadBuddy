@@ -163,7 +163,7 @@ on shutdown.
   built-in one (#4673). A trigger pins its version: each trigger of an older built-in
   version moves to the new one, keeping its approved grant, only when the new script calls
   nothing its version did not that the grant does not admit; any other trigger stays, with
-  the notice "A newer built-in flow exists; re-approve to use it." A person's edit or
+  the notice "A newer built-in flow exists: move this trigger to the newest version and approve its grant to use it." A person's edit or
   delete stands, and nothing runs until a person makes its
   trigger and approves its grant; `false` registers nothing; read from the environment
   only. The flow chooses no spools, so on the native (LAN) path, where the run's spools

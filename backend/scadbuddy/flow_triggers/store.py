@@ -161,8 +161,10 @@ class TriggerStore:
             self._move_builtin, trigger_id, from_definition_id, to_definition_id, approval_id, by
         )
 
-    async def set_notice(self, trigger_id: str, notice: str | None) -> None:
-        await self._call(self._set_notice, trigger_id, notice)
+    async def set_notice(self, trigger_id: str, notice: str | None, definition_id: str) -> None:
+        """Set its notice while it still runs ``definition_id``: a trigger moved since
+        (by another replica or a person) is left as it is (#5732 review)."""
+        await self._call(self._set_notice, trigger_id, notice, definition_id)
 
     async def set_paused(
         self, trigger_id: str, paused: bool, by: dict[str, Any] | None, reason: str | None
@@ -411,11 +413,12 @@ class TriggerStore:
         assert row is not None
         return Trigger.model_validate(row)
 
-    def _set_notice(self, trigger_id: str, notice: str | None) -> None:
+    def _set_notice(self, trigger_id: str, notice: str | None, definition_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE flow_triggers SET notice = %s WHERE id = %s AND notice IS DISTINCT FROM %s",
-                (notice, trigger_id, notice),
+                "UPDATE flow_triggers SET notice = %s WHERE id = %s AND definition_id = %s"
+                " AND notice IS DISTINCT FROM %s",
+                (notice, trigger_id, definition_id, notice),
             )
 
     def _set_paused(

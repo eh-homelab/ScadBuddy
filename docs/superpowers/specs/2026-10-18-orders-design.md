@@ -1080,7 +1080,8 @@ What this relies on, and what the design adds for it:
   A trigger pins its version: each trigger of an older built-in version moves to the new
   one, its approved grant kept, only when that grant admits every call the new script
   makes that its version did not; any other trigger stays, with the notice "A newer
-  built-in flow exists; re-approve to use it.";
+  built-in flow exists: move this trigger to the newest version and approve its grant to
+  use it.";
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
   and on a refusal (`order_on_hold`, `requote_needed`, any other), or print choices it
   cannot read (no output, or one gone), asks a person with
