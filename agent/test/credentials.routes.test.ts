@@ -3,7 +3,7 @@ import type { UpgradeWebSocket } from 'hono/ws'
 import { describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { AuditEntry, AuditRepo } from '../src/audit/log.js'
-import { type Credential, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
+import { type Credential, CREDENTIAL_NAME_MAX, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { CredentialEntryView, CredentialListView, CredentialView } from '../src/routes/credentials.js'
 import type { AiStatusView } from '../src/routes/status.js'
@@ -101,6 +101,7 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
       id: a.id,
       priority: 0,
       kind: 'anthropic_api_key',
+      name: null,
       base_url: null,
       last4: 'aaaa',
       updated_at: expect.any(String),
@@ -195,6 +196,49 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     expect((await call('PUT', '/entries/nope', { kind: 'anthropic_api_key', secret: KEY_A })).status).toBe(404)
   })
 
+  it('stores an optional name, trimmed, and lists it; no name is null (#3710)', async () => {
+    const { call, create } = setup()
+    const named = await create({ kind: 'claude_oauth_token', secret: KEY_A, name: '  Personal Max  ' })
+    expect(named.name).toBe('Personal Max')
+    const blank = await create({ kind: 'anthropic_api_key', secret: KEY_B, name: '   ' })
+    expect(blank.name).toBeNull()
+    const none = await create({ kind: 'gateway', base_url: 'https://llm.example', secret: GW })
+    expect(none.name).toBeNull()
+    const list = (await call<CredentialListView>('GET', '/entries')).body
+    expect(list.credentials.map((c) => c.name)).toEqual(['Personal Max', null, null])
+  })
+
+  it('renames a credential without its secret, and clears the name (#3710)', async () => {
+    const { call, create, credentials } = setup()
+    const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
+    await credentials.record(a.id, 0, { kind: 'disabled', reason: 'HTTP 401' })
+    const renamed = await call<CredentialEntryView>('PUT', `/entries/${a.id}/name`, { name: ' Work API ' })
+    expect(renamed.status).toBe(200)
+    // A rename changes only the name: the key, its health and its epoch stay.
+    expect(renamed.body).toMatchObject({ id: a.id, name: 'Work API', last4: a.last4, status: 'disabled' })
+    expect((await credentials.get(a.id))?.epoch).toBe(0)
+    const cleared = await call<CredentialEntryView>('PUT', `/entries/${a.id}/name`, { name: null })
+    expect(cleared.body.name).toBeNull()
+    expect((await call<CredentialEntryView>('PUT', `/entries/${a.id}/name`, { name: '' })).body.name).toBeNull()
+    expect((await call('PUT', '/entries/nope/name', { name: 'x' })).status).toBe(404)
+  })
+
+  it('refuses a name that is too long or holds control characters (#3710)', async () => {
+    const { call, create } = setup()
+    const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
+    const max = 'n'.repeat(CREDENTIAL_NAME_MAX)
+    expect((await call<CredentialEntryView>('PUT', `/entries/${a.id}/name`, { name: max })).body.name).toBe(max)
+    for (const name of [`${max}n`, 'two\nlines', 'tab\there', 'bell\u0007', 'rtl‮override', 'line sep']) {
+      const res = await call<{ detail: string }>('PUT', `/entries/${a.id}/name`, { name })
+      expect(res.status, JSON.stringify(name)).toBe(400)
+      const created = await call<{ detail: string }>('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_B, name })
+      expect(created.status, JSON.stringify(name)).toBe(400)
+    }
+    expect((await call('PUT', `/entries/${a.id}/name`, { name: 'x', extra: 1 })).status).toBe(400)
+    expect((await call('PUT', `/entries/${a.id}/name`, { name: 'x' }, { ...UI, origin: 'https://evil.example', 'content-type': 'application/json' })).status).toBe(403)
+    expect((await call<CredentialListView>('GET', '/entries')).body.credentials).toHaveLength(1)
+  })
+
   it('resets a disabled or cooling credential', async () => {
     const { call, create, credentials } = setup()
     const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
@@ -245,6 +289,7 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
     await call('PUT', '/order', { ids: [a.id] })
     await call('PUT', `/entries/${a.id}`, { kind: 'anthropic_api_key' })
+    await call('PUT', `/entries/${a.id}/name`, { name: 'Secret-looking name' })
     await call('POST', `/entries/${a.id}/reset`, undefined, UI)
     await call('POST', `/entries/${a.id}/test`, undefined, UI)
     await call('DELETE', `/entries/${a.id}`, undefined, UI)
@@ -253,11 +298,14 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
       ['credential', 'create'],
       ['credential', 'reorder'],
       ['credential', 'save'],
+      ['credential', 'rename'],
       ['credential', 'reset'],
       ['credential', 'delete'],
       ['credential', 'save'],
     ])
     expect(JSON.stringify(audited)).not.toMatch(/entries-(first|second)/)
+    // The name is data the user typed: the audit row names the route, never the body.
+    expect(JSON.stringify(audited)).not.toContain('Secret-looking')
   })
 })
 

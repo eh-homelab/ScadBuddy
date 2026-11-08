@@ -15,12 +15,17 @@ export type AiCredentialKind = 'anthropic_api_key' | 'claude_oauth_token' | 'gat
  */
 export type AiCredentialStatus = 'active' | 'cooling_down' | 'disabled'
 
+/** agent `credentials.ts` `CREDENTIAL_NAME_MAX`: the most characters a name has, after trimming. */
+export const AI_CREDENTIAL_NAME_MAX = 60
+
 /** One credential. The secret itself is never returned. */
 export interface AiCredentialEntry {
   id: string
   /** 0 is tried first. */
   priority: number
   kind: AiCredentialKind
+  /** The person's label for it (#3710), or null. Plain text: show it as text, never as markup. */
+  name: string | null
   base_url: string | null
   /** Empty for a secret shorter than 12 characters. */
   last4: string
@@ -52,6 +57,8 @@ export interface AiCredentialCreate {
   /** Gateway only. */
   base_url?: string | null
   secret: string
+  /** Optional (#3710); trimmed, and empty is no name. */
+  name?: string | null
 }
 
 export interface AiCredentialSave {
