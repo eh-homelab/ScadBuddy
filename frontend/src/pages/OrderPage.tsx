@@ -6,6 +6,8 @@ import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
+import { DepositControls } from '../components/orders/DepositControls'
+import { ShippingOptionPicker } from '../components/orders/ShippingOptionPicker'
 import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
@@ -29,6 +31,7 @@ import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from '.
 import { useSliceQuotes } from '../components/orders/useSliceQuotes'
 import type { ItemSection } from '../components/orders/itemActions'
 import { RecordDrawer } from '../components/records/RecordDrawer'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -74,7 +77,10 @@ export function OrderPage() {
   // #5543 — each item's parts, and what the open items are short of.
   const orderParts = useAsync(() => api.orderParts(id), [id], [`order:${id}`])
   // #4953 — `orders_allow_unfulfil`; on until the settings answer, as the backend's default.
-  const unfulfilAllowed = useAsync(() => api.getSettings(), []).data?.orders_allow_unfulfil ?? true
+  const settings = useAsync(() => api.getSettings(), []).data
+  const unfulfilAllowed = settings?.orders_allow_unfulfil ?? true
+  // #5281 — the shop's shipping options, for the order's picker.
+  const shippingOptions = settings?.storefront_shipping_options ?? []
   const detail = view.data
   // #5282: a storefront cart has no customer until it is submitted.
   const customerId = detail?.order.customer_id
@@ -129,6 +135,11 @@ export function OrderPage() {
   const providers = useAsync(() => api.paymentProviders(), []).data
   const providerLabel = (id: string) => (providers ?? []).find((p) => p.id === id)?.label ?? id
   const [payment, setPayment] = useState({ amount: '', method: '', request: NO_REQUEST })
+  // #5281 — the charges editor's unsaved rows hold the shipping option picker, which writes
+  // the same list: a save of stale rows would undo the option.
+  const [chargesDirty, setChargesDirty] = useState(false)
+  // …and a shipping option write in flight, until its reload lands, locks the editor's rows.
+  const [pickerBusy, setPickerBusy] = useState(false)
 
   function reload() {
     view.refresh()
@@ -369,8 +380,16 @@ export function OrderPage() {
             <CardContent className="flex flex-col gap-3">
               {/* #4955 step 4 — the summary: subtotal, each charge, total, paid and balance. */}
               <h2 className="text-sm font-medium">Summary</h2>
-              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
-              <OrderSummary currency={order.currency} exponent={order.minor_exponent} totals={totals} charges={charges} />
+              {/* #5281 — the shipping option writes the order's one shipping charge. */}
+              <ShippingOptionPicker order={order} charges={charges} options={shippingOptions} disabled={chargesDirty} onBusyChange={setPickerBusy} onChanged={reload} />
+              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} onDirtyChange={setChargesDirty} locked={pickerBusy} />
+              <OrderSummary
+                currency={order.currency}
+                exponent={order.minor_exponent}
+                totals={totals}
+                charges={charges}
+                chargeBadge={(c) => (c.auto ? <Badge variant="secondary">auto</Badge> : null)}
+              />
               {(totals.unpriced_items ?? []).length > 0 && (
                 <p className="text-xs text-warn" data-testid="order-unpriced">
                   Not in the total, with no price yet: {(totals.unpriced_items ?? []).map((id) => titles.get(id) ?? id).join(', ')}
@@ -388,6 +407,7 @@ export function OrderPage() {
                   ))}
                 </ul>
               )}
+              <DepositControls order={order} totals={totals} requests={requests} onChanged={reload} />
               <PaymentRequests order={order} requests={requests} balanceMinor={totals.balance_minor} onChanged={reload} />
               {order.status !== 'cancelled' && (
                 <form
@@ -445,7 +465,7 @@ export function OrderPage() {
 
         <Card size="sm">
           <CardContent>
-            <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} onChanged={reload} />
+            <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} shippingHeld={totals.shipping_held} onChanged={reload} />
           </CardContent>
         </Card>
 
