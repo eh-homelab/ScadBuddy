@@ -165,3 +165,11 @@ def test_a_no_charge_item_keeps_the_total_and_shows_its_cost_as_a_loss(
     costs = client.get(f"/api/v1/orders/{order_id}/costs").json()
     # A discount counts, signed; tax never counts as revenue.
     assert (costs["charges_minor"], costs["revenue_minor"]) == (300, 1300)
+
+
+def test_a_charge_other_than_shipping_names_no_shipping_option(client: TestClient) -> None:
+    order_id = create_order(client, create_customer(client)["id"])["id"]
+    fee = {"kind": "fee", "label": "Rush", "amount_minor": 100, "shipping_option_id": "post"}
+    refused = put(client, order_id, fee)
+    assert refused.status_code == 422, refused.text
+    assert "shipping_option_id" in refused.text

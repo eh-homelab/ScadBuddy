@@ -497,6 +497,26 @@ class StoredSettings(BambuddyIds):
                 logger.warning("unreadable model project", extra={"scope": scope})
         return kept
 
+    @field_validator("orders_deposit_policy", "storefront_shipping_options", mode="before")
+    @classmethod
+    def _readable_money_rules(cls, value: Any, info: ValidationInfo) -> Any:
+        """An entry this version cannot read (#5281) is dropped, and a value that is not a
+        list is none, so it cannot stop the settings loading."""
+        if value is None:
+            return None
+        name = info.field_name or ""
+        if not isinstance(value, list):
+            logger.warning("unreadable money setting", extra={"setting": name})
+            return None
+        shape = DepositRule if name == "orders_deposit_policy" else ShippingOption
+        kept: list[BaseModel] = []
+        for entry in value:
+            try:
+                kept.append(shape.model_validate(entry))
+            except ValidationError:
+                logger.warning("unreadable money setting entry", extra={"setting": name})
+        return kept
+
     @field_validator("model_print_choices", mode="before")
     @classmethod
     def _readable_choices(cls, value: Any) -> Any:

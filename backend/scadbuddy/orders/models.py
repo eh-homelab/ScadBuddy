@@ -15,7 +15,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, computed_field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationInfo,
+    computed_field,
+    field_validator,
+)
 
 from scadbuddy.core.settings import decimal_string
 from scadbuddy.library.libraries import ModelLibrary
@@ -194,8 +203,16 @@ class ChargeInput(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     #: Signed: a discount is negative.
     amount_minor: Money
-    #: The shipping option a ``shipping`` charge was chosen from (#5281), if any.
-    shipping_option_id: str | None = None
+    #: The shipping option a ``shipping`` charge was chosen from (#5281), if any; no
+    #: other kind names one (``order_charges_option_is_shipping``).
+    shipping_option_id: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,40}$")
+
+    @field_validator("shipping_option_id")
+    @classmethod
+    def _option_is_shipping(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is not None and info.data.get("kind") != "shipping":
+            raise ValueError("only a shipping charge names a shipping option")
+        return value
 
 
 class Charge(ChargeInput):

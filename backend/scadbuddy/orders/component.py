@@ -77,7 +77,8 @@ class OrdersComponent:
 
     def rules(self) -> OrderRules:
         """The shop's money rules (#5281) as stored now: the lifecycle reads them on each
-        use, so a change applies to the next transition."""
+        use, so a change applies to the next transition. Each call is a full settings
+        snapshot (three queries), so a transition reads it once."""
         snapshot = self.core.settings_store.snapshot()
         runtime, stored = snapshot.runtime, snapshot.stored
         return OrderRules(

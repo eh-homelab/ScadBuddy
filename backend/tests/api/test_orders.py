@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.api.test_customers import ADA
@@ -204,3 +205,20 @@ def test_payments_hold_and_the_audit_line(client: TestClient) -> None:
     assert (
         client.post(f"/api/v1/orders/{order['id']}/payments", json={"amount": 1}).status_code == 422
     )
+
+
+@pytest.mark.parametrize("kind", ["fee", "tax", "discount"])
+def test_only_a_shipping_charge_names_a_shipping_option(client: TestClient, kind: str) -> None:
+    order = create_order(client, create_customer(client)["id"])
+    charge = {"kind": kind, "label": "x", "amount_minor": 1, "shipping_option_id": "post"}
+    refused = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [charge]})
+    assert refused.status_code == 422, refused.text
+    assert "shipping_option_id" in refused.text
+    shipping = {**charge, "kind": "shipping"}
+    assert (
+        client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [shipping]}).status_code
+        == 200
+    )
+    bad_id = {**shipping, "shipping_option_id": "Not An Id"}
+    refused = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [bad_id]})
+    assert refused.status_code == 422
