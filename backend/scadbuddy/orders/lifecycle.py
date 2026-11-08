@@ -965,11 +965,11 @@ class Lifecycle:
 
     def _set_deposit(
         self, conn: Conn, order: Order, by: Actor, amount: Money | None, **audit: Any
-    ) -> Order:
+    ) -> Order | None:
         """Cancels the open deposit requests, sets the deposit, clears its waiver, and asks
         for what of it is not paid yet, on the default provider. The same deposit whose
         open request already asks for the rest (or none, with nothing due) writes
-        nothing: the order is returned as it is."""
+        nothing and is None, so the caller tells no one."""
         due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
         asking = [
             found
@@ -979,7 +979,7 @@ class Lifecycle:
         if amount == order.deposit_minor and [r.amount_minor for r in asking] == (
             [due] if due > 0 else []
         ):
-            return order
+            return None
         for found in asking:
             payments.set_request_status(conn, found.id, "cancelled")
             self._event(conn, order, by, "payment_request.cancelled", request_id=found.id)
@@ -1016,7 +1016,10 @@ class Lifecycle:
             self._deposit_editable(order)
             if amount_minor is not None and amount_minor < 1:
                 raise LifecycleError("amount_minor", "a deposit is above zero", unprocessable=True)
-            order = self._set_deposit(conn, order, by, amount_minor)
+            updated = self._set_deposit(conn, order, by, amount_minor)
+            if updated is None:
+                return order
+            order = updated
         self._told(_Change(order))
         return order
 
@@ -1035,7 +1038,10 @@ class Lifecycle:
                 currency=order.currency,
                 shop_currency=rules.shop_currency,
             )
-            order = self._set_deposit(conn, order, by, amount, policy=True)
+            updated = self._set_deposit(conn, order, by, amount, policy=True)
+            if updated is None:
+                return order
+            order = updated
         self._told(_Change(order))
         return order
 
