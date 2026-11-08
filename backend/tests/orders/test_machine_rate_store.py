@@ -482,6 +482,28 @@ async def test_the_views_inputs_are_from_the_same_read_as_its_breakdown(
     assert view is not None and view.inputs is not None
     assert view.breakdown.intervals == "bambuddy"
     assert view.inputs.maintenance[0].interval_hours == "50"
+    assert view.bambuddy_tasks == ["Lubricate rods"]
+
+
+async def test_the_view_of_a_linked_printer_with_no_profile_names_bambuddys_tasks(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    # The first person to type its tasks gets Bambuddy's names; the rate is the book's.
+    printer = linked_printer(printers)
+    live = FakeBambuddy(
+        [
+            MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours"),
+            MaintenanceTask(task="Check belts", interval_hours=30, interval_type="days"),
+        ]
+    )
+    view = await rates(store, printers, settings_store, live).view(printer.id)
+    assert view is not None and view.inputs is None
+    assert view.breakdown.source == "price_book"
+    assert view.bambuddy_tasks == ["Lubricate rods", "Check belts"]
+    silent = await rates(store, printers, settings_store, FakeBambuddy(None)).view(printer.id)
+    assert silent is not None and silent.bambuddy_tasks == []
+    lan = await rates(store, printers, settings_store, live).view(lan_printer(printers).id)
+    assert lan is not None and lan.bambuddy_tasks == []
 
 
 def test_keeping_intervals_waits_for_a_replace_of_the_same_printer(

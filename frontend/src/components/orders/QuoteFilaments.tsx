@@ -149,8 +149,20 @@ function SupportFilaments({
       <div className="flex flex-wrap items-end gap-2">
         <div className="flex flex-col gap-1">
           <Label htmlFor="quote-support-slot">Support slot</Label>
-          <Input id="quote-support-slot" className="w-20" inputMode="numeric" placeholder="5" value={slot} onChange={(event) => setSlot(event.target.value)} />
+          <Input
+            id="quote-support-slot"
+            className="w-20"
+            inputMode="numeric"
+            placeholder="5"
+            aria-describedby="quote-support-slot-hint"
+            value={slot}
+            onChange={(event) => setSlot(event.target.value)}
+          />
         </div>
+        {/* A slot the slice does not use is refused only after slicing (`orders/quote.py`). */}
+        <p id="quote-support-slot-hint" className="pb-2 text-xs text-muted-foreground">
+          A slot the slice uses
+        </p>
         <Button type="button" size="sm" variant="outline" onClick={add}>
           Add support filament
         </Button>
