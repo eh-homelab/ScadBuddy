@@ -41,6 +41,7 @@ function statusOf(id: string): ProviderStatus {
     last_webhook_error: connected?.last_webhook_error ?? null,
     last_webhook_error_at: connected?.last_webhook_error_at ?? null,
     currency: connected?.currency ?? null,
+    reports_currency: connected?.reports_currency ?? false,
   }
 }
 
@@ -84,8 +85,8 @@ export const handlers = [
 ]
 
 /** Connect the fake provider as the settings form would, for a test's setup. */
-export function mockConnectProvider(account = 'a', currency: string | null = null) {
-  state.providers = [{ id: FAKE.id, account_label: `Fake account ${account}`, is_default: true, connected_at: now(), last_webhook_at: null, last_webhook_error: null, last_webhook_error_at: null, currency }]
+export function mockConnectProvider(account = 'a', currency: string | null = null, reportsCurrency = false) {
+  state.providers = [{ id: FAKE.id, account_label: `Fake account ${account}`, is_default: true, connected_at: now(), last_webhook_at: null, last_webhook_error: null, last_webhook_error_at: null, currency, reports_currency: reportsCurrency }]
 }
 
 /** #5684 — the fake provider's last webhook failed with `error` (connect it first). */

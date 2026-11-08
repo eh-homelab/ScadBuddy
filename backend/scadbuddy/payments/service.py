@@ -117,6 +117,10 @@ class ProviderStatus(BaseModel):
     #: The one currency the connected account takes, when it has one (#5666: a Square
     #: location's); Settings warns when it is not the shop's ``orders_currency``.
     currency: str | None = None
+    #: Whether the provider's account takes one currency (`PaymentProvider
+    #: .reports_currency`): a connected row of it with no ``currency`` was connected
+    #: before the currency was kept, and is asked to reconnect.
+    reports_currency: bool = False
 
 
 class ProviderConnect(BaseModel):
@@ -508,6 +512,7 @@ class Payments:
                     last_webhook_error=None if row is None else row.last_webhook_error,
                     last_webhook_error_at=None if row is None else row.last_webhook_error_at,
                     currency=None if row is None else row.currency,
+                    reports_currency=adapter is not None and adapter.reports_currency,
                 )
             )
         return found

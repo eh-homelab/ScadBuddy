@@ -571,8 +571,11 @@ and `MERCHANT_PROFILE_READ`
 ScadBuddy checks that the location is active and that it takes payments in the shop's
 order currency ([Location](https://developer.squareup.com/reference/square/objects/Location)):
 a location in another currency is refused. When the order currency is changed later,
-the page warns that new payment links will fail until Square is connected again with a
-location in that currency. The page then shows
+the page warns that payment links for orders created from then on will fail (existing
+orders keep their currency) until Square is connected again with a location in that
+currency. A Square account connected before the location's currency was kept (#5744)
+shows "Currency not checked; reconnect to check it." until it is connected again. The
+page then shows
 "Connected as Square location … (sandbox)" or "(production)". Each payment request is a
 Square payment link for the request's amount, named for the order, with the request in
 its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).
