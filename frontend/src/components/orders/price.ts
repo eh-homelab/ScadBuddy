@@ -1,9 +1,6 @@
 import { api } from '../../api/client'
-import type { ManualQuoteInput, OrderItemDetail, OrderStatus, Quote } from '../../api/types'
+import type { ManualQuoteInput, OrderItemDetail, Quote } from '../../api/types'
 import { toMinor } from '../../lib/money'
-
-/** The order statuses that take a price (§3.4): past `quoted` the accepted prices are pinned. */
-export const PRICED_WHILE: ReadonlySet<OrderStatus> = new Set<OrderStatus>(['draft', 'quoted'])
 
 /** What the price helpers read of an item. */
 type Priced = Pick<OrderItemDetail, 'quantity' | 'quotes'>

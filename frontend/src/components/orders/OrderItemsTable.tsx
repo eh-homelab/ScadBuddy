@@ -1,7 +1,7 @@
 import { Fragment, useId, useState, type KeyboardEvent } from 'react'
 import { MoreHorizontalIcon, PencilIcon } from 'lucide-react'
 import { api } from '../../api/client'
-import type { Order, OrderAttachment, OrderCosts, OrderItemDetail, OrderStatus, Shipment } from '../../api/types'
+import type { Order, OrderAttachment, OrderCosts, OrderItemDetail, OrderStatus, Quote, Shipment } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -116,7 +116,7 @@ export function OrderItemsTable({
       className: 'break-words',
       cell: (item, open) => (
         <span className="flex flex-col items-start gap-0.5">
-          <TitleEditor orderId={orderId} item={item} editable={itemEdits(order, item).title} open={open} onChanged={onChanged} />
+          <TitleEditor orderId={orderId} item={item} editable={itemEdits(order, item).title} open={open} onChanged={onChanged} pageBusy={busy} />
           {/* #5544 — a library file item names its file, by its name when it was added. */}
           {item.library_file && (
             <span className="text-[11px] break-all text-muted-foreground" data-testid="item-library-file">
@@ -146,7 +146,7 @@ export function OrderItemsTable({
       header: 'Qty',
       className: 'sb-num',
       cell: (item) =>
-        itemEdits(order, item).quantity ? <QuantityEditor orderId={orderId} item={item} onChanged={onChanged} /> : item.quantity,
+        itemEdits(order, item).quantity ? <QuantityEditor orderId={orderId} item={item} onChanged={onChanged} pageBusy={busy} /> : item.quantity,
     },
     {
       key: 'unit',
@@ -560,12 +560,15 @@ function TitleEditor({
   editable,
   open,
   onChanged,
+  pageBusy,
 }: {
   orderId: string
   item: OrderItemDetail
   editable: boolean
   open: (() => void) | undefined
   onChanged: () => void
+  /** A page write is running: Enter waits for it, as the ⋯ menu's writes do. */
+  pageBusy: boolean
 }) {
   const [typed, setTyped] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -616,7 +619,7 @@ function TitleEditor({
         aria-describedby={error ? errorId : undefined}
         className="h-7"
         value={typed}
-        disabled={busy}
+        readOnly={busy}
         onChange={(event) => {
           setTyped(event.target.value)
           setError(null)
@@ -624,7 +627,7 @@ function TitleEditor({
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
             event.preventDefault()
-            if (!busy) void save(typed)
+            if (!busy && !pageBusy) void save(typed)
           } else if (event.key === 'Escape') {
             event.preventDefault()
             close()
@@ -645,7 +648,7 @@ function TitleEditor({
  * saves it (a model item's accepted quote is dropped, as the drawer's Save item does; a custom
  * item is priced again at once), Escape puts back the quantity it has. A refusal shows under it.
  */
-function QuantityEditor({ orderId, item, onChanged }: { orderId: string; item: OrderItemDetail; onChanged: () => void }) {
+function QuantityEditor({ orderId, item, onChanged, pageBusy }: { orderId: string; item: OrderItemDetail; onChanged: () => void; pageBusy: boolean }) {
   const [typed, setTyped] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -678,7 +681,8 @@ function QuantityEditor({ orderId, item, onChanged }: { orderId: string; item: O
         inputMode="numeric"
         className="h-7 w-16 text-right"
         value={text}
-        disabled={busy}
+        // Read-only while it saves, not disabled: the input keeps its focus, so Tab goes on.
+        readOnly={busy}
         onChange={(event) => {
           setTyped(event.target.value)
           setError(null)
@@ -686,7 +690,7 @@ function QuantityEditor({ orderId, item, onChanged }: { orderId: string; item: O
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
             event.preventDefault()
-            if (!busy) void save()
+            if (!busy && !pageBusy) void save()
           } else if (event.key === 'Escape') {
             event.preventDefault()
             setTyped(null)
@@ -723,6 +727,17 @@ function UnitPrice({ item, currency, exponent }: { item: OrderItemDetail; curren
 }
 
 /**
+ * The quote the row's unit price reads: `pricingQuote`'s, except for an item revised after
+ * acceptance (#5350), whose old accepted quote prices a design replaced since. It reads the
+ * newest quote of its current design not yet accepted, or none.
+ */
+function editorQuote(item: OrderItemDetail): { quote: Quote; accepted: boolean } | null {
+  if (!item.revised_after_acceptance) return pricingQuote(item)
+  const pending = item.quotes.filter((quote) => !quote.accepted && quote.revision_id === item.current_revision_id).sort(byCreated).at(-1)
+  return pending ? { quote: pending, accepted: false } : null
+}
+
+/**
  * The unit price, typed: Enter (or Accept) accepts the item's pending quote when the
  * price is that quote's and it is for the item's quantity (a slice quote keeps its sliced
  * file and cost), else records a `manual` quote at it and accepts that. Escape puts back
@@ -741,7 +756,8 @@ function UnitPriceEditor({
   exponent: number
   onChanged: () => void
 }) {
-  const price = unitPrice(item)
+  const priced = editorQuote(item)
+  const price = priced ? { minor: priced.quote.unit_price_minor, accepted: priced.accepted } : null
   const current = price ? toMajor(price.minor, exponent) : ''
   // What was typed; null shows the item's price, so a reload brings in the new one.
   const [typed, setTyped] = useState<string | null>(null)
@@ -752,7 +768,6 @@ function UnitPriceEditor({
   // The same amount however it is typed (12.5 is 12.50), so an accepted price stays put.
   const unchanged = price !== null && parseUnitPrice(text, exponent) === price.minor
   // Nothing to accept: the accepted quote prices the item at its quantity now.
-  const priced = pricingQuote(item)
   const settled = priced !== null && priced.accepted && priced.quote.quantity === item.quantity
 
   async function submit() {
@@ -765,7 +780,7 @@ function UnitPriceEditor({
     setError(null)
     // The pending quote is accepted as it is only while it still prices this item: at the
     // typed price and at the item's quantity (a quantity change leaves it `quote_stale`).
-    const pending = pricingQuote(item)
+    const pending = editorQuote(item)
     const reuse = pending && !pending.accepted && pending.quote.quantity === item.quantity && pending.quote.unit_price_minor === minor ? pending.quote : null
     let recorded = false
     try {
@@ -829,7 +844,7 @@ function UnitPriceEditor({
           Accept
         </Button>
       </span>
-      {price && !price.accepted && <NotAccepted />}
+      {((price && !price.accepted) || item.revised_after_acceptance) && <NotAccepted />}
       {error && (
         <p id={errorId} role="alert" className="max-w-56 text-right text-[11px] whitespace-normal text-warn">
           {error}

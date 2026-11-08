@@ -112,8 +112,21 @@ describe('itemEdits (#4955)', () => {
       title: true,
       quantity: false,
       price: false,
-      locked: LOCKED_TEXT,
+      locked: `${LOCKED_TEXT} To change what they get, revise the design or add an item.`,
     })
+  })
+
+  it('names only the ways out the backend takes now', () => {
+    const accepted = [quote({ accepted: true })]
+    const priced = (fields: Partial<OrderItemDetail> = {}) => item({ status: 'approved', quotes: accepted, ...fields })
+    const locked = (o: Order, i: OrderItemDetail) => itemEdits(o, i).locked
+    // A model item on an accepted order: revise it, or add an item.
+    expect(locked(order({ status: 'accepted' }), priced())).toBe(`${LOCKED_TEXT} To change what they get, revise the design or add an item.`)
+    // A custom or library file item takes no revision (`NO_REVISIONS`).
+    expect(locked(order({ status: 'accepted' }), priced({ kind: 'custom', reference: null, output_id: null }))).toBe(`${LOCKED_TEXT} To change what they get, add an item.`)
+    // A shipped order takes neither, nor does an order on hold.
+    expect(locked(order({ status: 'shipped' }), priced())).toBe(LOCKED_TEXT)
+    expect(locked(order({ status: 'accepted', on_hold: true }), priced())).toBe(LOCKED_TEXT)
   })
 
   it('edits an item added after acceptance until its price is accepted (#5349)', () => {

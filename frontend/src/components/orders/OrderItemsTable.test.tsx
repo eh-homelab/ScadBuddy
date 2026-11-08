@@ -666,6 +666,64 @@ describe('OrderItemsTable · inline edit (#4955)', () => {
     expect(within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })).toBeInTheDocument()
     expect(screen.getByTestId(`item-locked-${ITEM_APPROVED}`)).toHaveTextContent(REVISED_TEXT)
   })
+
+  it("prices a revised item's new design from empty, even at the old price, and says it is not accepted (#5350)", async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.revised_after_acceptance = true
+    const quoted = vi.spyOn(api, 'quoteOrderItem')
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const input = within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })
+    expect(input).toHaveValue('')
+    expect(within(row(ITEM_APPROVED)).getByText('not accepted')).toBeInTheDocument()
+    await user.type(input, '15.00{Enter}')
+    await waitFor(() => expect(accepted).toHaveBeenCalled())
+    expect(quoted).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1500 })
+  })
+
+  it("accepts a revised item's pending quote of the new design at its own price, recording nothing (#5350)", async () => {
+    const found = state.items.find((i) => i.id === ITEM_APPROVED)!
+    found.revised_after_acceptance = true
+    const old = state.quotes.find((q) => q.order_item_id === ITEM_APPROVED && q.accepted)!
+    state.quotes.push({ ...old, id: 'q-new-design', accepted: false, unit_price_minor: 1500, revision_id: found.current_revision_id, created_at: '2026-11-08T10:00:00Z' })
+    const quoted = vi.spyOn(api, 'quoteOrderItem')
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const input = within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })
+    expect(input).toHaveValue('15.00')
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Accept unit price' }))
+    await waitFor(() => expect(accepted).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED, 'q-new-design'))
+    expect(quoted).not.toHaveBeenCalled()
+  })
+
+  it('keeps the quantity focused after Enter, so Tab goes on from it', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '4{Enter}')
+    await waitFor(() => expect(draftItem().quantity).toBe(4))
+    expect(screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })).toHaveFocus()
+  })
+
+  it('waits for a running page write before it saves a quantity', async () => {
+    let finish: () => void = () => undefined
+    vi.spyOn(api, 'cancelOrderItem').mockImplementation(() => new Promise((resolve) => (finish = () => resolve({} as never))))
+    const custom = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(custom.id)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Cancel item' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel item' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add product' })).toBeDisabled())
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '6{Enter}')
+    expect(updated).not.toHaveBeenCalled()
+    await act(async () => finish())
+  })
 })
 
 // #5544 — a library file item names its file under its title, by its name when it was added.
