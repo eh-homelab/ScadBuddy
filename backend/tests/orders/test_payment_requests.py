@@ -370,6 +370,24 @@ def test_a_second_paid_event_for_a_request_the_provider_paid_is_ignored(shop: Pa
     assert [r["outcome"] for r in outcomes] == ["recorded", "ignored"]
 
 
+def test_a_paid_event_told_again_with_its_fee_writes_the_fee_once(shop: PayShop) -> None:
+    """#5666: Square tells a payment's fee in a later ``payment.updated`` of the same
+    payment, a new event that is ``paid`` again. The money is not recorded twice; the fee
+    is written on the first payment, once."""
+    order, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", EVENT.model_copy(update={"fee_minor": None}))
+    assert shop.rows.cost_entries(order.id) == []
+    with_fee = EVENT.model_copy(update={"event_id": "e6"})
+    assert shop.lifecycle.record_provider_event("fake", with_fee) == "recorded"
+    [pay] = [p for p in shop.rows.payments(order.id) if p.provider]
+    [fee] = shop.rows.cost_entries(order.id)
+    assert (fee.amount_minor, fee.source) == (31, f"payment:{pay.id}")
+    assert shop.rows_request(req.id).payment_id == pay.id
+    again = EVENT.model_copy(update={"event_id": "e7"})
+    assert shop.lifecycle.record_provider_event("fake", again) == "ignored"
+    assert len(shop.rows.cost_entries(order.id)) == 1
+
+
 def test_a_paid_event_for_a_request_paid_by_hand_is_recorded(shop: PayShop) -> None:
     order, req = shop.linked()
     cash = shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)

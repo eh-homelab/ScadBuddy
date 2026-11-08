@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "category": "INVALID_REQUEST_ERROR",
+      "code": "INVALID_VALUE",
+      "detail": "Currency 'EUR' does not match the location's currency.",
+      "field": "quick_pay.price_money.currency"
+    }
+  ]
+}

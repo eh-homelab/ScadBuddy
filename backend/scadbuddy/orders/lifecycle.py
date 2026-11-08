@@ -1050,7 +1050,15 @@ class Lifecycle:
             # #5681: the refund's own failure was told first, so the money never left.
             return "ignored", None
         if event.kind == "paid" and self._paid_by(conn, order, found, provider):
-            # A hosted page is paid once: this is the same money told again.
+            # A hosted page is paid once: this is the same money told again. A provider
+            # that tells the fee only in a later update of the same payment (#5666:
+            # Square's ``payment.updated``) adds it now, on the payment, once.
+            if (
+                event.fee_minor
+                and found.payment_id is not None
+                and self._write_fee(conn, order, found.payment_id, provider, event.fee_minor, by)
+            ):
+                return "recorded", None
             return "ignored", None
         amount = found.amount_minor if event.amount_minor is None else event.amount_minor
         payment = self.store.insert_payment(

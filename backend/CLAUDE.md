@@ -905,6 +905,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
   approval is not captured (a failed mark is logged, not retried, and such a capture, like one
   made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  `square.py` (#5666: a request is a quick-pay payment link and its reference is the link's
+  Square order id, which each payment carries; `x-square-hmacsha256-signature` checked by our
+  own code over the notification URL setting and the raw body; a cancel finds the order's
+  link by listing the links and deletes it; a payment is `paid` under Square's event id each
+  time it is told, and its fee comes from `processing_fee`; the facts, each with its Square
+  link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -929,7 +935,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   unique `(order_id, kind, source)` index); one that arrives before its payment is
   `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
   only while the request is open or pending and the event (`ProviderEvent.created_at`) is
-  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
+  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A
+  `paid` event for a request this provider's payment already paid writes no money; with a
+  fee it writes that payment's fee once (#5666: Square adds the fee in a later update). A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. A `refund_failed`

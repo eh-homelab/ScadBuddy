@@ -65,6 +65,18 @@ def test_paypal_is_offered_with_its_environment_and_one_secret(client: TestClien
     ]
 
 
+def test_square_is_offered_with_its_location_webhook_and_two_secrets(client: TestClient) -> None:
+    [square] = [s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "square"]
+    assert (square["label"], square["connected"]) == ("Square", False)
+    assert [(f["name"], f["secret"]) for f in square["fields"]] == [
+        ("environment", False),
+        ("location_id", False),
+        ("notification_url", False),
+        ("access_token", True),
+        ("signature_key", True),
+    ]
+
+
 def test_the_page_never_sees_a_secret(client: TestClient) -> None:
     before = fake_status(client)
     assert (before["id"], before["connected"], before["is_default"]) == ("fake", False, False)
@@ -111,7 +123,7 @@ def test_a_field_not_declared_or_missing_is_422_naming_it(client: TestClient) ->
 
 def test_an_unknown_provider_is_404(client: TestClient) -> None:
     for answer in (
-        client.put("/api/v1/payments/providers/square", json=FAKE_CONNECT),
+        client.put("/api/v1/payments/providers/nowhere", json=FAKE_CONNECT),
         client.delete(PROVIDER),
         client.post(f"{PROVIDER}/default"),
     ):
