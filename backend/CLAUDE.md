@@ -850,6 +850,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `GET /farm/archives`; status and name filter the listed page), `ArchiveQuote.tsx` ("Quote
   from the print" in `QuoteEditor`), the grid's "From past print" line; mocks
   `orders/pastPrints.ts`, `orders.ts` `addArchiveItem` and `priceBook.ts`.
+  The items card's writes (#4955, §4.2): `POST …/items/{item}/duplicate`
+  (`Lifecycle.duplicate_item`, body `{after_acceptance}`: the item's kind, current design,
+  past print archives, quantity, title, notes and SKU, added as `add_items` adds one; no
+  quote copied but a custom item's own price; audit `item.duplicated`) and `POST
+  /orders/{id}/fulfil` (`Lifecycle.fulfil_items`, `FulfilLine`s: per item an attempt by hand
+  of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
+  `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
+  `failed`, or named twice, refuses all).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for

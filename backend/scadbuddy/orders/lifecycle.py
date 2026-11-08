@@ -206,6 +206,16 @@ class FulfilmentInput(BaseModel):
     archive_id: int | None = Field(default=None, ge=1)
 
 
+class FulfilLine(BaseModel):
+    """One item of a bulk fulfil (#4955, order operations spec 2026-11-07 §4.2): how many
+    of it were made."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1, max_length=64)
+    quantity: int = Field(ge=1)
+
+
 def _refuse_revision_role(role: AttachmentRole) -> None:
     """A `render` or a `test_print` is a design revision's file (storefront spec §4),
     never an order's, an item's or an attempt's."""
@@ -2011,6 +2021,65 @@ class Lifecycle:
         self._told(_Change(order, [(item, None) for item in items]))
         return items
 
+    def duplicate_item(
+        self, order_id: str, item_id: str, by: Actor, *, after_acceptance: bool = False
+    ) -> OrderItem:
+        """#4955 (order operations spec 2026-11-07 §4.2): a new item of the order with the
+        item's kind, current design (reference, colours and output, or library file), past
+        print archives, quantity, title, notes and SKU, added as `add_items` adds one
+        (``after_acceptance`` as its). No quote is copied: it is priced again. A custom
+        item's price is its own field (#4954), so the copy takes its unit price (the
+        accepted quote's, else the newest), accepted unless added after acceptance. A
+        library file item's slots come from its first quote, as the original's did. The
+        audit line says ``item.duplicated`` after the add's own row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._takes_item(order, after_acceptance)
+            item = self._item_of(conn, order, item_id)
+            common: dict[str, Any] = {
+                "quantity": item.quantity,
+                "notes": item.notes,
+                "sku": item.sku,
+            }
+            entry: NewItem
+            if item.kind == "custom":
+                quotes = self.store.quotes(item.id, conn=conn)
+                priced = next((q for q in quotes if q.accepted), None) or max(
+                    quotes, key=lambda q: q.created_at, default=None
+                )
+                entry = NewCustomItem(
+                    title=item.title,
+                    unit_price_minor=priced.unit_price_minor if priced else 0,
+                    requires_printing=item.requires_printing,
+                    accept=not after_acceptance,
+                    **common,
+                )
+                if entry.accept:
+                    self._not_on_hold(order)
+            elif item.kind == "request":
+                entry = NewRequestItem(title=item.title, **common)
+            elif item.library_file is not None:
+                entry = NewLibraryItem(
+                    file=item.library_file,
+                    title=item.title,
+                    origin_archive_ids=tuple(item.origin_archive_ids),
+                    **common,
+                )
+            else:
+                assert item.reference is not None
+                entry = NewModelItem(
+                    resolved=ResolvedReference(item.reference, list(item.colours)),
+                    output_id=item.output_id,
+                    title=item.title,
+                    origin_archive_ids=tuple(item.origin_archive_ids),
+                    **common,
+                )
+            copy = self._insert_new(conn, order, by, entry, after_acceptance)
+            self._event(conn, order, by, "item.duplicated", item_id=copy.id, from_item_id=item.id)
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(copy, None)]))
+        return copy
+
     def _insert_new(
         self, conn: Conn, order: Order, by: Actor, entry: NewItem, after_acceptance: bool
     ) -> OrderItem:
@@ -2896,35 +2965,84 @@ class Lifecycle:
                     "archive_claimed",
                     f"Bambuddy archive {body.archive_id} is already another attempt's print",
                 )
-            attempt = self.store.insert_fulfilment(
-                conn,
-                item.id,
-                quantity=body.quantity,
-                outcome=body.outcome,
-                created_by=by,
-                failure_reason=body.failure_reason,
-                started_at=body.started_at,
-                finished_at=body.finished_at,
-                notes=body.notes,
-                archive_ids=[] if body.archive_id is None else [body.archive_id],
-            )
-            status = self._after_attempt(body.outcome)
-            if status != item.status:
-                item = self.store.update_item(conn, item.id, status=status)
+            item, attempt = self._insert_attempt(conn, order, item, body, by)
             changed: list[tuple[OrderItem, int | None]] = [(item, attempt.attempt)]
-            self._event(
-                conn,
-                order,
-                by,
-                "fulfilment.recorded",
-                item_id=item.id,
-                fulfilment_id=attempt.id,
-                attempt=attempt.attempt,
-                outcome=attempt.outcome,
-            )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, changed))
         return attempt
+
+    def _insert_attempt(
+        self, conn: Conn, order: Order, item: OrderItem, body: FulfilmentInput, by: Actor
+    ) -> tuple[OrderItem, Fulfilment]:
+        """The attempt's row, the item's status after it and the audit row."""
+        attempt = self.store.insert_fulfilment(
+            conn,
+            item.id,
+            quantity=body.quantity,
+            outcome=body.outcome,
+            created_by=by,
+            failure_reason=body.failure_reason,
+            started_at=body.started_at,
+            finished_at=body.finished_at,
+            notes=body.notes,
+            archive_ids=[] if body.archive_id is None else [body.archive_id],
+        )
+        status = self._after_attempt(body.outcome)
+        if status != item.status:
+            item = self.store.update_item(conn, item.id, status=status)
+        self._event(
+            conn,
+            order,
+            by,
+            "fulfilment.recorded",
+            item_id=item.id,
+            fulfilment_id=attempt.id,
+            attempt=attempt.attempt,
+            outcome=attempt.outcome,
+        )
+        return item, attempt
+
+    def fulfil_items(
+        self, order_id: str, lines: Sequence[FulfilLine], by: Actor
+    ) -> list[Fulfilment]:
+        """#4955 (order operations spec 2026-11-07 §4.2): each line's item made by hand,
+        ``quantity`` of it, in one transaction: an attempt `succeeded`, recorded and
+        accepted as `record_fulfilment` and `accept_fulfilment` do one by one. An item is
+        `fulfilled` once its accepted attempts reach its quantity. A refusal of any line
+        writes nothing: an order not accepted or on hold, an item named twice (422
+        ``items``), and an item not `approved` or `failed` (``item_not_open`` for a settled
+        one, else ``item_not_approved``: a printed item's print attempt is accepted on its
+        own). The attempts, in the lines' order."""
+        ids = [line.item_id for line in lines]
+        if not ids or len(set(ids)) != len(ids):
+            raise LifecycleError(
+                "items", "name each item once, and at least one", unprocessable=True
+            )
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._producing(order)
+            items = [self._item_of(conn, order, line.item_id) for line in lines]
+            for item in items:
+                if item.status not in FULFILLABLE:
+                    raise LifecycleError(
+                        "item_not_open" if item.status in SETTLED else "item_not_approved",
+                        f"item {item.id} is {item.status}",
+                        items=[item.id],
+                    )
+            attempts: list[Fulfilment] = []
+            changed: list[tuple[OrderItem, int | None]] = []
+            for item, line in zip(items, lines, strict=True):
+                if item.status == "failed":
+                    # Ruling 4, as `record_fulfilment`.
+                    item = self.store.update_item(conn, item.id, status="approved")
+                body = FulfilmentInput(quantity=line.quantity, outcome="succeeded")
+                item, attempt = self._insert_attempt(conn, order, item, body, by)
+                item, attempt = self._accept_attempt(conn, order, item, attempt, by)
+                attempts.append(attempt)
+                changed.append((item, attempt.attempt))
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, changed))
+        return attempts
 
     def _attempt_of(
         self,
@@ -3050,33 +3168,40 @@ class Lifecycle:
                     " quote's",
                     items=[item.id],
                 )
-            attempt = self.store.accept_fulfilment(conn, attempt.id, datetime.now(UTC))
-            made = sum(
-                f.quantity
-                for f in self.store.fulfilments(item.id, conn=conn)
-                if f.accepted_at is not None
-            )
-            changed: list[tuple[OrderItem, int | None]] = []
-            if made >= item.quantity:
-                item = self.store.update_item(conn, item.id, status="fulfilled")
-                self._use_parts(conn, order, item, by)
-            elif item.status == "printed":
-                # Some are still to make: the next print is for the rest (§5.4 `copies`).
-                item = self.store.update_item(conn, item.id, status="approved")
-            changed.append((item, attempt.attempt))
-            self._event(
-                conn,
-                order,
-                by,
-                "fulfilment.accepted",
-                item_id=item.id,
-                fulfilment_id=attempt.id,
-                attempt=attempt.attempt,
-                made=made,
-            )
+            item, attempt = self._accept_attempt(conn, order, item, attempt, by)
+            changed: list[tuple[OrderItem, int | None]] = [(item, attempt.attempt)]
             order = self._rederive(conn, order, by)
         self._told(_Change(order, changed))
         return attempt
+
+    def _accept_attempt(
+        self, conn: Conn, order: Order, item: OrderItem, attempt: Fulfilment, by: Actor
+    ) -> tuple[OrderItem, Fulfilment]:
+        """The attempt accepted, the item `fulfilled` once its accepted attempts reach its
+        quantity (its parts out of stock), and the audit row."""
+        attempt = self.store.accept_fulfilment(conn, attempt.id, datetime.now(UTC))
+        made = sum(
+            f.quantity
+            for f in self.store.fulfilments(item.id, conn=conn)
+            if f.accepted_at is not None
+        )
+        if made >= item.quantity:
+            item = self.store.update_item(conn, item.id, status="fulfilled")
+            self._use_parts(conn, order, item, by)
+        elif item.status == "printed":
+            # Some are still to make: the next print is for the rest (§5.4 `copies`).
+            item = self.store.update_item(conn, item.id, status="approved")
+        self._event(
+            conn,
+            order,
+            by,
+            "fulfilment.accepted",
+            item_id=item.id,
+            fulfilment_id=attempt.id,
+            attempt=attempt.attempt,
+            made=made,
+        )
+        return item, attempt
 
     def unfulfil_item(
         self, order_id: str, item_id: str, by: Actor, *, allowed: bool = True
