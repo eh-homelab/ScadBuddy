@@ -15,7 +15,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, computed_field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationInfo,
+    computed_field,
+    field_validator,
+)
 
 from scadbuddy.core.settings import decimal_string
 from scadbuddy.library.libraries import ModelLibrary
@@ -202,12 +211,30 @@ class ChargeInput(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     #: Signed: a discount is negative.
     amount_minor: Money
+    #: The shipping option a ``shipping`` charge was chosen from (#5281), if any; no
+    #: other kind names one (``order_charges_option_is_shipping``).
+    shipping_option_id: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,40}$")
+    #: A charge sent back as it was read (#5281): the auto tax row, marked by ``auto`` or
+    #: its ``id`` (any amount), is never written as a typed one; the order keeps its own
+    #: and recomputes it. Any other ``id`` is ignored: the list is replaced whole.
+    id: str | None = Field(default=None, max_length=100)
+    auto: bool | None = None
+
+    @field_validator("shipping_option_id")
+    @classmethod
+    def _option_is_shipping(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is not None and info.data.get("kind") != "shipping":
+            raise ValueError("only a shipping charge names a shipping option")
+        return value
 
 
 class Charge(ChargeInput):
     id: str
     order_id: str
     position: int
+    #: The tax ScadBuddy computes from ``orders_tax_percent`` (#5281): no body writes it,
+    #: and a save of the charges keeps it.
+    auto: bool = False
 
 
 class Payment(BaseModel):
@@ -269,6 +296,12 @@ class Order(BaseModel):
     created_at: datetime
     updated_at: datetime
     created_by: Actor
+    #: What the order asks before production (#5281), in its currency; None asks none.
+    deposit_minor: Money | None = None
+    #: Why the shop went on without the deposit ("Proceed without deposit")...
+    deposit_waived_reason: str | None = None
+    #: ...and why it ships without full payment ("Ship without full payment").
+    balance_waived_reason: str | None = None
     source: OrderSource = "back_office"
     #: When the visitor submitted the cart; None on every back-office order and on a draft.
     submitted_at: datetime | None = None

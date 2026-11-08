@@ -15,8 +15,8 @@ from scadbuddy.payments.models import PaymentRequestView, ProviderEvent
 from scadbuddy.payments.provider import EventTooEarlyError
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY
-from tests.orders.test_payment_requests import EVENT, PayShop, _slug, connect
+from tests.orders.test_lifecycle import BY, connect
+from tests.orders.test_payment_requests import EVENT, PayShop, _slug
 
 pytestmark = pytest.mark.requires_postgres
 

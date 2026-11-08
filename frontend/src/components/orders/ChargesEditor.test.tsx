@@ -8,7 +8,7 @@ import { renderPage } from '../../test/utils'
 import { addMode } from './afterAcceptance'
 import { ChargesEditor } from './ChargesEditor'
 
-const POST: OrderCharge = { id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0 }
+const POST: OrderCharge = { id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0, auto: false }
 
 function order(id: string, status: Order['status'], onHold = false) {
   return { id, number: 'ORD-2026-2', status, on_hold: onHold, currency: 'USD', minor_exponent: 2 }

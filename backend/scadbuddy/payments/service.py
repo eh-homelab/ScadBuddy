@@ -1,7 +1,8 @@
 """The payments service (#4957): what the routes call. It opens a request through the
 lifecycle, then asks the provider for its hosted page after the commit (plan gap 9), so
-a slow or failed provider never holds the order's lock. In the same way, once a cancel
-or a manual payment closes a request, it asks the provider to close the request's page.
+a slow or failed provider never holds the order's lock. In the same way, once a cancel,
+an accept, a deposit change or a manual payment closes a request, it asks the provider
+to close the request's page (``run_closing``).
 It reads a provider's webhook, and it connects the shop's account at a provider. No
 exception, log line or answer here carries a secret."""
 
@@ -239,6 +240,25 @@ class Payments:
             await self._close_page(found.id, found.provider, hosted.provider_ref)
         return linked
 
+    async def run_linking[T](self, order_id: str, call: Callable[[], T]) -> T:
+        """Runs ``call``, a lifecycle call that may open a request on a provider (a balance
+        request, #5281), then links each request it opened. An older request whose link
+        failed is left to ``POST …/link``, so an edit does not call the provider again."""
+        before = await self.request_ids(order_id)
+        result = await asyncio.to_thread(call)
+        await self.link_opened(order_id, before)
+        return result
+
+    async def request_ids(self, order_id: str) -> set[str]:
+        """The order's request ids now, for ``link_opened``."""
+        return {r.id for r in await asyncio.to_thread(self._requests, order_id)}
+
+    async def link_opened(self, order_id: str, before: set[str]) -> None:
+        """Link each open request on a provider that is not in ``before``."""
+        for found in await asyncio.to_thread(self._requests, order_id):
+            if found.id not in before and found.status == "open" and found.provider is not None:
+                await self.link(found.id)
+
     async def link_pending(self, order_id: str) -> list[PaymentRequestView]:
         """Link every open request of the order that has a provider and no page yet."""
 
@@ -254,33 +274,42 @@ class Payments:
         return [await self.link(r.id) for r in await asyncio.to_thread(pending)]
 
     # -- closed requests --------------------------------------------------------------
-    # Each call closes requests through the lifecycle, then, after the commit, closes the
-    # provider's page of each request that left ``open`` for ``cancelled`` or for
+    # Each call closes requests through the lifecycle (a request's cancel, an order's
+    # cancel or accept, a deposit set or applied, a manual payment), then, after the
+    # commit, closes the provider's page of each request it moved to ``cancelled`` or to
     # ``paid`` by hand. A provider that fails is logged and undoes nothing: the request
     # stays closed here, and a provider's paid event on it is still recorded. The close
     # transaction marks each such page (``close_pending_at``, #5700); a confirmed close
     # clears the mark, and a failed one leaves it for `retry_closes`, the housekeeping
     # sweep's, which tries again with a backoff.
 
-    async def cancel_request(self, order_id: str, request_id: str, by: Actor) -> PaymentRequestView:
+    async def cancel_request(
+        self, order_id: str, request_id: str, by: Actor, reason: str | None = None
+    ) -> PaymentRequestView:
         cancelled = await asyncio.to_thread(
-            self._orders.lifecycle.cancel_payment_request, order_id, request_id, by
+            self._orders.lifecycle.cancel_payment_request, order_id, request_id, by, reason
         )
         if await self._close_pages([cancelled]):
             return cancelled.model_copy(update={"close_pending_at": None})
         return cancelled
 
-    async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
-        """``cancel`` cancels the order and its open requests."""
+    async def run_closing[T](self, order_id: str, call: Callable[[], T]) -> T:
+        """Runs ``call``, a lifecycle call that may cancel requests of the order (an order's
+        cancel, its accept, a deposit set or applied), then closes the page of each request
+        it cancelled. A request cancelled before the call, or kept by it, is not touched."""
         before = {
             r.id
             for r in await asyncio.to_thread(self._requests, order_id)
             if r.status == "cancelled"
         }
-        cancelled = await asyncio.to_thread(cancel)
+        result = await asyncio.to_thread(call)
         after = await asyncio.to_thread(self._requests, order_id)
         await self._close_pages(r for r in after if r.status == "cancelled" and r.id not in before)
-        return cancelled
+        return result
+
+    async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
+        """``cancel`` cancels the order and its open requests."""
+        return await self.run_closing(order_id, cancel)
 
     async def add_payment(self, order_id: str, add: Callable[[], Payment]) -> Payment:
         """``add`` records a payment the shop received, which can pay open requests."""
@@ -418,8 +447,9 @@ class Payments:
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
         if order_id is None:
             return outcome, []
-        # #5700: the open balance requests this payment settled (`_close_balance`) are
-        # marked; their pages are closed after the reply, as a manual payment's are.
+        # #5700: the open balance and deposit requests this payment settled
+        # (`_close_balance`, `_close_deposit`) are marked; their pages are closed after the
+        # reply, as a manual payment's are.
         now = await asyncio.to_thread(self._requests, order_id)
         return outcome, [r for r in now if r.close_pending_at is not None and r.id not in before]
 

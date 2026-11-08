@@ -385,7 +385,7 @@ function fixtures(): State {
         items: [{ order_item_id: ITEM_CLOSED, quantity: 1 }],
       },
     ],
-    charges: [{ id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0 }],
+    charges: [{ id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0, auto: false }],
     payments: [],
     paymentRequests: [],
     providers: [],

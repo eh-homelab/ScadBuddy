@@ -7,8 +7,9 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.orders.models import Charge, Money, OrderItem, Payment, Quote
+from scadbuddy.orders.models import Charge, Money, Order, OrderItem, Payment, Quote
 from scadbuddy.orders.store import Conn, OrderStore
+from scadbuddy.payments.models import PaymentRequestView
 
 
 class OrderTotals(BaseModel):
@@ -27,6 +28,11 @@ class OrderTotals(BaseModel):
     total_minor: Money
     paid_minor: Money
     balance_minor: Money
+    #: What of the deposit (#5281) is not paid yet: 0 with no deposit or a waived one.
+    deposit_due_minor: Money = 0
+    #: The balance holds the shipment (#5281, `balance_unpaid`): a `balance` request not
+    #: cancelled, no waiver, and a balance above zero.
+    shipping_held: bool = False
 
 
 def item_price(item: OrderItem, quotes: Sequence[Quote]) -> tuple[Money, bool] | None:
@@ -42,11 +48,29 @@ def item_price(item: OrderItem, quotes: Sequence[Quote]) -> tuple[Money, bool] |
     return newest.unit_price_minor * item.quantity, False
 
 
+def has_standing_balance(requests: Sequence[PaymentRequestView]) -> bool:
+    """The order has a `balance` request that is not cancelled (#5281, gap 2)."""
+    return any(r.kind == "balance" and r.status != "cancelled" for r in requests)
+
+
+def balance_due(requests: Sequence[PaymentRequestView], balance_minor: Money) -> Money:
+    """The balance a `balance` request that is not cancelled asks of the order (#5281), or
+    0 when it has no such request or nothing is due."""
+    if not has_standing_balance(requests):
+        return 0
+    return max(balance_minor, 0)
+
+
 def order_totals(
     items: Sequence[tuple[OrderItem, Sequence[Quote]]],
     charges: Sequence[Charge],
     payments: Sequence[Payment],
+    *,
+    order: Order | None = None,
+    requests: Sequence[PaymentRequestView] = (),
 ) -> OrderTotals:
+    """With ``order`` and its ``requests``, also what of the deposit is due and whether the
+    balance holds the shipment; without them both are 0 and False."""
     subtotal = pending = 0
     unpriced: list[str] = []
     for item, quotes in items:
@@ -62,6 +86,13 @@ def order_totals(
             pending += amount
     charged = sum(charge.amount_minor for charge in charges)
     paid = sum(payment.amount_minor for payment in payments)
+    balance = subtotal + charged - paid
+    deposit_due = 0
+    held = False
+    if order is not None:
+        if order.deposit_minor is not None and order.deposit_waived_reason is None:
+            deposit_due = max(0, order.deposit_minor - paid)
+        held = order.balance_waived_reason is None and balance_due(requests, balance) > 0
     return OrderTotals(
         subtotal_minor=subtotal,
         pending_minor=pending,
@@ -69,7 +100,9 @@ def order_totals(
         charges_minor=charged,
         total_minor=subtotal + charged,
         paid_minor=paid,
-        balance_minor=subtotal + charged - paid,
+        balance_minor=balance,
+        deposit_due_minor=deposit_due,
+        shipping_held=held,
     )
 
 
