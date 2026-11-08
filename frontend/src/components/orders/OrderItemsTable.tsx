@@ -96,6 +96,12 @@ export function OrderItemsTable({
               Library file{item.library_file.library === 'native' ? '' : ' in Bambuddy'}: {item.library_file.filename}
             </span>
           )}
+          {/* #4777 — an item taken from a past print names the Bambuddy archives it came from. */}
+          {(item.origin_archive_ids ?? []).length > 0 && (
+            <span className="text-[11px] text-muted-foreground" data-testid="item-past-print">
+              From past print {(item.origin_archive_ids ?? []).map((id) => `#${id}`).join(', ')}
+            </span>
+          )}
           {item.sku && <span className="font-mono text-[11px] text-muted-foreground">SKU {item.sku}</span>}
         </span>
       ),

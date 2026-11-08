@@ -291,6 +291,9 @@ class NewItem:
     title: str | None = None
     notes: str = ""
     sku: str | None = None
+    #: The Bambuddy archives a past print's item is taken from (#4777); a model or
+    #: library file item's only.
+    origin_archive_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1472,7 +1475,10 @@ class Lifecycle:
         **detail: Any,
     ) -> None:
         """The add's audit row. After acceptance it is ``item.added_after_acceptance``,
-        naming the item and the status the order had (#5349)."""
+        naming the item and the status the order had (#5349). A past print's item names
+        the archives it was taken from (#4777)."""
+        if item.origin_archive_ids:
+            detail["origin_archive_ids"] = item.origin_archive_ids
         if after_acceptance:
             self._event(
                 conn,
@@ -1797,13 +1803,21 @@ class Lifecycle:
         notes: str = "",
         sku: str | None = None,
         after_acceptance: bool = False,
+        origin_archive_ids: tuple[int, ...] = (),
     ) -> OrderItem:
         """A library file item (#5544): the file's id, name and library, with no template
         commit and no inputs. It starts `draft`, unpriced, approved with its quote (it has
         no design to approve first), and takes a slice quote of the file or a manual one.
         The caller has read the file from the library that serves. ``after_acceptance``
-        as `add_item`'s."""
-        entry = NewLibraryItem(file=file, quantity=quantity, title=title, notes=notes, sku=sku)
+        as `add_item`'s; ``origin_archive_ids`` as `NewItem`'s."""
+        entry = NewLibraryItem(
+            file=file,
+            quantity=quantity,
+            title=title,
+            notes=notes,
+            sku=sku,
+            origin_archive_ids=origin_archive_ids,
+        )
         [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
@@ -1885,6 +1899,7 @@ class Lifecycle:
                 title=entry.title,
                 notes=entry.notes,
                 sku=entry.sku,
+                origin_archive_ids=entry.origin_archive_ids,
             )
             self._added(
                 conn,
@@ -1941,6 +1956,7 @@ class Lifecycle:
             title=entry.title,
             notes=entry.notes,
             sku=entry.sku,
+            origin_archive_ids=entry.origin_archive_ids,
         )
         self._added(conn, order, item, by, after_acceptance)
         item, _ = self._revise(
@@ -2346,6 +2362,47 @@ class Lifecycle:
                 unit_price_minor=body.unit_price_minor,
                 quantity=item.quantity,
                 created_by=by,
+                revision_id=item.current_revision_id,
+            )
+            change = self._recorded(conn, order, item, quote, by)
+        self._told(change)
+        return quote
+
+    def record_archive_quote(
+        self, order_id: str, item_id: str, priced: Priced, plates: Sequence[Plate], by: Actor
+    ) -> Quote:
+        """An `archive` quote (#4777, order operations spec §3.2): ``plates`` read from a
+        past print's archives, priced at the book in force, with no sliced file. As a
+        manual quote: the order open for the item's price, the item not settled, not
+        custom, with a design; it names the item's current revision."""
+        self.ensure_revision(order_id, item_id, by)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            self._open_for_requote(conn, order, item, "an item's price")
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if item.kind == "custom":
+                raise LifecycleError(
+                    "item_custom",
+                    f"item {item_id} is a custom item: its price is its own field",
+                    items=[item.id],
+                )
+            if not has_design(item):
+                raise LifecycleError(
+                    "item_has_no_design", f"item {item_id} has no design yet", items=[item.id]
+                )
+            quote = self.store.insert_quote(
+                conn,
+                item.id,
+                source="archive",
+                lines=priced.lines,
+                unit_cost_minor=priced.unit_cost_minor,
+                unit_price_minor=priced.unit_price_minor,
+                quantity=item.quantity,
+                created_by=by,
+                plates=[plate.model_dump(mode="json") for plate in plates],
                 revision_id=item.current_revision_id,
             )
             change = self._recorded(conn, order, item, quote, by)

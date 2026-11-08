@@ -56,7 +56,11 @@ ContactKind = Literal[
     "phone", "email", "instagram", "facebook", "tiktok", "etsy", "website", "other"
 ]
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
-QuoteSource = Literal["slice", "manual"]
+#: A ``slice`` quote is priced from the item's slice; ``manual`` is typed; ``archive``
+#: (#4777) is priced from what a past print used, with no re-slice.
+QuoteSource = Literal["slice", "manual", "archive"]
+#: The sources whose plates hold measured grams and seconds, which job cost prices by.
+MEASURED_SOURCES: frozenset[str] = frozenset({"slice", "archive"})
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
 #: ``custom`` item is a title, a quantity and a typed price with nothing behind it; a
 #: ``library_file`` item (#5544) names a file of the library (its ``library_file``).
@@ -380,6 +384,9 @@ class OrderItem(BaseModel):
     #: waits for its own quote to be accepted. The old accepted quote stays accepted (the
     #: price the customer agreed) until then; accepting a quote clears it.
     revised_after_acceptance: bool = False
+    #: The Bambuddy archives a past print's item was taken from (#4777, order operations
+    #: spec §3.2): the one picked and its run's other plates; empty for any other source.
+    origin_archive_ids: list[int] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
