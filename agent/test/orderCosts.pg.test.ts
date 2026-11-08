@@ -172,6 +172,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     expect(posted.map((p) => p.orderId)).toEqual(['a'])
   })
 
+  it('carries only what it sent when a revision of the order lands while its report runs', async () => {
+    const id = await session(1)
+    await revise(id, 'a', 'a1')
+    // The second item's revision is recorded while the report of `a` waits for the backend.
+    const racing = new OrderCosts(db.sql, async (report) => {
+      posted.push(report)
+      await revise(id, 'a', 'a2')
+      return 'recorded'
+    })
+    await racing.report(id)
+    expect(posted.map((p) => [p.orderId, p.orderItemId, p.costUsd])).toEqual([['a', 'a1', '1.00000000']])
+    const rows = await db.sql<{ order_item_id: string; reported_usd: number; reported: boolean }[]>`
+      SELECT order_item_id, reported_usd, reported_at IS NOT NULL AS reported FROM ai_session_order_costs
+      WHERE session_id = ${id} ORDER BY order_item_id`
+    expect(rows.map((r) => [r.order_item_id, Number(r.reported_usd), r.reported])).toEqual([
+      ['a1', 1, true],
+      ['a2', 0, true],
+    ])
+  })
+
   it('reports nothing for a session with no spend since', async () => {
     const id = await session(0)
     await revise(id, 'a', 'a1')

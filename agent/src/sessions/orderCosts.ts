@@ -193,8 +193,11 @@ export class OrderCosts implements TouchedSink {
     const orders = [...byId.values()]
     const fresh = orders.filter((o) => o.attempted === null)
     const share = fresh.length === 0 ? 0 : Math.max(Number(row.cost) - Number(row.carried), 0) / fresh.length
-    // Under a hundredth of a cent no new share is sent (the backend would write nothing): those
-    // orders stay to report, with the next turn's spend.
+    // Under a hundredth of a cent no new share is sent: those orders stay to report, with the
+    // next turn's spend. A larger share still under one minor unit of the order's currency is
+    // sent, and the backend answers it with no entry (`deferred`), which keeps it the same way.
+    // The rows are read whole and updated by the items read: a revision recorded while the
+    // report runs is no part of this share, and is marked reported with nothing carried.
     const due = share < 1e-4 ? orders.filter((o) => o.attempted !== null) : orders
     for (const order of due) {
       const left = deadline - this.now()
@@ -203,7 +206,8 @@ export class OrderCosts implements TouchedSink {
       if (order.attempted === null) {
         await sql`
           UPDATE ai_session_order_costs SET attempted_usd = ${amount / order.items.length}
-          WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
+          WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND order_item_id = ANY(${order.items})
+            AND reported_at IS NULL`
       }
       const answer = await this.post(
         {

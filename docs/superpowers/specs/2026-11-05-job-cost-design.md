@@ -135,8 +135,7 @@ replayed webhook, a retried flow) write once.
   `ai_session:<id>`, with the spend it knows. Nothing in the backend reads the agent's
   `ai_*` tables (the database-access rule, #5295). The order's currency may not be USD: a stored setting
   `pricing_usd_rate` (one USD in the order currency, default `1`, env-seeded) converts it,
-  and the entry's note keeps the USD figure. Until that flow exists, nothing writes these
-  entries; the shop can add one by hand.
+  and the entry's note keeps the USD figure. The shop can also add one by hand.
   As built (#5330): "works on an item" is a successful `order_item_revision_add` (or
   `_after_acceptance`), the step the request-to-model flow ends with, in a session; the
   report goes at each turn's end. The route is the agent's own CRUD route, `POST
