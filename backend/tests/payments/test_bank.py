@@ -200,16 +200,70 @@ async def test_unlink_removes_the_item_and_drops_the_token(rows: OrderStore, poo
     assert raw_row(pool) is None
 
 
-async def test_unlink_keeps_the_token_when_plaid_refuses(rows: OrderStore) -> None:
+async def test_unlink_keeps_the_token_when_plaid_does_not_answer(rows: OrderStore) -> None:
     bank = BankLinks(rows, KEK)
     with respx.mock as router:
         await linked(bank, router)
-        router.post(f"{SANDBOX}/item/remove").mock(
-            return_value=httpx.Response(400, json=payload("error.invalid_api_keys.json"))
-        )
+        router.post(f"{SANDBOX}/item/remove").mock(side_effect=httpx.ConnectError("down"))
         with pytest.raises(PlaidError):
             await bank.unlink()
     assert bank.status().account is not None
+
+
+@pytest.mark.parametrize("code", ["INVALID_API_KEYS", "UNAUTHORIZED_ENVIRONMENT"])
+async def test_unlink_with_keys_plaid_refuses_unlinks_here_and_says_so(
+    rows: OrderStore, pool: PgPool, code: str
+) -> None:
+    """The shop rotated its secret at Plaid: the Item cannot be removed with these keys,
+    so it is unlinked here and the shop removes it in the Plaid Dashboard."""
+    bank = BankLinks(rows, KEK)
+    refusal = {**payload("error.invalid_api_keys.json"), "error_code": code}
+    with respx.mock as router:
+        await linked(bank, router)
+        router.post(f"{SANDBOX}/item/remove").mock(return_value=httpx.Response(400, json=refusal))
+        unlinked = await bank.unlink()
+    assert unlinked.removed_at_plaid is False
+    assert unlinked.note is not None and "Plaid Dashboard" in unlinked.note
+    status = bank.status()
+    assert (status.configured, status.account) == (True, None)
+    raw = raw_row(pool)
+    assert raw is not None and raw["item_id"] is None
+    assert bank.access() is None
+    # The keys can now be replaced.
+    with respx.mock as router:
+        plaid_answers(router)
+        await bank.save_keys(KEYS)
+
+
+@pytest.mark.parametrize("kek", [OTHER_KEK, None], ids=["another key", "no key"])
+async def test_unlink_with_keys_that_will_not_open_unlinks_here(
+    rows: OrderStore, pool: PgPool, kek: object
+) -> None:
+    with respx.mock as router:
+        await linked(BankLinks(rows, KEK), router)
+    with respx.mock:  # nothing may reach Plaid
+        unlinked = await BankLinks(rows, kek).unlink()  # type: ignore[arg-type]
+    assert unlinked.removed_at_plaid is False
+    assert unlinked.note is not None and "Plaid Dashboard" in unlinked.note
+    # The sealed token cannot be opened to reseal the keys: the row goes, keys and all.
+    assert raw_row(pool) is None
+
+
+async def test_a_link_whose_write_fails_removes_its_item(
+    rows: OrderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bank = BankLinks(rows, KEK)
+    with respx.mock as router:
+        routes = plaid_answers(router)
+        await bank.save_keys(KEYS)
+
+        def broken(*args: object) -> object:
+            raise RuntimeError("the database is gone")
+
+        monkeypatch.setattr(bank, "_seal", broken)
+        with pytest.raises(RuntimeError):
+            await bank.link("public-sandbox-1", CHECKING)
+    assert json.loads(routes["/item/remove"].calls.last.request.content) == {"access_token": ACCESS}
 
 
 async def test_unlink_of_an_item_plaid_already_removed_drops_it(rows: OrderStore) -> None:

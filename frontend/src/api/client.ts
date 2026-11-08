@@ -257,6 +257,7 @@ import type {
   BankKeys,
   BankLinkCreate,
   BankStatus,
+  BankUnlinked,
   PolicyUpdate,
   PriceBook,
   ProviderConnect,
@@ -2449,7 +2450,7 @@ export const api = {
   forgetBankKeys: () => request<void>('/payments/bank/keys', { method: 'DELETE' }),
   bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
   linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
-  unlinkBank: () => request<void>('/payments/bank/link', { method: 'DELETE' }),
+  unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   cancelPaymentRequest: (orderId: string, requestId: string) =>

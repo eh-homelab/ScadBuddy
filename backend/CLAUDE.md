@@ -1030,9 +1030,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `payments/bank.py` (`BankLinks`, `PaymentsComponent.bank`: one `bank_links` row, the keys
   and the access token sealed under AAD `bank_links:<id>`, and in the clear only Plaid's
   ids and the account's name, type and mask; Plaid is called outside every transaction, and
-  a link that lost a race or chose an account that is not checking or savings removes its
-  Item at Plaid; new keys are refused while linked, `bank_linked`; an unlink Plaid refuses
-  keeps the token), routes `api/bank_link.py` (`/payments/bank`; every write in
+  a link that lost a race, chose an account that is not checking or savings, or failed to
+  store removes its Item at Plaid; new keys are refused while linked, `bank_linked`; an
+  unlink Plaid does not answer keeps the token, and one whose keys Plaid refuses
+  (`plaid.KEYS_REFUSED`) or that will not open drops the link here only, `BankUnlinked`
+  telling the shop to remove the Item in the Plaid Dashboard), routes `api/bank_link.py` (`/payments/bank`; every write in
   `PERSON_ENDPOINTS`), frontend `components/settings/BankAccount.tsx` and
   `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
   allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.

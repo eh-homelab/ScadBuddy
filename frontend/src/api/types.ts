@@ -472,6 +472,7 @@ export type ProviderConnect = Schemas['ProviderConnect']
 export type BankStatus = Schemas['BankStatus']
 export type BankKeys = Schemas['BankKeys']
 export type BankLinkCreate = Schemas['BankLinkCreate']
+export type BankUnlinked = Schemas['BankUnlinked']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the

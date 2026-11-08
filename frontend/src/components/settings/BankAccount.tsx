@@ -31,6 +31,7 @@ export function BankAccount() {
   const [keys, setKeys] = useState<BankKeys>({ environment: 'production', client_id: '', secret: '' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
   const shown = status ?? listed.data
 
   async function run(action: () => Promise<BankStatus | null | void>) {
@@ -56,6 +57,12 @@ export function BankAccount() {
     }
   }
 
+  async function unlink() {
+    await run(async () => {
+      setNote((await api.unlinkBank()).note)
+    })
+  }
+
   async function link() {
     await run(async () => {
       const { link_token } = await api.bankLinkToken()
@@ -69,7 +76,7 @@ export function BankAccount() {
     <section aria-label="Bank account" className="space-y-2 rounded-md border p-3">
       <h4 className="text-sm font-medium">Bank account (Plaid)</h4>
       <p className="text-[13px] text-muted-foreground">
-        Link the shop&apos;s checking or savings account to match its deposits to orders.
+        Link the shop&apos;s checking or savings account. Matching its deposits to orders comes in a later step of #4961.
       </p>
       <p className="text-[13px] text-muted-foreground">Stripe payouts go to the bank set in your Stripe dashboard.</p>
       {listed.error && !shown && (
@@ -87,7 +94,7 @@ export function BankAccount() {
               {shown.account.mask ? ` · ending ${shown.account.mask}` : ''}
             </span>
           </p>
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(() => api.unlinkBank())} {...USER_ONLY}>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void unlink()} {...USER_ONLY}>
             Unlink
           </Button>
         </div>
@@ -148,6 +155,11 @@ export function BankAccount() {
             </Button>
           </div>
         </form>
+      )}
+      {note && (
+        <p role="status" className="text-[13px] text-warn">
+          {note}
+        </p>
       )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">

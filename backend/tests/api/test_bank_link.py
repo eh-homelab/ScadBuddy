@@ -65,7 +65,9 @@ def test_link_show_and_unlink(client: TestClient, plaid: respx.MockRouter) -> No
     shown = client.get(BANK)
     assert ACCESS not in shown.text and "plaid-s3cret" not in shown.text
     assert shown.json()["account"]["mask"] == "0000"
-    assert client.delete(f"{BANK}/link").status_code == 204
+    unlinked = client.delete(f"{BANK}/link")
+    assert unlinked.status_code == 200, unlinked.text
+    assert unlinked.json() == {"removed_at_plaid": True, "note": None}
     assert client.get(BANK).json()["account"] is None
     assert client.delete(f"{BANK}/keys").status_code == 204
     assert client.get(BANK).json()["configured"] is False

@@ -20,6 +20,7 @@ from scadbuddy.payments.bank import (
     BankNotConfiguredError,
     BankNotLinkedError,
     BankStatus,
+    BankUnlinked,
     LinkToken,
 )
 from scadbuddy.payments.component import PaymentsDep
@@ -126,17 +127,18 @@ async def create_bank_link(body: BankLinkCreate, payments: PaymentsDep) -> BankS
 
 @router.delete(
     "/link",
-    status_code=status.HTTP_204_NO_CONTENT,
-    response_class=Response,
+    response_model=BankUnlinked,
     summary="Unlink the bank account",
     description=(
         "Removes the Item at Plaid, then drops the access token; the keys stay. When"
-        " Plaid refuses, 422 and the link stays."
+        " Plaid does not answer, 422 and the link stays. When Plaid refuses the keys"
+        " themselves, or they will not open, the link is dropped here only:"
+        " `removed_at_plaid` is false and `note` tells the shop to remove the Item in the"
+        " Plaid Dashboard."
     ),
 )
-async def delete_bank_link(payments: PaymentsDep) -> Response:
+async def delete_bank_link(payments: PaymentsDep) -> BankUnlinked:
     try:
-        await payments.bank.unlink()
+        return await payments.bank.unlink()
     except _REFUSALS as error:
         raise _problem(error) from None
-    return Response(status_code=status.HTTP_204_NO_CONTENT)

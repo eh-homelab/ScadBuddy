@@ -1,7 +1,7 @@
 import { screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
-import { MOCK_CHECKING, MOCK_LINK_TOKEN, mockBankLink } from '../../mocks/features/bank'
+import { MOCK_CHECKING, MOCK_LINK_TOKEN, mockBankLink, setMockKeysRefused } from '../../mocks/features/bank'
 import type { PlaidGlobal } from '../../lib/plaidLink'
 import { enter, renderSettingsSection } from '../../pages/settings/testing'
 import { BankAccount } from './BankAccount'
@@ -78,6 +78,15 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     await user.click(await screen.findByRole('button', { name: 'Unlink' }))
     expect(await screen.findByRole('button', { name: 'Link a bank account' })).toBeInTheDocument()
     expect(screen.queryByText('Plaid Checking')).not.toBeInTheDocument()
+  })
+
+  it('says to remove the Item in the Plaid Dashboard when Plaid refused the keys', async () => {
+    mockBankLink({ linked: true })
+    setMockKeysRefused(true)
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Unlink' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Remove it in the Plaid Dashboard.')
+    expect(await screen.findByRole('button', { name: 'Link a bank account' })).toBeInTheDocument()
   })
 
   it('forgets the keys', async () => {

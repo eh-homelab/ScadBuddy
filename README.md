@@ -587,7 +587,9 @@ Cash needs no provider: record it as a manual payment.
 #### Bank account through Plaid (#4961)
 
 Plaid is not a payment provider: it takes no payment. It links the shop's checking or
-savings account so ScadBuddy can read its deposits. In the Plaid Dashboard, get the
+savings account; reading its deposits and matching them to orders is a later step of
+#4961, which is why Link asks for the Transactions product
+([Transactions](https://plaid.com/docs/transactions/)). In the Plaid Dashboard, get the
 client ID and the Sandbox or Production secret
 ([quickstart](https://plaid.com/docs/quickstart/)). In Settings → Payments, under
 "Bank account (Plaid)", save them with their environment; Plaid checks them before they
@@ -597,7 +599,9 @@ the shop picks one checking or savings account
 the account's name, type and mask (its last 2-4 characters) only, never an account or
 routing number. "Unlink" removes the Item at Plaid
 ([`/item/remove`](https://plaid.com/docs/api/items/#itemremove)) and drops the token; the
-keys stay until "Forget keys". The page's Content-Security-Policy allows Link's one
+keys stay until "Forget keys". When Plaid refuses the stored keys (a secret rotated in the
+Dashboard) or they will not open (another key file), "Unlink" drops the link here only
+and says to remove the Item in the Plaid Dashboard. The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 

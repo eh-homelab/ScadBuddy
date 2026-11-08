@@ -51,6 +51,9 @@ TIMEOUT: Final = httpx.Timeout(20.0)
 CLIENT_NAME: Final = "ScadBuddy"
 AccountSubtype = Literal["checking", "savings"]
 ACCOUNT_SUBTYPES: Final[tuple[AccountSubtype, ...]] = ("checking", "savings")
+#: Error codes that mean Plaid refuses the keys themselves: a rotated secret, or keys
+#: of another environment (https://plaid.com/docs/errors/invalid-input/).
+KEYS_REFUSED: Final = frozenset({"INVALID_API_KEYS", "UNAUTHORIZED_ENVIRONMENT"})
 #: Error codes that mean the Item is already gone at Plaid.
 GONE: Final = frozenset({"ITEM_NOT_FOUND", "INVALID_ACCESS_TOKEN"})
 
@@ -149,6 +152,8 @@ async def account(keys: PlaidKeys, access_token: str, account_id: str) -> PlaidA
             continue
         if row.get("type") != "depository" or row.get("subtype") not in ACCOUNT_SUBTYPES:
             break
+        if not isinstance(row.get("name"), str) or not row["name"]:
+            raise PlaidError("Plaid gave the chosen account no name")
         try:
             return PlaidAccount.model_validate(
                 {k: row.get(k) for k in ("account_id", "name", "subtype", "mask")}

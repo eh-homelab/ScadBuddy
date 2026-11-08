@@ -18,11 +18,20 @@ const ACCOUNTS: Record<string, NonNullable<BankStatus['account']>> = {
   'mock-savings': { name: 'Plaid Saving', type: 'savings', mask: '1111' },
 }
 
+/** `BankUnlinked.note` when Plaid refused the keys (`REMOVE_AT_PLAID`). */
+export const MOCK_REMOVE_AT_PLAID = 'Unlinked here, but Plaid refused the stored keys, so the Item is still at Plaid. Remove it in the Plaid Dashboard.'
+let keysRefused = false
+/** Plaid refuses the stored keys (a rotated secret): unlink drops the link here only. */
+export function setMockKeysRefused(refused: boolean): void {
+  keysRefused = refused
+}
+
 const EMPTY: BankStatus = { configured: false, environment: null, account: null, linked_at: null }
 let bank: BankStatus = { ...EMPTY }
 
 export function reset(): void {
   bank = { ...EMPTY }
+  keysRefused = false
 }
 
 /** Saved keys and, with `linked`, the sandbox checking account, for a test's setup. */
@@ -65,6 +74,6 @@ export const handlers = [
   http.delete('/api/v1/payments/bank/link', ({ request }) => {
     if (!bank.account) return problem(request, 409, 'no bank account is linked', PROBLEMS + 'bank_not_linked')
     bank = { ...bank, account: null, linked_at: null }
-    return new HttpResponse(null, { status: 204 })
+    return HttpResponse.json(keysRefused ? { removed_at_plaid: false, note: MOCK_REMOVE_AT_PLAID } : { removed_at_plaid: true, note: null })
   }),
 ]

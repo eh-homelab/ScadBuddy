@@ -94,6 +94,20 @@ class LinkToken(BaseModel):
     link_token: str
 
 
+#: What the shop is told when the Item could not be removed at Plaid.
+REMOVE_AT_PLAID = (
+    "Unlinked here, but Plaid refused the stored keys, so the Item is still at Plaid."
+    " Remove it in the Plaid Dashboard."
+)
+
+
+class BankUnlinked(BaseModel):
+    #: False when Plaid refused the keys or they would not open: unlinked here only.
+    removed_at_plaid: bool
+    #: What the shop must still do, when anything.
+    note: str | None
+
+
 @dataclass(frozen=True)
 class LinkedAccess:
     """What a call on the linked Item needs."""
@@ -242,6 +256,25 @@ class BankLinks:
         except PlaidError:
             await _remove_quietly(keys, exchanged.access_token)
             raise
+        try:
+            same = self._keep_link(row, secrets, exchanged, account)
+        except Exception:
+            # The token was never stored: no Item may be left at Plaid without it.
+            await _remove_quietly(keys, exchanged.access_token)
+            raise
+        if not same:
+            await _remove_quietly(keys, exchanged.access_token)
+            raise BankLinkedError()
+        return self.status()
+
+    def _keep_link(
+        self,
+        row: dict[str, Any],
+        secrets: dict[str, str],
+        exchanged: plaid.Exchanged,
+        account: plaid.PlaidAccount,
+    ) -> bool:
+        """Store the link; False when another link or new keys came first."""
         with self._store.transaction() as conn:
             now = self._row(conn, lock=True)
             same = (
@@ -269,21 +302,46 @@ class BankLinks:
                         row["id"],
                     ),
                 )
-        if not same:
-            await _remove_quietly(keys, exchanged.access_token)
-            raise BankLinkedError()
-        return self.status()
+        return same
 
-    async def unlink(self) -> None:
-        """Remove the Item at Plaid, then drop the token. When Plaid refuses, the token
-        stays so the shop can try again; an Item Plaid no longer has is removed."""
-        linked = self.access()
+    async def unlink(self) -> BankUnlinked:
+        """Remove the Item at Plaid, then drop the token. When Plaid does not answer, the
+        token stays so the shop can try again; an Item Plaid no longer has is removed.
+        When Plaid refuses the keys themselves (a rotated secret) or they will not open
+        (another key file), the link is dropped here only and the shop is told to remove
+        the Item in the Plaid Dashboard, as ``PaymentCredentials.disconnect`` never needs
+        the secret either."""
+        try:
+            linked = self.access()
+        except (CredentialUnreadableError, KekMissingError):
+            self._drop_unreadable()
+            return BankUnlinked(removed_at_plaid=False, note=REMOVE_AT_PLAID)
         if linked is None:
             raise BankNotLinkedError()
-        await plaid.remove_item(linked.keys, linked.access_token)
+        try:
+            await plaid.remove_item(linked.keys, linked.access_token)
+        except PlaidError as error:
+            if error.code not in plaid.KEYS_REFUSED:
+                raise
+            self._drop_link(linked.item_id)
+            return BankUnlinked(removed_at_plaid=False, note=REMOVE_AT_PLAID)
+        self._drop_link(linked.item_id)
+        return BankUnlinked(removed_at_plaid=True, note=None)
+
+    def _drop_unreadable(self) -> None:
+        """Keys that will not open cannot be sealed again without the token: the row goes."""
         with self._store.transaction() as conn:
             row = self._row(conn, lock=True)
-            if row is None or row["item_id"] != linked.item_id:
+            if row is None or row["item_id"] is None:
+                raise BankNotLinkedError()
+            logger.warning("unlinked the bank account here: its stored keys will not open")
+            conn.execute("DELETE FROM bank_links WHERE id = %s", (row["id"],))
+
+    def _drop_link(self, item_id: str) -> None:
+        """Forget ``item_id``'s token and account; the keys stay."""
+        with self._store.transaction() as conn:
+            row = self._row(conn, lock=True)
+            if row is None or row["item_id"] != item_id:
                 return
             secrets = {k: v for k, v in self._open(row).items() if k != "access_token"}
             sealed = self._seal(str(row["id"]), secrets)

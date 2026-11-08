@@ -139,6 +139,15 @@ async def test_an_account_that_is_not_checking_or_savings_is_refused(account_id:
 
 
 @respx.mock
+async def test_an_account_with_no_name_says_so() -> None:
+    found = payload("accounts.get.json")
+    found["accounts"][0]["name"] = None
+    respx.post(f"{SANDBOX}/accounts/get").mock(return_value=httpx.Response(200, json=found))
+    with pytest.raises(PlaidError, match="no name"):
+        await plaid.account(KEYS, ACCESS, CHECKING)
+
+
+@respx.mock
 async def test_remove_sends_the_access_token() -> None:
     route = respx.post(f"{SANDBOX}/item/remove").mock(
         return_value=httpx.Response(200, json=payload("item.remove.json"))
