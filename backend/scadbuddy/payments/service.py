@@ -114,6 +114,9 @@ class ProviderStatus(BaseModel):
     #: Why the last webhook failed, cleared by the next that succeeds (#5684).
     last_webhook_error: WebhookError | None
     last_webhook_error_at: datetime | None
+    #: The one currency the connected account takes, when it has one (#5666: a Square
+    #: location's); Settings warns when it is not the shop's ``orders_currency``.
+    currency: str | None = None
 
 
 class ProviderConnect(BaseModel):
@@ -463,6 +466,7 @@ class Payments:
                 settings=body.settings,
                 secrets=body.secrets,
                 account_label=account_label,
+                currency=verified.currency,
             )
         )
         logger.info("payment provider %s connected", provider)
@@ -503,6 +507,7 @@ class Payments:
                     last_webhook_at=None if row is None else row.last_webhook_at,
                     last_webhook_error=None if row is None else row.last_webhook_error,
                     last_webhook_error_at=None if row is None else row.last_webhook_error_at,
+                    currency=None if row is None else row.currency,
                 )
             )
         return found

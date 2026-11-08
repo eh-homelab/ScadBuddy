@@ -936,7 +936,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
   `kek_missing`), `service.py` (`Payments`, what the routes call; `connect` refuses an
   account whose `Verified.currency` is not the shop's `orders_currency`,
-  `CurrencyMismatchError`, 409 `currency_mismatch`, #5666) and
+  `CurrencyMismatchError`, 409 `currency_mismatch`, #5666, and keeps it on the row,
+  `payment_credentials.currency`, given back as `ProviderStatus.currency`; Settings →
+  Payments warns when `orders_currency` moved away from it since, and the settings
+  route does not refuse that move) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus
