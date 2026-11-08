@@ -422,7 +422,8 @@ RUN apt-get update \
 # vendor file BBL.json beside the machine, process and filament presets, laid out
 # as resources/profiles/ is, without the tree's cover images and bed models.
 WORKDIR /opt
-RUN curl --fail --silent --show-error --location --output bambu-studio.AppImage \
+RUN curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+         --output bambu-studio.AppImage \
          "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
     && printf '%s  bambu-studio.AppImage\n' "$BAMBU_STUDIO_SHA256_AMD64" > bambu-studio.sha256 \
     && sha256sum --check --strict bambu-studio.sha256 \
@@ -534,7 +535,8 @@ RUN case "$TARGETARCH" in \
       arm64) triple=aarch64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_ARM64" ;; \
       *) echo "ERROR: openscad-lsp publishes no build for '${TARGETARCH}'." >&2; exit 1 ;; \
     esac \
-    && curl --fail --silent --show-error --location --output openscad-lsp.tar.xz \
+    && curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+         --output openscad-lsp.tar.xz \
          "https://github.com/Leathong/openscad-LSP/releases/download/v${OPENSCAD_LSP_VERSION}/openscad-lsp-${triple}.tar.xz" \
     && printf '%s  openscad-lsp.tar.xz\n' "$sha" > openscad-lsp.sha256 \
     && sha256sum --check --strict openscad-lsp.sha256 \
@@ -757,6 +759,8 @@ USER root
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
 # above (the release's checksums.txt). ci.yml's `agent` job installs the same version
 # and amd64 digest for the agent's Temporal tests (#1055); bump them together.
+# When the GitHub release URL still fails after its retries, Temporal's own download
+# site serves the same tarball (#5706); the sha256 check is the same for both.
 ARG TARGETARCH
 ARG TEMPORAL_CLI_VERSION=1.9.1
 ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
@@ -766,8 +770,12 @@ RUN case "$TARGETARCH" in \
       arm64) sha="$TEMPORAL_CLI_SHA256_ARM64" ;; \
       *) echo "ERROR: no pinned Temporal CLI for '${TARGETARCH}'." >&2; exit 1 ;; \
     esac \
-    && curl --fail --silent --show-error --location --output /tmp/temporal-cli.tar.gz \
-        "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_${TARGETARCH}.tar.gz" \
+    && { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --output /tmp/temporal-cli.tar.gz \
+           "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_${TARGETARCH}.tar.gz" \
+         || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+           --output /tmp/temporal-cli.tar.gz \
+           "https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=${TARGETARCH}"; } \
     && printf '%s  /tmp/temporal-cli.tar.gz\n' "$sha" > /tmp/temporal-cli.sha256 \
     && sha256sum --check --strict /tmp/temporal-cli.sha256 \
     && tar -xzf /tmp/temporal-cli.tar.gz -C /usr/local/bin temporal \

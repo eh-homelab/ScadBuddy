@@ -317,15 +317,23 @@ jobs:
       # lint builds it with that release, never whatever kustomize the runner
       # image happens to carry. The sha256 is the one kustomize published in
       # that release's checksums.txt, pinned here so a replaced asset fails.
+      # When the release URL keeps failing, the same asset comes through the
+      # REST API (#5706): KUSTOMIZE_ASSET_ID is that tarball's asset id, so a
+      # version bump changes it too; the sha256 check covers both.
       - name: Install kustomize
         env:
           KUSTOMIZE_VERSION: v5.6.0
           KUSTOMIZE_SHA256: 54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f
+          KUSTOMIZE_ASSET_ID: "220363320"
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tarball="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/${tarball}"
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/${tarball}" \
+            || curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/$tarball" \
+              -H "Accept: application/octet-stream" -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/kubernetes-sigs/kustomize/releases/assets/${KUSTOMIZE_ASSET_ID}"
           echo "${KUSTOMIZE_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/kustomize"
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/kustomize" kustomize
@@ -724,8 +732,14 @@ jobs:
           TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
-            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          # Temporal's own download site serves the same tarball when GitHub's
+          # release URL keeps failing (#5706); the sha256 check covers both.
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz" \
+            || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+              --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+              "https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=amd64"
           echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
           "$RUNNER_TEMP/temporal" --version
@@ -1762,8 +1776,14 @@ jobs:
           TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
-            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          # Temporal's own download site serves the same tarball when GitHub's
+          # release URL keeps failing (#5706); the sha256 check covers both.
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz" \
+            || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+              --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+              "https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=amd64"
           echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
           "$RUNNER_TEMP/temporal" --version
