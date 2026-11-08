@@ -3,7 +3,8 @@ public reaches. A bad signature records nothing; a replayed event records one pa
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,11 +14,14 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.credentials import PaymentCredentials
 from scadbuddy.payments.fake import FAKE, signed_event
 from scadbuddy.payments.provider import ProviderUnavailableError
+from scadbuddy.payments.service import Payments
 from tests.api.test_auth_enforce import ENABLED, HEADER, PUBLIC, _app, _sign_in
 from tests.api.test_order_payments import (
     connect_fake,
@@ -381,3 +385,31 @@ def test_a_provider_payment_that_clears_the_balance_closes_the_balance_page(
     assert found[balance["id"]]["status"] == "paid"
     assert found[balance["id"]]["close_pending_at"] is None
     assert found[deposit["id"]]["close_pending_at"] is None
+
+
+def test_the_webhook_answers_before_it_closes_the_pages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5718 review: the closes are handed to ``after``, which the route runs once the
+    answer is sent, so a slow provider never delays the webhook's reply."""
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    app: Any = client.app
+    service: Payments = getattr(app.state, STATE_ATTR).components.get(PAYMENTS).service
+    later: list[Callable[[], Awaitable[object]]] = []
+
+    async def receive() -> str:
+        return await service.handle_webhook("fake", headers, body, after=later.append)
+
+    async def run(job: Callable[[], Awaitable[object]]) -> None:
+        await job()
+
+    assert asyncio.run(receive()) == "recorded"
+    assert FAKE.cancelled == []
+    for job in later:
+        asyncio.run(run(job))
+    assert FAKE.cancelled == [balance["provider_ref"]]

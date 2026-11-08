@@ -47,6 +47,9 @@ class PaymentRequestView(PaymentRequest):
     #: own) and the provider has not yet confirmed that its page is closed. The
     #: housekeeping sweep tries again until it does.
     close_pending_at: datetime | None = None
+    #: The sweep stopped trying: the provider was not connected on the
+    #: `payments.store.CLOSE_GIVE_UP_ATTEMPTS`th try. Close the page at the provider.
+    close_abandoned_at: datetime | None = None
 
 
 class ProviderEvent(BaseModel):

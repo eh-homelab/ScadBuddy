@@ -124,6 +124,18 @@ describe('PaymentRequests (#4957)', () => {
     expect(await screen.findByText('Close not yet confirmed by Fake; ScadBuddy tries again')).toBeInTheDocument()
   })
 
+  it('asks the shop to close a page the sweep gave up on at the provider (#5700)', async () => {
+    await setup((id) => {
+      const found = state.paymentRequests.find((r) => r.id === id)
+      if (!found) throw new Error('no request')
+      found.status = 'cancelled'
+      found.close_pending_at = '2026-11-08T12:00:00Z'
+      found.close_abandoned_at = '2026-11-11T12:00:00Z'
+    })
+    expect(await screen.findByText('Could not close; close it at Fake')).toBeInTheDocument()
+    expect(screen.queryByText(/ScadBuddy tries again/)).not.toBeInTheDocument()
+  })
+
   it('says nothing of the close once the provider confirmed it', async () => {
     const { user } = await setup((id) => void id)
     await user.click(await screen.findByRole('button', { name: 'Cancel' }))

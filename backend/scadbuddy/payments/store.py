@@ -21,13 +21,20 @@ from scadbuddy.payments.models import (
 _PUBLIC = (
     "id, order_id, kind, provider, amount_minor, currency, hosted_url, status, created_at, paid_at"
 )
-_VIEW = f"{_PUBLIC}, provider_ref, link_error, payment_id, created_by, close_pending_at"
+_VIEW = (
+    f"{_PUBLIC}, provider_ref, link_error, payment_id, created_by, close_pending_at,"
+    " close_abandoned_at"
+)
 
 #: #5700: the first wait before the sweep closes a marked page. It gives the close after
 #: the commit time to finish; each failed try doubles the wait, up to a day.
 CLOSE_RETRY_FIRST_MINUTES = 5
 #: The most marked pages one sweep tries.
 CLOSE_RETRY_BATCH = 8
+#: A page whose provider is not connected on this try, once it has failed this many
+#: tries (the close after the commit counts), is given up (`close_abandoned_at`). With
+#: the backoff that is about three and a half days: long enough for a shop to reconnect.
+CLOSE_GIVE_UP_ATTEMPTS = 10
 
 
 def insert_request(
@@ -121,35 +128,50 @@ def set_request_status(
 
 
 def closes_due(conn: Conn, limit: int = CLOSE_RETRY_BATCH) -> list[PaymentRequestView]:
-    """The marked pages whose wait is over: `CLOSE_RETRY_FIRST_MINUTES` after the mark or
-    the last try, doubled for each failed try, at most a day. Oldest mark first."""
+    """Claim the marked pages whose wait is over: `CLOSE_RETRY_FIRST_MINUTES` after the
+    mark or the last try, doubled for each failed try, at most a day; never a page given
+    up. Oldest mark first. The sweep runs from both Schedules, so the rows are taken with
+    ``FOR UPDATE SKIP LOCKED`` and their ``close_tried_at`` is stamped as they are taken:
+    an overlapping run finds them not due, and a page is never tried twice at once."""
     rows = conn.execute(
-        f"SELECT {_VIEW} FROM payment_requests WHERE close_pending_at IS NOT NULL"
-        " AND COALESCE(close_tried_at, close_pending_at) <= clock_timestamp() - LEAST("
-        "  %s * interval '1 minute' * power(2, LEAST(close_attempts, 16)), interval '1 day')"
-        " ORDER BY close_pending_at, id LIMIT %s",
+        "UPDATE payment_requests SET close_tried_at = clock_timestamp()"
+        " WHERE id IN (SELECT id FROM payment_requests WHERE close_pending_at IS NOT NULL"
+        "  AND close_abandoned_at IS NULL"
+        "  AND COALESCE(close_tried_at, close_pending_at) <= clock_timestamp() - LEAST("
+        "   %s * interval '1 minute' * power(2, LEAST(close_attempts, 16)),"
+        "   interval '1 day')"
+        "  ORDER BY close_pending_at, id LIMIT %s FOR UPDATE SKIP LOCKED)"
+        f" RETURNING {_VIEW}",
         (CLOSE_RETRY_FIRST_MINUTES, limit),
     ).fetchall()
-    return [PaymentRequestView.model_validate(r) for r in rows]
+    found = [PaymentRequestView.model_validate(r) for r in rows]
+    return sorted(found, key=lambda r: (r.close_pending_at or r.created_at, r.id))
 
 
 def close_confirmed(conn: Conn, request_id: str, provider_ref: str) -> None:
     """The provider closed the page ``provider_ref``, or says it was closed already. A
     request that no longer holds that reference keeps its mark."""
     conn.execute(
-        "UPDATE payment_requests SET close_pending_at = NULL WHERE id = %s AND provider_ref = %s",
+        "UPDATE payment_requests SET close_pending_at = NULL, close_abandoned_at = NULL"
+        " WHERE id = %s AND provider_ref = %s",
         (request_id, provider_ref),
     )
 
 
-def close_failed(conn: Conn, request_id: str, provider_ref: str) -> None:
+def close_failed(
+    conn: Conn, request_id: str, provider_ref: str, *, provider_gone: bool = False
+) -> None:
     """One more failed try of the marked page ``provider_ref``; a request with no mark,
-    or with another reference, is left as it is."""
+    or with another reference, is left as it is. ``provider_gone``: the provider is not
+    connected; that try, once the page has `CLOSE_GIVE_UP_ATTEMPTS` failed tries, gives
+    the page up (`close_abandoned_at`)."""
     conn.execute(
         "UPDATE payment_requests SET close_attempts = close_attempts + 1,"
-        " close_tried_at = clock_timestamp()"
+        " close_tried_at = clock_timestamp(),"
+        " close_abandoned_at = CASE WHEN %s AND close_attempts + 1 >= %s"
+        "  THEN clock_timestamp() ELSE close_abandoned_at END"
         " WHERE id = %s AND provider_ref = %s AND close_pending_at IS NOT NULL",
-        (request_id, provider_ref),
+        (provider_gone, CLOSE_GIVE_UP_ATTEMPTS, request_id, provider_ref),
     )
 
 

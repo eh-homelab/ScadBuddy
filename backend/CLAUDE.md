@@ -982,17 +982,24 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   marks it, setting `payment_requests.close_pending_at` when a request with a
   `provider_ref` is cancelled, or paid by a payment that is not its own provider's (by
   hand, or another request's payment that cleared the balance); its own provider's
-  payment clears the mark. After the commit, a cancel, a manual payment and a webhook's
-  payment close the pages they marked (`Payments.cancel_request`, `cancel_order`,
-  `add_payment`, `_handle_webhook`). `Payments._close_page` clears the mark once the
+  payment clears the mark. After the commit, a cancel and a manual payment close the
+  pages they marked (`Payments.cancel_request`, `cancel_order`, `add_payment`); a
+  webhook's payment hands its closes to the route's `BackgroundTasks` (`handle_webhook`
+  `after`), so they run once the answer is sent. `Payments._close_page` clears the mark once the
   provider confirms (`close_confirmed`) and counts a failed try (`close_failed`:
   `close_attempts`, `close_tried_at`), each only while the request still holds the
   reference it tried. The `housekeeping_retry_payment_closes` sweep (both Schedules, behind
   its patch) calls `Payments.retry_closes`: up to `CLOSE_RETRY_BATCH` marked pages whose
   wait is over (`closes_due`: `CLOSE_RETRY_FIRST_MINUTES` after the mark or the last try,
-  doubled per failed try, at most a day). It never runs the lifecycle again. The order
-  page says "Close not yet confirmed" while the mark stands (`PaymentRequests.tsx`).
-  A page the provider made after its request was cancelled or paid by hand
-  (`Payments.link`'s race) is kept with its `provider_ref`, no `hosted_url`, and the mark
-  (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`), so the sweep
-  retries it like any other.
+  doubled per failed try, at most a day), claimed `FOR UPDATE SKIP LOCKED` with
+  `close_tried_at` stamped as they are taken, so the two Schedules' runs never try one
+  page at once. A try that finds the provider not connected, once the page has
+  `CLOSE_GIVE_UP_ATTEMPTS` (10, about three and a half days) failed tries, gives it up
+  (`close_abandoned_at`); any other failure is tried again at most a day apart. It never
+  runs the lifecycle again. The order page says "Close not yet confirmed" while the mark
+  stands, and "Could not close; close it at <provider>" once given up
+  (`PaymentRequests.tsx`). A page the provider made after its request was cancelled or
+  paid by hand (`Payments.link`'s race) is kept with its `provider_ref`, no `hosted_url`,
+  and the mark (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`),
+  so the sweep retries it like any other. A late page whose reference another request
+  holds names that request's live page: it is not kept, not marked and not closed.
