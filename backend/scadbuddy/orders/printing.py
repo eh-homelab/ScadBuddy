@@ -27,13 +27,21 @@ native LAN print's too, so a native print settles by itself), heard on the event
 ``unknown`` end, or a follow that stopped before the print settled) is settled by hand,
 ``PATCH``ing the attempt.
 
-What it does not do yet: print the quote's sliced file itself. A slice quote is checked
-(its file still there, its digest the quote's, else ``requote_needed``) and the attempt
-records and holds that file, but the run slices the item's output with the request's
-choices, as the dialog's run does; when those are the quote's, the run reuses the
-quote's own background slice (``bambuddy/preview.py``), otherwise it is a slice of the
-same output. Each slot's spool is filled from the item's filaments in the operation's
-check (``orders/spools.py``, #4251): ``needs_spool_choice``, ``spool_not_filament``.
+The print sends what was quoted (#4673, order operations spec §5.1). A slice quote
+records its print setup (``Quote.choices``: printer, path, choices, tower, supports and
+sequence; ``filament_plan``), and a print takes each part of it the request leaves out
+(``ItemPrintRequest``; ``{}`` sends none), so the run slices the item's output with the
+quote's own setup and reuses the quote's background slice (``bambuddy/preview.py``)
+while it is kept. A request that sends a setup the quote was not sliced with is
+``requote_needed`` (:func:`_same_setup`), never sliced again silently. A slice quote is
+also checked (its file still there, its digest the quote's, else ``requote_needed``),
+and the attempt records and holds that file. The run does not queue that file itself: a
+background slice no longer kept is sliced again, with the same setup. A manual or
+archive quote, which sliced nothing, records no setup: its print slices with the
+request's choices and spools, which it must then send (422 ``print_setup_missing``).
+Each slot's spool is filled from the item's filaments in the operation's check
+(``orders/spools.py``, #4251): ``needs_spool_choice``, ``spool_not_filament``; the
+spools are never compared with the quote's.
 
 A library file item (#5544) prints its file as ``POST /print/library/{file_id}/run``
 does (``api/library_print.py`` ``start_library_run``), on the run subject
@@ -54,12 +62,14 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
 from typing import Any
 
 from fastapi import status
 
+from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.events import (
     BusResync,
@@ -178,8 +188,10 @@ async def print_check(
     request's settings per slot (#5571, ``part_settings.dumped``): sent and not the
     quote's, they are ``requote_needed``; what the run needs then carries the quote's
     ``part_settings``, which a request that sends none prints with. ``setup`` is the
-    tower, supports and sequence the request sent (#4673, :func:`sent_setup`), checked
-    against the quote's as ``part_settings`` are (:func:`_same_setup`)."""
+    print setup the request sent (#4673, :func:`sent_setup`, with ``filament_plan`` when
+    it sent one), checked against the quote's (:func:`_same_setup`); what the run needs
+    then carries the quote's (``setup``, :func:`quoted_setup`), which fills what the
+    request left out."""
     order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
         raise _refused(f"order_{order.status}", f"order {order.label} is {order.status}")
@@ -207,7 +219,7 @@ async def print_check(
     if quote is None:
         raise requote(item, "it has no accepted quote")
     _same_part_settings(item, quote, part_settings)
-    _same_setup(item, quote, setup or {})
+    _same_setup(item, quote, setup)
     if reference is None:
         return await _library_stands(library, blobs, item, quote, copies)
     return await _stands(outputs, blobs, item, reference, quote, copies, schema_of)
@@ -281,7 +293,7 @@ async def test_print_check(
     if not quotes:
         raise requote(item, "it has no slice quote of its current revision")
     _same_part_settings(item, quotes[-1], part_settings)
-    _same_setup(item, quotes[-1], setup or {})
+    _same_setup(item, quotes[-1], setup)
     return await _stands(outputs, blobs, item, reference, quotes[-1], 1, schema_of)
 
 
@@ -300,35 +312,106 @@ def _same_part_settings(
 
 
 #: The print setup a print takes from its quote when it sends none (#4673, order
-#: operations spec §5.1): `PrintRunRequest`'s fields of the same names.
-QUOTED_SETUP = ("prime_tower", "supports", "print_sequence")
+#: operations spec §5.1): `PrintRunRequest`'s fields of the same names, as the quote
+#: records them in its `choices` (`quote.print_setup`). One sent that differs from the
+#: quote's is `requote_needed` (:data:`COMPARED_SETUP`: all but `path`): the print would
+#: not be what was priced.
+QUOTED_SETUP = (
+    "printer_id",
+    "printer",
+    "path",
+    "choices",
+    "prime_tower",
+    "supports",
+    "print_sequence",
+)
 
 
-def sent_setup(request: Mapping[str, Any]) -> dict[str, Any]:
-    """The :data:`QUOTED_SETUP` an item print's request sent (its operation's
-    ``request``, dumped with ``exclude_unset``), in ``PrintRunRequest``'s JSON shapes, as
-    the quote records them (``quote.print_setup``)."""
-    body = PrintRunRequest.model_validate(request)
-    sent = {key for key in QUOTED_SETUP if key in request}
-    return body.model_dump(mode="json", include=sent) if sent else {}
+class ItemPrintRequest(PrintRunRequest):
+    """An item's print or test print (#4673 PR 2): the print dialog's body, with
+    ``choices`` and ``filament_plan`` optional. Each of :data:`QUOTED_SETUP` and the
+    spools left out is the accepted quote's (the test print's: its slice quote's), so a
+    body of ``{}`` prints exactly what was quoted. A quote that records no setup (manual,
+    archive, or one recorded before #4673) needs ``choices`` and ``filament_plan`` sent."""
+
+    filament_plan: FilamentPlan | None = None  # type: ignore[assignment]
+    choices: PrintChoices | None = None  # type: ignore[assignment]
+
+
+def sent_setup(body: ItemPrintRequest, sent: Collection[str]) -> dict[str, Any]:
+    """The :data:`QUOTED_SETUP` and ``filament_plan`` an item print's request sent
+    (``sent``: the keys of its operation's ``request``, dumped with ``exclude_unset``),
+    in ``PrintRunRequest``'s JSON shapes, as the quote records them
+    (``quote.print_setup``). The spools are never compared, only filled."""
+    keys = {key for key in (*QUOTED_SETUP, "filament_plan") if key in sent}
+    return body.model_dump(mode="json", include=keys) if keys else {}
 
 
 def quoted_setup(quote: Quote) -> dict[str, Any] | None:
-    """The quote's :data:`QUOTED_SETUP` (#4673), which a print that sends none prints
-    with; None for a quote that records none (manual, archive, or recorded before)."""
+    """The quote's :data:`QUOTED_SETUP` and spools (``filament_plan``, #4673), which a
+    print that sends none prints with; None for a quote that records none (manual,
+    archive, or recorded before)."""
     if quote.choices is None:
         return None
-    return {key: quote.choices.get(key) for key in QUOTED_SETUP}
+    setup = {key: quote.choices.get(key) for key in QUOTED_SETUP}
+    return {**setup, "filament_plan": quote.filament_plan}
 
 
-def _same_setup(item: OrderItem, quote: Quote, asked: Mapping[str, Any]) -> None:
-    """``requote_needed`` when a print sends a tower, supports or sequence (#4673) that
-    ``quote`` was not sliced with: it would print what was not priced. One not sent is
-    the quote's own; a quote that records none checks nothing."""
+def _compared(key: str, value: Any) -> Any:
+    """``value`` as it slices: supports off is off whatever type or angle rides along
+    (``supports.wanted_settings``; #5720 review)."""
+    if key == "supports" and isinstance(value, dict) and value.get("enabled") is False:
+        return {"enabled": False}
+    return value
+
+
+#: The :data:`QUOTED_SETUP` a print may not change: every key but ``path``. Another
+#: route than the quote's prints the same setup, slicing again on that route when the
+#: quote's slice cannot be queued there (#5352: a LAN slice through Bambuddy's queue).
+COMPARED_SETUP = tuple(key for key in QUOTED_SETUP if key != "path")
+
+
+#: The two names of a printer: the run resolves one from the other, and refuses a pair
+#: that does not link (``prepare_run``), so only a name both sides give is compared.
+_PRINTER_NAMES = frozenset({"printer_id", "printer"})
+
+
+def setup_differences(asked: Mapping[str, Any], recorded: Mapping[str, Any]) -> list[str]:
+    """The :data:`COMPARED_SETUP` keys ``asked`` sent that are not ``recorded``'s, in
+    order. A key ``recorded`` lacks (a quote recorded with fewer) is never a difference,
+    nor is a printer name (:data:`_PRINTER_NAMES`) that either side leaves null."""
+    return [
+        key
+        for key in COMPARED_SETUP
+        if key in asked
+        and key in recorded
+        and not (key in _PRINTER_NAMES and (asked[key] is None or recorded[key] is None))
+        and _compared(key, asked[key]) != _compared(key, recorded[key])
+    ]
+
+
+def _same_setup(item: OrderItem, quote: Quote, asked: Mapping[str, Any] | None) -> None:
+    """``requote_needed`` when a print sends a setup (#4673) that ``quote`` was not
+    sliced with: it would print what was not priced, so it is never sliced again
+    silently. One not sent is the quote's own. A quote that records none prints with the
+    request's, which must then name ``choices`` and ``filament_plan`` (422
+    ``print_setup_missing``). ``asked`` None (a caller that checks no setup) checks
+    nothing."""
+    if asked is None:
+        return
     recorded = quoted_setup(quote)
     if recorded is None:
+        missing = [key for key in ("choices", "filament_plan") if key not in asked]
+        if missing:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"item {item.id}'s quote records no print setup (a manual or archive quote,"
+                f" or one made before quotes recorded it): send {' and '.join(missing)}",
+                type_=PROBLEMS + "print_setup_missing",
+                items=[item.id],
+            )
         return
-    differs = [key for key in QUOTED_SETUP if key in asked and asked[key] != recorded[key]]
+    differs = setup_differences(asked, recorded)
     if differs:
         raise requote(
             item,

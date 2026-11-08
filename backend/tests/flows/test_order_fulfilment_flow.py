@@ -264,6 +264,17 @@ def test_the_print_leaves_the_tower_supports_and_sequence_to_the_quote() -> None
     assert not {"prime_tower", "supports", "print_sequence"} & set(request)
 
 
+def test_an_item_whose_quote_records_its_setup_prints_with_it() -> None:
+    """#4673 PR 2: an accepted quote that records its print setup is printed with it, so
+    the flow sends no choices of its own (the model's remembered ones would differ from
+    the quote's and be `requote_needed`), and reads none."""
+    item = {**_item("a"), "quotes": [{"accepted": True, "choices": {"choices": {}}}]}
+    host = _Host([item], [_OK], [])
+    host.run()
+    assert host.requests == [{}]
+    assert "get_print_choices" not in host.calls
+
+
 def test_a_hold_asks_until_the_order_is_released() -> None:
     held = _refused("order_on_hold")
     host = _Host([_item("a")], [held, held, _OK], ["print", "print"])

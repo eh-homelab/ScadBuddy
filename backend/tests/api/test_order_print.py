@@ -623,6 +623,17 @@ def test_an_item_prints_through_bambuddys_queue_with_its_calibrations(
     assert uploads() == uploaded_before + 1
 
 
+#: A LAN quote's choices that slice on both routes (#4673): each slot pinned to Bambu
+#: Studio's own PLA Basic, which the native slicer reads and Bambuddy's recorded
+#: catalogue (`slicer-presets-h2c.json`) lists.
+PLA_BASIC: dict[str, Any] = {"source": "standard", "id": "Bambu PLA Basic @BBL H2C"}
+LAN_CHOICES: dict[str, Any] = {
+    "nozzles": [{"size": "0.4"}],
+    "tier": "standard",
+    "filament_overrides": {"1": PLA_BASIC, "2": PLA_BASIC},
+}
+
+
 def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice(
     model: str,
     settings: Settings,
@@ -656,7 +667,10 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
                 printer=row,
                 printer_id=None,
                 filament_plan=lan_plan,
-                choices={"nozzles": [{"size": "0.4"}], "tier": "standard"},
+                # #4673: the print slices with the quote's choices on Bambuddy's route
+                # too, so each slot is pinned to a preset the native slicer reads there
+                # (a cloud ref of Bambu Studio's own PLA Basic, `slicing/catalogue.py`).
+                choices=LAN_CHOICES,
             )
             assert started.status_code == 202, started.text
             op = follow_operation(client, started.json(), timeout=120, poll=0.2)
@@ -681,11 +695,16 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
                 )
                 assert fixed.status_code == 200, fixed.text
 
+            # #4673: the quote's printer and choices, Bambuddy's spools and its route.
             attempt = answered(
                 client,
                 client.post(
                     f"{shop.path}/print",
-                    json={**body(), "path": "bambuddy", "options": CALIBRATIONS},
+                    json={
+                        "filament_plan": body()["filament_plan"],
+                        "path": "bambuddy",
+                        "options": CALIBRATIONS,
+                    },
                     headers=press(),
                 ),
             )
@@ -889,3 +908,91 @@ def test_a_test_print_takes_its_slice_quotes_setup(
     assert attempt["purpose"] == "test"
     [request] = sent
     assert _setup_of(request) == {key: quote["choices"][key] for key in SETUP_KEYS}
+
+
+# -- the print sends what was quoted (#4673 PR 2, order operations spec §5.1) ------------------
+
+
+def _accepted(client: TestClient, shop: QuoteShop, quote: dict[str, Any]) -> None:
+    assert client.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert client.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    _books_spools(shop)
+
+
+def test_a_print_with_no_choices_prints_the_quotes_setup(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A print that sends no choices of its own prints with the accepted quote's printer,
+    path, choices, spools, tower, supports and sequence, so it prints the quote's slice."""
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    _accepted(bambuddy, shop, quote)
+    queue_route()
+
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json={}, headers=press()))
+
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+    [request] = sent
+    recorded = quote["choices"]
+    assert request.printer_id == recorded["printer_id"]
+    assert request.choices.model_dump(mode="json") == recorded["choices"]
+    assert _setup_of(request) == {key: recorded[key] for key in SETUP_KEYS}
+    assert [s.model_dump(mode="json") for s in request.filament_plan.slots] == quote[
+        "filament_plan"
+    ]["slots"]
+
+
+def test_a_print_whose_choices_differ_from_the_quotes_wants_a_new_quote(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never sliced again silently: another printer or quality than the quote's is
+    `requote_needed`, naming what differs. The quote's own sent again prints. (Another
+    `path` is #5352's: the same setup on another route.)"""
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    _accepted(bambuddy, shop, quote)
+
+    for other, named in (
+        (body(tier="draft"), "choices"),
+        ({**body(), "printer_id": 2}, "printer_id"),
+    ):
+        refusal = problem(
+            bambuddy.post(f"{shop.path}/print", json=other, headers=press()), "requote_needed"
+        )
+        assert named in refusal["detail"]
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=body(), headers=press()))
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+
+
+def test_a_test_print_with_no_choices_prints_its_quotes_setup(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    revision = shop.get_item()["current_revision_id"]
+    _books_spools(shop)
+    url = f"{shop.path}/revisions/{revision}/test-print"
+    problem(bambuddy.post(url, json=body(tier="draft"), headers=press()), "requote_needed")
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(url, json={}, headers=press()))
+
+    assert attempt["purpose"] == "test"
+    [request] = sent
+    assert request.choices.model_dump(mode="json") == quote["choices"]["choices"]
+
+
+def test_a_manual_quote_prints_with_the_requests_choices_and_needs_some(
+    bambuddy: TestClient,
+) -> None:
+    """A manual quote sliced nothing and records no setup: the print slices with the
+    request's choices, and a request with none is refused, naming them."""
+    slice_routes()
+    queue_route()
+    item = Item(bambuddy)
+    refusal = problem(
+        bambuddy.post(f"{item.path}/print", json={}, headers=press()), "print_setup_missing", 422
+    )
+    assert "choices" in refusal["detail"]
+    attempt = printed(item, key="print-manual")
+    assert attempt["sliced_sha256"] is None

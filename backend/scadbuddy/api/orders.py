@@ -49,7 +49,6 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
-from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import printable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
@@ -121,7 +120,7 @@ from scadbuddy.orders.models import (
 from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.pricing import estimate_grams, to_minor
-from scadbuddy.orders.printing import print_request_id
+from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import ArchiveQuoteRequest, SliceQuoteRequest, subject_of
@@ -2233,29 +2232,34 @@ async def accept_quote(order_id: str, item_id: str, quote_id: str, orders: Order
 async def print_item(
     order_id: str,
     item_id: str,
-    body: PrintRunRequest,
+    body: ItemPrintRequest,
     response: Response,
     http: Request,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Fulfilment | JSONResponse:
     """The ``order_item_print`` operation (#4719, §5.4): a print run of the item's output
-    with the print dialog's spools and choices in the body, started as
-    ``POST /print/outputs/{id}/run`` starts one, for every plate and the quantity still
-    to print (the body's ``copies``, plates and ``request_id`` are the item's, not the
-    caller's). Answers with the attempt it recorded, the item `queued`; the item then
-    follows the run (`printing`, `printed` or `failed`), and a print whose end could not
-    be read is settled by ``PATCH``ing the attempt. Refused before anything starts: 404
-    for an unknown order or item; 409 ``order_not_accepted``, ``order_on_hold``,
-    ``order_closed``/``order_cancelled``, ``item_custom``, ``item_not_open``,
+    with the accepted quote's print setup (#4673: its printer, path, choices, tower,
+    supports, sequence and spools; each the body leaves out is the quote's, so ``{}``
+    prints what was quoted), started as ``POST /print/outputs/{id}/run`` starts one,
+    for every plate and the quantity still to print (the body's ``copies``, plates and
+    ``request_id`` are the item's, not the caller's). Answers with the attempt it
+    recorded, the item `queued`; the item then follows the run (`printing`, `printed` or
+    `failed`), and a print whose end could not be read is settled by ``PATCH``ing the
+    attempt. Refused before anything starts: 404 for an unknown order or item; 409
+    ``order_not_accepted``, ``order_on_hold``, ``order_closed``/``order_cancelled``,
+    ``item_custom``, ``item_not_open``,
     ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
     quantity: accept them), ``print_in_flight`` (a test print of the item is still
     open), ``print_request_conflict`` (the key's print is another item's, or the key's
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced, or a
-    ``part_settings``, ``prime_tower``, ``supports`` or ``print_sequence`` sent that the
-    quote was not sliced with; each one omitted is the quote's, #5571, #4673); and the
-    print run's own refusals, as the print route answers them."""
+    ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
+    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
+    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    slices again on its route, #5352); 422 ``print_setup_missing`` when the quote records
+    no setup (manual, archive) and the body sends no ``choices`` or ``filament_plan``;
+    and the print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id)
     result = await run_operation(
         ops,
@@ -2289,7 +2293,7 @@ async def test_print_item(
     order_id: str,
     item_id: str,
     revision_id: str,
-    body: PrintRunRequest,
+    body: ItemPrintRequest,
     response: Response,
     http: Request,
     ops: OperationsDep,
@@ -2308,9 +2312,11 @@ async def test_print_item(
     ``print_request_conflict`` (the key's print is another item's or a production
     print), and ``requote_needed`` (no slice quote of the revision,
     its sliced file gone or no longer the file it priced, the output gone, or a
-    ``part_settings``, ``prime_tower``, ``supports`` or ``print_sequence`` sent that the
-    quote was not sliced with; each one omitted is the quote's, #5571, #4673); and the
-    print run's own refusals, as the print route answers them."""
+    ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
+    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
+    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    slices again on its route, #5352); 422 ``print_setup_missing`` as ``POST …/print``
+    answers it; and the print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id, revision_id)
     result = await run_operation(
         ops,

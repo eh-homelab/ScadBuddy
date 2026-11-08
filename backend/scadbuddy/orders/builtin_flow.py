@@ -107,7 +107,12 @@ async def print_request(item):
     """The print dialog's body for `item`: its model's (or file's) remembered choices,
     the dialog's defaults otherwise. Its spools are filled from the item's filaments. A
     library file's choices come from the library that serves, Bambuddy's or ScadBuddy's
-    own (`api/library_print.py` `get_library_choices`)."""
+    own (`api/library_print.py` `get_library_choices`). An accepted quote that records its
+    print setup (#4673) prints with it, so nothing is sent or read: other choices than the
+    quote's are `requote_needed`."""
+    accepted = [quote for quote in item.get("quotes") or [] if quote.get("accepted")]
+    if accepted and accepted[0].get("choices") is not None:
+        return {}
     if item.get("library_file") is not None:
         source = {"library_file_id": item["library_file"]["id"]}
     else:

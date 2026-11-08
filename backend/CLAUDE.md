@@ -657,8 +657,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
   `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
-  An item's print takes the tower, supports and sequence it omits from the quote's
-  (`printing.py` `QUOTED_SETUP`, `print_body`'s `setup`); one that differs is `requote_needed`. The lifecycle drops the quote holders §3.4 releases
+  An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
+  the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
+  `operations.py` `filled`); one sent that differs is `requote_needed`
+  (`setup_differences`: not `path`, a printer name left null, or the spools), and a quote
+  with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.

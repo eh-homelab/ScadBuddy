@@ -185,29 +185,39 @@ have "versions" (git commits: `list_versions`, `diff_version`, `restore_version`
 - Agent: `order_item_quote.slice` gains `inputs`/`commit` (makes the revision first) and
   the three choices; `order_get` lists print setups with their choices.
 
+### 5.3 Depends on
+
+#5280 (scadify, revisions). Its revisions, `revision_id` on quotes and test prints are on
+main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against them on
+2026-11-07. §5 is not blocked.
+
 ### 5.4 As built
 
-- PR 1 (#4673): `SliceQuoteRequest` takes `prime_tower`, `supports` and `print_sequence`
+- PR 1 (#5720): `SliceQuoteRequest` takes `prime_tower`, `supports` and `print_sequence`
   (`PrintRunRequest`'s own types); `orders/operations.py` `preview_request` passes them to
   the background slice. `order_item_quotes.choices` (`printer_id`, `printer`, `path`,
   `choices`, `prime_tower`, `supports`, `print_sequence`, each present, null when left out;
   `orders/quote.py` `print_setup`) and `filament_plan` are written with a slice quote and
   shown on `Quote`, so `order_get` lists them. A manual or archive quote has neither. The
   agent's `order_item_quote.slice` takes the three.
-- The print reads only `prime_tower`, `supports` and `print_sequence` of `choices`
-  (`orders/printing.py` `QUOTED_SETUP`, pulled into PR 1 by its review): an item's print or
-  test print that omits one prints with the quote's (`operations.py` `print_body`'s
-  `setup`, from the check's `quoted_setup`), and one that differs is `requote_needed`
-  (`_same_setup`), as `part_settings` are (#5571). A quote with no `choices` checks
-  nothing. The agent's `order_item_print` takes the three, optional. The rest of
-  `choices` and `filament_plan` are read from PR 2 on: until then the print's own
-  printer, path, `choices` and spools stand, as before.
-
-### 5.3 Depends on
-
-#5280 (scadify, revisions). Its revisions, `revision_id` on quotes and test prints are on
-main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against them on
-2026-11-07. §5 is not blocked.
+- PR 2: the print reads the whole setup. An item's print or test print takes the body
+  `ItemPrintRequest` (`orders/printing.py`: `choices` and `filament_plan` optional), and
+  each of `QUOTED_SETUP` (every `choices` key above) and the spools it leaves out is the
+  quote's (`quoted_setup` in the check's result, `operations.py` `filled` in the check
+  and in `print_body`), so `{}` prints what was quoted and reuses the quote's background
+  slice while it is kept. One sent that differs is `requote_needed`, naming it
+  (`setup_differences` over `COMPARED_SETUP`), never sliced again silently, with three
+  exceptions **(calls)**: `path` is filled but not compared (#5352: another route prints
+  the same setup and slices again there); a printer name either side leaves null is not
+  compared (the run refuses a `printer`/`printer_id` pair that does not link); and the
+  spools are never compared (the check fills them from the item's filaments, §5.4 of the
+  orders spec). Supports off compare equal whatever type or angle rides along. A quote
+  that records no setup (manual, archive, or made before PR 1) prints with the
+  request's, which must then send `choices` and `filament_plan` (422
+  `print_setup_missing`). The built-in `order-fulfilment` flow sends `{}` for an item
+  whose accepted quote records a setup. The agent's `order_item_print` takes every field
+  optional. The page's print dialog still sends its own choices, which must be the
+  quote's; PR 4's "Slice…" opens it from the quote.
 
 ## 6. A derived machine rate (#4625)
 
