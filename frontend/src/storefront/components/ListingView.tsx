@@ -1,4 +1,5 @@
 import { useId } from 'react'
+import type { ListingBound, ParamValue } from '../../api/types'
 import { formatMoney } from '../../lib/money'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,16 +16,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
  * never as HTML (spec §5.8).
  */
 
-export type ParamValue = boolean | number | string
 export type ParamValues = Record<string, ParamValue>
 
-/** What a customer may set a parameter to: `orders/storefront/wire.py` `ParamBound`. */
-export type ListingBound =
-  | { kind: 'number'; min: number; max: number; step?: number | null }
-  | { kind: 'choice'; choices: ParamValue[] }
-  | { kind: 'text'; max_length: number }
-
-/** A parameter the customer may change, with its schema's label, help and group. */
+/** A parameter the customer may change (its bound is `orders/storefront/wire.py` `ParamBound`), with its schema's label, help and group. */
 export type PublicParam = ListingBound & {
   label: string
   help?: string | null
