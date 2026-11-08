@@ -18,6 +18,7 @@ from scadbuddy.payments.credentials import KekMissingError, ProviderBusyError
 from scadbuddy.payments.provider import ProviderError
 from scadbuddy.payments.service import (
     CurrencyMismatchError,
+    CurrencyUnknownError,
     FieldError,
     ProviderConnect,
     ProviderNotFoundError,
@@ -49,7 +50,8 @@ async def list_providers(payments: PaymentsDep) -> list[ProviderStatus]:
     description=(
         "The provider checks the account first. 409 `kek_missing` without"
         " SCADBUDDY_SECRET_KEY_FILE; 409 `currency_mismatch` when the account takes"
-        " payments in one currency and it is not `orders_currency`; 422 with the"
+        " payments in one currency and it is not `orders_currency`; 409"
+        " `currency_unknown` when such an account names no currency; 422 with the"
         " provider's own text when it refuses."
     ),
 )
@@ -74,6 +76,10 @@ async def connect_provider(
     except CurrencyMismatchError as error:
         raise ApiError(
             status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + "currency_mismatch"
+        ) from None
+    except CurrencyUnknownError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + "currency_unknown"
         ) from None
     except ProviderError as error:
         raise ApiError(

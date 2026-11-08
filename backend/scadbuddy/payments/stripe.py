@@ -142,6 +142,7 @@ def verify_signature(secret: str, header: str, body: bytes, *, now: float) -> No
 class StripeProvider:
     id = "stripe"
     label = "Stripe"
+    reports_currency = False
     fields: Sequence[ProviderField] = (
         ProviderField(name="secret_key", label="Secret or restricted key", secret=True),
         ProviderField(name="webhook_secret", label="Webhook signing secret", secret=True),

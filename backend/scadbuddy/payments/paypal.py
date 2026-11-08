@@ -173,6 +173,7 @@ def _refusal(status: int, found: Mapping[str, Any]) -> _RefusedError:
 class PayPalProvider:
     id = "paypal"
     label = "PayPal"
+    reports_currency = False
     #: The wallet under ``payment_source``; Venmo (#4960) is the same order with ``venmo``.
     funding_source = "paypal"
     fields: Sequence[ProviderField] = (
