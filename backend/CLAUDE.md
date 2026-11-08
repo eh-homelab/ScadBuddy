@@ -10,12 +10,16 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The render and print workers
-each connect as a role of their own, with the grant lists in `render/worker_role.py`
-(`RENDER_GRANTS`) and `auth/caller_grants.py` (`PRINT_GRANTS`, and `AGENT_GRANTS` for
-the agent). The projects worker has no database client (#5298): it reaches flows,
-operations and payload keys through CRUD routes, and `PROJECTS_GRANTS` is empty. Template `pipeline/` Python runs in
-the render worker's pod, and openscad and `openscad-lsp` run in the API's pod.
+database owner and runs SQL on the agent's `ai_*` tables. The print worker connects as a
+role of its own, with the grant list in `auth/caller_grants.py` (`PRINT_GRANTS`, and
+`AGENT_GRANTS` for the agent). The projects and render workers have no database client
+(#5298): they reach their data through CRUD routes. The projects worker has no grant
+list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
+every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
+(`render/worker_role.py`) is empty until #5298 Task 22 revokes its role. The render
+worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
+Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
+pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
 nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
@@ -31,7 +35,7 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
-(the projects worker, #5298) takes `exchange_source` instead: the exchange only, with no
+(the projects and render workers, #5298) takes `exchange_source` instead: the exchange only, with no
 view, and no proof refuses its start. `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
@@ -146,12 +150,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
   backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, everything the
-  render worker's own role `scadbuddy_render` may touch, granted by the API at start;
-  a change to what the worker reads or writes changes it, and
-  `tests/test_render_worker_role.py` renders as that role; the worker never migrates
-  and reads the store settings and writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it; that role is today's state,
-  superseded by #5295, which moves the worker's SQL behind CRUD routes, #5298). The legacy in-process queue, its file and Postgres stores
+  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, now empty, which the
+  API grants the unused role `scadbuddy_render` at start until #5298 Task 22 revokes it,
+  and `grant_role`, which every caller's list goes through; the render worker holds no
+  database, #5298, `tests/test_render_worker_nodb.py`: it reads the store settings and
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -234,7 +237,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
-  event bus to `FlowTriggerFire`, one per trigger and event); the workflow and the
+  event bus to `FlowTriggerFire`, one per trigger and event, an order event one per
+  trigger and status change, `_change_fires`); the workflow and the
   Schedules are `workflows/flow_triggers.py`, routes `api/flow_triggers.py`. A fire reads
   everything from the trigger's row (the Schedule carries the trigger id only) and runs
   as its creator, with a run grant only from a standing grant a person approved; never
@@ -249,6 +253,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_item_print` with the call's key and follows the attempt's run; a refusal before
   it starts is the outcome `refused` with `problem` (`requote_needed`), and
   `RouteRefusedError.problem` carries a route's problem `type`.
+  Order events (#4252, orders spec §7.1): the kinds `order.changed` and
+  `order_item.changed` fire once per row of `order_status_changes` (kept by a trigger on
+  `orders` and `order_items`; keys `order:<id>:<status>:<change>` and
+  `order_item:<id>:<status>:<change>`), never per event: an event reads the newest
+  `CHANGES_HEARD` rows of its order or item (`events.py` `_change_fires`), so a plain edit,
+  a hold or a release fires nothing, a return to a status fires again, and a change before
+  the trigger's `live_since` (made, its event last edited, or last resumed) or already fired is
+  skipped. An item
+  attempt recorded with no status change fires nothing. `EventTiming.subject` `{kind: template|order|order_item, id?}` (a stored
+  or sent `slug` reads as a template subject; no migration) and `match` (`status` only,
+  values checked against `OrderStatus`/`ItemStatus`), both applied in
+  `TriggerStore.event_triggers` before a fire starts; an order fire's `customer_id` is
+  read from the order's row (`order_facts`), and an item event for an item gone since
+  fires nothing. `trigger()` returns `OrderChanged` /
+  `OrderItemChanged`.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
@@ -427,10 +446,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
-  pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
+  pinned workflows on SIGTERM. No database and no KEK (#5298, `NoDatabaseSettings`): it
+  waits for its CRUD areas (`RENDER_CRUD_AREAS`), gets its credential from
+  `exchange_source`, and refuses the local store (`LocalStoreRefusedError`, plan D11). `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); every
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
+  settings, the Bambuddy key among them, come from the API's CRUD route
+  (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
+  every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
   behavior), so an `Operation` moves to the current build, which #4139's deferral

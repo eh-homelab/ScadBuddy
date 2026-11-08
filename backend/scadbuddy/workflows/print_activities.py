@@ -70,7 +70,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
-from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.library.settings_store import SettingsReader, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
@@ -145,7 +145,7 @@ async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error:
 
 @dataclass
 class PrintDeps:
-    settings_store: SettingsStore
+    settings_store: SettingsReader
     #: The outputs, on the volume or through the API (#1060).
     outputs: OutputReader
     #: Where a print records the output's last print (#1060).
@@ -192,13 +192,13 @@ def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
     return [LanPlateSend(plate_id=plate_id, copies=copies) for plate_id, copies in counts.items()]
 
 
-def plate_clear_of(planned: PlannedRun, settings: SettingsStore) -> PlannedRun:
+def plate_clear_of(planned: PlannedRun, settings: SettingsReader) -> PlannedRun:
     """``planned`` with ``lan_require_plate_clear`` as it is now (#4939), for a native run
     of several prints: the run keeps it, so a change applies from the next run. Any
     other run has no print to wait between, and reads nothing."""
     if not planned.lan_start or planned.copies * len(planned.plates) < 2:
         return planned
-    required = settings.snapshot().runtime.lan_require_plate_clear
+    required = settings.plate_clear_required()
     return planned.model_copy(update={"plate_clear": required})
 
 
@@ -234,8 +234,9 @@ class PrintActivities:
     def __init__(self, deps: PrintDeps) -> None:
         self.d = deps
 
-    def _settings(self) -> StoredSettings:
-        return self.d.settings_store.load()
+    async def _settings(self) -> StoredSettings:
+        # Off the loop: on the print worker a read is an HTTP call that may retry (#5298).
+        return await asyncio.to_thread(self.d.settings_store.load)
 
     async def _source(
         self, client: BambuddyClient | None, spec: SourceSpec, settings: StoredSettings
@@ -286,7 +287,7 @@ class PrintActivities:
         if spec.kind == "library":
             assert spec.file_id is not None
             return LibrarySource(spec.file_id, [], [], uploads=self.d.uploads, sends=self.d.links)
-        return await self._output_source(spec, self._settings())
+        return await self._output_source(spec, await self._settings())
 
     @activity.defn(name="print_check")
     async def check(self, check: CheckInput) -> Checked:
@@ -298,7 +299,7 @@ class PrintActivities:
             # once the check has ended, right before the record. Both times are the
             # server's: the execution's start and this attempt's (review #1061 3).
             raise ApplicationError(UNWAITED.detail, UNWAITED, type=REFUSED, non_retryable=True)
-        settings = self._settings()
+        settings = await self._settings()
         spec = input.source
         request = input.request
         try:
@@ -423,7 +424,7 @@ class PrintActivities:
         """The record, idempotent on this execution: a retry returns the same row."""
         info = activity.info()
         assert info.workflow_id is not None and info.workflow_run_id is not None
-        retention = self._settings().print_run_retention_seconds
+        retention = (await self._settings()).print_run_retention_seconds
         return await self.d.store.insert_accepted(
             uuid.uuid4().hex,
             subject=PrintSubject.from_run_subject(input.input.subject),
@@ -439,7 +440,7 @@ class PrintActivities:
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
         """The upload and every plate resolved; nothing sliced yet."""
-        settings = self._settings()
+        settings = await self._settings()
         # The check's decision (`lan_start`, D2): a native run builds no client (D3).
         native = input.accepted.prepared.lan_start
         try:
@@ -495,7 +496,7 @@ class PrintActivities:
     @activity.defn(name="print_slice_start")
     async def slice_start(self, input: SliceStartInput) -> SliceStarted:
         try:
-            async with client_for(self._settings()) as client:
+            async with client_for(await self._settings()) as client:
                 started = await start_slice(
                     client,
                     library_file_id=input.library_file_id,
@@ -534,7 +535,7 @@ class PrintActivities:
         cannot reach is retried here, reading the same job; a job that is lost, or still
         unreachable once these retries are spent, the workflow slices again (#2081)."""
         try:
-            async with client_for(self._settings()) as client:
+            async with client_for(await self._settings()) as client:
                 return await heartbeating(wait_slice(client, job_id))
         except SliceLostError as error:
             raise raised_as(error, SLICE_LOST) from None
@@ -556,7 +557,7 @@ class PrintActivities:
         maziggy/bambuddy@943f3587), or 404 where the caller may not read it; the read
         back, not that text, is what decides."""
         try:
-            async with client_for(self._settings()) as client:
+            async with client_for(await self._settings()) as client:
                 try:
                     return await queue_plate(
                         client,
@@ -623,7 +624,7 @@ class PrintActivities:
                     return
                 file_hash = (await self.d.library.library_file(sliced_id)).file_hash
             else:
-                async with client_for(self._settings()) as client:
+                async with client_for(await self._settings()) as client:
                     file_hash = (await client.library_file(sliced_id)).file_hash
         except Exception:
             # Whatever went wrong, the plate is on Bambuddy's queue: its record stands.
@@ -662,7 +663,7 @@ class PrintActivities:
         but the settings read is best effort: remembering is bounded by
         ``REMEMBER_BUDGET`` and its failure logged (review #1061 1a), and Bambuddy's
         settings removed meanwhile only leave out the queue link."""
-        settings = self._settings()
+        settings = await self._settings()
         planned = input.planned
         spec = input.input.source
         if planned.project_id is not None:

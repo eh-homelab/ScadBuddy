@@ -40,7 +40,9 @@ test.describe('real backend', () => {
 
     await page.goto('/')
     await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible()
-    await page.getByRole('link', { name: /Name Keychain/ }).click()
+    // #5654: open the keychain by its URL. The Models page's first 24 follow file mtimes,
+    // which the image build copies from the checkout, so the keychain can fall off it.
+    await page.goto('/m/builtin:name-keychain')
 
     // The first render happens without being asked, and it is a real OpenSCAD run.
     const bbox = page.getByTestId('bbox-readout')
@@ -80,8 +82,7 @@ test.describe('real backend', () => {
   test('lists a render in Activity as the user\'s and reaches Succeeded', async ({ page }) => {
     test.setTimeout(180_000)
 
-    await page.goto('/')
-    await page.getByRole('link', { name: /Name Keychain/ }).click()
+    await page.goto('/m/builtin:name-keychain') // #5654: not the Models page's first 24
     await expect(page.getByTestId('bbox-readout')).toContainText('mm', { timeout: 120_000 })
 
     await page.getByRole('link', { name: 'Activity' }).click()

@@ -2964,6 +2964,8 @@ class Catalogue:
         outputs are gone -- so a removed model leaves nothing behind in memory."""
         if self.outputs is not None:
             self.outputs.forget_plate_cover(slug)
+            # Their rows in the cross-model list go with them (#4777).
+            self.outputs.forget_indexed(slug)
 
     def sync_builtins(self, bundled: Path) -> str | None:
         """Mirror the image's bundled models into ``_builtin/`` as one commit.

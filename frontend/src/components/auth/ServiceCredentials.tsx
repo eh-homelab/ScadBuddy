@@ -1,19 +1,27 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
-import type { ServiceCaller, ServiceCredentialView } from '../../api/types'
+import type { LegacyCaller, ServiceCaller, ServiceCredentialView } from '../../api/types'
 import { Button } from '@/components/ui/button'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 
 // #4975 phase 4 — Settings → System → Service credentials (spec 2026-11-01 §7.2): the bearer
-// credentials the API issues the agent and the print and projects workers, rotated on their
-// own. Never a secret: created, expires, last used, with revoke and "Rotate now".
+// credentials the API issues each service. Never a secret: created, expires, last used, with
+// revoke. The agent and the print worker read a sealed one, rotated on its own and by
+// "Rotate now"; the projects and render workers and the storefront get none of those
+// (#5298, #5282): they exchange a proof for each, listed here to be revoked.
 
-const CALLERS: { caller: ServiceCaller; label: string }[] = [
-  { caller: 'agent', label: 'Agent' },
-  { caller: 'print', label: 'Print worker' },
-  { caller: 'projects', label: 'Projects worker' },
+type Section =
+  | { caller: LegacyCaller; label: string; sealed: true }
+  | { caller: Exclude<ServiceCaller, LegacyCaller>; label: string; sealed: false }
+
+const CALLERS: Section[] = [
+  { caller: 'agent', label: 'Agent', sealed: true },
+  { caller: 'print', label: 'Print worker', sealed: true },
+  { caller: 'projects', label: 'Projects worker', sealed: false },
+  { caller: 'render', label: 'Render worker', sealed: false },
+  { caller: 'storefront', label: 'Storefront', sealed: false },
 ]
 
 const day = (iso: string) => new Date(iso).toLocaleDateString()
@@ -48,24 +56,29 @@ export function ServiceCredentials() {
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
-        Issued and rotated by ScadBuddy: each lasts 30 days and the next is issued a week before, so a rotation
-        never cuts a service off. Revoking the last live one issues a replacement at once.
+        Issued and rotated by ScadBuddy. The agent's and the print worker's each last 30 days and the next is issued a
+        week before, so a rotation never cuts a service off; revoking the last live one issues a replacement at once.
+        The other services exchange a proof for each credential, which lasts 15 minutes; a revoked one is replaced at
+        the service's next exchange.
       </p>
-      {CALLERS.map(({ caller, label }) => {
+      {CALLERS.map((section) => {
+        const { caller, label } = section
         const own = shown.filter((row) => row.caller === caller)
         return (
           <section key={caller} aria-label={label} className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm">{label}</h4>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={busy !== null}
-                onClick={() => void run(`rotate-${caller}`, () => api.rotateServiceCredential(caller))}
-                {...USER_ONLY}
-              >
-                Rotate now
-              </Button>
+              {section.sealed && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => void run(`rotate-${caller}`, () => api.rotateServiceCredential(section.caller))}
+                  {...USER_ONLY}
+                >
+                  Rotate now
+                </Button>
+              )}
             </div>
             <ul className="divide-y rounded-md border" aria-label={`${label} credentials`}>
               {own.length === 0 && <li className="px-3 py-2 text-sm text-muted-foreground">None issued.</li>}

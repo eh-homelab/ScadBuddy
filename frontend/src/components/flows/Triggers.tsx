@@ -2,7 +2,7 @@ import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { FlowGrantSpec, FlowTrigger, FlowTriggerCreate, FlowTriggerFire } from '../../api/types'
+import type { FlowGrantSpec, FlowTrigger, FlowTriggerCreate, FlowTriggerFire, Order, OrderItem } from '../../api/types'
 
 import { inputFields, type InputField } from '../../lib/flowInputs'
 import { timeAgo } from '../../lib/format'
@@ -40,20 +40,54 @@ function every(seconds: number): string {
   return `every ${seconds} seconds`
 }
 
-type EventKind = NonNullable<FlowTriggerCreate['event']>['kind']
+type EventTiming = NonNullable<FlowTriggerCreate['event']>
+type EventKind = EventTiming['kind']
 
 const EVENT_TEXT: Record<string, string> = {
   'render.finished': 'When a render finishes',
   'model.changed': 'When a model changes',
   'print.finished': 'When a print finishes',
   'print.failed': 'When a print fails',
+  'order.changed': "When an order's status changes",
+  'order_item.changed': "When a line item's status changes",
+}
+
+/** The statuses an order event's `match` may list (#4252, orders spec §7.1). */
+const ORDER_STATUSES = [
+  'draft',
+  'quoted',
+  'accepted',
+  'in_production',
+  'ready',
+  'shipped',
+  'closed',
+  'cancelled',
+] as const satisfies readonly Order['status'][]
+const ITEM_STATUSES = [
+  'draft',
+  'quoted',
+  'approved',
+  'queued',
+  'printing',
+  'printed',
+  'fulfilled',
+  'failed',
+  'cancelled',
+] as const satisfies readonly OrderItem['status'][]
+const isOrderEvent = (kind: string) => kind === 'order.changed' || kind === 'order_item.changed'
+const statusText = (status: string) => status.replace('_', ' ')
+
+function subjectText(subject: EventTiming['subject']): string {
+  if (!subject?.id) return ''
+  return subject.kind === 'template' ? ` (${subject.id})` : ` (${subject.kind.replace('_', ' ')} ${subject.id})`
 }
 
 /** A trigger's timing, as one phrase. */
 function triggerText(trigger: Pick<FlowTrigger, 'kind' | 'schedule' | 'event'>): string {
   if (trigger.kind === 'event' && trigger.event) {
-    const slug = trigger.event.slug ? ` (${trigger.event.slug})` : ''
-    return `${EVENT_TEXT[trigger.event.kind] ?? trigger.event.kind}${slug}`
+    const statuses = trigger.event.match?.status
+    const match = statuses?.length ? `: ${statuses.map(statusText).join(', ')}` : ''
+    return `${EVENT_TEXT[trigger.event.kind] ?? trigger.event.kind}${subjectText(trigger.event.subject)}${match}`
   }
   const schedule = trigger.schedule
   if (!schedule) return 'Schedule'
@@ -363,9 +397,37 @@ function NewTrigger({
   const [zone, setZone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
   const [event, setEvent] = useState('render.finished')
   const [slug, setSlug] = useState('')
+  const [subjectKind, setSubjectKind] = useState<'order' | 'order_item'>('order')
+  const [statuses, setStatuses] = useState<string[]>([])
   const [skip, setSkip] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+
+  function eventTiming(): EventTiming {
+    const subjectId = slug.trim()
+    const kindOf = !isOrderEvent(event) ? 'template' : event === 'order.changed' ? 'order' : subjectKind
+    return {
+      kind: event as EventKind,
+      ...(subjectId ? { subject: { kind: kindOf, id: subjectId } } : {}),
+      ...(statuses.length ? { match: { status: statuses } } : {}),
+    }
+  }
+
+  // What the typed subject names: a model, an order or a line item.
+  const subjectOf = (ev: string, by: 'order' | 'order_item') =>
+    !isOrderEvent(ev) ? 'model' : ev === 'order.changed' || by === 'order' ? 'order' : 'order_item'
+
+  function chooseEvent(next: string) {
+    // A subject typed for one kind of thing (a model, an order, an item) is not another's.
+    if (subjectOf(next, subjectKind) !== subjectOf(event, subjectKind)) setSlug('')
+    setEvent(next)
+    setStatuses([])
+  }
+
+  function chooseSubjectKind(next: 'order' | 'order_item') {
+    if (subjectOf(event, next) !== subjectOf(event, subjectKind)) setSlug('')
+    setSubjectKind(next)
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -384,7 +446,7 @@ function NewTrigger({
                 ? { interval_s: Math.round(Number(minutes) * 60), ...timing }
                 : { cron: [cron.trim()], ...timing },
           }
-        : { event: { kind: event as EventKind, ...(slug.trim() ? { slug: slug.trim() } : {}) } }),
+        : { event: eventTiming() }),
     }
     setBusy(true)
     setError(undefined)
@@ -464,7 +526,7 @@ function NewTrigger({
             <>
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor={id('event-kind')}>Event</Label>
-                <Select value={event} onValueChange={setEvent}>
+                <Select value={event} onValueChange={chooseEvent}>
                   <SelectTrigger id={id('event-kind')} className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -473,13 +535,54 @@ function NewTrigger({
                     <SelectItem value="model.changed">A model changes</SelectItem>
                     <SelectItem value="print.finished">A print finishes</SelectItem>
                     <SelectItem value="print.failed">A print fails</SelectItem>
+                    <SelectItem value="order.changed">An order's status changes</SelectItem>
+                    <SelectItem value="order_item.changed">A line item's status changes</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
+              {event === 'order_item.changed' && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor={id('subject-kind')}>Narrow by</Label>
+                  <Select value={subjectKind} onValueChange={(next) => chooseSubjectKind(next as 'order' | 'order_item')}>
+                    <SelectTrigger id={id('subject-kind')} className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="order">Its order</SelectItem>
+                      <SelectItem value="order_item">The item itself</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor={id('slug')}>Only for model (optional)</Label>
+                <Label htmlFor={id('slug')}>
+                  {!isOrderEvent(event)
+                    ? 'Only for model (optional)'
+                    : event === 'order.changed' || subjectKind === 'order'
+                      ? 'Only for order id (optional)'
+                      : 'Only for item id (optional)'}
+                </Label>
                 <Input id={id('slug')} value={slug} onChange={(e) => setSlug(e.target.value)} />
               </div>
+              {isOrderEvent(event) && (
+                <fieldset className="flex flex-col gap-1.5">
+                  <legend className="mb-1.5 text-[13px] font-medium">Only when the status becomes (optional)</legend>
+                  <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {(event === 'order.changed' ? ORDER_STATUSES : ITEM_STATUSES).map((status) => (
+                      <div key={status} className="flex items-center gap-2">
+                        <Checkbox
+                          id={id(`status-${status}`)}
+                          checked={statuses.includes(status)}
+                          onCheckedChange={(next) =>
+                            setStatuses((now) => (next === true ? [...now, status] : now.filter((s) => s !== status)))
+                          }
+                        />
+                        <Label htmlFor={id(`status-${status}`)}>{statusText(status)}</Label>
+                      </div>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
             </>
           )}
           <div className="flex items-center gap-2">

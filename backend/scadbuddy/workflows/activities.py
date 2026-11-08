@@ -85,7 +85,6 @@ from scadbuddy.workflows.models import (
 
 if TYPE_CHECKING:
     from scadbuddy.crud.render import RemoteGeometryIndex, RemoteJobProjection
-    from scadbuddy.store.index import Pool
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +113,6 @@ class WorkerDeps:
     #: Where a piece's geometry is found for a later piece in other colours; None turns
     #: that reuse off.
     geometry: GeometryIndex | RemoteGeometryIndex | None = None
-    #: The render worker's own SQL pool (its stores still on SQL), closed when it
-    #: stops; None on the API's in-process worker, whose pool is the API's.
-    pool: Pool | None = None
     #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
     revision: str = ""
     openscad_version: str = ""

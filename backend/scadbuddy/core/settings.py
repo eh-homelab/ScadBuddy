@@ -686,8 +686,8 @@ class Settings(BaseSettings):
 
 
 class NoDatabaseSettings(Settings):
-    """The settings of a worker that holds no SQL (#5298): the projects worker. It
-    starts with ``SCADBUDDY_DATABASE_URL`` unset, and ignores it when set."""
+    """The settings of a worker that holds no SQL (#5298): the projects and render
+    workers. It starts with ``SCADBUDDY_DATABASE_URL`` unset, and ignores it when set."""
 
     @field_validator("database_url")
     @classmethod

@@ -21,6 +21,9 @@ async def test_a_script_reads_its_event_by_kind() -> None:
         "    return t['slug'] + '@' + t['commit']",
         "if t['kind'] == 'render.finished':",
         "    return t['slug'] + ':' + t['job_id']",
+        # The order kinds (#4252) are told apart too: what is left is a print's.
+        "if t['kind'] == 'order.changed' or t['kind'] == 'order_item.changed':",
+        "    return t['order_id']",
         "printer = t['printer'] or 'no printer'",
         "if t['kind'] == 'print.failed':",
         "    return 'failed ' + t['run_id'] + ' ' + t['output_id'] + ' ' + printer",
@@ -50,3 +53,32 @@ async def test_the_type_check_catches_misuse_of_the_event(lines: list[str]) -> N
 def test_the_editor_offers_trigger() -> None:
     names = [f.name for f in host_interface({}).functions]
     assert "trigger" in names
+
+
+async def test_a_script_reads_an_order_event_by_kind() -> None:
+    """#4252: the two order kinds, told apart by `kind` like the rest."""
+    script = _script(
+        "t = await trigger()",
+        "if t is None:",
+        "    return None",
+        "if t['kind'] == 'order.changed':",
+        "    return t['order_id'] + ' ' + t['status'] + ' ' + t['customer_id']",
+        "if t['kind'] == 'order_item.changed':",
+        "    return [t['order_id'], t['item_id'], t['status'], t['attempt']]",
+        "return t['slug']",
+    )
+    assert await check_script(script) == []
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # An order's event names no item.
+        ["if t is not None and t['kind'] == 'order.changed':", "    return t['item_id']"],
+        # An item's event names no customer.
+        ["if t is not None and t['kind'] == 'order_item.changed':", "    return t['customer_id']"],
+    ],
+)
+async def test_the_type_check_catches_misuse_of_an_order_event(lines: list[str]) -> None:
+    problems = await check_script(_script("t = await trigger()", *lines))
+    assert problems, lines

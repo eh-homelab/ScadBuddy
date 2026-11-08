@@ -1,11 +1,11 @@
-"""The render worker's own Postgres role (#601, spec 2026-09-27 §9): render workers do
-not hold the API's settings store.
+"""The render worker's own Postgres role (#601, spec 2026-09-27 §9), and the grants every
+caller's role gets through `grant_role` (`auth/caller_grants.py`).
 
-`python -m scadbuddy.worker` (the default `render` queue) connects as whatever
-``SCADBUDDY_DATABASE_URL`` names. Given a role of its own, that role holds exactly
-`RENDER_GRANTS`, which the API grants it at every start (`grant_render_role`), once the
-role exists: the deployment creates the role and its password, the app owns the list.
-The worker never migrates; it waits until the API has (`wait_until_ready`).
+`python -m scadbuddy.worker` (the default `render` queue) holds no database (#5298): it
+reads and writes through the API's CRUD routes, and opens no connection. The role
+``scadbuddy_render`` stays until #5298 Task 22 revokes and drops it; until then the API
+grants it `RENDER_GRANTS` (nothing now) at every start (`grant_render_role`), once the
+role exists, and keeps `RENDER_ROWS` on what it was granted before.
 """
 
 from __future__ import annotations
@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 #: The role the API grants `RENDER_GRANTS` to, when it exists.
 RENDER_ROLE = "scadbuddy_render"
 
-#: Every relation the render worker touches, and what it does there. A change to what
-#: the worker reads or writes changes this list in the same PR;
-#: `tests/test_render_worker_role.py` renders as a role holding exactly this.
+#: Every relation the render worker touches, and what it does there: none, since it holds
+#: no database (#5298 Task 20, `tests/test_render_worker_nodb.py`). A role granted any of
+#: the relations below before keeps them until #5298 Task 22 revokes them; the API never
+#: revokes at start.
 RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # No `render_jobs`, `events` or `activity`: the job's row, its job.* events and its
     # activity row go through the API's CRUD routes (#5298, `crud/render.py`
@@ -45,8 +46,8 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # them until #5298 Task 22 revokes them.
     # No `render_settings`: the store settings come from the API's CRUD route (#5298,
     # `crud/render.py`). A role granted it before keeps it until the role is revoked.
-    # Whether the API has migrated to this build's schema (`wait_until_ready`).
-    "scadbuddy_migrations": ("SELECT",),
+    # No `scadbuddy_migrations`: the worker no longer waits for the API's migrations; it
+    # waits for the API to serve its CRUD areas (`crud/client.py` `wait_for_areas`).
 }
 
 #: Tables the role may reach only some rows of, and which: a restrictive row policy
@@ -121,7 +122,7 @@ def grant_role(
 def owns_schema(conn: Connection[Any]) -> bool:
     """Whether this connection's role may migrate: the ledger is missing (a new schema,
     which whoever connects first creates) or its owner is a role this one belongs to.
-    A role of the deployment's own making (`scadbuddy_print`, `scadbuddy_projects`) is
+    A role of the deployment's own making (`scadbuddy_print`, `scadbuddy_render`) is
     neither, and waits for the API instead."""
     cur = conn.cursor(row_factory=tuple_row)
     schema = cur.execute("SELECT current_schema()").fetchone()
@@ -139,7 +140,7 @@ def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> No
     """Hold ``role`` to ``rows`` of ``table``. Enabling row security takes effect because
     the API's role owns the table (it migrates) and so bypasses it; `everyone`, the
     permissive policy, keeps every other non-owner role (a separately credentialed print
-    or projects worker) unrestricted, since with row security on and no policy a role
+    worker) unrestricted, since with row security on and no policy a role
     sees no row. The role's policy is named by its predicate, so a changed predicate
     replaces the old one rather than leaving it in force (and so does af75581's
     unsuffixed ``only_<role>``)."""
@@ -179,8 +180,8 @@ def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> No
 
 
 def grant_at_start(pool: ConnectionPool[Any]) -> None:
-    """The API's start, after its migrations: `grant_render_role`. A failure is logged,
-    never fatal to the API; a worker on that role then waits for a start that grants."""
+    """The API's start, after its migrations: `grant_render_role`, which grants the unused
+    role nothing new until #5298 Task 22. A failure is logged, never fatal to the API."""
     try:
         with pool.connection() as conn:
             granted = grant_render_role(conn)
@@ -222,11 +223,8 @@ def pending_migrations(
     return sorted(m.id for m in migrations if m.id not in done)
 
 
-def missing_privileges(
-    conn: Connection[Any], grants: Mapping[str, tuple[str, ...]] = RENDER_GRANTS
-) -> list[str]:
-    """The ``grants`` (`RENDER_GRANTS`) this connection's role lacks, as
-    ``table: PRIVILEGE``."""
+def missing_privileges(conn: Connection[Any], grants: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """The ``grants`` this connection's role lacks, as ``table: PRIVILEGE``."""
     cur = conn.cursor(row_factory=tuple_row)
     missing: list[str] = []
     for table, privileges in grants.items():
@@ -250,11 +248,11 @@ def wait_until_ready(
     *,
     stopping: Callable[[], bool] = lambda: False,
     poll: float = READY_POLL,
-    grants: Mapping[str, tuple[str, ...]] = RENDER_GRANTS,
-    role: str = RENDER_ROLE,
+    grants: Mapping[str, tuple[str, ...]],
+    role: str,
 ) -> None:
-    """Return once the API has applied every migration this build has and this role
-    holds `RENDER_GRANTS`; until then log what is missing and look again every
+    """Return once the API has applied every migration this build has and ``role``
+    holds ``grants`` (`auth/caller_grants.py`); until then log what is missing and look again every
     ``poll`` seconds. A worker never migrates: in a rollout it may start before the
     API, and its role may not create anything. ``stopping`` ends the wait with
     `WorkerStoppedError`. A ledger the role may not read yet (migrated, not yet

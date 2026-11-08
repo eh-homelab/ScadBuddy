@@ -19,7 +19,7 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import SESSION_COOKIE
 from scadbuddy.auth.models import principal_for
-from scadbuddy.auth.service_credentials import TokenReader
+from scadbuddy.auth.service_credentials import LEGACY_CALLERS, ServiceCredentialStore, TokenReader
 from scadbuddy.core.settings import Settings
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
@@ -68,8 +68,13 @@ def _sign_in(client: TestClient, app: FastAPI, subject: str = "alice") -> str:
 
 
 def _bearer(app: FastAPI, settings: Settings, caller: Any) -> dict[str, str]:
-    kek = getattr(app.state, STATE_ATTR).settings_store.kek
-    token = TokenReader(caller, settings.database_url, kek).token()
+    store = getattr(app.state, STATE_ATTR).settings_store
+    if caller in LEGACY_CALLERS:
+        token = TokenReader(caller, settings.database_url, store.kek).token()
+    else:
+        # No sealed credential (#5298): the caller exchanges its proof, as in prod.
+        issued = ServiceCredentialStore(store.pool).issue(caller, "bootstrap", rate_limited=False)
+        token = issued.token
     assert token is not None
     return {"Authorization": f"Bearer {token}"}
 

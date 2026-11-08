@@ -67,6 +67,7 @@ from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
+from scadbuddy.auth.revoke import revoke_retired
 from scadbuddy.auth.service_credentials import grant_caller_views
 from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
@@ -136,6 +137,7 @@ from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activit
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import spool_activities
 from scadbuddy.spools.component import SPOOLS
+from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -1090,8 +1092,19 @@ async def _maintain_models_git_logged(state: AppState) -> None:
 def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
-    none can be sealed, so none are issued."""
+    none can be sealed, so none are issued. First, a sealed credential of a caller that
+    reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
+    try:
+        retired = auth.credentials.revoke_retired_legacy()
+    except Exception:
+        # Never in the way of the rotation: the next start or sweep tries again.
+        logger.warning("could not revoke the retired callers' sealed credentials", exc_info=True)
+    else:
+        if retired:
+            logger.info(
+                "revoked the retired callers' sealed credentials", extra={"credentials": retired}
+            )
     kek = auth.kek
     if kek is None:
         return
@@ -1102,16 +1115,25 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
-    """At start, after the migrations: each caller's role its own view, and the
-    credentials due. A failure is logged, never fatal, as `grant_at_start`."""
+    """At start, after the migrations: each caller's role its own view, a retired
+    caller's role nothing (#5298 Task 11), and the credentials due. A failure is logged,
+    never fatal, as `grant_at_start`."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
             tables = grant_callers(conn)
+            revoked: list[str] = []
+            try:
+                revoked = revoke_retired(conn)
+            except Exception:
+                # A revoke that fails must not cost the start its credentials' rotation.
+                logger.exception("could not revoke the retired callers' roles")
         if granted:
             logger.info("granted the callers' credential views", extra={"roles": granted})
         if tables:
             logger.info("granted the callers' tables", extra={"roles": tables})
+        if revoked:
+            logger.info("revoked the retired callers' roles", extra={"roles": revoked})
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")
@@ -1427,6 +1449,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         rack=state.components.get(RACK_USAGE),
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
+        native_spools=NativeSpoolStore(state.settings_store.pool),
     )
     activities = [
         *PrintActivities(deps).all(),
@@ -1771,8 +1794,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
-    # The render worker's own role, if the deployment made one, gets what this
-    # build's worker touches (#601); the worker waits for it.
+    # The render worker's old role, if the deployment made one, gets `RENDER_GRANTS`
+    # (#601), now empty: the worker holds no database (#5298), and the role keeps what
+    # it was granted before until #5298 Task 22 revokes it.
     await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)

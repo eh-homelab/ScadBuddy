@@ -118,6 +118,11 @@ class OutputIndex:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM output_index WHERE output_id = ANY(%s)", (list(output_ids),))
 
+    def forget_slug(self, slug: str) -> None:
+        """Drop every row of ``slug``'s outputs: its outputs' directory is gone."""
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM output_index WHERE slug = %s", (slug,))
+
     def _filters(self, query: OutputQuery) -> tuple[str, list[Any]]:
         where: list[str] = []
         args: list[Any] = []
