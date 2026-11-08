@@ -15,6 +15,15 @@ import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalText } from './refusal'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from './itemLink'
 import { addItem, afterAcceptanceWarning, isCart, type AddMode } from './afterAcceptance'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import type { SliceQuoteRun, SliceQuoteRuns } from './useSliceQuotes'
 import { elapsed, useNow } from './useNow'
 import { When } from './When'
@@ -315,6 +324,8 @@ function ItemMenu({
   busy: boolean
 }) {
   const [confirming, setConfirming] = useState(false)
+  // Delete and Cancel ask first: in the menu they sit one slip from Open details.
+  const [removing, setRemoving] = useState<'delete' | 'cancel' | null>(null)
   function run(action: ItemAction) {
     const section = SECTIONS[action.key]
     if (section) return onSection(section)
@@ -322,8 +333,10 @@ function ItemMenu({
     // The menu closes first: a dialog opened in the same tick would be closed with it.
     if (action.key === 'unfulfil') return setTimeout(() => setConfirming(true), 0)
     if (action.key === 'reopen') return onAct(() => api.reopenOrderItem(orderId, item.id))
-    if (action.key === 'delete') return onAct(() => api.deleteOrderItem(orderId, item.id))
-    if (action.key === 'cancel') return onAct(() => api.cancelOrderItem(orderId, item.id))
+    if (action.key === 'delete' || action.key === 'cancel') {
+      const key = action.key
+      return setTimeout(() => setRemoving(key), 0)
+    }
   }
   const off = actions.some((action) => action.key === 'unfulfil' && action.blocked === UNFULFIL_OFF_TEXT)
   return (
@@ -355,6 +368,32 @@ function ItemMenu({
         </DropdownMenuContent>
       </DropdownMenu>
       <UnfulfilDialog orderId={orderId} item={item} open={confirming} onOpenChange={setConfirming} onChanged={onChanged} />
+      <AlertDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`${removing === 'delete' ? 'Delete' : 'Cancel'} ${item.title}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {removing === 'delete'
+                ? 'The draft item and its quotes are deleted.'
+                : 'The item stays on the order, in no sum, and can be reopened.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={busy}
+              onClick={() => {
+                const what = removing
+                setRemoving(null)
+                onAct(() => (what === 'delete' ? api.deleteOrderItem(orderId, item.id) : api.cancelOrderItem(orderId, item.id)))
+              }}
+            >
+              {removing === 'delete' ? 'Delete item' : 'Cancel item'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

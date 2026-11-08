@@ -564,14 +564,14 @@ function ItemDrawer({
   const [notes, setNotes] = useState(item.notes)
   const [typedPrice, setTypedPrice] = useState(unitText)
   const [printing, setPrinting] = useState(item.requires_printing)
-  // Scrolled to once, when its wrapper attaches: the drawer's content mounts in a portal, after
-  // this component's own effects run.
-  const scrolledTo = useRef(false)
-  const sectionRef = (name: ItemSection) => (element: HTMLDivElement | null) => {
-    if (!element || name !== section || scrolledTo.current) return
-    scrolledTo.current = true
-    element.scrollIntoView?.({ block: 'start' })
-  }
+  // The chosen section's wrapper, set when it attaches (the drawer's content mounts in a portal,
+  // after this component's own effects run), and scrolled to; another section's attaches in its
+  // place, so a second ⋯ section for this item scrolls again.
+  const [target, setTarget] = useState<HTMLDivElement | null>(null)
+  const sectionRef = (name: ItemSection) => (name === section ? setTarget : undefined)
+  useEffect(() => {
+    target?.scrollIntoView?.({ block: 'start' })
+  }, [target])
   useEffect(() => {
     setQuantity(String(item.quantity))
     setTitle(item.title)

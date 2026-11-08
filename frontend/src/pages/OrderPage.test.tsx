@@ -151,7 +151,7 @@ describe('OrderPage (#4249)', () => {
     expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
   })
 
-  it('points an empty accepted order at Add item and the custom item row (#5349, #5541)', async () => {
+  it('points an empty accepted order at Add product and the custom item row (#5349, #5541)', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     const row = state.orders.find((o) => o.id === order.id)
     if (row) row.status = 'accepted'
@@ -164,7 +164,7 @@ describe('OrderPage (#4249)', () => {
     expect(screen.getByTestId('custom-item-row')).toBeInTheDocument()
   })
 
-  it('points an empty table at Add item only where there is one', async () => {
+  it('points an empty table at Add product only where there is one', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     await api.cancelOrder(order.id)
     render(order.id)
@@ -173,7 +173,7 @@ describe('OrderPage (#4249)', () => {
     expect(screen.queryByText(/Add one with Add product above/)).not.toBeInTheDocument()
   })
 
-  it('offers Add item on an accepted order, which asks first and quotes the new item (#5349)', async () => {
+  it('offers Add product on an accepted order, which asks first and quotes the new item (#5349)', async () => {
     const after = vi.spyOn(api, 'addOrderItemAfterAcceptance')
     const { user } = render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
@@ -215,7 +215,7 @@ describe('OrderPage (#4249)', () => {
     expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
   })
 
-  it('offers no Add item on an accepted order on hold', async () => {
+  it('offers no Add product on an accepted order on hold', async () => {
     await api.holdOrder(ORDER_ACCEPTED)
     render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })

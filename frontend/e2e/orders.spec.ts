@@ -178,7 +178,7 @@ test.describe('orders', () => {
     await expect(dialog.getByTestId('order-estimate')).toContainText(/An estimate: about [\d.]+ g/)
   })
 
-  // #4251 — "Add item" on the order page: an output of a template, then a template's
+  // #4251 — "Add product" on the order page (its dialog is "Add item"): an output of a template, then a template's
   // current version with its defaults, without leaving the order.
   test('adds items from the order page', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })

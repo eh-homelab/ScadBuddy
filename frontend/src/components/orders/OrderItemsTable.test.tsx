@@ -439,6 +439,17 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     expect(screen.getByRole('textbox', { name: 'Custom item title' })).toHaveFocus()
   })
 
+  it("shows a row's loss badge from the money view, and pads the custom item row to match", async () => {
+    const real = await api.orderCosts(ORDER_DRAFT)
+    const base = real.items[0] ?? { item_id: ITEM_DRAFT }
+    vi.spyOn(api, 'orderCosts').mockResolvedValue({ ...real, items: [{ ...base, item_id: ITEM_DRAFT, margin_state: 'loss' }] } as typeof real)
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getByText('Loss')).toBeInTheDocument())
+    const body = within(row(ITEM_DRAFT)).getAllByRole('cell').length
+    expect(within(screen.getByTestId('custom-item-row')).getAllByRole('cell')).toHaveLength(body)
+  })
+
   it('names where each item came from', async () => {
     const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 1, title: 'Drawer label' })
     render(ORDER_DRAFT)
@@ -487,6 +498,22 @@ describe('OrderItemsTable · the items card (#4955)', () => {
       expect(scrolled.filter((id) => id.startsWith('item-section-'))).toEqual([])
     })
 
+    it('scrolls again to a second section of the item already open', async () => {
+      state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+      const { user } = render(ORDER_ACCEPTED)
+      await screen.findByRole('heading', { name: 'ORD-2026-2' })
+      await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+      await user.click(await screen.findByRole('menuitem', { name: /^Print/ }))
+      await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await waitFor(() => expect(scrolled).toContain('item-section-print'))
+      scrolled.length = 0
+      // Beside the assistant the drawer is not modal (#798): the row's menu stays reachable.
+      const trigger = within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions', hidden: true })
+      fireEvent.keyDown(trigger, { key: 'Enter' })
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Fulfil…', hidden: true }))
+      await waitFor(() => expect(scrolled).toContain('item-section-fulfil'))
+    })
+
     it('does not carry the section to the next item opened from its title', async () => {
       const other = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
       const { user } = render(ORDER_DRAFT)
@@ -520,6 +547,7 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).getByRole('button', { name: 'Delete item' }))
     const card = screen.getByRole('region', { name: 'Items' })
     await waitFor(() => expect(within(card).getByRole('button', { name: 'Add product' })).toBeDisabled())
     expect(within(card).getByRole('button', { name: 'Add custom item' })).toBeDisabled()
@@ -530,12 +558,29 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     await waitFor(() => expect(within(card).getByRole('button', { name: 'Add product' })).toBeEnabled())
   })
 
-  it('deletes a draft item from its menu', async () => {
+  it('deletes a draft item from its menu after a confirm, and keeps it on Keep', async () => {
+    const deleted = vi.spyOn(api, 'deleteOrderItem')
     const { user } = render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).getByRole('button', { name: 'Keep' }))
+    expect(deleted).not.toHaveBeenCalled()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).getByRole('button', { name: 'Delete item' }))
     await waitFor(() => expect(screen.queryByTestId(`order-item-${ITEM_DRAFT}`)).not.toBeInTheDocument())
+  })
+
+  it('cancels a quoted item from its menu after a confirm', async () => {
+    const cancelled = vi.spyOn(api, 'cancelOrderItem')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Cancel item' }))
+    const confirm = await screen.findByRole('alertdialog', { name: /^Cancel .*\?$/ })
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel item' }))
+    await waitFor(() => expect(cancelled).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED))
   })
 })
 
