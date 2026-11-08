@@ -188,7 +188,7 @@ test.describe('orders', () => {
     const rows = page.getByRole('table', { name: 'Line items' }).getByRole('row')
     await expect(rows).toHaveCount(3)
 
-    await page.getByRole('button', { name: 'Add item' }).click()
+    await page.getByRole('button', { name: 'Add product' }).click()
     let dialog = page.getByRole('dialog', { name: 'Add item' })
     await dialog.getByLabel('Template').fill('keychain')
     await dialog.getByRole('button', { name: /Name Keychain/ }).click()
@@ -199,7 +199,7 @@ test.describe('orders', () => {
     await expect(dialog).toBeHidden()
     await expect(rows).toHaveCount(4)
 
-    await page.getByRole('button', { name: 'Add item' }).click()
+    await page.getByRole('button', { name: 'Add product' }).click()
     dialog = page.getByRole('dialog', { name: 'Add item' })
     await dialog.getByLabel('Template').fill('maze')
     await dialog.getByRole('button', { name: /Ball Maze/ }).click()
@@ -216,7 +216,7 @@ test.describe('orders', () => {
     await page.goto('/orders')
     await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'ORD-2026-3', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Add item' }).click()
+    await page.getByRole('button', { name: 'Add product' }).click()
     const add = page.getByRole('dialog', { name: 'Add item' })
     await add.getByRole('button', { name: 'Design request' }).click()
     await add.getByLabel('Title').fill('A dragon')

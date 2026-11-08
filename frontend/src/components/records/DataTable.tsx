@@ -41,16 +41,26 @@ export interface DataTableProps<Row> {
   footer?: ReactNode
   /** Classes on a row, such as a tint for its state (#5327). */
   rowClassName?: (row: Row) => string
+  /** #4955 — a heading and its actions above the table, inside the card: the card is then a
+   * region named by `heading`, shown with its empty text even when there are no rows. */
+  heading?: string
+  toolbar?: ReactNode
 }
 
-export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer, rowClassName }: DataTableProps<Row>) {
-  if (rows.length === 0 && empty !== undefined && !footer) {
+export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer, rowClassName, heading, toolbar }: DataTableProps<Row>) {
+  if (rows.length === 0 && empty !== undefined && !footer && heading === undefined) {
     return (
       <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">{empty}</p>
     )
   }
   return (
-    <Card className="gap-0 py-0">
+    <Card className="gap-0 py-0" {...(heading !== undefined ? { role: 'region', 'aria-label': heading } : {})}>
+      {heading !== undefined && (
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+          <h2 className="mr-auto text-sm font-medium">{heading}</h2>
+          {toolbar}
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-left text-[13px]" aria-label={label}>
           <thead className="bg-muted/50 text-xs text-muted-foreground">

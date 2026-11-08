@@ -418,6 +418,62 @@ describe('OrderItemsTable · row menu', () => {
   })
 })
 
+// #4955, spec 2026-11-07 §4.1 — one card: its header adds items, a row names its source, and
+// every row's ⋯ menu holds the actions allowed now.
+describe('OrderItemsTable · the items card (#4955)', () => {
+  beforeEach(() => resetMockState())
+
+  it('adds items from the card header', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const card = screen.getByRole('region', { name: 'Items' })
+    await user.click(within(card).getByRole('button', { name: 'Add product' }))
+    expect(await screen.findByRole('dialog', { name: 'Add item' })).toBeInTheDocument()
+  })
+
+  it('focuses the custom item row from the card header', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(screen.getByRole('region', { name: 'Items' })).getByRole('button', { name: 'Add custom item' }))
+    expect(screen.getByRole('textbox', { name: 'Custom item title' })).toHaveFocus()
+  })
+
+  it('names where each item came from', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 1, title: 'Drawer label' })
+    render(ORDER_DRAFT)
+    expect(await screen.findByTestId(`item-source-${added.id}`)).toHaveTextContent('file')
+    expect(screen.getByTestId(`item-source-${ITEM_DRAFT}`)).toHaveTextContent(/^(model|output)$/)
+  })
+
+  it("offers a draft item's actions, and opens the drawer at its quote", async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    const names = (await screen.findAllByRole('menuitem')).map((m) => m.textContent)
+    expect(names).toEqual(['Open details', 'Quote from a slice…', 'Delete item'])
+    await user.click(screen.getByRole('menuitem', { name: 'Quote from a slice…' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('item-section-quote')).toBeInTheDocument()
+  })
+
+  it("offers an accepted item's fulfil, refused with the reason on hold", async () => {
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+    expect(await screen.findByRole('menuitem', { name: 'Fulfil…' })).toHaveAttribute('data-disabled')
+    expect(screen.getAllByText('The order is on hold. Release it first.').length).toBeGreaterThan(0)
+  })
+
+  it('deletes a draft item from its menu', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await waitFor(() => expect(screen.queryByTestId(`order-item-${ITEM_DRAFT}`)).not.toBeInTheDocument())
+  })
+})
+
 // #5544 — a library file item names its file under its title, by its name when it was added.
 describe('OrderItemsTable · library file items', () => {
   beforeEach(() => resetMockState())

@@ -4,24 +4,12 @@ import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Revision
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
+import { offersPrint } from './itemActions'
 import { Button } from '@/components/ui/button'
 
 /** The order states past acceptance, in which an item is made (§3.5). */
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const ENDED = new Set(['closed', 'cancelled'])
-
-/** Whether the item can be printed now: a model or library file item of an accepted order
- * not on hold, `approved` (or `failed`, for a reprint), with the output (or the library
- * file) its quote was made from. */
-function offersPrint(order: Order, item: OrderItemDetail): boolean {
-  return (
-    orderItemSource(item) !== null &&
-    IN_PRODUCTION.has(order.status) &&
-    !order.on_hold &&
-    (item.status === 'approved' || item.status === 'failed') &&
-    item.quotes.some((quote) => quote.accepted)
-  )
-}
 
 /** Whether the newest revision can be test printed now: before the order is accepted
  * (#5280, spec §4.4), from the output its quote was made from. */
