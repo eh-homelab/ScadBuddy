@@ -27,7 +27,6 @@ from scadbuddy.payments.provider import (
     ProviderUnavailableError,
 )
 from scadbuddy.payments.registry import providers
-from scadbuddy.payments.stripe import STRIPE
 
 PAYLOADS = Path(__file__).parent / "paypal_payloads"
 SANDBOX = API["sandbox"]
@@ -110,8 +109,9 @@ async def parse(paypal: PayPalProvider, name: str) -> ProviderEvent:
 
 
 def test_the_registry_offers_paypal() -> None:
-    assert providers(fake=False) == {"stripe": STRIPE, "paypal": PAYPAL}
-    assert set(providers(fake=True)) == {"stripe", "paypal", "fake"}
+    assert providers(fake=False)["paypal"] is PAYPAL
+    assert set(providers(fake=False)) == {"stripe", "paypal", "square"}
+    assert set(providers(fake=True)) == {"stripe", "paypal", "square", "fake"}
 
 
 def test_paypal_asks_for_the_app_the_webhook_and_the_environment() -> None:
@@ -129,7 +129,10 @@ async def test_verify_reads_the_webhook_and_names_the_app_and_environment(
     hook = pp.get(f"/v1/notifications/webhooks/{WEBHOOK_ID}").respond(
         json=payload("api.webhook.json")
     )
-    assert await paypal.verify(CRED) == "PayPal app APP-80W284485P519543T (sandbox)"
+    verified = await paypal.verify(CRED)
+    assert verified.account_label == "PayPal app APP-80W284485P519543T (sandbox)"
+    # An app takes many currencies: no account currency to compare (#5666).
+    assert verified.currency is None
     token = pp["token"].calls.last.request
     basic = base64.b64encode(f"{CLIENT_ID}:{SECRET}".encode()).decode()
     assert token.headers["authorization"] == f"Basic {basic}"
@@ -144,7 +147,8 @@ async def test_live_uses_the_live_api(paypal: PayPalProvider) -> None:
         router.get(f"/v1/notifications/webhooks/{WEBHOOK_ID}").respond(
             json=payload("api.webhook.json")
         )
-        assert await paypal.verify(live) == "PayPal app APP-80W284485P519543T (live)"
+        verified = await paypal.verify(live)
+        assert verified.account_label == "PayPal app APP-80W284485P519543T (live)"
 
 
 @pytest.mark.parametrize(
@@ -207,7 +211,7 @@ async def test_every_event_or_the_older_denied_name_is_enough(
 ) -> None:
     hook = payload("api.webhook.json") | {"event_types": [{"name": n} for n in names]}
     pp.get(f"/v1/notifications/webhooks/{WEBHOOK_ID}").respond(json=hook)
-    assert (await paypal.verify(CRED)).startswith("PayPal app")
+    assert (await paypal.verify(CRED)).account_label.startswith("PayPal app")
 
 
 async def test_paypal_not_answering_is_a_provider_error(paypal: PayPalProvider, pp: Any) -> None:

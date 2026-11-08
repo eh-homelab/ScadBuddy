@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "category": "INVALID_REQUEST_ERROR",
+      "code": "BAD_REQUEST",
+      "detail": "The payment link cannot be deleted."
+    }
+  ]
+}

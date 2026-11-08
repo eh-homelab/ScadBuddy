@@ -1,0 +1,36 @@
+{
+  "created_at": "2026-11-09T10:06:00.000Z",
+  "data": {
+    "id": "KkAkhdMsgzn59SM8A89WgKwekxLZY_ptNBVqHYxt5gAdfcobBe4u1AZsXhoz06KTtuq9Ls24P",
+    "object": {
+      "refund": {
+        "amount_money": {
+          "amount": 400,
+          "currency": "USD"
+        },
+        "created_at": "2026-11-09T10:00:00.836Z",
+        "id": "KkAkhdMsgzn59SM8A89WgKwekxLZY_ptNBVqHYxt5gAdfcobBe4u1AZsXhoz06KTtuq9Ls24P",
+        "location_id": "L88917AVBK2S5",
+        "order_id": "haOyDuHiqtAXMk0d8pDKXpL7Jg4F",
+        "payment_id": "hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+        "processing_fee": [
+          {
+            "amount_money": {
+              "amount": -29,
+              "currency": "USD"
+            },
+            "effective_at": "2026-11-09T12:05:16.000Z",
+            "type": "INITIAL"
+          }
+        ],
+        "status": "COMPLETED",
+        "updated_at": "2026-11-09T10:05:16.381Z",
+        "version": 10
+      }
+    },
+    "type": "refund"
+  },
+  "event_id": "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9",
+  "merchant_id": "6SSW7HV8K2ST5",
+  "type": "refund.updated"
+}

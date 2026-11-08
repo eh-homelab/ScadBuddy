@@ -1,0 +1,110 @@
+{
+  "payment_link": {
+    "created_at": "2026-11-08T15:00:01Z",
+    "id": "PKVT6XGJZXYUP3NZ",
+    "long_url": "https://sandbox.checkout.square.site/merchant/6SSW7HV8K2ST5/order/o4b7saqp4HzhNttf5AJxC0Srjd4F",
+    "order_id": "o4b7saqp4HzhNttf5AJxC0Srjd4F",
+    "url": "https://sandbox.square.link/u/kpTBBMfZ",
+    "version": 1,
+    "payment_note": "Order ORD-2026-7 (ScadBuddy request req-1)",
+    "checkout_options": {
+      "redirect_url": "https://shop.example/orders/order-1"
+    }
+  },
+  "related_resources": {
+    "orders": [
+      {
+        "created_at": "2026-11-08T15:00:01.000Z",
+        "fulfillments": [
+          {
+            "state": "PROPOSED",
+            "type": "DIGITAL",
+            "uid": "bBpNrxjdQxGQP16sTmdzi"
+          }
+        ],
+        "id": "o4b7saqp4HzhNttf5AJxC0Srjd4F",
+        "line_items": [
+          {
+            "base_price_money": {
+              "amount": 700,
+              "currency": "USD"
+            },
+            "gross_sales_money": {
+              "amount": 700,
+              "currency": "USD"
+            },
+            "item_type": "ITEM",
+            "name": "Order ORD-2026-7",
+            "quantity": "1",
+            "total_discount_money": {
+              "amount": 0,
+              "currency": "USD"
+            },
+            "total_money": {
+              "amount": 700,
+              "currency": "USD"
+            },
+            "total_tax_money": {
+              "amount": 0,
+              "currency": "USD"
+            },
+            "uid": "8YX13D1U3jO7czP8JVrAR",
+            "variation_total_price_money": {
+              "amount": 700,
+              "currency": "USD"
+            }
+          }
+        ],
+        "location_id": "L88917AVBK2S5",
+        "net_amounts": {
+          "discount_money": {
+            "amount": 0,
+            "currency": "USD"
+          },
+          "service_charge_money": {
+            "amount": 0,
+            "currency": "USD"
+          },
+          "tax_money": {
+            "amount": 0,
+            "currency": "USD"
+          },
+          "tip_money": {
+            "amount": 0,
+            "currency": "USD"
+          },
+          "total_money": {
+            "amount": 700,
+            "currency": "USD"
+          }
+        },
+        "source": {
+          "name": "ScadBuddy"
+        },
+        "state": "DRAFT",
+        "total_discount_money": {
+          "amount": 0,
+          "currency": "USD"
+        },
+        "total_money": {
+          "amount": 700,
+          "currency": "USD"
+        },
+        "total_service_charge_money": {
+          "amount": 0,
+          "currency": "USD"
+        },
+        "total_tax_money": {
+          "amount": 0,
+          "currency": "USD"
+        },
+        "total_tip_money": {
+          "amount": 0,
+          "currency": "USD"
+        },
+        "updated_at": "2026-11-08T15:00:01.000Z",
+        "version": 1
+      }
+    ]
+  }
+}

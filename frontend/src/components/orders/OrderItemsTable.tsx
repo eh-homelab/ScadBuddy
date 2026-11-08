@@ -117,7 +117,6 @@ export function OrderItemsTable({
     setSelectableWas(selectable)
     if (!selectable) setPicked(new Set())
   }
-  // An order that stops taking a selection (cancelled, closed) drops it.
   const chosen = selectable ? items.filter((item) => picked.has(item.id)) : []
   const pick = (ids: string[], on: boolean) => {
     const next = new Set(picked)

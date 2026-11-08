@@ -67,9 +67,9 @@ from scadbuddy.bambuddy.models import (
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
-from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLinkStore
+from scadbuddy.bambuddy.print_links import LanArchiveLink, LinkedPrint, PrintLinkStore
 from scadbuddy.bambuddy.print_source import is_sliced, printable
-from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -481,9 +481,10 @@ class PrintDetail(PrintSummary):
     #: Bambuddy's bookkeeping of the print (#1860); None once it no longer has it.
     record: PrintRecord | None = None
     #: The slicer settings per filament slot the print was laid out with (#5627), from
-    #: the ScadBuddy run that queued it (``PrintRunResult.part_settings``): only the
-    #: request's, which a reprint sends again; a template's ``part_print_settings`` (#5626)
-    #: apply again on their own. None for none, or for a print no recorded run queued.
+    #: the ScadBuddy run that queued it, or started it over the LAN (#5661)
+    #: (``PrintRunResult.part_settings``): only the request's, which a reprint sends
+    #: again; a template's ``part_print_settings`` (#5626) apply again on their own. None
+    #: for none, or for a print no recorded run queued or started.
     part_settings: PartSettingsMap | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
@@ -491,15 +492,45 @@ class PrintDetail(PrintSummary):
     )
 
 
+class _ByFile:
+    """The run is named by nothing but the archive's file name, which only the archive's
+    read gives (`_run_by_file`)."""
+
+
+_BY_FILE = _ByFile()
+
+
 async def _part_settings(
-    links: PrintLinkStore, runs: PrintRunStore, link: LinkedPrint
-) -> PartSettingsMap | None:
-    """``link``'s print's settings per slot (#5627): its queue item's send names the run
-    that queued it, and that run's result holds them. None when no send names a run (one
-    recorded before #1751, or a print queued outside ScadBuddy) or the run is pruned.
-    A failed read is logged and gives None, so the print record still loads."""
+    cache: ArchiveCache,
+    client: BambuddyClient,
+    links: PrintLinkStore,
+    runs: PrintRunStore,
+    link: LinkedPrint,
+) -> tuple[ArchiveDetail | None, PartSettingsMap | None]:
+    """The archive, and ``link``'s print's settings per slot (#5627): the run that queued
+    or started it recorded them in its result. A print on Bambuddy's queue names that run
+    through its queue item's send. A LAN print names it through the start it became
+    (#5661): a recorded start, else the archive's file name (`_run_by_file`). The send
+    and the recorded start are read while the archive is fetched; only the file name
+    waits for it (#5733). The settings are None when nothing names a run exactly (a send
+    recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
+    under another name) or the run is pruned. A failed read of them is logged and gives
+    None, so the print record still loads."""
+    archive, named = await asyncio.gather(
+        cache.archive(client, link.archive_id), _guarded(_named_run(links, runs, link), link)
+    )
+    run: PrintRun | None = (
+        await _guarded(_run_by_file(links, runs, link, archive), link)
+        if isinstance(named, _ByFile)
+        else named
+    )
+    settings = run.result.part_settings if run is not None and run.result is not None else None
+    return archive, settings
+
+
+async def _guarded[T](read: Awaitable[T], link: LinkedPrint) -> T | None:
     try:
-        return await _read_part_settings(links, runs, link)
+        return await read
     except (psycopg.Error, ValueError):
         logger.warning(
             "could not read a print's part settings", extra={"archive_id": link.archive_id}
@@ -507,18 +538,81 @@ async def _part_settings(
         return None
 
 
-async def _read_part_settings(
+async def _named_run(
     links: PrintLinkStore, runs: PrintRunStore, link: LinkedPrint
-) -> PartSettingsMap | None:
-    # A link found by content hash (a reprint made inside Bambuddy, a LAN print) names no
-    # queue item (`PrintLink.queue_item_id` is optional), so no send.
-    if link.queue_item_id is None:
+) -> PrintRun | _ByFile | None:
+    """The run a send or a recorded LAN start names, or `_BY_FILE` when neither is
+    recorded for a link found by content hash."""
+    if link.queue_item_id is not None:
+        send = await links.send(link.queue_item_id)
+        if send is None or send.run_id is None:
+            return None
+        return await runs.get(send.run_id)
+    # A link found by content hash (a LAN print, or a reprint made inside Bambuddy) names
+    # no queue item (`PrintLink.queue_item_id` is optional), so no send.
+    recorded = await links.lan_start(link.archive_id)
+    if recorded is None:
+        return _BY_FILE
+    run = await runs.get(recorded.run_id)
+    # The archive can belong to another subject since the record was made: that
+    # subject's print is not this run's. A pruned run gives none.
+    subject = PrintSubject.parse(link.subject).run_subject
+    return run if run is not None and run.output_id == subject else None
+
+
+#: The file name a LAN start uploads (`workflows/printing.py` `_start_lan`):
+#: ``scadbuddy-<run id[:8]>-p<plate>``, then ``-c<copy>`` past the first copy (together
+#: the start's ``subtask_name``), then ``-<attempt>`` past the first attempt, then
+#: ``.3mf``. A stem never ends in ``-<digits>``, so the attempt is read without doubt.
+_LAN_FILE = re.compile(r"(?P<subtask>scadbuddy-(?P<run>[0-9a-f]{8})-p\d+(?:-c\d+)?)(?:-\d+)?\.3mf")
+
+
+async def _run_by_file(
+    links: PrintLinkStore,
+    runs: PrintRunStore,
+    link: LinkedPrint,
+    archive: ArchiveDetail | None,
+) -> PrintRun | None:
+    """The run whose LAN start ``link``'s archive became (#5661), from the archive's file
+    name: Bambuddy archives a print it did not queue under the name of the file the
+    printer printed (``services/archive.py`` ``archive_print``,
+    ``filename=original_filename or source_file.name``, maziggy/bambuddy@2ce0d93). That
+    name is the one the run uploaded, and it names the start. The link is recorded only
+    when exactly one start of one run of the link's own subject has that name, whatever
+    the run's status: never a guess. The recorded link is kept when the archive is
+    deleted later, and `_named_run` follows it."""
+    subject = PrintSubject.parse(link.subject).run_subject
+    if archive is None or archive.filename is None:
         return None
-    send = await links.send(link.queue_item_id)
-    if send is None or send.run_id is None:
+    named = _LAN_FILE.fullmatch(archive.filename)
+    if named is None:
         return None
-    run = await runs.get(send.run_id)
-    return run.result.part_settings if run is not None and run.result is not None else None
+    subtask = named["subtask"]
+    found = [
+        (run, start)
+        for run in await runs.lan_started(subject, [subtask])
+        if run.id.startswith(named["run"]) and run.result is not None
+        for start in run.result.lan
+        if start.subtask_name == subtask
+    ]
+    if len(found) != 1:
+        return None
+    run, start = found[0]
+    try:
+        await links.record_lan_start(
+            LanArchiveLink(
+                archive_id=link.archive_id,
+                run_id=run.id,
+                subtask_name=subtask,
+                plate_id=start.plate_id,
+            )
+        )
+    except psycopg.Error:
+        # The run is found exactly; only the record is lost, and the next read tries again.
+        logger.warning(
+            "could not record a LAN print's start", extra={"archive_id": link.archive_id}
+        )
+    return run
 
 
 def _prints_url(archive_id: int, path: str) -> str:
@@ -1205,7 +1299,7 @@ def _outcome(
         "parameters; none for a library file's print), every file (ScadBuddy's 3MF and "
         "preview mesh, the sliced file and slicer project Bambuddy kept), its photos, "
         "timelapse and plate image, its outcome and runs, and the slicer settings per "
-        "filament slot (`part_settings`) the ScadBuddy run that queued it set. "
+        "filament slot (`part_settings`) the ScadBuddy run that queued or started it set. "
         "`printer_media=1` also lists what the printer holds for it, which asks the printer."
     ),
 )
@@ -1236,9 +1330,7 @@ async def get_print(
     meta = output.meta if output is not None else None
 
     async with client_for(store.load()) as client:
-        archive, part_settings = await asyncio.gather(
-            cache.archive(client, archive_id), _part_settings(links, print_runs.store, link)
-        )
+        archive, part_settings = await _part_settings(cache, client, links, print_runs.store, link)
         diff = await defaults.diff(output) if output is not None else None
         file = await _LibraryFiles(cache, client).file(link.library_file_id)
         summary = _summary(link, meta, archive, diff, file.filename if file else None)

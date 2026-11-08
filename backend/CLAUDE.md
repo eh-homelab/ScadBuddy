@@ -909,7 +909,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   hand with no provider. `models.py` (`PaymentRequest`, the storefront's shape with no
   `provider_ref`; `PaymentRequestView`, the back office's; `ProviderEvent`), `store.py`
   (SQL in the caller's transaction; `open_requests_for_order`), `provider.py` (the
-  `PaymentProvider` protocol, `BadSignatureError`, `ProviderError`), `registry.py` (the
+  `PaymentProvider` protocol, `Verified`: `verify`'s account label and, when the account
+  takes one currency, that currency, `BadSignatureError`, `ProviderError`), `registry.py` (the
   offered providers; the fake one only with the bootstrap
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
   `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
@@ -922,10 +923,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   it again with a backoff: 5 minutes first, the wait doubling, at most a day; until a try
   lands, a later approval is still captured, and such a capture, like one made before the
   mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  `square.py` (#5666: a request is a quick-pay payment link and its reference is the link's
+  Square order id, which each payment carries; `x-square-hmacsha256-signature` checked by our
+  own code over the notification URL setting and the raw body; a cancel finds the order's
+  link by listing the links and deletes it; a payment is `paid` under Square's event id each
+  time it is told, and its fee comes from `processing_fee`; only an ACH payment's `PENDING`
+  and `FAILED` move the request, a declined card leaves it open, and a payment or refund
+  with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
+  link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
-  `kek_missing`), `service.py` (`Payments`, what the routes call) and
+  `kek_missing`), `service.py` (`Payments`, what the routes call; `connect` refuses an
+  account whose `Verified.currency` is not the shop's `orders_currency`,
+  `CurrencyMismatchError`, 409 `currency_mismatch`, #5666) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus
@@ -946,7 +957,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   unique `(order_id, kind, source)` index); one that arrives before its payment is
   `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
   only while the request is open or pending and the event (`ProviderEvent.created_at`) is
-  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
+  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A
+  `paid` event for a request on which this provider already recorded its payment (same
+  provider, request and reference, `Lifecycle._provider_payment`, whatever the request's
+  `payment_id`) writes no money; with a fee it writes that payment's fee once (#5666:
+  Square adds the fee in a later update). A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. A `refund_failed`

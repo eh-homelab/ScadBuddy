@@ -364,7 +364,23 @@ the dialog's settings differ from them. An item print from the API that sends no
 prints with the quote's (`print_body` reads `{}` as none sent). The run's result
 records them (`PrintRunResult.part_settings`), and `GET /prints/{archive_id}` lists them as
 `part_settings`, found through the queue item's send and its run. A print started over
-the LAN has no queue item, so its record lists none. Every answer gives a slot's settings
+the LAN has no queue item, so its run is found through the start it became (#5661,
+`print_history._run_by_file`). Bambuddy archives a print it did not queue under the name of
+the file the printer printed (`services/archive.py` `archive_print`,
+[maziggy/bambuddy@2ce0d93](https://github.com/maziggy/bambuddy/blob/2ce0d93451c50516f9a3bacbc80c80e14fbdcc3e/backend/app/services/archive.py)).
+That name is the one the run uploaded (`scadbuddy-<run id[:8]>-p<plate>[-c<copy>][-<attempt>].3mf`,
+`workflows/printing.py` `_start_lan`), and it names the start. The first read of a link
+found by content hash whose file name has that form looks for the start among the
+runs of the link's own subject whose result holds it, whatever the run's status (#5733;
+today only a run that succeeded holds a result). When exactly one start of one run has that
+name, the read records it (`lan_print_archives`: archive, run, start, plate) and lists
+that run's settings. Later reads follow the record (`print_history._named_run`), also once
+Bambuddy has deleted the archive, and list none once the run is pruned or the archive
+belongs to another subject. A send or a recorded start is read while the archive is
+fetched; only the file name waits for the archive (#5733). Any other case (no such name, no such start, two runs that share the name)
+records nothing and lists none: the link is never a guess. A LAN print reaches `/prints`
+only through a content hash link (`linking.link_subject_by_hash`), which matches the
+hashes of the subject's sliced files in Bambuddy's library. Every answer gives a slot's settings
 with only what is set (`part_settings.parts_set_only`, on the read models: the run result,
 the print record, the remembered choices and the check), so a reprint can send them again as
 they are. A request's own dump keeps every key, so `run_key` is what it was before #5627.

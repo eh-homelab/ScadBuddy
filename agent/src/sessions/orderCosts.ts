@@ -24,9 +24,12 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // backend out of reach) keeps it, with the share it sent (`attempted_usd`), and the next
 // report sends that same share again: an answer lost after the backend wrote the entry loses
 // no spend. A share the backend found under one minor unit of the order's currency (it
-// answers no entry) stays to report, with the next turn's spend; once the session is `done`
-// or `failed`, such a share is closed out, reported with nothing carried. One turn's reports
-// share one deadline (REPORT_DEADLINE_MS); what it leaves waits for the next turn's end. The
+// answers no entry) stays to report, with the next turn's spend; once the session is over
+// (`done`, `failed`, or `idle` with no session activity for IDLE_OVER_AFTER), such a share is
+// closed out, reported with nothing carried. A session that works again later loses nothing:
+// the closed-out spend was never carried, so it folds into the next turn's share, split equally
+// across that turn's orders. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it
+// leaves waits for the next turn's end. The
 // finish activity does not wait for `report`. A session runs one report at a time across
 // replicas (a session-level advisory lock on a connection of the lock client, never one of
 // the stores', freed with it if the process dies). `record` waits at most RECORD_WAIT_MS for
@@ -67,6 +70,12 @@ const FINAL_REFUSALS: ReadonlySet<number> = new Set([400, 404, 409, 422])
 const LOCK_PREFIX = 'ai_session_order_costs:'
 /** How long a row waits before the sweep reports it: past any turn that could still report it. */
 export const SWEEP_AFTER = '15 minutes'
+/**
+ * How long an idle session has had no activity (`ai_sessions.updated_at`, which a turn's start
+ * and end move, as a handoff and other writes of the row do) before its sub-unit share is
+ * closed out.
+ */
+export const IDLE_OVER_AFTER = '1 hour'
 /** The most sessions one sweep reports: each may take up to REPORT_DEADLINE_MS. */
 export const SWEEP_LIMIT = 20
 /** Less time left than this, and the rest wait for the next turn's end. */
@@ -229,8 +238,9 @@ export class OrderCosts implements TouchedSink {
       WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
     if (pending.length === 0) return
     await sql`UPDATE ai_session_order_costs SET tried_at = now() WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL`
-    const [row] = await sql<{ cost: number; carried: number; principal: string; status: string }[]>`
-      SELECT s.cost_usd AS cost, s.owner_id AS principal, s.status,
+    const [row] = await sql<{ cost: number; carried: number; principal: string; over: boolean }[]>`
+      SELECT s.cost_usd AS cost, s.owner_id AS principal,
+             (s.status IN ('done', 'failed') OR (s.status = 'idle' AND s.updated_at < now() - ${IDLE_OVER_AFTER}::interval)) AS over,
              (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
               FROM ai_session_order_costs WHERE session_id = s.id) AS carried
       FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
@@ -248,9 +258,14 @@ export class OrderCosts implements TouchedSink {
     // Under a hundredth of a cent no new share is sent: those orders stay to report, with the
     // next turn's spend. A larger share still under one minor unit of the order's currency is
     // sent, and the backend answers it with no entry (`deferred`), which keeps it the same way.
-    // Once the session is over (`done`, `failed`) no more spend comes: such a share is closed
-    // out, reported with nothing carried, so it leaves the sweep for good.
-    const over = row.status === 'done' || row.status === 'failed'
+    // Once the session is over no more spend comes: such a share is closed out, reported with
+    // nothing carried, so it leaves the sweep for good. Over is `done` or `failed`, or `idle`
+    // with no session activity (`updated_at`) for IDLE_OVER_AFTER: a chat turn that ends well
+    // leaves the session idle, and the sweep finds it there once that turn's own report has run.
+    // Nothing carried means nothing lost: if the session works again, the closed-out spend is
+    // still in `cost - carried`, so it folds into the next turn's share, split equally across
+    // that turn's orders.
+    const over = row.over
     if (over && share < 1e-4) {
       for (const order of fresh) await this.closeOut(sessionId, order.id)
     }
