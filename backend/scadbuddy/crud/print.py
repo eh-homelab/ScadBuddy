@@ -571,6 +571,9 @@ for _name in API_ONLY:
     setattr(RemoteUploadStore, _name, _api_only(_name))
 
 
+#: How long one event's post may take, retries included (`RemoteEvents._drain`).
+EVENT_POST_BUDGET = 5.0
+
 #: An event and the body that posts it, encoded once by `RemoteEvents.publish`.
 Posted = tuple[Event, dict[str, Any]]
 
@@ -659,7 +662,15 @@ class RemoteEvents:
             event, body = item
             try:
                 # The event's own id makes a resend one row (`publish_once`).
-                await self._client.request("POST", f"{BASE}/events", json=body)
+                # A short budget: in an outage the drain drops this one and moves on,
+                # rather than hold every queued event behind it.
+                await self._client.request(
+                    "POST",
+                    f"{BASE}/events",
+                    json=body,
+                    timeout=EVENT_POST_BUDGET,
+                    budget=EVENT_POST_BUDGET,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:

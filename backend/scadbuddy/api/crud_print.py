@@ -250,9 +250,18 @@ async def find_run(key: str, has_request_id: bool, runs: PrintRunsDep) -> PrintR
 
 @router.get("/runs/lan-waiting", name="crud_print_lan_waiting")
 async def lan_waiting(
-    runs: PrintRunsDep, printers: Annotated[list[UUID], Query(default_factory=list)]
+    runs: PrintRunsDep, printers: Annotated[list[str], Query(default_factory=list)]
 ) -> dict[str, PrintRun]:
-    return await runs.store.lan_waiting([str(printer) for printer in printers])
+    # Registry ids, as `PrintRunStore.lan_waiting` takes them; one that is no UUID would
+    # fail its cast to ``uuid[]`` as a 500.
+    for printer in printers:
+        try:
+            UUID(printer)
+        except ValueError:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"Not a printer id: {printer!r}."
+            ) from None
+    return await runs.store.lan_waiting(printers)
 
 
 @router.get("/runs/running", name="crud_print_running_runs")

@@ -30,6 +30,7 @@ from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRunError, PrintRunStore, read_latest
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import PrinterEvent, PrintEvent, PrintRunEvent
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
@@ -39,9 +40,11 @@ from scadbuddy.crud.client import (
     CrudRefusedError,
     CrudUnavailableError,
 )
+from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.operations import OTHER_CALLERS_KIND, RemoteOperationStore
 from scadbuddy.crud.print import (
     BASE,
+    EVENT_POST_BUDGET,
     REPRINT_RECORD_BUDGET,
     RemoteEvents,
     RemoteOutcomes,
@@ -56,7 +59,12 @@ from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import InsertInput
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
-from tests.crud.crud_support import FakeClock, served_print_crud, threaded_print_crud
+from tests.crud.crud_support import (
+    FakeClock,
+    FixedToken,
+    served_print_crud,
+    threaded_print_crud,
+)
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -512,3 +520,51 @@ async def test_the_remote_insert_reads_no_settings() -> None:
     )
     inserted: Any = await ActivityEnvironment().run(activities.insert, input)
     assert inserted == "inserted"
+
+
+async def test_a_printer_that_is_no_uuid_is_refused(crud: CrudClient) -> None:
+    """The route takes the registry ids as strings, as `PrintRunStore.lan_waiting` does,
+    and refuses one its cast would fail on with a 422, not a 500."""
+    with pytest.raises(CrudRefusedError) as refused:
+        await crud.request("GET", f"{BASE}/runs/lan-waiting?printers=not-a-uuid")
+    assert refused.value.status == 422
+
+
+async def test_an_event_of_a_known_kind_that_does_not_decode_is_a_422(crud: CrudClient) -> None:
+    with pytest.raises(CrudRefusedError) as refused:
+        await crud.request("POST", f"{BASE}/events", json={"event": {"kind": "print.progress"}})
+    assert refused.value.status == 422
+
+
+async def test_an_outage_drops_each_event_after_a_short_budget() -> None:
+    """In an outage each post gives up after `EVENT_POST_BUDGET`, so the drain moves on:
+    every event is dropped and counted, and none waits out the client's own budget."""
+    clock = FakeClock()
+    posts = 0
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        posts += 1
+        return httpx.Response(503, headers=CRUD_HEADERS)
+
+    client = CrudClient(
+        "http://api",
+        "print",
+        ServiceAuth(FixedToken()),
+        transport=httpx.MockTransport(unavailable),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    metrics = Metrics()
+    events = RemoteEvents(client, metrics=metrics)
+    await events.start()
+    try:
+        for n in range(3):
+            events.publish(PrinterEvent(kind="printer.report", printer_id=f"p{n}"))
+    finally:
+        await events.aclose()
+        await client.aclose()
+    assert metrics.events_dropped.labels("error")._value.get() == 3
+    assert posts >= 3
+    # Each post's retries end inside its own short budget, not the client's.
+    assert clock.now <= 3 * EVENT_POST_BUDGET + 3
