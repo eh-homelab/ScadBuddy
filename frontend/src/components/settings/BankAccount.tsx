@@ -42,6 +42,8 @@ export function BankAccount() {
     try {
       const next = await action()
       setStatus(next ?? (await api.bankLink()))
+      // Whatever succeeded, the key form starts closed again.
+      setEditing(false)
       return true
     } catch (err) {
       setError(failure(err))
@@ -55,7 +57,6 @@ export function BankAccount() {
     if (await run(() => api.saveBankKeys(keys))) {
       // The secret leaves the page as soon as it is sent.
       setKeys({ ...keys, client_id: '', secret: '' })
-      setEditing(false)
     }
   }
 
@@ -108,7 +109,17 @@ export function BankAccount() {
             <Button size="sm" disabled={busy} onClick={() => void link()} {...USER_ONLY}>
               Link a bank account
             </Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditing(!editing)} {...USER_ONLY}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                // Replacing keys starts from the environment they were saved for.
+                if (!editing && shown.environment) setKeys({ ...keys, environment: shown.environment })
+                setEditing(!editing)
+              }}
+              {...USER_ONLY}
+            >
               {editing ? 'Keep keys' : 'Replace keys'}
             </Button>
             <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(() => api.forgetBankKeys())} {...USER_ONLY}>

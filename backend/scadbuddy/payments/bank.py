@@ -103,10 +103,17 @@ class LinkToken(BaseModel):
     link_token: str
 
 
-#: What the shop is told when the Item could not be removed at Plaid.
+#: What the shop is told when Plaid refused the keys, so the Item could not be removed.
 REMOVE_AT_PLAID = (
     "Unlinked here, but Plaid refused the stored keys, so the Item is still at Plaid."
     " Remove it in the Plaid Dashboard."
+)
+#: What the shop is told when the keys would not open with this key file: Plaid was never
+#: asked, and the keys went with the row.
+KEYS_UNREADABLE = (
+    "Unlinked here, but the stored Plaid keys could not be opened with this key file, so"
+    " the Item is still at Plaid. Remove it in the Plaid Dashboard, then save the keys"
+    " again."
 )
 
 
@@ -348,7 +355,7 @@ class BankLinks:
             linked = await asyncio.to_thread(self.access)
         except CredentialUnreadableError:
             await asyncio.to_thread(self._drop_unreadable)
-            return BankUnlinked(removed_at_plaid=False, note=REMOVE_AT_PLAID)
+            return BankUnlinked(removed_at_plaid=False, note=KEYS_UNREADABLE)
         if linked is None:
             raise BankNotLinkedError()
         try:

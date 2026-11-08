@@ -1149,8 +1149,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Postgres call of an async method runs in `asyncio.to_thread`; an unlink Plaid does not
   answer keeps the token, an unlink without the key file is 409 `kek_missing` and keeps
   the row (the file may come back), and one whose keys Plaid refuses
-  (`plaid.KEYS_REFUSED`) or that are sealed under another key file drops the link here
-  only, `BankUnlinked` telling the shop to remove the Item in the Plaid Dashboard), routes `api/bank_link.py` (`/payments/bank`; every write in
+  (`plaid.KEYS_REFUSED`) drops the link here only and keeps the keys (`REMOVE_AT_PLAID`),
+  while one whose keys are sealed under another key file deletes the row, keys and all
+  (`KEYS_UNREADABLE`: remove the Item in the Plaid Dashboard, then save the keys again);
+  either way `BankUnlinked.note` says what to do), routes `api/bank_link.py` (`/payments/bank`; every write in
   `PERSON_ENDPOINTS`), frontend `components/settings/BankAccount.tsx` and
   `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
   allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.

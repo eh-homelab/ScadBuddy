@@ -18,6 +18,8 @@ from scadbuddy.core.secrets import kek_from_base64
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments import plaid
 from scadbuddy.payments.bank import (
+    KEYS_UNREADABLE,
+    REMOVE_AT_PLAID,
     BankAccount,
     BankKeys,
     BankKeysChangedError,
@@ -226,7 +228,8 @@ async def test_unlink_with_keys_plaid_refuses_unlinks_here_and_says_so(
         router.post(f"{SANDBOX}/item/remove").mock(return_value=httpx.Response(400, json=refusal))
         unlinked = await bank.unlink()
     assert unlinked.removed_at_plaid is False
-    assert unlinked.note is not None and "Plaid Dashboard" in unlinked.note
+    assert unlinked.note == REMOVE_AT_PLAID
+    assert "Plaid refused the stored keys" in unlinked.note
     status = bank.status()
     assert (status.configured, status.account) == (True, None)
     raw = raw_row(pool)
@@ -246,7 +249,11 @@ async def test_unlink_with_keys_that_will_not_open_unlinks_here(
     with respx.mock:  # nothing may reach Plaid
         unlinked = await BankLinks(rows, OTHER_KEK).unlink()
     assert unlinked.removed_at_plaid is False
-    assert unlinked.note is not None and "Plaid Dashboard" in unlinked.note
+    # Plaid was never asked: the note names the key file, and says to save the keys again.
+    assert unlinked.note == KEYS_UNREADABLE
+    assert "could not be opened with this key file" in unlinked.note
+    assert "save the keys again" in unlinked.note
+    assert "Plaid refused" not in unlinked.note
     # The sealed token cannot be opened to reseal the keys: the row goes, keys and all.
     assert raw_row(pool) is None
 

@@ -25,6 +25,14 @@ let keysRefused = false
 export function setMockKeysRefused(refused: boolean): void {
   keysRefused = refused
 }
+/** `BankUnlinked.note` when the keys would not open with this key file (`KEYS_UNREADABLE`). */
+export const MOCK_KEYS_UNREADABLE =
+  'Unlinked here, but the stored Plaid keys could not be opened with this key file, so the Item is still at Plaid. Remove it in the Plaid Dashboard, then save the keys again.'
+let keysUnreadable = false
+/** The keys were sealed under another key file: unlink drops the row, keys and all. */
+export function setMockKeysUnreadable(unreadable: boolean): void {
+  keysUnreadable = unreadable
+}
 
 const EMPTY: BankStatus = { configured: false, environment: null, account: null, linked_at: null }
 let bank: BankStatus = { ...EMPTY }
@@ -32,6 +40,7 @@ let bank: BankStatus = { ...EMPTY }
 export function reset(): void {
   bank = { ...EMPTY }
   keysRefused = false
+  keysUnreadable = false
 }
 
 /** Saved keys and, with `linked`, the sandbox checking account, for a test's setup. */
@@ -73,6 +82,10 @@ export const handlers = [
   }),
   http.delete('/api/v1/payments/bank/link', ({ request }) => {
     if (!bank.account) return problem(request, 409, 'no bank account is linked', PROBLEMS + 'bank_not_linked')
+    if (keysUnreadable) {
+      bank = { ...EMPTY }
+      return HttpResponse.json({ removed_at_plaid: false, note: MOCK_KEYS_UNREADABLE })
+    }
     bank = { ...bank, account: null, linked_at: null }
     return HttpResponse.json(keysRefused ? { removed_at_plaid: false, note: MOCK_REMOVE_AT_PLAID } : { removed_at_plaid: true, note: null })
   }),

@@ -1,7 +1,7 @@
 import { screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
-import { MOCK_CHECKING, MOCK_LINK_TOKEN, mockBankLink, setMockKeysRefused } from '../../mocks/features/bank'
+import { MOCK_CHECKING, MOCK_LINK_TOKEN, mockBankLink, setMockKeysRefused, setMockKeysUnreadable } from '../../mocks/features/bank'
 import type { PlaidGlobal } from '../../lib/plaidLink'
 import { enter, renderSettingsSection } from '../../pages/settings/testing'
 import { BankAccount } from './BankAccount'
@@ -99,6 +99,33 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
     expect(await screen.findByText('Plaid Checking')).toBeInTheDocument()
     expect(screen.queryByText(/Remove it in the Plaid Dashboard/)).not.toBeInTheDocument()
+  })
+
+  it('says the keys would not open, and to save them again, when they are unreadable', async () => {
+    mockBankLink({ linked: true })
+    setMockKeysUnreadable(true)
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Unlink' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('could not be opened with this key file')
+    expect(await screen.findByLabelText('Client ID')).toBeInTheDocument()
+  })
+
+  it('preselects the saved environment when replacing the keys', async () => {
+    mockBankLink({ linked: false })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Replace keys' }))
+    expect(screen.getByRole('radio', { name: 'Sandbox' })).toBeChecked()
+  })
+
+  it('closes the key form once another action succeeds', async () => {
+    mockBankLink({ linked: false })
+    stubLink({ accounts: [{ id: MOCK_CHECKING }] })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Replace keys' }))
+    await user.click(screen.getByRole('button', { name: 'Link a bank account' }))
+    await user.click(await screen.findByRole('button', { name: 'Unlink' }))
+    expect(await screen.findByRole('button', { name: 'Replace keys' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Client ID')).not.toBeInTheDocument()
   })
 
   it('forgets the keys', async () => {
