@@ -393,8 +393,12 @@ of the starts' days for the hashes of the subject's slices, native and Bambuddy'
 (`linking.link_lan_starts`), records each match as a `content_hash` link, and names the
 start from the archive's file name as above. At most four subjects are scanned per
 request, and one subject at most once per process every 10 minutes
-(`linking.LAN_SCANS_PER_CALL`, `LAN_SCAN_INTERVAL`). A start whose print never reached
-Bambuddy is looked for until its 14 days end. Every answer gives a slot's settings
+(`linking.LAN_SCANS_PER_CALL`, `LAN_SCAN_INTERVAL`). The read skips the subjects this
+process scanned within those 10 minutes, so newer subjects cannot keep an older one from
+its scan (#5749). It reads only the runs made at most 14 days before the window
+(`runs.LAN_RUN_SPAN`), so a start of a run made more than 28 days ago is not looked for. The
+scan asks Bambuddy only for its own slices' hashes, never for a native slice's id. A
+start whose print never reached Bambuddy is looked for until its 14 days end, or until its run is 28 days old, whichever comes first. Every answer gives a slot's settings
 with only what is set (`part_settings.parts_set_only`, on the read models: the run result,
 the print record, the remembered choices and the check), so a reprint can send them again as
 they are. A request's own dump keeps every key, so `run_key` is what it was before #5627.

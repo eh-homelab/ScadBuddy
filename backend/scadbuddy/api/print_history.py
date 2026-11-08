@@ -636,18 +636,20 @@ async def _link_lan_prints(
     no queue item, so nothing else links its print. Each subject with such a start since
     `linking.LAN_LINK_WINDOW` is scanned by its slices' hashes
     (`linking.link_lan_starts`), at most `linking.LAN_SCANS_PER_CALL` per call and once per
-    `linking.LAN_SCAN_INTERVAL`. Each archive found that names no start yet is read once,
-    and its file name names the start (`_run_by_file`, the exactly-one rule), so the
-    start is not looked for again. A failure is logged, never raised: the list still
-    loads, and a later call tries again."""
+    `linking.LAN_SCAN_INTERVAL`; the read skips the subjects scanned within it (#5749).
+    Each archive found that names no start yet is read once, and its file name names the
+    start (`_run_by_file`, the exactly-one rule), so the start is not looked for again. A
+    failure is logged, never raised: the list still loads, and a later call tries again."""
+    now = time.monotonic()
     try:
         pending = await runs.lan_unnamed(
-            datetime.now(UTC) - linking.LAN_LINK_WINDOW, linking.LAN_PENDING_LIMIT
+            datetime.now(UTC) - linking.LAN_LINK_WINDOW,
+            linking.LAN_PENDING_LIMIT,
+            skip=linking.recent_lan_scans(now),
         )
     except psycopg.Error:
         logger.exception("could not read the LAN prints to link")
         return
-    now = time.monotonic()
     claimed: list[LanPending] = []
     for row in pending:
         if len(claimed) >= linking.LAN_SCANS_PER_CALL:

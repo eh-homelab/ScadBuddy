@@ -9,6 +9,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1279,6 +1280,11 @@ def native_slice(client: TestClient, pg_conninfo: str, output_id: str) -> None:
         uploads.record(output_id, LibraryCopy(id=NATIVE_COPY, folder_id=None, target_key="H2C"))
     )
     asyncio.run(uploads.record_sliced(output_id, NATIVE_COPY, SlicedCopy(id=NATIVE_SLICE)))
+    native_row(pg_conninfo)
+
+
+def native_row(pg_conninfo: str) -> None:
+    """The native library's row of `NATIVE_SLICE`, with its sha256."""
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO library_files (id, name, size, sha256, blob_key, media_type)"
@@ -1390,6 +1396,113 @@ def test_a_lan_print_of_another_subject_s_slice_is_not_linked(
 
     assert listed.status_code == 200, listed.text
     assert listed.json()["items"] == []
+
+
+@respx.mock
+def test_a_lan_scan_asks_bambuddy_for_no_native_slice(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#5749: a native slice's id names no file in Bambuddy's library, so the scan never
+    asks Bambuddy for it, even where it is recorded under a Bambuddy copy. Its hash is
+    the native row's. A refusal there (a key without the library scope) cannot fail the
+    scan."""
+    configure(client)
+    output_id = make_output(client, model)
+    uploads = state(client).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=12, folder_id=None, target_key="H2C")))
+    asyncio.run(uploads.record_sliced(output_id, 12, SlicedCopy(id=NATIVE_SLICE)))
+    native_row(pg_conninfo)
+    asked = respx.get(f"{API}/library/files/{NATIVE_SLICE}").mock(return_value=httpx.Response(403))
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "printing", "content_hash": NATIVE_HASH}
+    )
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert [item["archive_id"] for item in listed.json()["items"]] == [40]
+    assert not asked.called
+
+
+def test_a_start_of_a_run_made_long_before_the_window_is_not_looked_for(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#5749: the read expands only the starts of runs made since a bound before the
+    window (`runs.LAN_RUN_SPAN`), not those of every run retention keeps."""
+    configure(client)
+    output_id = make_output(client, model)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE print_runs SET created_at = now() - interval '60 days' WHERE id = %s",
+            (LAN_RUN,),
+        )
+    runs = state(client).print_runs.store
+
+    assert asyncio.run(runs.lan_unnamed(datetime.now(UTC) - timedelta(days=1), 10)) == []
+
+
+@respx.mock
+def test_a_subject_scanned_lately_leaves_its_place_to_an_older_one(
+    client: TestClient, model: str, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5749: the read skips the subjects scanned within `LAN_SCAN_INTERVAL`, so newer
+    subjects whose prints never reached Bambuddy cannot fill `LAN_PENDING_LIMIT` and
+    keep an older one from its scan."""
+    monkeypatch.setattr(linking, "LAN_PENDING_LIMIT", 1)
+    configure(client)
+    older = make_output(client, model)
+    newer = make_output(client, model)
+    native_slice(client, pg_conninfo, older)
+    recent_lan_run(
+        client,
+        PrintSubject.output(older),
+        model,
+        started_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    lan_run(
+        client,
+        LAN_TWIN,
+        PrintSubject.output(newer),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1",),
+        started_at=datetime.now(UTC),
+    )
+    assert linking.claim_lan_scan(newer, time.monotonic())
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "printing", "content_hash": NATIVE_HASH}
+    )
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert [item["archive_id"] for item in listed.json()["items"]] == [40]
+
+
+@respx.mock
+def test_a_failed_lan_scan_gives_back_its_claim_and_the_list_still_loads(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#5749: Bambuddy's archive list fails; the list answers, and the subject is not
+    held for `LAN_SCAN_INTERVAL`, so the next list tries again."""
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    respx.get(f"{API}/printers/", name="printers").mock(
+        return_value=httpx.Response(200, json=recording("printers.json"))
+    )
+    archives = respx.get(f"{API}/archives/").mock(return_value=httpx.Response(500))
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+    assert archives.called
+    assert output_id not in linking._last_lan_scan
 
 
 @respx.mock
