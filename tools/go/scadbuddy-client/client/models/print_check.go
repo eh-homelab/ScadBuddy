@@ -21,6 +21,8 @@ type PrintCheck struct {
 	process_part_settings PartSettingsable
 	// The rack property
 	rack RackPickViewable
+	// The slot_part_settings property
+	slot_part_settings i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The warnings property
 	warnings []FilamentWarningable
 }
@@ -204,6 +206,16 @@ func (m *PrintCheck) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["slot_part_settings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSlotPartSettings(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["warnings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfObjectValues(CreateFilamentWarningFromDiscriminatorValue)
 		if err != nil {
@@ -247,6 +259,12 @@ func (m *PrintCheck) GetRack() RackPickViewable {
 	return m.rack
 }
 
+// GetSlotPartSettings gets the slot_part_settings property value. The slot_part_settings property
+// returns a UntypedNodeable when successful
+func (m *PrintCheck) GetSlotPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.slot_part_settings
+}
+
 // GetWarnings gets the warnings property value. The warnings property
 // returns a []FilamentWarningable when successful
 func (m *PrintCheck) GetWarnings() []FilamentWarningable {
@@ -281,6 +299,12 @@ func (m *PrintCheck) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteObjectValue("rack", m.GetRack())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("slot_part_settings", m.GetSlotPartSettings())
 		if err != nil {
 			return err
 		}
@@ -336,6 +360,11 @@ func (m *PrintCheck) SetRack(value RackPickViewable) {
 	m.rack = value
 }
 
+// SetSlotPartSettings sets the slot_part_settings property value. The slot_part_settings property
+func (m *PrintCheck) SetSlotPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.slot_part_settings = value
+}
+
 // SetWarnings sets the warnings property value. The warnings property
 func (m *PrintCheck) SetWarnings(value []FilamentWarningable) {
 	m.warnings = value
@@ -349,11 +378,13 @@ type PrintCheckable interface {
 	GetObjects() PrintCheck_PrintCheck_objectsable
 	GetProcessPartSettings() PartSettingsable
 	GetRack() RackPickViewable
+	GetSlotPartSettings() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetWarnings() []FilamentWarningable
 	SetErrors(value []string)
 	SetNozzlePlan(value NozzlePlanable)
 	SetObjects(value PrintCheck_PrintCheck_objectsable)
 	SetProcessPartSettings(value PartSettingsable)
 	SetRack(value RackPickViewable)
+	SetSlotPartSettings(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetWarnings(value []FilamentWarningable)
 }
