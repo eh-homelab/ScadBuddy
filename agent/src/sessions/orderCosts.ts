@@ -15,8 +15,8 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // order with one revised item gets the entry on that item, one with several on the order.
 // The backend writes one entry per order and session, so an order already reported in this
 // session records nothing more. A report the route refuses for good (404 the order gone, since
-// an item gone falls back to the order; 409 a currency no rate reaches; 422 a body it cannot
-// take) is dropped, and its share is counted as carried: no other order's entry takes it, so
+// an item gone falls back to the order; 409 a currency no rate reaches, or a visitor's cart
+// not yet submitted, `order_not_submitted`; 422 a body it cannot take) is dropped, and its share is counted as carried: no other order's entry takes it, so
 // it is in no entry. Any other failure (no credential yet or a
 // dead one, 401 and 403; 429; a 5xx; the backend out of reach) keeps it, with the share it
 // sent (`attempted_usd`), and the next report sends that same share again: an answer lost
@@ -55,7 +55,7 @@ export const ASSISTANT_COST_PATH = (orderId: string) => `/api/v1/internal/crud/a
 export const REPORT_TIMEOUT_MS = 5_000
 /** How long all of one turn's reports may take. */
 export const REPORT_DEADLINE_MS = 15_000
-/** The route's refusals that no later try mends: the order gone (an item gone falls back to the order), its currency, the body. */
+/** The route's refusals that no later try mends: the order gone (an item gone falls back to the order), its currency or an unsubmitted cart, the body. */
 const FINAL_REFUSALS: ReadonlySet<number> = new Set([404, 409, 422])
 /** The advisory lock a session's report holds, by `hashtextextended` of this plus the session id. */
 const LOCK_PREFIX = 'ai_session_order_costs:'

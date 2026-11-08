@@ -37,7 +37,8 @@ turn) reports the session's `cost_usd` since its last report, split equally betw
 orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s
 for the turn's reports in all, one report per session at a time across replicas, by an
 advisory lock; `sweep` at start and hourly reports what a session's last turn left). Only the
-route's own 404 (the order gone: an item gone falls back to the order), 409 or 422 drops
+route's own 404 (the order gone: an item gone falls back to the order), 409 (a currency no
+rate reaches, a visitor's unsubmitted cart) or 422 drops
 that order's report, its share in no entry. Anything else (401 or 403 while there
 is no live credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the
 share it sent (`attempted_usd`), sent again as it was at the next turn's end, so a lost

@@ -1325,6 +1325,8 @@ class Lifecycle:
         and answers ``None``, so the agent keeps it to report with more spend."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            # A visitor's cart is no job yet: nothing is spent on it (storefront spec §6.3).
+            check_submitted(order)
             # The item the session revised may be gone by now (a draft item deleted before
             # the report landed): the spend still counts, on the order.
             found = None if order_item_id is None else self.store.item(order_item_id, conn=conn)
@@ -1334,8 +1336,7 @@ class Lifecycle:
             if factor is None:
                 raise LifecycleError(
                     "currency_unconvertible",
-                    f"order {order.number} is in {order.currency}; the USD rate is in "
-                    f"{usd_rate.currency}",
+                    f"{order.label} is in {order.currency}; the USD rate is in {usd_rate.currency}",
                 )
             amount = to_minor(cost_usd * factor, order.currency)
             source = f"ai_session:{session_id}"

@@ -40,6 +40,9 @@ describe('crudCostPoster', () => {
   it("tells the route's refusal from a failure to try again", async () => {
     expect(await crudCostPoster('http://api', answering(404, true))(REPORT, 1_000)).toBe('refused')
     expect(await crudCostPoster('http://api', answering(409, true))(REPORT, 1_000)).toBe('refused')
+    // A visitor's cart not yet submitted (#5696) is no job: its spend is never sent again.
+    const cart = answering(409, true, [], '{"type": "https://scadbuddy.dev/problems/orders/order_not_submitted", "status": 409}')
+    expect(await crudCostPoster('http://api', cart)(REPORT, 1_000)).toBe('refused')
     expect(await crudCostPoster('http://api', answering(422, true))(REPORT, 1_000)).toBe('refused')
     // No credential yet, a dead one, another caller's or a busy API: sent again later.
     for (const status of [400, 401, 403, 429]) {
