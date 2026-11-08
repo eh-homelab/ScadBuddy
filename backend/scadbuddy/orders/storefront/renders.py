@@ -155,6 +155,12 @@ async def _withdraw_limited(
     await asyncio.to_thread(limits.undo, row, key)
 
 
+def _expired() -> ApiError:
+    return problem(
+        status.HTTP_410_GONE, "render_expired", "This preview has expired. Start it again."
+    )
+
+
 def _unavailable_render() -> ApiError:
     return problem(
         status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -207,9 +213,10 @@ async def start_render(
     ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start; one
     that `never_started` costs nothing), each with ``Retry-After``. The edge's client
     sends a 503 again with the same key for its budget, so a visitor sees the edge's own
-    503 when the start keeps failing. A key seen before replays its row as its first
-    answer left it: the row's job when it names one, else the submit joined again, with
-    no count, no withdrawal and no undo."""
+    503 when the start keeps failing. A key seen before replays its row: the job the
+    row names (410 ``render_expired`` when that job is gone; it is never submitted
+    again), else the submit sent again, counted as a fresh one is when it runs on its own
+    and the row is free."""
     orders = _orders(state)
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
@@ -280,13 +287,19 @@ async def start_render(
     row: int = recorded.body["row"]
     counted: bool = recorded.body["counted"]
     if not fresh:
-        # A replayed key changes nothing: a second submit cannot tell how the first went
-        # (a finished job answers "reused", Temporal repeats a run's first answer), so the
-        # row keeps what its first answer left it, and a job it names is the answer.
-        named = await asyncio.to_thread(limits.job_of, row)
+        # A replayed key: a second submit cannot tell how the first went (a finished job
+        # answers "reused", Temporal repeats a run's first answer), so a job the row names
+        # is the answer. One that is gone is never submitted again: that would start a run
+        # the row, maybe free, never counted. A new key starts a fresh, counted render.
+        stood = await asyncio.to_thread(limits.state_of, row)
+        if stood is None:
+            raise _expired()
+        named, counted = stood
         if named is not None:
-            with suppress(JobNotFoundError):
+            try:
                 return store_render(await asyncio.to_thread(state.render.store.read, named))
+            except JobNotFoundError:
+                raise _expired() from None
     params = reference.inputs.get("params", {})
     try:
         job, coalesced = await state.render.submit_answer(
@@ -319,12 +332,10 @@ async def start_render(
         # Else the job may exist: the row and its reply stay, so the same key sent again
         # replays the row and joins the job, counted once.
         raise _unavailable_render() from None
-    if not fresh:
-        # The first answer was lost before `attach`: join its job, as recorded.
-        await asyncio.to_thread(limits.attach, row, job.id)
-        return store_render(job)
-    # `_shared` read the jobs before the submit, with no lock. The submit decides.
-    if counted and coalesced:
+    # `_shared` read the jobs before the submit, with no lock. The submit decides. A
+    # replay (its first answer lost before `attach`) never uncounts its row, but a free
+    # row whose submit runs on its own counts, as a fresh one does.
+    if fresh and counted and coalesced:
         # A job opened in between: joined or reused, it costs nothing.
         await asyncio.to_thread(limits.set_counted, row, False)
     elif not counted and not coalesced:

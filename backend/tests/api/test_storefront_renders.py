@@ -285,6 +285,88 @@ def test_a_shared_guess_retried_is_not_counted_again(
     assert wait_done(crud, TOKEN_A, first["id"])["status"] == "done"
 
 
+def test_a_replay_whose_job_is_gone_is_410_and_starts_nothing(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review of 52079204d: a replayed key whose job was pruned never submits
+    again, so a shared (free) row cannot start an uncounted run."""
+    first = a_render(crud, TOKEN_A, listing, {"width": 45}, key="k-gone")
+    wait_done(crud, TOKEN_A, first["id"])
+    state = _state(crud.api)
+    state.projection.delete(first["id"])
+    render = state.render
+
+    async def never(*_args: Any, **_kwargs: Any) -> tuple[Job, bool]:
+        raise AssertionError("a replay of a gone job submitted again")
+
+    monkeypatch.setattr(render, "submit_answer", never)
+    r = crud.post("/renders", json=render_body(listing, {"width": 45}), key="k-gone")
+    assert r.status_code == 410, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_expired"
+
+
+def lost_before_attach(crud: CrudCaller, key: str) -> None:
+    """The row of ``key`` as a first answer lost before `attach` left it, guessed free."""
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_renders SET job_id = NULL, counted = false"
+            " WHERE id = (SELECT (body->>'row')::bigint FROM crud_requests WHERE key = %s)",
+            (key,),
+        )
+
+
+def own_runs(monkeypatch: pytest.MonkeyPatch, crud: CrudCaller) -> list[Job]:
+    """Every submit answers as a run of its own (not coalesced)."""
+    render = _state(crud.api).render
+    real = render.submit_answer
+    seen: list[Job] = []
+
+    async def own(*args: Any, **kwargs: Any) -> tuple[Job, bool]:
+        job, _ = await real(*args, **kwargs)
+        seen.append(job)
+        return job, False
+
+    monkeypatch.setattr(render, "submit_answer", own)
+    return seen
+
+
+def test_a_free_replay_that_runs_on_its_own_is_counted(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review of 52079204d: a free row replayed before `attach` whose submit is
+    a run of its own counts as any run does."""
+    first = a_render(crud, TOKEN_A, listing, {"width": 46}, key="k-lost")
+    lost_before_attach(crud, "k-lost")
+    assert counted_rows(crud, TOKEN_A) == 0
+    own_runs(monkeypatch, crud)
+    again = a_render(crud, TOKEN_A, listing, {"width": 46}, key="k-lost")
+    assert again["id"] == first["id"]
+    assert counted_rows(crud, TOKEN_A) == 1 and counted_rows(crud, TOKEN_A, counted=False) == 0
+    wait_done(crud, TOKEN_A, first["id"])
+
+
+def test_a_free_replay_over_the_limit_is_429_and_withdrawn(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a_render(crud, TOKEN_A, listing, {"width": 47}, key="k-lost-2")
+    lost_before_attach(crud, "k-lost-2")
+    for w in (30, 31, 32):
+        a_render(crud, TOKEN_A, listing, {"width": w})
+    withdrawn: list[str] = []
+    render = _state(crud.api).render
+
+    async def withdraw(job_id: str, **_kwargs: Any) -> None:
+        withdrawn.append(job_id)
+
+    monkeypatch.setattr(render, "withdraw", withdraw)
+    seen = own_runs(monkeypatch, crud)
+    r = crud.post("/renders", json=render_body(listing, {"width": 47}), key="k-lost-2")
+    assert r.status_code == 429, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_limited"
+    assert withdrawn == [seen[0].id] and ledger_rows(crud, "k-lost-2") == 0
+    assert counted_rows(crud, TOKEN_A) == 3 and counted_rows(crud, TOKEN_A, counted=False) == 0
+
+
 def test_over_the_limit_is_429_with_retry_after(crud: CrudCaller, listing: dict[str, Any]) -> None:
     for w in (30, 31, 32):
         a_render(crud, TOKEN_A, listing, {"width": w})

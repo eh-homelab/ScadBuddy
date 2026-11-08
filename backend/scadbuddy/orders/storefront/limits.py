@@ -254,13 +254,14 @@ class RenderLimits:
         if moved != 1:
             raise LookupError(f"no storefront render row {row_id}")
 
-    def job_of(self, row_id: int) -> str | None:
-        """The job `attach` gave the row; None when it has none yet, or the row is gone."""
+    def state_of(self, row_id: int) -> tuple[str | None, bool] | None:
+        """The row's job (None until `attach`) and whether it counts; None when the row
+        is gone."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT job_id FROM storefront_renders WHERE id = %s", (row_id,)
+                "SELECT job_id, counted FROM storefront_renders WHERE id = %s", (row_id,)
             ).fetchone()
-        return None if row is None else row["job_id"]
+        return None if row is None else (row["job_id"], row["counted"])
 
     def set_counted(self, row_id: int, counted: bool) -> None:
         """Whether the row counts, as its submit answered: a run of its own counts, even
