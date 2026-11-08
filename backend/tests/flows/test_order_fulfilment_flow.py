@@ -422,3 +422,21 @@ def test_a_library_file_item_reads_its_choices_by_its_file() -> None:
     host.run()
     assert host.sources == [{"library_file_id": 7}]
     assert host.printed == ["a"]
+
+
+async def test_a_registration_lost_to_another_replica_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5682: the pre-check saw no version, but another replica registered it
+    first (`register_new` answers None); the log tells that apart from the pre-check."""
+
+    async def register_new(*args: object, **kwargs: object) -> None:
+        return None
+
+    history = SimpleNamespace(available=True, versions=lambda name: [])
+    definitions = SimpleNamespace(history=history, register_new=register_new)
+    with caplog.at_level("INFO", logger="scadbuddy.orders.builtin_flow"):
+        made = await ensure_builtin_flow(cast(FlowDefinitions, definitions))
+    assert made is False
+    assert "another replica registered it first" in caplog.text
+    assert "the name has versions" not in caplog.text
