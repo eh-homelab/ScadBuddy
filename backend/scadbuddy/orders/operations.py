@@ -60,7 +60,7 @@ from scadbuddy.orders.bambuddy import (
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
-from scadbuddy.orders.printing import print_check, print_item, test_print_check
+from scadbuddy.orders.printing import print_check, print_item, sent_setup, test_print_check
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import item_project
 from scadbuddy.orders.quote import (
@@ -141,6 +141,23 @@ def _too_big(plate_id: int) -> ApiError:
     )
 
 
+def preview_request(request: SliceQuoteRequest) -> PrintRunRequest:
+    """The print run's request a quote's background slice prepares (Ruling 2): the
+    dialog's choices, the route, the settings per slot (#5571) and the tower, supports
+    and sequence (#4673), so the quote slices what the print will."""
+    return PrintRunRequest(
+        printer=request.printer,
+        printer_id=request.printer_id,
+        filament_plan=request.filament_plan,
+        choices=request.choices,
+        path=request.path,
+        part_settings=request.part_settings,
+        prime_tower=request.prime_tower,
+        supports=request.supports,
+        print_sequence=request.print_sequence,
+    )
+
+
 class PreviewSlicer:
     """``orders/quote.py``'s ``Slicer`` over the dialog's background slice: Bambuddy's,
     or the native slicer's on ``slicer_backend`` native, as ``start_preview`` picks."""
@@ -171,14 +188,7 @@ class PreviewSlicer:
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
-        body = PrintRunRequest(
-            printer=request.printer,
-            printer_id=request.printer_id,
-            filament_plan=request.filament_plan,
-            choices=request.choices,
-            path=request.path,
-            part_settings=request.part_settings,
-        )
+        body = preview_request(request)
         registry = self.components.get(PRINTERS)
         # The run's own decision (plan 2026-10-18 D2), as the dialog's background slice
         # makes it (`slice_route`): a quote for a printer a run reaches over the LAN
@@ -349,6 +359,7 @@ def print_body(
     project_id: int | None = None,
     filament_plan: Mapping[str, Any] | None = None,
     part_settings: Mapping[str, Any] | None = None,
+    setup: Mapping[str, Any] | None = None,
 ) -> PrintRunRequest:
     """The print run's request for one ``order_item_print`` (its operation's
     ``request``): §5.4's quantity still to print, of the whole output (a quote is the
@@ -357,8 +368,15 @@ def print_body(
     place of any project or folder the request named; ``filament_plan`` the check's
     filled plan (§5.4 "Spools"), in place of the request's. ``part_settings`` are the
     quote's settings per slot (#5571), which a request that sends none prints with, so
-    the print slices what the quote priced."""
+    the print slices what the quote priced; ``setup`` the quote's tower, supports and
+    sequence (#4673, ``printing.quoted_setup``), each taken when the request sent none."""
+    quoted = {
+        key: value
+        for key, value in (setup or {}).items()
+        if key not in request["request"] and value is not None
+    }
     body: dict[str, Any] = {
+        **quoted,
         **request["request"],
         "copies": copies,
         "all_plates": True,
@@ -412,12 +430,13 @@ async def claimed_run(
     projects: Sequence[int | None],
     filament_plan: Mapping[str, Any] | None = None,
     part_settings: Mapping[str, Any] | None = None,
+    setup: Mapping[str, Any] | None = None,
 ) -> PrintRun | None:
     """The run an ``order_item_print`` request made, keyed with any of ``projects``
     (:func:`existing_run` for each, in order), the check's ``filament_plan`` and the
-    quote's ``part_settings``."""
+    quote's ``part_settings`` and ``setup``."""
     for project_id in projects:
-        body = print_body(request, copies, project_id, filament_plan, part_settings)
+        body = print_body(request, copies, project_id, filament_plan, part_settings, setup)
         run = await existing_run(runs, subject, body)
         if run is not None:
             return run
@@ -517,6 +536,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 schema_of=lambda reference: reference_schema(core, reference),
                 by=Actor.model_validate(request["by"]),
                 part_settings=dumped(body.part_settings),
+                setup=sent_setup(request["request"]),
             )
         else:
             checked = await print_check(
@@ -528,6 +548,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 schema_of=lambda reference: reference_schema(core, reference),
                 library=served_library(),
                 part_settings=dumped(body.part_settings),
+                setup=sent_setup(request["request"]),
             )
         if body.printer is not None:
             settings = await asyncio.to_thread(core.settings_store.load)
@@ -637,6 +658,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         plan = checked.get("filament_plan")
         # The quote's settings per slot (#5571); one checked before #5571 has none.
         quoted_settings = checked.get("part_settings")
+        # The quote's tower, supports and sequence (#4673); one checked before has none.
+        setup = checked.get("setup")
 
         async def keyed() -> tuple[bool, list[int | None]]:
             """Whether the claim recorded its project, and the projects its run may be
@@ -651,7 +674,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         async def existing(copies: int) -> PrintRun | None:
             _, projects = await keyed()
             return await claimed_run(
-                core.print_runs, subject, request, copies, projects, plan, quoted_settings
+                core.print_runs, subject, request, copies, projects, plan, quoted_settings, setup
             )
 
         async def start(copies: int) -> PrintRun:
@@ -659,7 +682,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if not recorded:
                 # A claim from before #5263, retried: its run may be under either key.
                 found = await claimed_run(
-                    core.print_runs, subject, request, copies, projects, plan, quoted_settings
+                    core.print_runs,
+                    subject,
+                    request,
+                    copies,
+                    projects,
+                    plan,
+                    quoted_settings,
+                    setup,
                 )
                 if found is not None:
                     return found
@@ -668,7 +698,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 # the file's filament slots, read as that route reads them (#2550).
                 started = await start_library_run(
                     file_id,
-                    print_body(request, copies, projects[0], plan, quoted_settings),
+                    print_body(request, copies, projects[0], plan, quoted_settings, setup),
                     runs=core.print_runs,
                     activity=components.get(ACTIVITY),
                     store=core.settings_store,
@@ -686,7 +716,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 Response(),
                 subject=subject,
                 slug=checked["slug"],
-                request=print_body(request, copies, projects[0], plan, quoted_settings),
+                request=print_body(request, copies, projects[0], plan, quoted_settings, setup),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
                 # #5602: the route's `asked_by_api`; else the run's author tells.

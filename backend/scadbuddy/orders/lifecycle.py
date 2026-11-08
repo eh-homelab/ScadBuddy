@@ -2790,6 +2790,8 @@ class Lifecycle:
         revision_id: str | None,
         quote_id: str | None = None,
         part_settings: dict[str, dict[str, Any]] | None = None,
+        choices: dict[str, Any] | None = None,
+        filament_plan: dict[str, Any] | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
         it, with the plates it read and the sliced file it read them from, under the id
@@ -2805,7 +2807,8 @@ class Lifecycle:
         are taken again in its own transaction, so a row never commits without them,
         whatever another attempt dropped before it. A library file item's quote (#5544)
         names no revision (``revision_id`` None): the item has none. Never on a cart
-        (#5282, ``order_not_submitted``)."""
+        (#5282, ``order_not_submitted``). ``choices`` and ``filament_plan`` are the print
+        setup it sliced with (#4673, ``quote.print_setup``), recorded with it."""
         self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
@@ -2844,6 +2847,8 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
                 part_settings=part_settings,
+                choices=choices,
+                filament_plan=filament_plan,
             )
             self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)
