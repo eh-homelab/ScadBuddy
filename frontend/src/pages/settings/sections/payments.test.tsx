@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../../api/client'
-import { resetMockState } from '../../../mocks/handlers'
+import { mockSettings, resetMockState } from '../../../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
 import { ORDER_ACCEPTED } from '../../../mocks/features/orders/state'
 import { enter, region, renderSettingsSection } from '../testing'
@@ -103,3 +103,23 @@ describe('Settings → Payments (#4957)', () => {
     expect((await api.connectPaymentProvider('fake', body)).connected).toBe(true)
   })
 })
+
+describe('Settings → Payments, paying by hand (#5281)', () => {
+  beforeEach(() => resetMockState())
+
+  it('saves the payment instructions as plain text', async () => {
+    const { user } = renderSettingsSection(<Payments />, { route })
+    const box = await screen.findByLabelText('Payment instructions')
+    await user.type(box, 'Bank transfer to <b>12-34</b>, with the order number.')
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }))
+    await waitFor(() => expect(mockSettings().storefront_payment_instructions).toBe('Bank transfer to <b>12-34</b>, with the order number.'))
+    expect(await screen.findByText('Saved.')).toBeInTheDocument()
+    // Kept as typed: plain text, never markup.
+    expect(box).toHaveValue('Bank transfer to <b>12-34</b>, with the order number.')
+    // Cleared, it is null again.
+    await user.clear(box)
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }))
+    await waitFor(() => expect(mockSettings().storefront_payment_instructions).toBeNull())
+  })
+})
+

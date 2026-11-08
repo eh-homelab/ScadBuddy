@@ -470,6 +470,10 @@ export type ProviderStatus = Schemas['ProviderStatus']
 export type ProviderConnect = Schemas['ProviderConnect']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
+/** #5281 — the shop's money rules (Settings → Orders): a rule of the deposit policy, and a
+ * way an order reaches its customer at a fixed price. */
+export type DepositRule = Schemas['DepositRule']
+export type ShippingOption = Schemas['ShippingOption']
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
  * places, the backend's (ISO 4217) and never `Intl`'s. */

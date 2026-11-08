@@ -126,6 +126,21 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'text',
     help: 'An order or item whose margin is below this percent of what was charged is marked thin, in amber. Below 0 it is a loss, in red. Such as 15.',
   },
+  // #5281 — auto tax (storefront spec §9): one `tax` charge ScadBuddy computes on an open order.
+  {
+    name: 'orders_tax_percent',
+    section: 'orders',
+    label: 'Tax, percent',
+    kind: 'text',
+    help: 'Added to an open order as one tax charge: this percent of its items, rounded half up, such as 8.25. At least 0 and below 100; 0 adds none. A tax charge typed on an order replaces it. A change applies to an order the next time its items or charges change.',
+  },
+  {
+    name: 'orders_tax_shipping',
+    section: 'orders',
+    label: 'Tax shipping too',
+    kind: 'bool',
+    help: 'On, the tax is also on the shipping charges. Fees and discounts are never taxed.',
+  },
   {
     name: 'pricing_usd_rate',
     section: 'orders',

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Order, OrderCharge } from '../../api/types'
 import { formatMoney, toMajor, toMinor } from '../../lib/money'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -8,16 +9,21 @@ import { refusalText } from './refusal'
 import { chargesWarning, saveCharges, type AddMode } from './afterAcceptance'
 
 const KINDS: OrderCharge['kind'][] = ['shipping', 'discount', 'fee', 'tax']
-type Row = { kind: OrderCharge['kind']; label: string; amount: string }
+/** An editable charge; `shipping_option_id` is kept so a save does not drop the option (#5281). */
+type Row = { kind: OrderCharge['kind']; label: string; amount: string; shipping_option_id?: string | null }
 
 /** The order's charges (§3.2: shipping, discount, fee, tax), replaced whole while draft or
  * quoted, and (#5351) on an accepted, in-production or ready order not on hold, through
- * `PUT …/charges/after-acceptance` after a confirm that names the order's status. */
+ * `PUT …/charges/after-acceptance` after a confirm that names the order's status. The auto
+ * tax row (#5281), which ScadBuddy computes from `orders_tax_percent`, is shown read-only
+ * with an "auto" tag and never sent: the backend keeps and recomputes it. */
 export function ChargesEditor({
   order,
   charges,
   mode,
   onChanged,
+  onDirtyChange,
+  locked = false,
 }: {
   order: Pick<Order, 'id' | 'number' | 'status' | 'currency' | 'minor_exponent'>
   charges: OrderCharge[]
@@ -25,6 +31,11 @@ export function ChargesEditor({
    * route after a confirm, null shows the charges read-only. */
   mode: AddMode | null
   onChanged: () => void
+  /** Told when the editor gets unsaved rows and when it loses them (#5281: the shipping
+   * option picker writes the same list, so it waits while they stand). */
+  onDirtyChange?: (dirty: boolean) => void
+  /** While the shipping option is being written: no edit starts on rows it will replace. */
+  locked?: boolean
 }) {
   const { currency, minor_exponent: exponent } = order
   const editable = mode !== null
@@ -34,9 +45,42 @@ export function ChargesEditor({
   const [error, setError] = useState<string | null>(null)
   // #5351: the save to an accepted order waits for a second click on the confirm.
   const [confirming, setConfirming] = useState(false)
+  const auto = charges.find((c) => c.auto)
   useEffect(() => {
-    if (!dirty) setRows(charges.map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent) })))
+    if (!dirty) setRows(charges.filter((c) => !c.auto).map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent), shipping_option_id: c.shipping_option_id ?? null })))
   }, [charges, exponent, dirty])
+  // A save answered: the charges it was made over, until the reload brings new ones. The
+  // editor stays unsaved till then, so its rows do not flash back and the picker stays off.
+  const savedOver = useRef<OrderCharge[] | null>(null)
+  const [awaiting, setAwaiting] = useState(false)
+  useEffect(() => {
+    if (savedOver.current !== null && charges !== savedOver.current) {
+      savedOver.current = null
+      setAwaiting(false)
+      setDirty(false)
+    }
+  }, [charges])
+  // No edit starts while the rows are about to be replaced, by the picker or by the reload.
+  const frozen = locked || awaiting
+  const told = useRef(onDirtyChange)
+  useEffect(() => {
+    told.current = onDirtyChange
+  })
+  useEffect(() => {
+    told.current?.(dirty)
+  }, [dirty])
+  // A typed tax beside the auto row with the same label would read as one line on the
+  // order and its summary: it needs another label.
+  const clashes = (row: Row) => auto !== undefined && row.kind === 'tax' && row.label.trim() === auto.label
+  const clash = rows.some(clashes)
+  const autoRow = auto && (
+    <p className="flex justify-between gap-2 text-[13px]" data-testid="auto-tax">
+      <span>
+        {auto.label} <Badge variant="secondary">auto</Badge>
+      </span>
+      <span className="sb-num">{formatMoney(auto.amount_minor, currency, exponent)}</span>
+    </p>
+  )
 
   if (!editable) {
     return (
@@ -49,7 +93,7 @@ export function ChargesEditor({
             {charges.map((c) => (
               <li key={c.id} className="flex justify-between gap-2">
                 <span>
-                  {c.label} <span className="text-muted-foreground">({c.kind})</span>
+                  {c.label} <span className="text-muted-foreground">({c.kind})</span> {c.auto && <Badge variant="secondary">auto</Badge>}
                 </span>
                 <span className="sb-num">{formatMoney(c.amount_minor, currency, exponent)}</span>
               </li>
@@ -63,7 +107,9 @@ export function ChargesEditor({
   const edit = (index: number, patch: Partial<Row>) => {
     setDirty(true)
     setConfirming(false)
-    setRows((was) => was.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+    // A charge edited away from its option's label or price no longer claims the option.
+    const unclaim = 'label' in patch || 'amount' in patch ? { shipping_option_id: null } : {}
+    setRows((was) => was.map((row, i) => (i === index ? { ...row, ...patch, ...unclaim } : row)))
   }
 
   return (
@@ -73,6 +119,7 @@ export function ChargesEditor({
         className="flex flex-col gap-2"
         onSubmit={(event) => {
           event.preventDefault()
+          if (clash) return
           const body = []
           for (const row of rows) {
             const minor = toMinor(row.amount, exponent)
@@ -80,7 +127,9 @@ export function ChargesEditor({
               setError('Each charge needs a label and an amount; a discount is negative.')
               return
             }
-            body.push({ kind: row.kind, label: row.label.trim(), amount_minor: minor })
+            // Only a shipping charge names an option; another kind drops it.
+            const option = row.kind === 'shipping' ? row.shipping_option_id : null
+            body.push({ kind: row.kind, label: row.label.trim(), amount_minor: minor, ...(option ? { shipping_option_id: option } : {}) })
           }
           if (mode === 'after_acceptance' && !confirming) {
             setConfirming(true)
@@ -90,7 +139,8 @@ export function ChargesEditor({
           setError(null)
           saveCharges(order.id, body, mode)
             .then(() => {
-              setDirty(false)
+              savedOver.current = charges
+              setAwaiting(true)
               setConfirming(false)
               onChanged()
             })
@@ -103,7 +153,7 @@ export function ChargesEditor({
       >
         {rows.map((row, index) => (
           <div key={index} className="flex flex-wrap items-center gap-2">
-            <Select value={row.kind} onValueChange={(kind) => edit(index, { kind: kind as OrderCharge['kind'] })}>
+            <Select value={row.kind} disabled={frozen} onValueChange={(kind) => edit(index, { kind: kind as OrderCharge['kind'] })}>
               <SelectTrigger aria-label={`Charge ${index + 1} kind`} className="w-28">
                 <SelectValue />
               </SelectTrigger>
@@ -115,13 +165,14 @@ export function ChargesEditor({
                 ))}
               </SelectContent>
             </Select>
-            <Input aria-label={`Charge ${index + 1} label`} className="w-40" value={row.label} onChange={(e) => edit(index, { label: e.target.value })} />
-            <Input aria-label={`Charge ${index + 1} amount`} inputMode="decimal" className="w-24" value={row.amount} onChange={(e) => edit(index, { amount: e.target.value })} />
+            <Input aria-label={`Charge ${index + 1} label`} disabled={frozen} className="w-40" value={row.label} onChange={(e) => edit(index, { label: e.target.value })} />
+            <Input aria-label={`Charge ${index + 1} amount`} disabled={frozen} inputMode="decimal" className="w-24" value={row.amount} onChange={(e) => edit(index, { amount: e.target.value })} />
             <Button
               type="button"
               size="xs"
               variant="ghost"
               aria-label={`Remove charge ${index + 1}`}
+              disabled={frozen}
               onClick={() => {
                 setDirty(true)
                 setConfirming(false)
@@ -130,13 +181,20 @@ export function ChargesEditor({
             >
               Remove
             </Button>
+            {clashes(row) && auto && (
+              <p role="alert" aria-label={`Charge ${index + 1} label problem`} className="w-full text-xs text-warn">
+                {`Two tax lines must not share a label: “${auto.label}” is the automatic tax. Give this one another label.`}
+              </p>
+            )}
           </div>
         ))}
+        {autoRow}
         <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
             size="sm"
             variant="outline"
+            disabled={frozen}
             onClick={() => {
               setDirty(true)
               setConfirming(false)
@@ -150,7 +208,21 @@ export function ChargesEditor({
               Back
             </Button>
           )}
-          <Button type="submit" size="sm" disabled={busy || !dirty}>
+          {dirty && !confirming && !awaiting && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setDirty(false)
+                setError(null)
+              }}
+            >
+              Discard
+            </Button>
+          )}
+          <Button type="submit" size="sm" disabled={busy || !dirty || clash || frozen}>
             {confirming ? 'Change the accepted order' : 'Save charges'}
           </Button>
         </div>

@@ -1070,9 +1070,12 @@ export const settingsDeployment: Record<string, unknown> = {
   google_fonts_api_key: 'from-the-deployment',
 }
 
+/** #5281 — stored only, never env-seeded: no source badge and no reset. */
+const STORED_ONLY = new Set(['orders_deposit_policy', 'storefront_shipping_options', 'storefront_payment_instructions'])
+
 /** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
 export const settingsApplies: NonNullable<Settings['applies']> = {
-  ...Object.fromEntries(Object.keys(settingsDefaults).map((name) => [name, 'live' as const])),
+  ...Object.fromEntries(Object.keys(settingsDefaults).filter((name) => !STORED_ONLY.has(name)).map((name) => [name, 'live' as const])),
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
   git_remote_token: 'live',

@@ -106,3 +106,58 @@ describe('Orders, job cost (#5326)', () => {
     expect(mockSettings().pricing_usd_rate).toBe('1')
   })
 })
+
+describe('Orders, money rules (#5281)', () => {
+  it('saves the tax, the deposit policy and the shipping options', async () => {
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const orders = region('Orders')
+    const field = (label: string) => within(orders).getByLabelText(label)
+    await user.clear(field('Tax, percent'))
+    await enter(user, field('Tax, percent'), '8.25')
+    await user.click(within(orders).getByRole('switch', { name: 'Tax shipping too' }))
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().orders_tax_percent).toBe('8.25'))
+    expect(mockSettings().orders_tax_shipping).toBe(true)
+
+    const policy = await within(orders).findByRole('region', { name: 'Deposit policy' })
+    await user.click(within(policy).getByRole('button', { name: 'Add rule' }))
+    // A design request has no estimate: a percent of it is zero, so the note says so.
+    expect(within(policy).getByText('A design request has no estimate, so a percent counts it as zero: use a fixed amount')).toBeInTheDocument()
+    await choose(user, within(policy).getByRole('combobox', { name: 'Rule 1 criterion' }), 'Total above')
+    expect(within(policy).queryByText(/A design request has no estimate/)).toBeNull()
+    await user.type(within(policy).getByLabelText('Rule 1 above (USD)'), '100')
+    await choose(user, within(policy).getByRole('combobox', { name: 'Rule 1 amount type' }), 'Percent')
+    await user.type(within(policy).getByLabelText('Rule 1 percent'), '50')
+    await user.click(within(policy).getByRole('button', { name: 'Save deposit policy' }))
+    await waitFor(() => expect(mockSettings().orders_deposit_policy).toEqual([{ criterion: 'total_above', above_minor: 10000, percent: '50' }]))
+
+    const options = within(orders).getByRole('region', { name: 'Shipping options' })
+    await user.click(within(options).getByRole('button', { name: 'Add option' }))
+    await user.type(within(options).getByLabelText('Option 1 id'), 'pickup')
+    await user.type(within(options).getByLabelText('Option 1 label'), 'Pick up at the shop')
+    await user.type(within(options).getByLabelText('Option 1 price (USD)'), '0')
+    await user.click(within(options).getByRole('checkbox', { name: 'Option 1 ships' }))
+    await user.click(within(options).getByRole('button', { name: 'Add option' }))
+    await user.type(within(options).getByLabelText('Option 2 id'), 'post')
+    await user.type(within(options).getByLabelText('Option 2 label'), 'Tracked post')
+    await user.type(within(options).getByLabelText('Option 2 price (USD)'), '6.50')
+    await user.click(within(options).getByRole('button', { name: 'Save shipping options' }))
+    await waitFor(() =>
+      expect(mockSettings().storefront_shipping_options).toEqual([
+        { id: 'pickup', label: 'Pick up at the shop', amount_minor: 0, ships: false },
+        { id: 'post', label: 'Tracked post', amount_minor: 650, ships: true },
+      ]),
+    )
+  })
+
+  it('refuses a fixed rule with no amount before it saves', async () => {
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const policy = await within(region('Orders')).findByRole('region', { name: 'Deposit policy' })
+    await user.click(within(policy).getByRole('button', { name: 'Add rule' }))
+    await user.click(within(policy).getByRole('button', { name: 'Save deposit policy' }))
+    expect(await within(policy).findByRole('alert')).toHaveTextContent('Rule 1: enter a fixed amount, such as 20.00.')
+    expect(mockSettings().orders_deposit_policy).toEqual([])
+  })
+})
