@@ -44,8 +44,9 @@ INPUTS = MachineRateInputs(
 
 
 class FakeBambuddy:
-    def __init__(self, tasks: list[MaintenanceTask] | None) -> None:
+    def __init__(self, tasks: list[MaintenanceTask] | None, *, garbled: bool = False) -> None:
         self.tasks = tasks
+        self.garbled = garbled
         self.asked: list[int] = []
 
     @property
@@ -56,6 +57,9 @@ class FakeBambuddy:
         self.asked.append(printer_id)
         if self.tasks is None:
             raise ApiError(502, "Bambuddy did not answer")
+        if self.garbled:
+            # A reply that does not validate, as the client's model_validate raises.
+            MaintenanceTask.model_validate({})
         return self.tasks
 
 
@@ -217,3 +221,66 @@ def test_the_money_views_fallback_is_the_default_printers_rate(
     assert machine.money_rates() == ("0.9", {lan.id: "0.7"})
     settings_store.save(SettingsPatch(default_printer=lan.id))
     assert machine.money_rates() == ("0.7", {lan.id: "0.7"})
+
+
+async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    garbled = FakeBambuddy([], garbled=True)
+    rate = await rates(store, printers, settings_store, garbled).breakdown(printer)
+    assert garbled.asked == [7]
+    assert rate.intervals == "stored"
+    assert rate.maintenance_per_hour == "0.12"
+
+
+def test_the_check_reads_the_quotes_printers_stored_rate(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """The quote's check prices nothing only when the printer's rate is 0 too, read with
+    no Bambuddy call."""
+    lan = lan_printer(printers)
+    bambuddy = FakeBambuddy(None)
+    machine = rates(store, printers, settings_store, bambuddy)
+    assert machine.check_rate(lan.id, None) is None
+    assert machine.check_rate(None, None) is None
+    store.replace(lan.id, INPUTS)
+    assert machine.check_rate(lan.id, None) == "0.7"
+    assert bambuddy.asked == []
+
+
+def _merge(printers: PrinterStore, store: MachineRateStore, kept: MachineRateInputs | None) -> str:
+    """A synthetic Bambuddy row with inputs merged into the row holding the serial, which
+    has ``kept``; the kept row's id."""
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    store.replace(gone.id, INPUTS)
+    mine = printers.create(PrinterCreate(serial="01P00A000000001", name="Mine"))
+    if kept is not None:
+        store.replace(mine.id, kept)
+    merged = printers.ensure_bambuddy(4, serial="01P00A000000001", name="H2C", model="H2C")
+    assert merged.id == mine.id and printers.get(gone.id) is None
+    return mine.id
+
+
+def test_a_merge_keeps_the_kept_printers_inputs_whole(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    """The kept printer has a profile and no parts or tasks: the gone printer's parts and
+    tasks are dropped with its profile, never mixed in."""
+    own = MachineRateInputs(profile=CostProfile(watts="300"))
+    kept = _merge(printers, store, own)
+    stored = store.stored(kept)
+    assert (stored.profile, stored.wear, stored.costs) == (own.profile, [], [])
+
+
+def test_a_merge_moves_every_input_to_a_printer_with_none(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    kept = _merge(printers, store, None)
+    stored = store.stored(kept)
+    assert (stored.profile, stored.wear, stored.costs) == (
+        INPUTS.profile,
+        INPUTS.wear_parts,
+        INPUTS.maintenance,
+    )

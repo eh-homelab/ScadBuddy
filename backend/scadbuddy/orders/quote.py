@@ -765,7 +765,8 @@ def price_quote(
     supports: set[int] = set()
     for number, filament_id in (support or {}).items():
         record = store.filament(filament_id)
-        if number not in filaments and record is not None:
+        # One archived since the check is refused as an unpriced slot (``price``).
+        if number not in filaments and record is not None and record.archived_at is None:
             filaments[number] = record
             supports.add(number)
     try:

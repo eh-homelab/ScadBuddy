@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,7 +32,7 @@ from typing import Annotated, Literal, Self
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -285,46 +286,56 @@ class MachineRateStore:
         key = printer_uuid(printer)
         if key is None:
             return Stored(None, [], [], None)
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT purchase_price, life_hours, watts, kwh_price, labour_rate_per_hour"
-                " FROM printer_cost_profiles WHERE printer = %s",
-                (key,),
-            ).fetchone()
-            parts = conn.execute(
-                "SELECT name, cost, life_hours FROM printer_wear_parts WHERE printer = %s"
-                " ORDER BY position",
-                (key,),
-            ).fetchall()
-            rows = conn.execute(
-                "SELECT task, minutes, consumables, interval_hours, interval_read_at"
-                " FROM printer_maintenance_costs WHERE printer = %s ORDER BY task",
-                (key,),
-            ).fetchall()
-        profile = None
-        if row is not None:
-            profile = CostProfile.model_validate({k: _number(v) for k, v in row.items()})
-        wear = [
-            WearPart(name=r["name"], cost=_text(r["cost"]), life_hours=_text(r["life_hours"]))
-            for r in parts
-        ]
-        costs = [
-            MaintenanceCost(
-                task=r["task"],
-                minutes=_text(r["minutes"]),
-                consumables=_text(r["consumables"]),
-                interval_hours=_number(r["interval_hours"]),
-            )
-            for r in rows
-        ]
-        read = [r["interval_read_at"] for r in rows if r["interval_read_at"] is not None]
-        return Stored(profile, wear, costs, max(read) if read else None)
+        return self._read([key]).get(str(key), Stored(None, [], [], None))
 
-    def profiled(self) -> list[str]:
-        """Every printer with a profile."""
+    def stored_all(self) -> dict[str, Stored]:
+        """Every profiled printer's rows, by registry id: one query per table."""
+        return self._read(None)
+
+    def _read(self, keys: list[uuid.UUID] | None) -> dict[str, Stored]:
+        """The rows of ``keys``' printers (None: every printer with a profile), one query
+        per table whatever their number."""
+        where = "" if keys is None else " WHERE printer = ANY(%s)"
+        args: tuple[object, ...] = () if keys is None else (keys,)
         with self._pool.connection() as conn:
-            rows = conn.execute("SELECT printer FROM printer_cost_profiles").fetchall()
-        return [str(row["printer"]) for row in rows]
+            profiles = conn.execute(
+                "SELECT printer, purchase_price, life_hours, watts, kwh_price,"
+                f" labour_rate_per_hour FROM printer_cost_profiles{where}",
+                args,
+            ).fetchall()
+            parts = conn.execute(
+                f"SELECT printer, name, cost, life_hours FROM printer_wear_parts{where}"
+                " ORDER BY printer, position",
+                args,
+            ).fetchall()
+            tasks = conn.execute(
+                "SELECT printer, task, minutes, consumables, interval_hours, interval_read_at"
+                f" FROM printer_maintenance_costs{where} ORDER BY printer, task",
+                args,
+            ).fetchall()
+        found: dict[str, Stored] = {}
+        for row in profiles:
+            fields = {k: _number(v) for k, v in row.items() if k != "printer"}
+            found[str(row["printer"])] = Stored(CostProfile.model_validate(fields), [], [], None)
+        for r in parts:
+            held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
+            held.wear.append(
+                WearPart(name=r["name"], cost=_text(r["cost"]), life_hours=_text(r["life_hours"]))
+            )
+        for r in tasks:
+            held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
+            held.costs.append(
+                MaintenanceCost(
+                    task=r["task"],
+                    minutes=_text(r["minutes"]),
+                    consumables=_text(r["consumables"]),
+                    interval_hours=_number(r["interval_hours"]),
+                )
+            )
+            read_at = r["interval_read_at"]
+            if read_at is not None and (held.read_at is None or read_at > held.read_at):
+                held.read_at = read_at
+        return found
 
     def replace(self, printer: str, body: MachineRateInputs) -> None:
         """The printer's inputs, replaced whole in one transaction. A task whose interval
@@ -451,7 +462,8 @@ class MachineRates:
             if live and self.integrations.linked:
                 try:
                     tasks = await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
-                except (ApiError, NotLinkedError):
+                except (ApiError, NotLinkedError, ValidationError):
+                    # A reply that does not validate is Bambuddy not answering usefully.
                     logger.warning(
                         "Bambuddy's maintenance tasks could not be read; the stored"
                         " intervals price the machine rate",
@@ -477,21 +489,37 @@ class MachineRates:
         """Every profiled printer's rate from its stored intervals, by registry id: no
         Bambuddy call, for the money view (job cost spec §4.1). Blocking."""
         runtime = self.settings.snapshot().runtime
-        rates: dict[str, str] = {}
-        for printer in self.store.profiled():
-            stored = self.store.stored(printer)
-            if stored.profile is None:
-                continue
-            rates[printer] = compute(
-                stored.profile,
-                stored.wear,
-                stored.costs,
-                None,
-                default_labour=runtime.pricing_labour_rate_per_hour,
-                currency=runtime.orders_currency,
-                intervals="stored",
-            ).rate_per_hour
-        return rates
+        return {
+            printer: self._stored_rate(stored, runtime.pricing_labour_rate_per_hour)
+            for printer, stored in self.store.stored_all().items()
+            if stored.profile is not None
+        }
+
+    @staticmethod
+    def _stored_rate(stored: Stored, default_labour: str) -> str:
+        assert stored.profile is not None
+        return compute(
+            stored.profile,
+            stored.wear,
+            stored.costs,
+            None,
+            default_labour=default_labour,
+            currency="",
+            intervals="stored",
+        ).rate_per_hour
+
+    def check_rate(self, printer: str | None, printer_id: int | None) -> str | None:
+        """The stored rate of the printer a quote names (:meth:`resolve`), with no
+        Bambuddy call, for the quote's check; None for no printer or no profile.
+        Blocking."""
+        row = self.resolve(printer, printer_id)
+        if row is None:
+            return None
+        stored = self.store.stored(row.id)
+        if stored.profile is None:
+            return None
+        labour = self.settings.snapshot().runtime.pricing_labour_rate_per_hour
+        return self._stored_rate(stored, labour)
 
     def money_rates(self) -> tuple[str, dict[str, str]]:
         """The money view's machine rates (job cost spec §4.1): for an attempt with no

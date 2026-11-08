@@ -1056,3 +1056,19 @@ def test_the_support_check_refuses_a_colour_slot_or_an_unknown_filament(shop: Sh
         update={"support_filaments": {2: shop.petg}}
     )
     support_check(shop.rows, shop.item.id, request)
+
+
+async def test_a_support_filament_archived_since_the_check_refuses_the_quote(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """Archived between the check and the run, as a colour slot's would be refused: never
+    priced from a filament the book hides."""
+    files = {1: sliced_plate(1, 3600, [10.0, 5.0, 2.0])}
+    request = shop.request(s0=shop.pla, s1=shop.pla).model_copy(
+        update={"support_filaments": {2: shop.petg}}
+    )
+    shop.rows.archive_filament(shop.petg)
+    with pytest.raises(ApiError) as refused:
+        await quote_run(run_of(shop, tmp_path, files), shop.order.id, shop.item.id, request, BY)
+    assert refused.value.status == 422
+    assert "slot 2" in refused.value.detail
