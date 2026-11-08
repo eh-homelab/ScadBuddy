@@ -35,7 +35,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Literal, LiteralString, Protocol
 
@@ -64,6 +64,12 @@ RunStatus = Literal["running", "succeeded", "failed"]
 #: for a client that sends no ``request_id``. Long enough for any retry of a request a
 #: proxy cut.
 REPEAT_WINDOW = timedelta(minutes=10)
+
+#: How long before the window of `PrintRunStore.lan_unnamed` a run may have been made
+#: and still have its LAN starts read (#5749): a run of several prints starts each one
+#: once the one before it is done, so its starts can come days after it was made. With
+#: the 14-day window, a start of a run made more than 28 days ago is not looked for.
+LAN_RUN_SPAN = timedelta(days=14)
 
 UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while preparing this print; see its logs."
 
@@ -299,11 +305,15 @@ class PrintRunStore:
             return []
         return await asyncio.to_thread(self._lan_started, run_subject, subtask_names)
 
-    async def lan_unnamed(self, since: datetime, limit: int) -> list[LanPending]:
+    async def lan_unnamed(
+        self, since: datetime, limit: int, *, skip: Sequence[str] = ()
+    ) -> list[LanPending]:
         """The run subjects with a LAN start since ``since`` that no archive names yet
-        (``lan_print_archives``, #5724), newest start first, at most ``limit``: what the
-        prints list looks for in Bambuddy's archives (`linking.link_lan_starts`)."""
-        return await asyncio.to_thread(self._lan_unnamed, since, limit)
+        (``lan_print_archives``, #5724), newest start first, at most ``limit``, other than
+        ``skip``: what the prints list looks for in Bambuddy's archives
+        (`linking.link_lan_starts`). Only the runs made since `LAN_RUN_SPAN` before
+        ``since`` are read (#5749), so the other runs' results are never expanded."""
+        return await asyncio.to_thread(self._lan_unnamed, since, limit, list(skip))
 
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         """The output's newest run, for as long as retention keeps it (#1049): the one
@@ -466,7 +476,7 @@ class PrintRunStore:
             ).fetchall()
         return [PrintRun.model_validate(row) for row in rows]
 
-    def _lan_unnamed(self, since: datetime, limit: int) -> list[LanPending]:
+    def _lan_unnamed(self, since: datetime, limit: int, skip: list[str]) -> list[LanPending]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT r.output_id AS subject, min(s.at) AS first, max(s.at) AS last"
@@ -475,11 +485,13 @@ class PrintRunStore:
                 # A result with no start list (a queued run's, or none yet) gives no rows.
                 "  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
                 "   THEN r.result->'lan' END) AS e) AS s"
-                " WHERE s.at >= %s"
+                # On the run's own columns, so only these runs' results are expanded.
+                " WHERE r.created_at >= %(made)s AND r.output_id <> ALL(%(skip)s)"
+                " AND s.at >= %(since)s"
                 " AND NOT EXISTS (SELECT 1 FROM lan_print_archives a"
                 "  WHERE a.run_id = r.id AND a.subtask_name = s.name)"
-                " GROUP BY r.output_id ORDER BY max(s.at) DESC LIMIT %s",
-                (since, limit),
+                " GROUP BY r.output_id ORDER BY max(s.at) DESC LIMIT %(limit)s",
+                {"made": since - LAN_RUN_SPAN, "skip": skip, "since": since, "limit": limit},
             ).fetchall()
         return [LanPending.model_validate(dict(row)) for row in rows]
 
