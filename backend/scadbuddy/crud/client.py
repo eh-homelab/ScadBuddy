@@ -42,10 +42,11 @@ module imports no database code (`crud/wire.py`, `auth/service_auth.py`).
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from typing import Any, Literal
 
 import httpx
@@ -72,7 +73,9 @@ BACKOFF_MAX = 2.0
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 OUT_OF_SCOPE = "out_of_scope"
 
-Outcome = Literal["ok", "refused", "route_missing", "unavailable", "transport", "reexchange"]
+Outcome = Literal[
+    "ok", "refused", "route_missing", "unavailable", "transport", "reexchange", "relay_failed"
+]
 
 
 #: Why a call's last try failed. ``unreached``: no connection was made (refused, a connect
@@ -264,13 +267,29 @@ class _Base:
 
 class CrudStream:
     """A response whose body is still to be read (`CrudClient.stream`): read it with
-    ``response.aiter_bytes()``, then `aclose` it."""
+    `aiter_bytes`, then `aclose` it. Its attempt is counted at `aclose`: ``ok`` when the
+    body was read to its end, ``relay_failed`` when it broke or was closed before."""
 
-    def __init__(self, response: httpx.Response, own: httpx.AsyncClient | None) -> None:
+    def __init__(
+        self,
+        response: httpx.Response,
+        own: httpx.AsyncClient | None,
+        observe: Callable[[Outcome], None] | None = None,
+    ) -> None:
         self.response = response
         self._own = own
+        self._observe = observe
+        self._relayed = False
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        async for chunk in self.response.aiter_bytes():
+            yield chunk
+        self._relayed = True
 
     async def aclose(self) -> None:
+        observe, self._observe = self._observe, None
+        if observe is not None:
+            observe("ok" if self._relayed else "relay_failed")
         await self.response.aclose()
         if self._own is not None:
             await self._own.aclose()
@@ -384,10 +403,10 @@ class CrudClient(_Base):
                 call.failed(error, started)
                 await self._sleep(call.delay())
                 continue
-            opened = CrudStream(response, fresh)
             if response.status_code < 400 and CRUD_HEADER in response.headers:
-                call.judge(response, started)
-                return opened
+                # Judged once its body is relayed (`CrudStream.aclose`), not before.
+                return CrudStream(response, fresh, functools.partial(call.observe, started=started))
+            opened = CrudStream(response, fresh)
             try:
                 # A refusal or a retry is judged from its problem, which is small.
                 await response.aread()
