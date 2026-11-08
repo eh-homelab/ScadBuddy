@@ -994,10 +994,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   doubled per failed try, at most a day), claimed `FOR UPDATE SKIP LOCKED` with
   `close_tried_at` stamped as they are taken, so the two Schedules' runs never try one
   page at once. A try that finds the provider not connected, once the page has
-  `CLOSE_GIVE_UP_ATTEMPTS` (10, about three and a half days) failed tries, gives it up
-  (`close_abandoned_at`); any other failure is tried again at most a day apart. It never
-  runs the lifecycle again. The order page says "Close not yet confirmed" while the mark
-  stands, and "Could not close; close it at <provider>" once given up
+  `CLOSE_GIVE_UP_ATTEMPTS` (10; the tenth comes about 66.5 hours, 2.8 days, after the
+  cancel) failed tries, gives it up (`close_abandoned_at`); any other failure is tried
+  again at most a day apart. Connecting the provider again (`PaymentCredentials.connect`,
+  `resume_closes`) starts its marked pages' tries over, given up or not, and a new or
+  cleared mark (`set_request_status`) clears the give-up and the tries. It never runs the
+  lifecycle again. The order page says "Close not yet confirmed" while the mark stands,
+  and "Could not close; close it at <provider>" once given up, only while the mark stands
   (`PaymentRequests.tsx`). A page the provider made after its request was cancelled or
   paid by hand (`Payments.link`'s race) is kept with its `provider_ref`, no `hosted_url`,
   and the mark (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`),

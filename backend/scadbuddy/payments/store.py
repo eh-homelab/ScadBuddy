@@ -33,7 +33,9 @@ CLOSE_RETRY_FIRST_MINUTES = 5
 CLOSE_RETRY_BATCH = 8
 #: A page whose provider is not connected on this try, once it has failed this many
 #: tries (the close after the commit counts), is given up (`close_abandoned_at`). With
-#: the backoff that is about three and a half days: long enough for a shop to reconnect.
+#: the backoff the last of those tries comes about 66.5 hours (2.8 days) after the cancel
+#: (10 + 20 + ... + 1280 minutes, then a day): long enough for a shop to reconnect, and
+#: a reconnect starts the tries over (`resume_closes`).
 CLOSE_GIVE_UP_ATTEMPTS = 10
 
 
@@ -107,19 +109,25 @@ def set_request_status(
     """#5700: the one place that marks a provider's page to close (``close_pending_at``).
     A request with a page that is cancelled, or paid by a payment that is not its own
     provider's (by hand, or a payment on another request that cleared the balance), is
-    marked. Its own provider's payment clears the mark: the page was paid."""
+    marked. Its own provider's payment clears the mark: the page was paid. A new mark, or
+    a cleared one, starts the close over: no tries and no give-up (#5728 review)."""
     row = conn.execute(
         "UPDATE payment_requests r SET status = %(status)s,"
         " paid_at = CASE WHEN %(status)s = 'paid' THEN clock_timestamp() END,"
         " payment_id = COALESCE(%(payment)s, r.payment_id),"
-        " close_pending_at = CASE"
-        "  WHEN r.provider_ref IS NOT NULL AND (%(status)s = 'cancelled' OR"
+        " close_pending_at = CASE WHEN m.mark THEN clock_timestamp()"
+        "  WHEN %(status)s = 'paid' THEN NULL ELSE r.close_pending_at END,"
+        " close_abandoned_at = CASE WHEN m.mark OR %(status)s = 'paid' THEN NULL"
+        "  ELSE r.close_abandoned_at END,"
+        " close_attempts = CASE WHEN m.mark OR %(status)s = 'paid' THEN 0"
+        "  ELSE r.close_attempts END,"
+        " close_tried_at = CASE WHEN m.mark OR %(status)s = 'paid' THEN NULL"
+        "  ELSE r.close_tried_at END"
+        " FROM (SELECT q.provider_ref IS NOT NULL AND (%(status)s = 'cancelled' OR"
         "   (%(status)s = 'paid' AND EXISTS (SELECT 1 FROM order_payments p"
         "    WHERE p.id = %(payment)s"
-        "    AND (p.provider IS NULL OR p.payment_request_id IS DISTINCT FROM r.id))))"
-        "  THEN clock_timestamp()"
-        "  WHEN %(status)s = 'paid' THEN NULL"
-        "  ELSE r.close_pending_at END"
+        "    AND (p.provider IS NULL OR p.payment_request_id IS DISTINCT FROM q.id))))"
+        "  AS mark FROM payment_requests q WHERE q.id = %(id)s) m"
         f" WHERE r.id = %(id)s RETURNING {_VIEW}",
         {"status": status, "payment": payment_id, "id": request_id},
     ).fetchone()
@@ -172,6 +180,16 @@ def close_failed(
         "  THEN clock_timestamp() ELSE close_abandoned_at END"
         " WHERE id = %s AND provider_ref = %s AND close_pending_at IS NOT NULL",
         (provider_gone, CLOSE_GIVE_UP_ATTEMPTS, request_id, provider_ref),
+    )
+
+
+def resume_closes(conn: Conn, provider: str) -> None:
+    """#5728 review: the shop connected ``provider`` again. Its marked pages, given up or
+    not, start their tries over, so the sweep closes them from the first wait."""
+    conn.execute(
+        "UPDATE payment_requests SET close_abandoned_at = NULL, close_attempts = 0,"
+        " close_tried_at = NULL WHERE provider = %s AND close_pending_at IS NOT NULL",
+        (provider,),
     )
 
 

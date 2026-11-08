@@ -413,3 +413,46 @@ def test_the_webhook_answers_before_it_closes_the_pages(
     for job in later:
         asyncio.run(run(job))
     assert FAKE.cancelled == [balance["provider_ref"]]
+
+
+def test_the_webhook_route_answers_before_the_close_runs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5728 review: through the route itself, the whole answer is sent before the
+    provider is asked to close the page."""
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    seen: list[str] = []
+
+    async def cancel(credential: Any, provider_ref: str) -> None:
+        seen.append(f"close {provider_ref}")
+
+    monkeypatch.setattr(FAKE, "cancel_request", cancel)
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": HOOK, "raw_path": HOOK.encode(), "root_path": "",
+        "query_string": b"", "server": ("testserver", 80), "client": ("testclient", 50000),
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json"),
+                    *((k.lower().encode(), v.encode()) for k, v in headers.items())],
+    }  # fmt: skip
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            await asyncio.Event().wait()
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            seen.append(f"status {message['status']}")
+        elif message["type"] == "http.response.body" and not message.get("more_body"):
+            seen.append("answered")
+
+    assert client.portal is not None
+    client.portal.call(client.app, scope, receive, send)
+    assert seen == ["status 200", "answered", f"close {balance['provider_ref']}"]

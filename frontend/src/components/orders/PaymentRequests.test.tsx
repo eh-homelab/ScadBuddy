@@ -136,6 +136,18 @@ describe('PaymentRequests (#4957)', () => {
     expect(screen.queryByText(/ScadBuddy tries again/)).not.toBeInTheDocument()
   })
 
+  it('says nothing of a give-up once the page is no longer marked (#5728 review)', async () => {
+    await setup((id) => {
+      const found = state.paymentRequests.find((r) => r.id === id)
+      if (!found) throw new Error('no request')
+      found.status = 'paid'
+      found.close_pending_at = null
+      found.close_abandoned_at = '2026-11-11T06:30:00Z'
+    })
+    expect(await screen.findByText('Paid')).toBeInTheDocument()
+    expect(screen.queryByText(/Could not close/)).not.toBeInTheDocument()
+  })
+
   it('says nothing of the close once the provider confirmed it', async () => {
     const { user } = await setup((id) => void id)
     await user.click(await screen.findByRole('button', { name: 'Cancel' }))

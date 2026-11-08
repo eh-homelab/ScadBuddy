@@ -162,7 +162,7 @@ export function PaymentRequests({
               </div>
               {r.status === 'pending' && <span className="text-xs text-muted-foreground">The bank payment is on its way</span>}
               {/* #5700: the provider's page may still take money until the provider confirms the close; once the sweep gives up (a provider not connected), the shop closes it there. */}
-              {r.close_abandoned_at ? (
+              {r.close_pending_at && r.close_abandoned_at ? (
                 <span className="text-xs text-warn">{`Could not close; close it at ${label(r.provider)}`}</span>
               ) : (
                 r.close_pending_at && <span className="text-xs text-warn">{`Close not yet confirmed by ${label(r.provider)}; ScadBuddy tries again`}</span>

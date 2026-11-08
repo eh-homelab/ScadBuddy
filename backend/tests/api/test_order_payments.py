@@ -431,6 +431,34 @@ def test_the_sweep_gives_up_on_a_page_whose_provider_is_disconnected(
     assert row == after == {"close_attempts": CLOSE_GIVE_UP_ATTEMPTS}
 
 
+def test_a_reconnect_resumes_the_closes_the_sweep_gave_up(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5728 review: the shop reconnects the provider; the given-up page is tried again
+    and closed, and the request no longer asks the shop to close it."""
+    cancels = _cancels(monkeypatch)
+    connect_fake(client)
+    order = payable_order(client)
+    req = request_payment(client, order["id"])
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute("DELETE FROM payment_credentials WHERE provider = 'fake'")
+    client.post(f"/api/v1/orders/{order['id']}/payment-requests/{req['id']}/cancel")
+    service = _state(client).components.get(PAYMENTS).service
+    for _ in range(CLOSE_GIVE_UP_ATTEMPTS - 1):
+        _due(client, req["id"])
+        asyncio.run(service.retry_closes())
+    [given_up] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert given_up["close_abandoned_at"] is not None
+    connect_fake(client)
+    [resumed] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert resumed["close_abandoned_at"] is None
+    _due(client, req["id"])
+    assert asyncio.run(service.retry_closes()) == 1
+    assert cancels == [req["provider_ref"]]
+    [closed] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert closed["close_pending_at"] is None and closed["close_abandoned_at"] is None
+
+
 def test_a_late_page_whose_reference_another_request_holds_is_not_closed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
