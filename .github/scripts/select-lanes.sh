@@ -21,7 +21,7 @@ if [ "${1:-}" = all ]; then
 fi
 
 wiring='Dockerfile$|\.dockerignore$|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$'
-backend="^(backend/|models/|test-fixtures/|e2e-stack/|workers/rust/vectors/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
+backend="^(backend/|models/|deploy/grafana/|test-fixtures/|e2e-stack/|workers/rust/vectors/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
 # agent-durable's tests read agent/ (migrations, fixtures, vectors). The job also checks
 # the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"

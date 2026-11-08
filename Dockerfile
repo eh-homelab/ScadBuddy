@@ -800,6 +800,9 @@ COPY workers/rust/vectors /app/workers/rust/vectors
 # fake rebuilds no other layer.
 COPY e2e-stack/fake-printer /app/e2e-stack/fake-printer
 COPY e2e-stack/bambuddy-recorder /app/e2e-stack/bambuddy-recorder
+# The dashboards whose operation panels name the workers' kinds
+# (test_dashboard_operation_kinds.py, #5298).
+COPY deploy/grafana /app/deploy/grafana
 
 # Numeric, not `scadbuddy`: a name is unresolvable to anything outside this
 # image, and Kubernetes' `runAsNonRoot` admission check can only read a uid.

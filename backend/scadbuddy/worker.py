@@ -32,7 +32,6 @@ from temporalio.runtime import Runtime
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
-from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.auth.caller_grants import open_for_caller
 from scadbuddy.auth.service_credentials import (
     ServiceAuth,
@@ -43,7 +42,6 @@ from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
-from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteBlobs, RemoteOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
@@ -54,7 +52,7 @@ from scadbuddy.bambuddy.progress import (
     progress_for,
     run_reader,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore, RecentRuns, newest_failed_from
+from scadbuddy.bambuddy.runs import newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -62,14 +60,17 @@ from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.loop_watch import LoopWatch
 from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.pg_events import PgNotifyEventBus
-from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
-from scadbuddy.crud.print import RemoteSettingsStore
+from scadbuddy.crud.print import (
+    RemoteEvents,
+    RemoteOutcomes,
+    RemotePrintRunStore,
+    RemoteSettingsStore,
+)
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
 from scadbuddy.crud.render import (
     RemoteAssetRows,
@@ -100,7 +101,6 @@ from scadbuddy.library.settings_store import (
     SettingsStore,
     settings_kek,
 )
-from scadbuddy.operations.store import OperationStore
 from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
@@ -1195,10 +1195,10 @@ async def run_inprocess_worker(
 
 @dataclass
 class PrintWorkerDeps:
-    """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): Postgres, the
-    event bus and the API's internal URL. It mounts no data volume and runs no template
-    code. The settings, the Bambuddy key among them, come from the API's CRUD route
-    (#5298)."""
+    """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): Postgres and the
+    API's internal URL. It mounts no data volume and runs no template code. The settings,
+    the Bambuddy key among them, its runs, their outcomes, its operations and its events
+    go through the API's CRUD routes (#5298); it does not LISTEN."""
 
     #: The settings, read through ``crud``.
     settings_store: RemoteSettingsStore
@@ -1206,12 +1206,13 @@ class PrintWorkerDeps:
     crud: CrudClient
     #: The worker's own pool, on its role (`open_for_caller`); no settings are read here.
     database: SettingsStore
-    events: PgNotifyEventBus
+    #: Its events, posted to the API (#5298): it does not LISTEN.
+    events: RemoteEvents
     outputs: RemoteOutputs
     rack: RackUsageStore
     metrics: Metrics
-    print_runs: PrintRunStore
-    operations: OperationStore
+    print_runs: RemotePrintRunStore
+    operations: RemoteOperationStore
     activities: list[Callable[..., Any]]
     follow_print: Callable[..., Any]
     #: Native library files, read through the API's internal routes (#3827).
@@ -1244,9 +1245,9 @@ async def _given(library: RemoteLibrary) -> RemoteLibrary | None:
 
 def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> PrintWorkerDeps:
     """The print worker's stores, over the API's database and its internal routes. The
-    Bambuddy settings, key included, are read through the API's CRUD route on every use
-    (#5298). ``crud``, the client of those routes, defaults to one with the worker's
-    credential."""
+    Bambuddy settings, key included, are read through the API's CRUD route on every use,
+    and the runs, outcomes, operations and events go through its CRUD routes (#5298).
+    ``crud``, the client of those routes, defaults to one with the worker's credential."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
             "SCADBUDDY_API_INTERNAL_URL is required for --queue bambuddy: the print worker"
@@ -1254,10 +1255,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             " http://scadbuddy:8080"
         )
     metrics = worker_metrics(settings, "print")
-    events = PgNotifyEventBus(
-        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
-    )
-    database = SettingsStore(settings, events=events)
+    database = SettingsStore(settings)
     # #5210: on a role of its own, wait for the API's migrations and grants.
     open_for_caller(database, "print")
     pool = database.pool
@@ -1272,6 +1270,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     crud = crud or CrudClient(settings.api_internal_url, "print", credential, metrics=metrics)
     # Called from threads (`asyncio.to_thread`), so blocking.
     settings_store = RemoteSettingsStore(crud.blocking())
+    # #5298: no LISTEN and no event log of its own. Its events go to the API (Q5), and
+    # its runs, outcomes and operations are written there with theirs (D7).
+    events = RemoteEvents(crud, metrics=metrics)
 
     @contextlib.asynccontextmanager
     async def bambuddy_client() -> AsyncIterator[BambuddyClient]:
@@ -1296,19 +1297,17 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
 
-    activity = ActivityIndex(pool, events=events, metrics=metrics)
-    print_runs = PrintRunStore(pool, events=events, activity=activity)
-    # This worker ends its kinds' records, so it counts them (#2295).
-    operations = OperationStore(pool, events=events, activity=activity, metrics=metrics)
+    # The runs and the operations through the API (#5298), which writes their events and
+    # activity rows, and counts each operation it ends (#2295).
+    print_runs = RemotePrintRunStore(crud)
+    operations = RemoteOperationStore(crud, "print")
     kek = settings_kek(settings.secret_key_file)
     printers = PrinterStore(pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file))
     reports = PrinterReportStore(pool)
-    # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9).
-    # The follow's newest-failure read shares its newest-run query (#4540 review).
-    recent_runs = RecentRuns(print_runs)
-    # A subject's ``print.run`` drops its kept run (#4541).
-    events.add_listener(recent_runs.heard)
-    lan = LanProgress(recent_runs.latest, printers, reports)
+    # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9). The
+    # worker hears no ``print.run`` (#5298), so it keeps no run (`RecentRuns`): each read
+    # asks the API for the subject's newest run.
+    lan = LanProgress(print_runs.latest_for_output, printers, reports)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # As the API's: the follow links archives too (#306), which the rack's settle
@@ -1333,7 +1332,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         store=SpoolStore(pool),
         providers=discover_providers(SettingsOnly(SplitSettings(settings_store, pool)), None),
     )
-    outcomes = PrintOutcomeStore(pool, events)
+    outcomes = RemoteOutcomes(crud)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1347,9 +1346,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             lan_settle_hook(rack),
             native_use_hook(spools),
         ],
-        newest_failed=newest_failed_from(
-            print_runs, settings_store.load, latest=recent_runs.latest
-        ),
+        newest_failed=newest_failed_from(print_runs, settings_store.load),
         record_outcome=outcomes.record,
         # Each older run of a subject is settled on its own (#5613).
         older_runs=outcomes,
@@ -1374,7 +1371,6 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         printers=printers,
         reports=reports,
     )
-    metrics.operation_kinds(kind.name for kind in kinds)
     printing = PrintActivities(
         PrintDeps(
             settings_store=settings_store,
@@ -1420,11 +1416,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         activities=[
             *printing.all(),
             *lan_printing.all(),
-            *operation_activities(
-                operations,
-                settings_store,
-                {kind.name: kind for kind in kinds},
-            ),
+            # The route prunes past the API's own retention (#5298).
+            *operation_activities(operations, None, {kind.name: kind for kind in kinds}),
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
         library=library,
@@ -1442,7 +1435,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
 
 
 #: The CRUD areas the print worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PRINT_CRUD_AREAS = frozenset({"settings"})
+PRINT_CRUD_AREAS = frozenset({"settings", "runs", "operations", "events"})
 
 
 async def run_print_worker(
@@ -1587,10 +1580,8 @@ async def run_projects_worker(
                 api=lambda: api_client(settings.api_internal_url, credential),
             )
         }
-        # The API ends its kinds' records and counts them (#2295, #5298). Its series are
-        # still made here at zero: the dashboard's library panels leave out the kinds
-        # that a print or projects job has (`deploy/grafana/scadbuddy-renders.json`).
-        metrics.operation_kinds(kinds)
+        # The API ends its kinds' records and counts them (#2295, #5298); the dashboards
+        # pick these kinds by name (`backend/tests/test_dashboard_operation_kinds.py`).
         decisions = operation_activities(RemoteOperationStore(crud, "projects"), None, kinds)
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)
