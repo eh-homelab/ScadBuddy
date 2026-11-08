@@ -271,7 +271,8 @@ jobs:
       - name: Test the Go client's spec workarounds
         run: .github/scripts/generate-go-client-jq.test.sh
 
-      # The weekly check of the release asset ids the downloads fall back to (#5706).
+      # The weekly check of the URLs the release downloads fall back to (#5706); its
+      # test also checks that every pin is found in the Dockerfile and here.
       - name: Test the release asset pin check
         run: .github/scripts/release-asset-pins.test.sh
 
