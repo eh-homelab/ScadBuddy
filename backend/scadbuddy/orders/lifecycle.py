@@ -968,8 +968,8 @@ class Lifecycle:
     ) -> Payment:
         """Money the shop already received: a record, allowed on hold (Ruling 14). A
         payment that names an open request of this order closes it. Named or not, a
-        payment that brings the balance to zero or below closes the open ``balance``
-        requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
+        payment that brings the balance to zero or below closes the open and failed
+        ``balance`` requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
         provider's event does. A cart (#5282) takes no money: ``order_not_submitted``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)

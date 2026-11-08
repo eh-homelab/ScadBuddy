@@ -103,8 +103,8 @@ export const FAKE_FEE_MINOR = 30
 
 /**
  * A provider's event on a request, as `Lifecycle._apply_event` records it: `paid` writes a
- * payment and the request's `paid`, closes the open balance requests once the balance is
- * clear and writes the provider's fee entry; `refunded` writes a negative payment and
+ * payment and the request's `paid`, closes the open and failed balance requests once the
+ * balance is clear and writes the provider's fee entry; `refunded` writes a negative payment and
  * closes nothing; `expired` ends an open request. `pending` makes an open request pending
  * and `failed` ends an open or pending one (#4958); neither writes money. It is recorded on
  * a cancelled order too.
