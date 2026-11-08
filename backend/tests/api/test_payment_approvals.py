@@ -271,7 +271,8 @@ def test_a_cancel_during_the_capture_is_refused(
 def test_an_order_cancelled_during_the_capture_leaves_the_request_pending(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The order's cancel ends its open requests only; the money on its way is recorded
+    """The order's cancel ends its open and failed requests only; a pending one is left,
+    and the money on its way is recorded
     when the capture's event arrives."""
     order_id, req = linked(client)
 
@@ -336,3 +337,20 @@ def test_an_approval_on_an_ended_order_is_never_captured(
     assert post(client, approved(req)).json() == {"outcome": "ignored"}
     assert captures == []
     assert status_of(client, order_id, req["id"]) == "open"
+
+
+def test_a_manual_payment_that_clears_the_balance_closes_a_failed_balance_request(
+    client: TestClient, captures: list[tuple[str, str]], cancels: list[str]
+) -> None:
+    """Else the customer approving the failed request's page again would pay twice."""
+    order_id, req = linked(client)
+    fail_it(client, req)
+    paid = client.post(
+        f"/api/v1/orders/{order_id}/payments",
+        json={"amount_minor": req["amount_minor"], "method": "cash"},
+    )
+    assert paid.status_code == 201, paid.text
+    assert status_of(client, order_id, req["id"]) == "paid"
+    assert cancels == [req["provider_ref"]]
+    assert post(client, approved(req)).json() == {"outcome": "ignored"}
+    assert captures == []

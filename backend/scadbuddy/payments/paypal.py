@@ -572,10 +572,13 @@ class PayPalProvider:
         from its capture. One not completed yet is read again: PayPal names no event for a
         pending refund that completes later."""
         if refund.get("status") != "COMPLETED":
+            refund_id = refund.get("id")
+            if not isinstance(refund_id, str) or not _PAYPAL_ID.fullmatch(refund_id):
+                return ProviderEvent(event_id=event_id, kind="other")
             again = await self._read(
-                credential, "GET", f"/v2/payments/refunds/{_path_id(refund['id'])}"
+                credential, "GET", f"/v2/payments/refunds/{refund_id}", gone=True
             )
-            if again.get("status") != "COMPLETED":
+            if again is None or again.get("status") != "COMPLETED":
                 return ProviderEvent(event_id=event_id, kind="other")
             refund = again
         up = next(

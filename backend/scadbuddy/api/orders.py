@@ -1337,7 +1337,7 @@ async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
 async def add_payment(
     order_id: str, body: PaymentCreate, orders: OrdersDep, service: PaymentsDep
 ) -> Payment:
-    """A payment that pays open requests closes their pages after the commit."""
+    """A payment that pays open or failed requests closes their pages after the commit."""
     check_path(order_id)
     by = current_actor()
     try:

@@ -831,11 +831,13 @@ class Lifecycle:
     # Its amount is fixed once opened. Its link is made after commit (``set_request_link``).
 
     def _close_balance(self, conn: Conn, order: Order, payment: Payment) -> None:
-        """Once the balance is zero or below, ``payment`` closes the open balance requests."""
+        """Once the balance is zero or below, ``payment`` closes the open and failed balance
+        requests (#4959: a customer can approve a failed one's page again, which would
+        charge twice)."""
         if totals_of(self.store, conn, order.id).balance_minor > 0:
             return
-        for open_request in payments.open_requests_for_order(conn, order.id):
-            if open_request.kind == "balance":
+        for open_request in payments.requests_for_order(conn, order.id):
+            if open_request.kind == "balance" and open_request.status in CAPTURABLE:
                 payments.set_request_status(conn, open_request.id, "paid", payment_id=payment.id)
 
     def _request_of(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:

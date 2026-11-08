@@ -223,8 +223,8 @@ class Payments:
 
     # -- closed requests --------------------------------------------------------------
     # Each call closes requests through the lifecycle, then, after the commit, closes the
-    # provider's page of each request that left ``open`` for ``cancelled`` or for
-    # ``paid`` by hand. A provider that fails is logged and undoes nothing: the request
+    # provider's page of each request that left ``open`` or ``failed`` for ``cancelled``
+    # or for ``paid`` by hand. A provider that fails is logged and undoes nothing: the request
     # stays closed here, and a provider's paid event on it is still recorded.
 
     async def cancel_request(self, order_id: str, request_id: str, by: Actor) -> PaymentRequestView:
@@ -235,7 +235,7 @@ class Payments:
         return cancelled
 
     async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
-        """``cancel`` cancels the order and its open requests."""
+        """``cancel`` cancels the order and its open and failed requests."""
         before = {
             r.id
             for r in await asyncio.to_thread(self._requests, order_id)
@@ -247,7 +247,8 @@ class Payments:
         return cancelled
 
     async def add_payment(self, order_id: str, add: Callable[[], Payment]) -> Payment:
-        """``add`` records a payment the shop received, which can pay open requests."""
+        """``add`` records a payment the shop received, which can pay open and failed
+        requests."""
         payment = await asyncio.to_thread(add)
         after = await asyncio.to_thread(self._requests, order_id)
         await self._close_pages(r for r in after if r.payment_id == payment.id)

@@ -760,6 +760,25 @@ async def test_a_refund_completed_by_the_time_it_is_read_is_recorded(
     )  # fmt: skip
 
 
+async def test_a_pending_refund_paypal_no_longer_has_is_other(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    """A retry would find nothing either: no 503."""
+    pp.get("/v2/payments/refunds/3LW20124903813633").respond(
+        404, json=payload("api.error.order_not_found.json")
+    )
+    event = await parse(paypal, "payment.capture.refunded.pending.json")
+    assert event.kind == "other"
+
+
+async def test_a_pending_refund_with_no_id_is_other(paypal: PayPalProvider, pp: Any) -> None:
+    """Nothing to read again and nothing to key it by: ``other``, never a 500."""
+    found = payload("payment.capture.refunded.pending.json")
+    del found["resource"]["id"]
+    event = await paypal.parse_webhook(CRED, HEADERS, json.dumps(found).encode())
+    assert event.kind == "other"
+
+
 async def test_a_refund_of_a_sale_outside_scadbuddy_names_its_own_order(
     paypal: PayPalProvider, pp: Any
 ) -> None:

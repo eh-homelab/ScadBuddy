@@ -112,6 +112,17 @@ describe('PaymentRequests (#4957)', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument())
   })
 
+  it('cancels a failed request, which a customer could still approve again (#4959)', async () => {
+    const { user } = await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+    })
+    expect(await screen.findByText('Failed')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument())
+  })
+
   it('offers no new request on a closed order', async () => {
     mockConnectProvider()
     renderPage(<Host id={ORDER_CLOSED} />)
