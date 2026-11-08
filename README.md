@@ -496,6 +496,25 @@ dashboard, where its webhooks are set up. Connecting a provider
 `SCADBUDDY_SECRET_KEY_FILE` (see "Encrypted API keys" below): the account's secret is
 sealed with that key.
 
+#### Stripe (#4958)
+
+In the Stripe Dashboard, add a webhook endpoint with the URL
+`https://<public host>/api/v1/payments/webhooks/stripe` and these events:
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `checkout.session.expired`, `refund.created`,
+`refund.updated` and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks),
+[refund events](https://docs.stripe.com/refunds#refund-events)). Each refund is recorded
+once, for its own amount, when Stripe says it succeeded. Then, in
+Settings → Payments, connect Stripe with a secret key (`sk_…`) or a restricted key
+(`rk_…`) and the endpoint's signing secret (`whsec_…`). A restricted key needs write
+access to Checkout Sessions and read access to PaymentIntents and balance transactions
+([restricted keys](https://docs.stripe.com/keys/restricted-api-keys)). Each payment
+request is a Checkout Session for the request's amount. The customer sees the payment
+methods the account has turned on, so card, and US bank account (ACH) when it is on. A
+bank payment shows as `pending` until Stripe says it settled, and as `failed` when it
+did not. The Stripe fee is recorded on the order's costs once Stripe's balance
+transaction gives it.
+
 ### Authentication on the deployment (#4975)
 
 What signing in is and what each `SCADBUDDY_AUTH_MODE` does is under "Signing in"

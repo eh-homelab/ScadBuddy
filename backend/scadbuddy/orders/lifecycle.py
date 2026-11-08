@@ -103,6 +103,7 @@ from scadbuddy.payments.models import (
     PaymentRequestView,
     ProviderEvent,
 )
+from scadbuddy.payments.provider import EventTooEarlyError
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,11 @@ QUOTE_HOLDER = "order_item_quote"
 #: the reaper's grace: a ref younger than this may belong to a run about to insert its
 #: row (Ruling 3).
 QUOTE_TIMEOUT = timedelta(minutes=30)
+
+
+#: How long a provider's fee that arrived before its payment is sent back for a retry
+#: (#4958); after it, the fee is recorded as ignored.
+FEE_RETRY_WINDOW = timedelta(hours=24)
 
 
 class LifecycleError(Exception):
@@ -951,6 +957,19 @@ class Lifecycle:
                 payments.set_request_status(conn, found.id, "expired")
                 self._event(conn, order, by, "payment_request.expired", request_id=found.id)
             return "recorded", None
+        if event.kind in ("pending", "failed"):
+            # #4958: money on its way, or money that did not come. Neither is a payment.
+            # A request already past ``pending`` keeps its status: the provider does not
+            # keep event order, so a late ``pending`` must not undo a ``paid``.
+            if found.status != "open" and not (
+                event.kind == "failed" and found.status == "pending"
+            ):
+                return "ignored", None
+            payments.set_request_status(conn, found.id, event.kind)
+            self._event(conn, order, by, f"payment_request.{event.kind}", request_id=found.id)
+            return "recorded", None
+        if event.kind == "fee":
+            return self._late_fee(conn, order, found, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
@@ -990,17 +1009,27 @@ class Lifecycle:
         self._close_balance(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
-            fee, _ = self.store.insert_cost_entry(
-                conn,
-                order.id,
-                CostEntryInput(
-                    kind="payment_fee",
-                    amount_minor=event.fee_minor,
-                    source=f"payment:{payment.id}",
-                    note=f"{provider} fee",
-                ),
-                created_by=by,
-            )
+            self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return "recorded", payment
+
+    def _write_fee(
+        self, conn: Conn, order: Order, payment_id: str, provider: str, fee_minor: int, by: Actor
+    ) -> bool:
+        """The provider's fee for ``payment_id`` as a ``payment_fee`` cost entry, and whether
+        this call wrote it. The unique ``(order_id, kind, source)`` index keeps it to one
+        per payment (``insert_cost_entry`` writes ON CONFLICT DO NOTHING)."""
+        fee, written = self.store.insert_cost_entry(
+            conn,
+            order.id,
+            CostEntryInput(
+                kind="payment_fee",
+                amount_minor=fee_minor,
+                source=f"payment:{payment_id}",
+                note=f"{provider} fee",
+            ),
+            created_by=by,
+        )
+        if written:
             self._event(
                 conn,
                 order,
@@ -1011,7 +1040,51 @@ class Lifecycle:
                 entry_kind=fee.kind,
                 amount_minor=fee.amount_minor,
             )
-        return "recorded", payment
+        return written
+
+    def _late_fee(
+        self,
+        conn: Conn,
+        order: Order,
+        found: PaymentRequestView,
+        provider: str,
+        event: ProviderEvent,
+        by: Actor,
+    ) -> tuple[EventOutcome, Payment | None]:
+        """#4958: a fee the provider knew only after it told the payment. It goes on the
+        payment this provider made for the request (a paid request's own, or one recorded
+        on a request paid by hand), under the order's lock taken by the caller, once: a
+        payment that already has its fee keeps it. Events come in any order, so a fee
+        whose payment is not recorded yet is `EventTooEarlyError`: the transaction rolls
+        back, its event row too, and the provider's retry is read again. Only while the
+        request is open or pending and the event is younger than `FEE_RETRY_WINDOW`:
+        after that the payment is not coming, and the event is recorded as ignored, so
+        a poison event is not answered 503 for ever."""
+        if not event.fee_minor:
+            return "ignored", None
+        payment = next(
+            (
+                p
+                for p in self.store.payments(order.id, conn=conn)
+                if p.provider == provider
+                and p.payment_request_id == found.id
+                and p.reference == found.provider_ref
+                and p.amount_minor > 0
+            ),
+            None,
+        )
+        if payment is None:
+            young = (
+                event.created_at is not None
+                and datetime.now(UTC) - event.created_at < FEE_RETRY_WINDOW
+            )
+            if found.status not in ("open", "pending") or not young:
+                return "ignored", None
+            raise EventTooEarlyError(
+                f"the {provider} payment this fee belongs to is not recorded yet"
+            )
+        written = self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return ("recorded" if written else "ignored"), payment
 
     # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
     # A record of what the job took, allowed in every status, ended and on hold included:

@@ -1,0 +1,10 @@
+{
+  "id": "txn_3MtwBwLkdIwHu7ix2rw9Uyaf",
+  "object": "balance_transaction",
+  "amount": 700,
+  "currency": "usd",
+  "fee": 50,
+  "net": 650,
+  "type": "charge",
+  "source": "ch_3MtwBwLkdIwHu7ix2KhxTz3v"
+}

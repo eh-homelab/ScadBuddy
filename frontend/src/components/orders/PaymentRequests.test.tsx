@@ -33,7 +33,8 @@ describe('PaymentRequests (#4957)', () => {
     await user.click(screen.getByRole('button', { name: 'Request' }))
     const list = await screen.findByRole('list', { name: 'Payment requests' })
     expect(within(list).getByText('$25.00')).toBeInTheDocument()
-    expect(within(list).getByText('Fake')).toBeInTheDocument()
+    // The provider's label arrives with the providers list, which can land after the requests.
+    expect(await within(list).findByText('Fake')).toBeInTheDocument()
     expect(within(list).getByRole('button', { name: 'Copy link' })).toBeEnabled()
     expect(within(list).getByRole('link', { name: 'Email' })).toHaveAttribute('href', expect.stringMatching(/^mailto:/))
     expect(within(list).getByRole('button', { name: 'Cancel' })).toBeEnabled()
@@ -44,6 +45,33 @@ describe('PaymentRequests (#4957)', () => {
     expect(await screen.findByText('Paid')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('shows a bank payment as pending until it settles, with no link and no cancel (#4958)', async () => {
+    await setup((id) => mockPaymentEvent(ORDER_ACCEPTED, id, 'pending'))
+    expect(await screen.findByText('Pending')).toBeInTheDocument()
+    expect(screen.getByText('The bank payment is on its way')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the provider connected while a request is pending, as the backend does (#4958)', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, {})
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'pending')
+    await expect(api.disconnectPaymentProvider('fake')).rejects.toThrow('open payment requests')
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'failed')
+    await expect(api.disconnectPaymentProvider('fake')).resolves.toBeUndefined()
+  })
+
+  it('shows a bank payment that did not settle as failed (#4958)', async () => {
+    await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+    })
+    expect(await screen.findByText('Failed')).toBeInTheDocument()
+    expect(screen.queryByText('The bank payment is on its way')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
   })
 
   it('says nothing is due as the backend says it', async () => {

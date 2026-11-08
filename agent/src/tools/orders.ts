@@ -507,7 +507,7 @@ export const orderTools: Tool[] = [
     label: "Read an order's payment requests",
     description:
       "An order's payment requests (#4957): each with its kind, amount, provider, `hosted_url`, `link_error` and " +
-      'status (`open`, `paid`, `expired`, `cancelled`).',
+      'status (`open`, `pending`, `paid`, `expired`, `cancelled`, `failed`; `pending` while a bank debit settles).',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}/payment-requests'],

@@ -12,7 +12,7 @@ from scadbuddy.payments.registry import providers
 CRED = Credential(settings={"account": "a"}, secrets={"signing_secret": "s3cret"})
 
 
-def test_a_signed_event_parses() -> None:
+async def test_a_signed_event_parses() -> None:
     body, headers = signed_event(
         "s3cret",
         {
@@ -20,31 +20,33 @@ def test_a_signed_event_parses() -> None:
             "amount_minor": 500, "currency": "USD", "fee_minor": 30,
         },
     )  # fmt: skip
-    event = FAKE.parse_webhook(CRED, headers, body)
+    event = await FAKE.parse_webhook(CRED, headers, body)
     assert event == ProviderEvent(
         event_id="e1", kind="paid", provider_ref="fake_r1", amount_minor=500,
         currency="USD", fee_minor=30,
     )  # fmt: skip
 
 
-def test_an_unknown_type_is_other() -> None:
+async def test_an_unknown_type_is_other() -> None:
     body, headers = signed_event("s3cret", {"id": "e2", "type": "dispute"})
-    assert FAKE.parse_webhook(CRED, headers, body).kind == "other"
+    assert (await FAKE.parse_webhook(CRED, headers, body)).kind == "other"
 
 
-def test_a_bad_signature_is_refused_before_the_body_is_read() -> None:
+async def test_a_bad_signature_is_refused_before_the_body_is_read() -> None:
     body, headers = signed_event("other", {"id": "e1", "type": "paid"})
     with pytest.raises(BadSignatureError):
-        FAKE.parse_webhook(CRED, headers, body)
+        await FAKE.parse_webhook(CRED, headers, body)
     with pytest.raises(BadSignatureError):
-        FAKE.parse_webhook(CRED, {}, b"not json")
+        await FAKE.parse_webhook(CRED, {}, b"not json")
     with pytest.raises(BadSignatureError):
-        FAKE.parse_webhook(CRED, {SIGNATURE_HEADER: sign("s3cret", b"x")}, b"not the signed body")
+        await FAKE.parse_webhook(
+            CRED, {SIGNATURE_HEADER: sign("s3cret", b"x")}, b"not the signed body"
+        )
 
 
 def test_the_registry_offers_the_fake_only_when_asked() -> None:
-    assert providers(fake=False) == {}
-    assert set(providers(fake=True)) == {"fake"}
+    assert "fake" not in providers(fake=False)
+    assert "fake" in providers(fake=True)
 
 
 def test_the_fake_has_one_secret_field() -> None:
@@ -64,10 +66,19 @@ async def test_verify_and_create_request() -> None:
         paid_at=None, provider_ref=None, link_error=None, payment_id=None,
         created_by=Actor(kind="browser"),
     )  # fmt: skip
-    hosted = await FAKE.create_request(CRED, view, return_url=None, idempotency_key="k")
+    hosted = await FAKE.create_request(
+        CRED, view, return_url=None, idempotency_key="k", order_number="ORD-2026-1"
+    )
     assert hosted.provider_ref == "fake_r1"
     assert str(hosted.hosted_url) == "https://payments.fake.invalid/pay/fake_r1"
 
 
 def test_repr_never_shows_a_secret() -> None:
     assert "s3cret" not in repr(CRED)
+
+
+@pytest.mark.parametrize("kind", ["pending", "failed", "fee"])
+async def test_the_fake_sends_the_slow_money_kinds(kind: str) -> None:
+    """#4958: dev runs drive a pending, a failed and a late fee through the fake."""
+    body, headers = signed_event("s3cret", {"id": "e9", "type": kind, "provider_ref": "fake_r1"})
+    assert (await FAKE.parse_webhook(CRED, headers, body)).kind == kind

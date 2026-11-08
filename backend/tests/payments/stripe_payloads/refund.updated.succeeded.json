@@ -1,0 +1,31 @@
+{
+  "id": "evt_4ref",
+  "object": "event",
+  "api_version": "2026-10-28.endive",
+  "created": 1762560100,
+  "data": {
+    "object": {
+      "id": "re_3bank",
+      "object": "refund",
+      "amount": 700,
+      "balance_transaction": null,
+      "charge": "ch_3MtwBwLkdIwHu7ix2KhxTz3v",
+      "created": 1762560100,
+      "currency": "usd",
+      "metadata": {},
+      "payment_intent": "pi_3MtwBwLkdIwHu7ix28a3tqPa",
+      "reason": null,
+      "status": "succeeded"
+    },
+    "previous_attributes": {
+      "status": "pending"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "refund.updated"
+}

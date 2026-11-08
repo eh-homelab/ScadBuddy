@@ -834,6 +834,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `PaymentProvider` protocol, `BadSignatureError`, `ProviderError`), `registry.py` (the
   offered providers; the fake one only with the bootstrap
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
+  `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
+  own code, no SDK; the facts it rests on, each with its Stripe link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -853,7 +855,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   failure stays on the open request as `link_error` (`POST …/payment-requests/{id}/link`
   retries). A provider's `paid` event with a fee writes a `payment_fee` cost entry,
   `source` `payment:<payment id>`, in the payment's own transaction (job cost spec
-  §4.4); a manual payment writes none. Routes: `api/order_payments.py`
+  §4.4); a manual payment writes none. A `fee` event (#4958, Stripe's balance transaction made after the
+  payment) writes the same entry later, once (`_late_fee`, under the order lock, on the
+  unique `(order_id, kind, source)` index); one that arrives before its payment is
+  `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
+  only while the request is open or pending and the event (`ProviderEvent.created_at`) is
+  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
+  moves an open request to `pending`, and `failed` moves an open or pending one to
+  `failed`; neither writes money, a pending request is never cancelled or closed by a
+  manual payment, and a disconnect is refused while one is pending. `parse_webhook` is
+  async and may call its provider once the signature holds; a failed call is
+  `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
