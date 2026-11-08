@@ -202,9 +202,9 @@ class OrderPatch(BaseModel):
     """Notes and the due date in any open state; the address ids (the order's own
     customer's) and the typed charges, replaced whole, while `draft` or `quoted`.
     The auto tax row (#5281) is not part of the list: leave it out and the order keeps it
-    and recomputes it; sent back as read (`auto`, its `id`, or a `tax` charge with its
-    label, whatever the amount) it stays the auto row and is recomputed. A typed tax takes
-    another label; it replaces the auto row. Past that, charges are 409
+    and recomputes it; sent back as read (marked by `auto` or its `id`, whatever the
+    amount) it stays the auto row and is recomputed. Any other `tax` charge, whatever its
+    label, is a typed tax and replaces the auto row. Past that, charges are 409
     ``order_not_editable``, which names `PUT /orders/{id}/charges/after-acceptance`
     (#5351). A field left out is untouched; ``null`` clears the due date or an address."""
 
@@ -233,9 +233,9 @@ class ChargesBody(BaseModel):
     """`PUT /orders/{id}/charges/after-acceptance` (#5351): the charges part of
     `PATCH /orders/{id}`, the typed charges replaced whole. The auto tax row (#5281) is
     not part of the list: leave it out and the order keeps it and recomputes it; sent back
-    as read (`auto`, its `id`, or a `tax` charge with its label, whatever the amount) it
-    stays the auto row and is recomputed. A typed tax takes another label; it replaces the
-    auto row."""
+    as read (marked by `auto` or its `id`, whatever the amount) it stays the auto row and
+    is recomputed. Any other `tax` charge, whatever its label, is a typed tax and replaces
+    the auto row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -551,11 +551,13 @@ async def _run[T](call: Callable[[], T]) -> T:
 
 
 async def _run_linked[T](call: Callable[[], T], order_id: str, payments: PaymentsComponent) -> T:
-    """``_run``, then a link for any request it opened on a provider (#5281): a reopened
-    order's balance request, or one a total grown past a paid deposit opens."""
-    result = await _run(call)
-    await payments.service.link_pending(order_id)
-    return result
+    """``_run``, then a link for each request it opened on a provider (#5281): a reopened
+    order's balance request, or one a total grown past a paid deposit opens. An older
+    request whose link failed is left to ``POST …/link`` (``Payments.run_linking``)."""
+    try:
+        return await payments.service.run_linking(order_id, call)
+    except LifecycleError as error:
+        raise refused(error) from None
 
 
 def check_path(*values: str) -> None:
@@ -1117,7 +1119,7 @@ async def put_charges_after_acceptance(
     """#5351: the typed charges, replaced whole, on an order that is `accepted`,
     `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. The auto
     tax row (#5281) is not part of the list: it is kept and recomputed, also when sent
-    back with its label; a `tax` charge with another label is typed and replaces it. It
+    back marked by `auto` or its `id`; any other `tax` charge is typed and replaces it. It
     changes what the customer pays: a fee or a discount (negative) keeps an agreed total
     when an item is added after acceptance. The audit row
     ``charges.replaced_after_acceptance`` holds the charges before and after. 409
@@ -2249,10 +2251,11 @@ async def quote_item_from_archive(
     no grams or time."""
     check_path(order_id, item_id)
     by = current_actor()
+    before = await service.service.request_ids(order_id)
     quote = await quote_from_archive(
         orders.lifecycle, orders.integrations, orders.price_book, order_id, item_id, body, by
     )
-    await service.service.link_pending(order_id)
+    await service.service.link_opened(order_id, before)
     return quote
 
 
@@ -2341,7 +2344,9 @@ async def print_item(
     quantity: accept them), ``print_in_flight`` (a test print of the item is still
     open), ``print_request_conflict`` (the key's print is another item's, or the key's
     test print), and ``requote_needed`` (no accepted quote, its output gone,
-    or a slice quote whose sliced file is gone or no longer the file it priced); and the
+    or a slice quote whose sliced file is gone or no longer the file it priced, or a
+    ``part_settings``, ``prime_tower``, ``supports`` or ``print_sequence`` sent that the
+    quote was not sliced with; each one omitted is the quote's, #5571, #4673); and the
     print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id)
     result = await run_operation(
@@ -2394,7 +2399,9 @@ async def test_print_item(
     ``print_in_flight`` (a print of the item, of either purpose, is still open),
     ``print_request_conflict`` (the key's print is another item's or a production
     print), and ``requote_needed`` (no slice quote of the revision,
-    its sliced file gone or no longer the file it priced, or the output gone); and the
+    its sliced file gone or no longer the file it priced, the output gone, or a
+    ``part_settings``, ``prime_tower``, ``supports`` or ``print_sequence`` sent that the
+    quote was not sliced with; each one omitted is the quote's, #5571, #4673); and the
     print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id, revision_id)
     result = await run_operation(

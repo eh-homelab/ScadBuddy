@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "category": "INVALID_REQUEST_ERROR",
+      "code": "NOT_FOUND",
+      "detail": "Resource not found."
+    }
+  ]
+}

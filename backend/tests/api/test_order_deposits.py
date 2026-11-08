@@ -17,6 +17,7 @@ from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.payments import store as payments_store
 from scadbuddy.payments.fake import FAKE
 from scadbuddy.payments.models import PaymentRequestStatus
+from scadbuddy.payments.provider import ProviderError
 from tests.api.test_customers import create as create_customer
 from tests.api.test_order_payments import connect_fake, request_payment, with_payments
 from tests.api.test_orders import create_order
@@ -385,9 +386,10 @@ def test_charges_sent_back_as_read_keep_the_tax_auto(client: TestClient) -> None
     assert client.put(url, json={"option_id": "pickup"}).status_code == 200
     assert _tax(client, order["id"]) == [(100, True)]
     read = detail(client, order["id"])["charges"]
-    # As an agent sends them: kind, label, amount and the option, plus a new fee.
+    # As an agent sends them: the read fields with the id and auto mark, plus a new fee.
     sent = [
-        {k: c[k] for k in ("kind", "label", "amount_minor", "shipping_option_id")} for c in read
+        {k: c[k] for k in ("id", "kind", "label", "amount_minor", "shipping_option_id", "auto")}
+        for c in read
     ]
     sent.append({"kind": "fee", "label": "Rush", "amount_minor": 500})
     patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": sent})
@@ -498,14 +500,14 @@ def test_the_rules_read_only_their_own_settings(
 
 
 def test_a_stale_auto_row_sent_back_stays_auto(client: TestClient) -> None:
-    """Re-review N1: the auto row read before the items changed still has its label."""
+    """The auto row read before the items changed is marked by its id and `auto`."""
     client.put("/api/v1/settings", json={"orders_tax_percent": "10"})
     order, item = quoted(client)
     stale = [
-        {k: c[k] for k in ("kind", "label", "amount_minor")}
+        {k: c[k] for k in ("id", "kind", "label", "amount_minor", "auto")}
         for c in detail(client, order["id"])["charges"]
     ]
-    assert stale == [{"kind": "tax", "label": "Tax 10%", "amount_minor": 100}]
+    assert [(c["label"], c["amount_minor"], c["auto"]) for c in stale] == [("Tax 10%", 100, True)]
     grown = client.patch(f"/api/v1/orders/{order['id']}/items/{item['id']}", json={"quantity": 3})
     assert grown.status_code == 200, grown.text
     patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": stale})
@@ -529,3 +531,48 @@ def test_an_item_added_after_acceptance_links_the_new_balance_request(
     last = detail(client, order["id"])["payment_requests"][-1]
     assert (last["kind"], last["amount_minor"], last["status"]) == ("balance", 1000, "open")
     assert last["hosted_url"]
+
+
+def test_an_edit_links_only_the_requests_it_opened(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #5726: a request whose link failed earlier waits for `POST …/link`; an
+    item edit does not call the provider for it again."""
+    connect_fake(client)
+    order, item = quoted(client)
+    calls: list[str] = []
+
+    async def down(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs["idempotency_key"])
+        raise ProviderError("down")
+
+    monkeypatch.setattr(FAKE, "create_request", down)
+    failed = request_payment(client, order["id"], amount_minor=200)
+    assert failed["link_error"] == "down" and calls == [failed["id"]]
+    edited = client.patch(f"/api/v1/orders/{order['id']}/items/{item['id']}", json={"quantity": 2})
+    assert edited.status_code == 200, edited.text
+    assert calls == [failed["id"]]
+
+
+def test_the_address_of_an_option_that_ships_is_not_cleared(client: TestClient) -> None:
+    """Review of #5726: an option that ships keeps the address it needs."""
+    client.put("/api/v1/settings", json={"storefront_shipping_options": OPTIONS})
+    order, _ = quoted(client)
+    url = f"/api/v1/orders/{order['id']}"
+    assert client.put(f"{url}/shipping-option", json={"option_id": "post"}).status_code == 200
+    problem(client.patch(url, json={"shipping_address_id": None}), "shipping_address_required")
+    assert detail(client, order["id"])["order"]["shipping_address_id"] is not None
+    assert client.put(f"{url}/shipping-option", json={"option_id": "pickup"}).status_code == 200
+    cleared = client.patch(url, json={"shipping_address_id": None})
+    assert cleared.status_code == 200, cleared.text
+
+
+def test_a_tax_with_the_auto_label_but_no_mark_is_typed(client: TestClient) -> None:
+    """Review of #5726: only the id or `auto` marks the auto row; a typed "Tax 10%" is a
+    typed tax."""
+    client.put("/api/v1/settings", json={"orders_tax_percent": "10"})
+    order, _ = quoted(client)
+    typed = {"kind": "tax", "label": "Tax 10%", "amount_minor": 90}
+    patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [typed]})
+    assert patched.status_code == 200, patched.text
+    assert _tax(client, order["id"]) == [(90, False)]

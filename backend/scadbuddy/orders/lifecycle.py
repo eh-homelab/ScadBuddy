@@ -71,7 +71,14 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.money import NO_RULES, OrderRules, deposit_for, tax_base, tax_minor
+from scadbuddy.orders.money import (
+    NO_RULES,
+    OrderRules,
+    deposit_for,
+    skipped_for_currency,
+    tax_base,
+    tax_minor,
+)
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartRow,
@@ -741,7 +748,8 @@ class Lifecycle:
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
         customer's) and charges while `draft` or `quoted`. A cart's charges are the
-        visitor's alone (`order_not_submitted`, ``check_visitors_cart``)."""
+        visitor's alone (`order_not_submitted`, ``check_visitors_cart``). The shipping
+        address is not cleared while an option that ships stays (`_no_option_ships`)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if edit.charges is not None:
@@ -773,6 +781,8 @@ class Lifecycle:
                             "address_not_found",
                             f"{name}: no address {wanted} of the order's customer",
                         )
+            if edit.shipping_address_id is None:
+                self._no_option_ships(conn, order, edit.charges)
             order = self.store.update_order_fields(
                 conn,
                 order.id,
@@ -801,11 +811,29 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def _no_option_ships(
+        self, conn: Conn, order: Order, charges: Sequence[ChargeInput] | None
+    ) -> None:
+        """Refuses (`shipping_address_required`) clearing the shipping address while a
+        shipping option that ships stays on the order (#5281): ``charges`` the edit writes,
+        else the order's own. Choose a pickup, or remove the option, first."""
+        kept = self.store.charges(order.id, conn=conn) if charges is None else charges
+        named = {c.shipping_option_id for c in kept if c.shipping_option_id is not None}
+        if not named:
+            return
+        ships = [o for o in self.rules().shipping_options if o.id in named and o.ships]
+        if ships:
+            raise LifecycleError(
+                "shipping_address_required",
+                f"order {order.label} ships by {ships[0].label}: it keeps its shipping address;"
+                " choose an option that does not ship, or remove the option, first",
+            )
+
     def _typed(self, conn: Conn, order: Order, charges: Sequence[ChargeInput]) -> list[ChargeInput]:
         """The charges a replace writes: ``charges`` less the auto tax row sent back as it
-        was read (``auto``, its ``id``, or a `tax` charge with its label, whatever its
-        amount: a read from before the items changed is stale), which the order keeps and
-        ``_retax`` recomputes. A `tax` charge with another label is typed and replaces the
+        was read, marked by ``auto`` or its ``id`` (whatever its amount: a read from
+        before the items changed is stale), which the order keeps and ``_retax``
+        recomputes. Any other `tax` charge, whatever its label, is typed and replaces the
         auto row."""
         auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
 
@@ -814,7 +842,7 @@ class Lifecycle:
                 return True
             if auto is None:
                 return False
-            return charge.id == auto.id or (charge.kind == "tax" and charge.label == auto.label)
+            return charge.id == auto.id
 
         return [charge for charge in charges if not is_auto(charge)]
 
@@ -1167,22 +1195,40 @@ class Lifecycle:
         return order
 
     def apply_deposit_policy(self, order_id: str, by: Actor) -> Order:
-        """``set_deposit`` with the deposit the shop's policy asks of the order now."""
+        """``set_deposit`` with the deposit the shop's policy asks of the order now. A rule
+        skipped only because the order is not in the shop's currency (a fixed amount or a
+        ``total_above`` threshold) is named on the `deposit.set` audit row as ``skipped``
+        (its index in the policy). When such rules are all that would apply, nothing is
+        written: `deposit_policy_currency` says to set the deposit by hand."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
             rules = self.rules()
             items = self.store.items(order.id, conn=conn)
+            context: dict[str, Any] = {
+                "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
+                "first_order": order.customer_id is None
+                or not self.store.accepted_before(conn, order.customer_id, order.id),
+                "currency": order.currency,
+                "shop_currency": rules.shop_currency,
+            }
             amount = deposit_for(
                 rules.deposit_policy,
                 total_minor=totals_of(self.store, conn, order.id).total_minor,
-                has_request=any(i.kind == "request" and i.status != "cancelled" for i in items),
-                first_order=order.customer_id is None
-                or not self.store.accepted_before(conn, order.customer_id, order.id),
-                currency=order.currency,
-                shop_currency=rules.shop_currency,
+                **context,
             )
-            updated = self._set_deposit(conn, order, by, amount, policy=True)
+            skipped = skipped_for_currency(rules.deposit_policy, **context)
+            if amount is None and skipped:
+                raise LifecycleError(
+                    "deposit_policy_currency",
+                    f"order {order.label} is in {order.currency}: the deposit policy's rules"
+                    f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
+                    " by hand",
+                )
+            audit: dict[str, Any] = {"policy": True}
+            if skipped:
+                audit["skipped"] = skipped
+            updated = self._set_deposit(conn, order, by, amount, **audit)
             if updated is None:
                 return order
             order = updated
@@ -1370,9 +1416,11 @@ class Lifecycle:
         """The provider's answer to a request's link, under the request's order lock: its
         hosted page, or why it failed (the link it had stays). A request no longer open
         (cancelled or expired while the provider answered) keeps no new link, so no one
-        pays it. A paid request is returned as it is: it needs no link and no error. A
-        reference another request holds is kept as ``link_error``, not as the link. No
-        audit row: the link is the provider's, not a person's decision."""
+        pays it; a page made then keeps its reference, marked to close (#5700), so the
+        housekeeping sweep closes it if the close after the commit fails. A paid request is
+        returned as it is: it needs no link and no error. A reference another request holds
+        is kept as ``link_error``, not as the link. No audit row: the link is the
+        provider's, not a person's decision."""
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
             if found is None:
@@ -1382,8 +1430,21 @@ class Lifecycle:
             order = self._lock(conn, found.order_id)
             found = payments.request(conn, request_id) or found
             if found.status == "paid":
-                return found
+                if hosted is None or found.provider_ref is not None:
+                    return found
+                # Paid by hand while the provider answered: keep the page only to close it.
+                return payments.set_request_link(
+                    conn,
+                    request_id,
+                    provider_ref=hosted.provider_ref,
+                    hosted_url=None,
+                    link_error=None,
+                    close_pending=True,
+                )
+            late_ref: str | None = None
             if found.status != "open":
+                if hosted is not None and found.provider_ref is None:
+                    late_ref = hosted.provider_ref
                 hosted, error = None, f"the payment request is {found.status}"
             try:
                 # A savepoint: a refused write leaves the transaction usable.
@@ -1391,9 +1452,14 @@ class Lifecycle:
                     linked = payments.set_request_link(
                         conn,
                         request_id,
-                        provider_ref=found.provider_ref if hosted is None else hosted.provider_ref,
+                        provider_ref=(
+                            (found.provider_ref or late_ref)
+                            if hosted is None
+                            else hosted.provider_ref
+                        ),
                         hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
                         link_error=error,
+                        close_pending=late_ref is not None,
                     )
             except errors.UniqueViolation:
                 # ``payment_requests_ref``: the provider answered with another request's
@@ -1443,17 +1509,24 @@ class Lifecycle:
             self._told(change)
         return outcome
 
-    def _paid_by(self, conn: Conn, order: Order, found: PaymentRequestView, provider: str) -> bool:
-        """Whether this provider's own payment already paid the request. A request paid
-        by hand, cancelled or expired takes a provider's payment: that money is real."""
-        if found.status != "paid" or found.payment_id is None:
-            return False
-        paid = next(
-            (p for p in self.store.payments(order.id, conn=conn) if p.id == found.payment_id),
+    def _provider_payment(
+        self, conn: Conn, order: Order, found: PaymentRequestView, provider: str
+    ) -> Payment | None:
+        """The payment this provider already recorded for the request's hosted page: its
+        provider, request and reference, money in. Read from the payments themselves, not
+        from the request's ``payment_id``: a request paid by hand first points at the cash,
+        and the provider's payment recorded on it after is still told again (#5666,
+        Square's ``payment.updated``)."""
+        return next(
+            (
+                p
+                for p in self.store.payments(order.id, conn=conn)
+                if p.provider == provider
+                and p.payment_request_id == found.id
+                and p.reference == found.provider_ref
+                and p.amount_minor > 0
+            ),
             None,
-        )
-        return (
-            paid is not None and paid.provider == provider and paid.reference == found.provider_ref
         )
 
     def _apply_event(
@@ -1497,8 +1570,17 @@ class Lifecycle:
         ):
             # #5681: the refund's own failure was told first, so the money never left.
             return "ignored", None
-        if event.kind == "paid" and self._paid_by(conn, order, found, provider):
-            # A hosted page is paid once: this is the same money told again.
+        told = (
+            self._provider_payment(conn, order, found, provider) if event.kind == "paid" else None
+        )
+        if told is not None:
+            # A hosted page is paid once: this is the same money told again. A provider
+            # that tells the fee only in a later update of the same payment (#5666:
+            # Square's ``payment.updated``) adds it now, on that payment, once.
+            if event.fee_minor and self._write_fee(
+                conn, order, told.id, provider, event.fee_minor, by
+            ):
+                return "recorded", told
             return "ignored", None
         amount = found.amount_minor if event.amount_minor is None else event.amount_minor
         payment = self.store.insert_payment(
@@ -1527,6 +1609,7 @@ class Lifecycle:
         if found.status != "paid":
             payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
         self._close_balance(conn, order, payment)
+        self._close_deposit(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
@@ -1627,17 +1710,7 @@ class Lifecycle:
         a poison event is not answered 503 for ever."""
         if not event.fee_minor:
             return "ignored", None
-        payment = next(
-            (
-                p
-                for p in self.store.payments(order.id, conn=conn)
-                if p.provider == provider
-                and p.payment_request_id == found.id
-                and p.reference == found.provider_ref
-                and p.amount_minor > 0
-            ),
-            None,
-        )
+        payment = self._provider_payment(conn, order, found, provider)
         if payment is None:
             young = (
                 event.created_at is not None
@@ -3249,6 +3322,8 @@ class Lifecycle:
         revision_id: str | None,
         quote_id: str | None = None,
         part_settings: dict[str, dict[str, Any]] | None = None,
+        choices: dict[str, Any] | None = None,
+        filament_plan: dict[str, Any] | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
         it, with the plates it read and the sliced file it read them from, under the id
@@ -3264,7 +3339,8 @@ class Lifecycle:
         are taken again in its own transaction, so a row never commits without them,
         whatever another attempt dropped before it. A library file item's quote (#5544)
         names no revision (``revision_id`` None): the item has none. Never on a cart
-        (#5282, ``order_not_submitted``)."""
+        (#5282, ``order_not_submitted``). ``choices`` and ``filament_plan`` are the print
+        setup it sliced with (#4673, ``quote.print_setup``), recorded with it."""
         self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
@@ -3303,6 +3379,8 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
                 part_settings=part_settings,
+                choices=choices,
+                filament_plan=filament_plan,
             )
             self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)

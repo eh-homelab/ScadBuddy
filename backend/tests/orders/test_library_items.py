@@ -265,6 +265,8 @@ def test_a_file_gone_refuses_the_quote_and_the_print(
         "sliced_blob_key": None,
         # #5571: the quote's settings per slot; a manual quote has none.
         "part_settings": None,
+        # #4673: the quote's tower, supports and sequence; a manual quote records none.
+        "setup": None,
     }
 
 

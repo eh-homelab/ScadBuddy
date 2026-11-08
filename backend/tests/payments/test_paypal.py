@@ -27,7 +27,6 @@ from scadbuddy.payments.provider import (
     ProviderUnavailableError,
 )
 from scadbuddy.payments.registry import providers
-from scadbuddy.payments.stripe import STRIPE
 
 PAYLOADS = Path(__file__).parent / "paypal_payloads"
 SANDBOX = API["sandbox"]
@@ -110,8 +109,9 @@ async def parse(paypal: PayPalProvider, name: str) -> ProviderEvent:
 
 
 def test_the_registry_offers_paypal() -> None:
-    assert providers(fake=False) == {"stripe": STRIPE, "paypal": PAYPAL}
-    assert set(providers(fake=True)) == {"stripe", "paypal", "fake"}
+    assert providers(fake=False)["paypal"] is PAYPAL
+    assert set(providers(fake=False)) == {"stripe", "paypal", "square"}
+    assert set(providers(fake=True)) == {"stripe", "paypal", "square", "fake"}
 
 
 def test_paypal_asks_for_the_app_the_webhook_and_the_environment() -> None:

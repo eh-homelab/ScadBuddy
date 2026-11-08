@@ -291,6 +291,41 @@ def test_a_quote_from_a_slice_on_bambuddy(bambuddy: TestClient) -> None:
     assert len(shop.get_item()["quotes"]) == 2
 
 
+def test_a_quote_records_its_print_setup(bambuddy: TestClient) -> None:
+    """#4673 (order operations spec §5.1): the route takes the tower, supports and
+    sequence, and the item's quotes (`order_get`) list each quote's whole setup."""
+    shop = Shop(bambuddy)
+    slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    # A support setting is written in the preset's shape, so the preset is read (#1899).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {"enable_support": "0"}})
+    )
+    setup: dict[str, Any] = {
+        "prime_tower": {"enabled": True, "no_sparse_layers": True},
+        "supports": {"enabled": True, "type": "tree", "threshold_angle": 40},
+        "print_sequence": "by object",
+    }
+    assert shop.post(print_sequence="by plate").status_code == 422
+    started = shop.post(**setup)
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op.get("error")
+    # The quote's slice is the print's: the three reach Bambuddy's slicer.
+    overrides = json.loads(slices.posted.calls.last.request.content)["process_overrides"]
+    assert overrides["enable_prime_tower"] == "1"
+    assert overrides["wipe_tower_no_sparse_layers"] == "1"
+    assert overrides["enable_support"] == "1"
+    assert overrides["print_sequence"] == "by object"
+    [listed] = shop.get_item()["quotes"]
+    for quote in (op["result"], listed):
+        choices = quote["choices"]
+        assert choices["prime_tower"] == setup["prime_tower"]
+        assert choices["supports"] == {**setup["supports"], "on_build_plate_only": None}
+        assert choices["print_sequence"] == "by object"
+        assert choices["printer_id"] == shop.request()["printer_id"]
+        assert quote["filament_plan"]["slots"] == shop.request()["filament_plan"]["slots"]
+
+
 def test_a_two_plate_item_is_quoted_on_both_plates(bambuddy: TestClient) -> None:
     """Review Focus 9: both plates' grams and seconds, and a setup line each."""
     shop = Shop(bambuddy, plates=2)

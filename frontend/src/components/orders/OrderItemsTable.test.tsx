@@ -838,6 +838,10 @@ describe('OrderItemsTable · duplicate and bulk actions (#4955)', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel the order' }))
     await waitFor(() => expect(state.orders.find((o) => o.id === ORDER_DRAFT)?.status).toBe('cancelled'))
     await waitFor(() => expect(screen.queryByTestId('bulk-actions')).toBeNull())
+    // Reopened, the order starts with nothing picked: the old selection does not come back.
+    await user.click(await screen.findByRole('button', { name: 'Reopen order' }))
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getByRole('checkbox', { name: 'Select Name Keychain' })).not.toBeChecked())
+    expect(screen.queryByTestId('bulk-actions')).toBeNull()
   })
 
   it('turns Fulfil off, with the reason, when no selected item can be fulfilled now', async () => {

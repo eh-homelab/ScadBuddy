@@ -198,7 +198,13 @@ async def set_deposit(
     "/{order_id}/deposit/policy",
     response_model=Order,
     summary="Set the deposit the shop's policy asks",
-    description="As `PUT …/deposit`, with the amount the deposit policy asks of the order now.",
+    description=(
+        "As `PUT …/deposit`, with the amount the deposit policy asks of the order now. A"
+        " fixed amount or a `total_above` rule is in the shop's currency: on an order in"
+        " another currency it is skipped and named on the `deposit.set` audit row"
+        " (`skipped`, its index in the policy), and when only such rules would apply the"
+        " answer is 409 `deposit_policy_currency` and nothing is written."
+    ),
 )
 async def apply_deposit_policy(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
     check_path(order_id)
@@ -262,10 +268,8 @@ async def set_shipping_option(
     check_path(order_id)
     by = current_actor()
     try:
-        order = await asyncio.to_thread(
-            orders.lifecycle.set_shipping_option, order_id, by, body.option_id
+        return await service.service.run_linking(
+            order_id, lambda: orders.lifecycle.set_shipping_option(order_id, by, body.option_id)
         )
     except LifecycleError as error:
         raise refused(error) from None
-    await service.service.link_pending(order_id)
-    return order

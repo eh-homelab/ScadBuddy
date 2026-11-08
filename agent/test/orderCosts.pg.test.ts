@@ -307,6 +307,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     ])
   })
 
+  it("closes out an idle session's sub-unit share once its last turn is long over", async () => {
+    const quiet = await session(0.003)
+    const recent = await session(0.003)
+    await revise(quiet, 'q', 'q1')
+    await revise(recent, 'r', 'r1')
+    // A chat turn that ends well leaves the session idle, never done.
+    await db.sql`UPDATE ai_sessions SET updated_at = now() - interval '2 hours' WHERE id = ${quiet}`
+    answer = 'deferred'
+    await costs.report(quiet)
+    await costs.report(recent)
+    const rows = await db.sql<{ order_id: string; reported: boolean; reported_usd: number }[]>`
+      SELECT order_id, reported_at IS NOT NULL AS reported, reported_usd FROM ai_session_order_costs ORDER BY order_id`
+    expect(rows.map((r) => [r.order_id, r.reported, Number(r.reported_usd)])).toEqual([
+      ['q', true, 0],
+      ['r', false, 0],
+    ])
+  })
+
   it('reports nothing for a session with no spend since', async () => {
     const id = await session(0)
     await revise(id, 'a', 'a1')

@@ -8,7 +8,7 @@ from datetime import timedelta
 import psycopg
 import pytest
 
-from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.print_links import LanArchiveLink, PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.render.projection import JobProjection
@@ -270,6 +270,33 @@ async def test_a_library_send_is_pending_until_its_archive_is_linked(
         "cube.3mf",
     )
     assert await links.linked(41) is None
+
+
+async def test_a_lan_start_s_archive_keeps_its_first_record(links: PrintLinkStore) -> None:
+    """#5661: one start per archive; a second record changes nothing."""
+    first = LanArchiveLink(archive_id=40, run_id="r1", subtask_name="scadbuddy-r1-p1", plate_id=1)
+    await links.record_lan_start(first)
+    await links.record_lan_start(first.model_copy(update={"run_id": "r2"}))
+
+    assert await links.lan_start(40) == first
+    assert await links.lan_start(41) is None
+
+
+async def test_deleting_outputs_deletes_the_lan_starts_no_link_names(
+    links: PrintLinkStore,
+) -> None:
+    await links.record(OUT, PrintLink(archive_id=40, matched_by="content_hash"))
+    await links.record(OUT, PrintLink(archive_id=41, matched_by="content_hash"))
+    await links.record(OTH, PrintLink(archive_id=41, matched_by="content_hash"))
+    for archive_id in (40, 41):
+        await links.record_lan_start(
+            LanArchiveLink(archive_id=archive_id, run_id="r1", subtask_name="s")
+        )
+
+    await links.delete_outputs([OUTPUT])
+
+    assert await links.lan_start(40) is None
+    assert await links.lan_start(41) is not None, "another output still prints it"
 
 
 async def test_deleting_outputs_deletes_their_sends(links: PrintLinkStore) -> None:

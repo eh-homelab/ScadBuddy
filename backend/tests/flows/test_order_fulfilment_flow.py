@@ -255,6 +255,15 @@ def test_a_stale_quote_asks_a_person_and_never_re_quotes() -> None:
     assert "accept the new quote, then answer print" in host.questions[0]
 
 
+def test_the_print_leaves_the_tower_supports_and_sequence_to_the_quote() -> None:
+    """#4673: the flow's request names none of them, so `order_item_print` prints each
+    item with its accepted quote's (`print_body`'s `setup`), what the quote priced."""
+    host = _Host([_item("a")], [_OK], [])
+    host.run()
+    [request] = host.requests
+    assert not {"prime_tower", "supports", "print_sequence"} & set(request)
+
+
 def test_a_hold_asks_until_the_order_is_released() -> None:
     held = _refused("order_on_hold")
     host = _Host([_item("a")], [held, held, _OK], ["print", "print"])

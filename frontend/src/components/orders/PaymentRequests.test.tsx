@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
+import { server } from '../../mocks/server'
 import { mockConnectProvider, mockPaymentEvent } from '../../mocks/features/payments'
 import { ORDER_ACCEPTED, ORDER_CLOSED, state } from '../../mocks/features/orders/state'
 import { choose } from '../../test/select'
@@ -38,6 +40,27 @@ describe('PaymentRequests (#4957)', () => {
     expect(within(list).getByRole('button', { name: 'Copy link' })).toBeEnabled()
     expect(within(list).getByRole('link', { name: 'Email' })).toHaveAttribute('href', expect.stringMatching(/^mailto:/))
     expect(within(list).getByRole('button', { name: 'Cancel' })).toBeEnabled()
+  })
+
+  it('requests through the default provider when the form opened before the providers loaded', async () => {
+    // The flake behind #5729: the form took its provider from a list not yet loaded, kept
+    // "by hand", and sent `provider: null` once the list arrived.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/payments/providers', async () => {
+        await held
+        return undefined
+      }),
+    )
+    const { user } = await setup()
+    await user.click(await screen.findByRole('button', { name: 'Request payment' }))
+    release()
+    expect(await screen.findByRole('combobox', { name: 'Provider' })).toHaveTextContent('Fake')
+    await user.click(screen.getByRole('button', { name: 'Request' }))
+    const list = await screen.findByRole('list', { name: 'Payment requests' })
+    expect(await within(list).findByText('Fake')).toBeInTheDocument()
+    expect(within(list).queryByText('By hand')).not.toBeInTheDocument()
   })
 
   it('shows a paid request with the provider after its webhook, and no link', async () => {
@@ -110,6 +133,25 @@ describe('PaymentRequests (#4957)', () => {
     await user.click(await screen.findByRole('button', { name: 'Cancel' }))
     expect(await screen.findByText('Cancelled')).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument())
+  })
+
+  it('says when the provider has not yet confirmed a cancelled page closed (#5700)', async () => {
+    await setup((id) => {
+      const found = state.paymentRequests.find((r) => r.id === id)
+      if (!found) throw new Error('no request')
+      found.status = 'cancelled'
+      found.close_pending_at = '2026-11-08T12:00:00Z'
+    })
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    // The provider's label arrives with the providers list, which can land after the requests.
+    expect(await screen.findByText('Close not yet confirmed by Fake; ScadBuddy tries again')).toBeInTheDocument()
+  })
+
+  it('says nothing of the close once the provider confirmed it', async () => {
+    const { user } = await setup((id) => void id)
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    expect(screen.queryByText(/Close not yet confirmed/)).not.toBeInTheDocument()
   })
 
   it('offers no new request on a closed order', async () => {

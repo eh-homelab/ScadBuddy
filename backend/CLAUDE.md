@@ -653,7 +653,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
-  it (`Lifecycle.record_slice_quote`). The lifecycle drops the quote holders §3.4 releases
+  it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
+  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
+  An item's print takes the tower, supports and sequence it omits from the quote's
+  (`printing.py` `QUOTED_SETUP`, `print_body`'s `setup`); one that differs is `requote_needed`. The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
@@ -697,7 +702,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `…_order_deposits_tax.sql`): `orders.deposit_minor`, `.deposit_waived_reason` and
   `.balance_waived_reason`; `order_charges.auto` (the one tax row ScadBuddy computes,
   `Lifecycle._retax`) and `.shipping_option_id`. `set_deposit` and `apply_deposit_policy`
-  (`PUT /orders/{id}/deposit`, `POST …/deposit/policy`, gap 7) work while `draft` or
+  (`PUT /orders/{id}/deposit`, `POST …/deposit/policy`, gap 7; a policy rule skipped
+  for the order's currency is named as `skipped` on the `deposit.set` row, and only such
+  rules is 409 `deposit_policy_currency`) work while `draft` or
   `quoted`: they cancel the open and failed `deposit` requests and open one for the
   deposit less what is paid on the default provider (gap 4); a pending one refuses them
   (`payment_in_flight`). Until the deposit is paid (gap 3) or waived (`POST
@@ -720,8 +727,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
   request, and it cancels nothing). Every route whose lifecycle call reaches `_retax`
-  links such a request after the commit (`api/orders.py` `_run_linked`, and
-  `link_pending` in the archive quote and shipping-option routes): adding items, an
+  links such a request after the commit, and only the requests that call opened, so an
+  older one whose link failed waits for `POST …/link` (`Payments.run_linking` under
+  `api/orders.py` `_run_linked` and the shipping-option route; `request_ids` and
+  `link_opened` around the archive quote): adding items, an
   item's edit, delete, cancel and reopen, a revision and its answer, a manual or archive
   quote and its acceptance, a duplicate, the charges, and the order's reopen. The slice
   quote's run (an operation) does not: a request it opens is linked by the next linked
@@ -731,16 +740,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   row is `orders_tax_percent` of the items plus, with `orders_tax_shipping`, the shipping
   charges, rounded half up; a typed `tax` charge removes it (gap 6). A charges replace
   (`PATCH` and `…/charges/after-acceptance`) writes the typed charges only: the auto row
-  sent back as read (`auto`, its `id`, or a `tax` charge with its label, whatever the
-  amount) is dropped and the auto row is kept and recomputed (`Lifecycle._typed`); a
-  typed tax takes another label, and a charge's `shipping_option_id` is kept when
+  sent back as read (marked by `auto` or its `id`, whatever the amount) is dropped and
+  the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
+  whatever its label, is typed, and a charge's `shipping_option_id` is kept when
   sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address
-  (`shipping_address_required`), a pickup does not (gap 15). Routes in
+  (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
+  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  that reaches the deposit pays the open `deposit` requests, a provider's as a manual one
+  (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
@@ -968,9 +980,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
   captures it from the webhook path and the capture's events record it; each webhook is
   checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
-  cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
-  approval is not captured (a failed mark is logged, not retried, and such a capture, like one
-  made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  cached in memory, never stored; a cancel marks the order's `custom_id` so a later
+  approval is not captured (a failed mark is logged and the housekeeping sweep below tries
+  it again with a backoff: 5 minutes first, the wait doubling, at most a day; until a try
+  lands, a later approval is still captured, and such a capture, like one made before the
+  mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  `square.py` (#5666: a request is a quick-pay payment link and its reference is the link's
+  Square order id, which each payment carries; `x-square-hmacsha256-signature` checked by our
+  own code over the notification URL setting and the raw body; a cancel finds the order's
+  link by listing the links and deletes it; a payment is `paid` under Square's event id each
+  time it is told, and its fee comes from `processing_fee`; only an ACH payment's `FAILED`
+  fails the request, a declined card leaves it open; the facts, each with its Square
+  link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -995,7 +1016,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   unique `(order_id, kind, source)` index); one that arrives before its payment is
   `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
   only while the request is open or pending and the event (`ProviderEvent.created_at`) is
-  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
+  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A
+  `paid` event for a request on which this provider already recorded its payment (same
+  provider, request and reference, `Lifecycle._provider_payment`, whatever the request's
+  `payment_id`) writes no money; with a fee it writes that payment's fee once (#5666:
+  Square adds the fee in a later update). A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. A `refund_failed`
@@ -1028,3 +1053,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
   clears it; Settings shows it
   (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.
+  A provider's page to close (#5700): `store.set_request_status` is the one place that
+  marks it, setting `payment_requests.close_pending_at` when a request with a
+  `provider_ref` is cancelled, or paid by a payment that is not its own provider's (by
+  hand, or another request's payment that cleared the balance); its own provider's
+  payment clears the mark. After the commit, a cancel, a manual payment and a webhook's
+  payment close the pages they marked (`Payments.cancel_request`, `cancel_order`,
+  `add_payment`, `_handle_webhook`). `Payments._close_page` clears the mark once the
+  provider confirms (`close_confirmed`) and counts a failed try (`close_failed`:
+  `close_attempts`, `close_tried_at`), each only while the request still holds the
+  reference it tried. The `housekeeping_retry_payment_closes` sweep (both Schedules, behind
+  its patch) calls `Payments.retry_closes`: up to `CLOSE_RETRY_BATCH` marked pages whose
+  wait is over (`closes_due`: `CLOSE_RETRY_FIRST_MINUTES` after the mark or the last try,
+  doubled per failed try, at most a day). It never runs the lifecycle again. The order
+  page says "Close not yet confirmed" while the mark stands (`PaymentRequests.tsx`).
+  A page the provider made after its request was cancelled or paid by hand
+  (`Payments.link`'s race) is kept with its `provider_ref`, no `hosted_url`, and the mark
+  (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`), so the sweep
+  retries it like any other.

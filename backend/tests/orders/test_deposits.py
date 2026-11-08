@@ -15,6 +15,7 @@ from scadbuddy.orders.money import DepositRule, OrderRules
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
+from scadbuddy.payments.models import HostedRequest, ProviderEvent
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import (
@@ -429,3 +430,79 @@ def test_a_payment_leaves_a_failed_deposit_request_failed(shop: Shop) -> None:
     set_request_status(shop, req.id, "failed")
     shop.lifecycle.add_payment(order.id, BY, amount_minor=2000, method="cash")
     assert [r.status for r in requests_for(shop, order)] == ["failed"]
+
+
+def test_a_provider_payment_that_reaches_the_deposit_pays_its_request(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """Review of #5726: a provider's payment on another request that covers the deposit
+    ends the deposit request `paid`, as a manual payment does, so its page closes."""
+    shop = Shop(rows, BlobRefs(pool))
+    shop.lifecycle.offered_providers = frozenset({"fake"})
+    connect(rows, default=True)
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    whole = shop.lifecycle.open_payment_request(order.id, BY, provider="fake")
+    shop.lifecycle.set_request_link(
+        whole.id,
+        hosted=HostedRequest.model_validate(
+            {"provider_ref": "fake_whole", "hosted_url": "https://payments.fake.invalid/w"}
+        ),
+        error=None,
+    )
+    shop.lifecycle.set_deposit(order.id, BY, 500)
+    deposit = next(r for r in requests_for(shop, order) if r.kind == "deposit")
+    shop.lifecycle.set_request_link(
+        deposit.id,
+        hosted=HostedRequest.model_validate(
+            {"provider_ref": "fake_dep", "hosted_url": "https://payments.fake.invalid/d"}
+        ),
+        error=None,
+    )
+    paid = ProviderEvent(
+        event_id="e-whole",
+        kind="paid",
+        provider_ref="fake_whole",
+        amount_minor=1000,
+        currency="USD",
+    )
+    assert shop.lifecycle.record_provider_event("fake", paid) == "recorded"
+    statuses = {(r.kind, r.status) for r in requests_for(shop, order)}
+    assert statuses == {("balance", "paid"), ("deposit", "paid")}
+    # Its page is marked, so the webhook closes it after the commit (#5700).
+    closing = next(r for r in requests_for(shop, order) if r.kind == "deposit")
+    assert closing.close_pending_at is not None
+
+
+# -- a policy rule in another currency (review of #5726) ----------------------------------
+
+FIRST_ORDER_500 = DepositRule(criterion="first_order", amount_minor=500)
+
+
+def _eur(*rules: DepositRule) -> OrderRules:
+    """The shop's currency is EUR; the orders here are USD."""
+    return OrderRules("EUR", Decimal(0), False, rules, ())
+
+
+def test_a_policy_with_only_rules_in_another_currency_is_refused(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    shop = RulesShop(rows, BlobRefs(pool), _eur(FIRST_ORDER_500, TOTAL_ABOVE_10000_50PCT))
+    order = shop.order()
+    shop.quoted(order, shop.item(order), price=20000)
+    before = _writes(shop, order)
+    error = _slug(lambda: shop.lifecycle.apply_deposit_policy(order.id, BY))
+    assert error.slug == "deposit_policy_currency"
+    assert "EUR" in str(error) and "USD" in str(error)
+    assert _writes(shop, order) == before
+
+
+def test_a_policy_deposit_names_the_rules_it_skipped(rows: OrderStore, pool: PgPool) -> None:
+    shop = RulesShop(rows, BlobRefs(pool), _eur(FIRST_ORDER_500, FIRST_ORDER_25PCT))
+    order = shop.order()
+    shop.quoted(order, shop.item(order), price=1000)
+    order = shop.lifecycle.apply_deposit_policy(order.id, BY)
+    assert order.deposit_minor == 250
+    sets = [e.detail for e in shop.rows.events(order.id) if e.kind == "deposit.set"]
+    assert sets == [{"amount_minor": 250, "policy": True, "skipped": [0]}]
