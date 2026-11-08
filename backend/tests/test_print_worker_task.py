@@ -104,7 +104,7 @@ def _state() -> SimpleNamespace:
     return SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
         temporal=object(),
-        settings_store=None,
+        settings_store=SimpleNamespace(pool=None),
         outputs=SimpleNamespace(prints=None),
         uploads=None,
         catalogue=None,

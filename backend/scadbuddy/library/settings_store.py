@@ -38,7 +38,17 @@ import types
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    LiteralString,
+    Protocol,
+    Self,
+    Union,
+    get_args,
+    get_origin,
+)
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -944,6 +954,11 @@ class SettingsStore:
     def load(self, timeout: float | None = None) -> StoredSettings:
         return self.snapshot(timeout).stored
 
+    def plate_clear_required(self) -> bool:
+        """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that
+        `StoredSettings` does not hold."""
+        return self.snapshot().runtime.lan_require_plate_clear
+
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
         emit(self.events, SettingsChanged(section=section))
@@ -1375,6 +1390,61 @@ def _put_entry(conn: Connection[DictRow], name: str, key: str, value: object) ->
         " ON CONFLICT (name) DO UPDATE"
         " SET value = settings.value || EXCLUDED.value, updated_at = now()",
         (name, key, Jsonb(value)),
+    )
+
+
+class SettingsReader(Protocol):
+    """A read of the settings: the API's `SettingsStore`, or the print worker's
+    `crud/print.py` `RemoteSettingsStore`, which reads them through the API (#5298)."""
+
+    def load(self, timeout: float | None = None) -> StoredSettings: ...
+
+    def plate_clear_required(self) -> bool: ...
+
+
+#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key,
+#: which is also the Bambuddy spool provider's key (`bambuddy/spool_providers.py`). No
+#: other spool provider has a key. `print_projection` leaves every other sealed field null.
+PRINT_SECRETS = frozenset({"bambuddy_api_key"})
+#: The S3 store's connection, which the print worker never reads (it reaches blobs
+#: through the API's routes): `print_projection` answers each as null, or as its default
+#: where the field takes no null. ``store_backend`` stays: a native run reads it.
+PRINT_UNREAD = (
+    "store_s3_endpoint",
+    "store_s3_region",
+    "store_s3_bucket",
+    "store_s3_prefix",
+    "store_s3_access_key_id",
+    "store_s3_path_style",
+)
+
+
+class PrintSettings(StoredSettings):
+    """What the print worker gets of the settings (`print_projection`): the stored
+    settings, and ``lan_require_plate_clear`` as the API resolves it."""
+
+    lan_require_plate_clear: bool = False
+
+
+def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
+    """``snapshot``'s settings with every sealed field null but `PRINT_SECRETS`, and the
+    `PRINT_UNREAD` fields null or default. A sealed field added later is null here until
+    it is named in `PRINT_SECRETS`."""
+    blanked: dict[str, Any] = {
+        name: None
+        for name in SECRET_FIELDS & StoredSettings.model_fields.keys()
+        if name not in PRINT_SECRETS
+    }
+    for name in PRINT_UNREAD:
+        field = StoredSettings.model_fields[name]
+        nullable = type(None) in get_args(field.annotation)
+        blanked[name] = None if nullable else field.get_default(call_default_factory=True)
+    return PrintSettings.model_validate(
+        {
+            **snapshot.stored.model_dump(),
+            **blanked,
+            "lan_require_plate_clear": snapshot.runtime.lan_require_plate_clear,
+        }
     )
 
 

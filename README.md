@@ -928,12 +928,16 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
-- **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
-  included, are read from it on every use), `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **Environment:** `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
-  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and the Bambuddy
-  URL and key as the API has them (they only seed a database never saved). Its build id
-  is `SCADBUDDY_REVISION`, stamped in the image.
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` and `SCADBUDDY_API_INTERNAL_URL`. It reads the
+  settings, the Bambuddy key included, from the API's CRUD route
+  `GET /api/v1/internal/crud/print/settings` on every use (#5298), as the API resolves
+  them, so its own Bambuddy URL and key variables are not read. That answer is
+  `no-store`. Every other sealed setting (the render key, the S3 secret) is null in it,
+  and so is the rest of the S3 store's connection (`PRINT_UNREAD`; the fields that take
+  no null keep their defaults). The worker waits until the API lists the `settings` area before it serves. Its
+  build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
   AUTO_UPGRADE: a run moves to each new build (#2066). They were pinned, and the

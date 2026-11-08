@@ -135,14 +135,17 @@ def test_the_role_holds_its_list_and_cannot_migrate(
         pool.close()
 
 
-def test_a_worker_on_its_own_role_opens_reads_settings_and_runs_an_operation(
+def test_a_worker_on_its_own_role_opens_and_runs_an_operation(
     owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
 ) -> None:
     _grant(owner, role, "print")
     store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
     open_for_caller(store, "print")
     try:
-        store.snapshot()
+        # #5298: the print worker reads its settings through the API's CRUD route
+        # (`crud/print.py`), so its list leaves out the remembered choices a snapshot reads.
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            store.snapshot()
         operations = OperationStore(store.pool)
 
         async def run() -> Any:

@@ -39,15 +39,16 @@ Grants = Mapping[str, tuple[str, ...]]
 _ALL = ("SELECT", "INSERT", "UPDATE", "DELETE")
 _READ = ("SELECT",)
 
-#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. Its
-#: `settings` reads are the whole snapshot (the Bambuddy key among them), and a printer
-#: merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `ensure_bambuddy`)
+#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. It reads
+#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route), but a
+#: printer merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `ensure_bambuddy`)
 #: rewrites every table `PRINTER_REFERENCES` names, `settings` and `activity` included.
 PRINT_GRANTS: Grants = {
-    # The settings snapshot (`library/settings_store.py` `snapshot`), and the merge's
-    # rewrite of a printer's stored choices (`printers/store.py`).
+    # The merge's rewrite of a printer's stored choices and plates (`printers/store.py`
+    # `_merge`) until #5298 Task 29. The worker reads the settings through the API's CRUD
+    # route (`crud/print.py`, #5298), so `model_print_choices` is gone from the list; an
+    # existing role keeps it until the revoke.
     "settings": ("SELECT", "UPDATE"),
-    "model_print_choices": _READ,
     "printer_bed_types": ("SELECT", "UPDATE", "DELETE"),
     # Whether the API has migrated (`wait_until_ready`).
     "scadbuddy_migrations": _READ,

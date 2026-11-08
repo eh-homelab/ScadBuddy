@@ -40,7 +40,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import VirtualPrinter
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek, SealError, open_bytes, seal_bytes
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 from scadbuddy.printers.bambuddy_sync import StoreRegistry, sync_virtual_printers
 from scadbuddy.printers.models import VirtualPrinterMode
@@ -210,7 +210,7 @@ UNKEYED = frozenset({SEALED_FIELD})
 
 
 def virtual_printer_kinds(
-    *, settings_store: SettingsStore, printers: PrinterStore | None
+    *, settings_store: SettingsReader, printers: PrinterStore | None
 ) -> list[OperationKind]:
     """``bambuddy_vp_create``, ``bambuddy_vp_update`` and ``bambuddy_vp_delete``. Each
     runs once: Bambuddy dedupes none of them (a second create makes a second VP). Each

@@ -14,7 +14,6 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -227,12 +226,12 @@ async def test_a_start_saves_what_it_uses_of_the_native_spools_once(pg_pool: PgP
         update={"run_id": "run-1", "grams_by_slot": {1: 12.5, 2: 4.0}}
     )
     input = base.model_copy(update={"printer": row.id, "spools": {1: option}, "uploaded": uploaded})
-    store = cast(SettingsStore, SimpleNamespace(pool=pg_pool))
     running = state(gcode_state="RUNNING", subtask_name=NAME)
     for lan in (Scripted(state(gcode_state="FINISH", **LAST), [running]), Scripted(running, [])):
         deps = LanDeps(
             printers=printers,
-            settings_store=store,
+            settings_store=cast(SettingsStore, None),
+            native_spools=native,
             connect=lambda *_, lan=lan: cast(LanPrinter, lan),
             start_wait=2,
         )
