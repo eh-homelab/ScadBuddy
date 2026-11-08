@@ -16,7 +16,7 @@ from scadbuddy.orders.lifecycle import (
     ShipmentEdit,
     ShipmentInput,
 )
-from scadbuddy.orders.models import Order, OrderItem, ShipmentItem
+from scadbuddy.orders.models import ChargeInput, Order, OrderItem, ShipmentItem
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -348,3 +348,46 @@ def test_a_failed_request_beside_a_deposit_leaves_one_request_at_accept(shop: Sh
     open_ones = [(r.kind, r.amount_minor) for r in found if r.status == "open"]
     assert open_ones == [("balance", 1000 - 100)]
     assert next(r for r in found if r.id == failed.id).status == "cancelled"
+
+
+def test_reopening_a_cancelled_accepted_order_asks_for_the_balance_again(shop: Shop) -> None:
+    order, item = with_deposit(shop)
+    shop.lifecycle.cancel_order(order.id, BY)
+    order = shop.lifecycle.reopen_order(order.id, BY)
+    assert order.status == "accepted"
+    found = requests_for(shop, order)
+    assert [(r.kind, r.amount_minor, r.status) for r in found][-1] == ("balance", 700, "open")
+    shop.fulfilled(order, item)
+    assert _slug(lambda: shop.shipped(order, shop.get_item(item))) == "balance_unpaid"
+
+
+def test_reopening_an_order_that_asked_for_nothing_opens_no_request(shop: Shop) -> None:
+    order, _ = shop.accepted()
+    shop.lifecycle.cancel_order(order.id, BY)
+    order = shop.lifecycle.reopen_order(order.id, BY)
+    assert requests_for(shop, order) == []
+
+
+def test_a_total_grown_past_a_full_deposit_opens_the_balance_request(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    shop.lifecycle.set_deposit(order.id, BY, 1000)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=1000, method="cash")
+    order = shop.lifecycle.accept_order(order.id, BY)
+    assert [r.kind for r in requests_for(shop, order)] == ["deposit"]
+    rush = ChargeInput(kind="fee", label="Rush", amount_minor=200)
+    shop.lifecycle.replace_charges_after_acceptance(order.id, BY, [rush])
+    found = requests_for(shop, order)
+    assert [(r.kind, r.amount_minor, r.status) for r in found][-1] == ("balance", 200, "open")
+    shop.fulfilled(order, shop.get_item(item))
+    assert _slug(lambda: shop.shipped(shop.get(order), shop.get_item(item))) == "balance_unpaid"
+
+
+def test_a_total_grown_after_the_shop_cancelled_the_balance_opens_none(shop: Shop) -> None:
+    order, _ = with_deposit(shop)
+    bal = requests_for(shop, order)[-1]
+    shop.lifecycle.cancel_payment_request(order.id, bal.id, BY)
+    rush = ChargeInput(kind="fee", label="Rush", amount_minor=200)
+    shop.lifecycle.replace_charges_after_acceptance(order.id, BY, [rush])
+    assert [r.status for r in requests_for(shop, order) if r.kind == "balance"] == ["cancelled"]

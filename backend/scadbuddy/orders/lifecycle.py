@@ -281,7 +281,8 @@ class ShipmentEdit(BaseModel):
 
 class OrderEdit(BaseModel):
     """`PATCH /orders/{id}`: notes and the due date in any open state; the addresses
-    and the charges, replaced whole, while `draft` or `quoted`."""
+    and the typed charges, replaced whole (the auto tax row stays, ``_typed``), while
+    `draft` or `quoted`."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -627,7 +628,7 @@ class Lifecycle:
         self._event(conn, order, by, "order.status", from_status=order.status, to=status)
         return moved
 
-    def _retax(self, conn: Conn, order: Order, rules: OrderRules | None = None) -> None:
+    def _retax(self, conn: Conn, order: Order, by: Actor, rules: OrderRules | None = None) -> None:
         """The order's auto tax row (#5281, storefront spec §9) as its rows now say, on an
         order `draft` through `ready`: ``orders_tax_percent`` of the items' subtotal, plus
         the shipping charges with ``orders_tax_shipping``, rounded half up. None at 0
@@ -635,22 +636,27 @@ class Lifecycle:
         ended order's row stays as it was. Each transition that changes the items, their
         quotes or the charges calls it once, before it rederives (`reopen_item` after,
         since its rederive can leave `shipped`); ``rules`` is the
-        transition's one read of them, when it has one."""
+        transition's one read of them, when it has one. At 0 percent with no auto row
+        there is nothing to do. Past acceptance, a total that grew past a deposit that paid
+        it whole opens the balance request (``_regate_balance``)."""
         if order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
             return
         rules = self.rules() if rules is None else rules
-        typed = [charge for charge in self.store.charges(order.id, conn=conn) if not charge.auto]
-        amount = 0
-        if rules.tax_percent > 0 and not any(charge.kind == "tax" for charge in typed):
-            items = totals_of(self.store, conn, order.id).subtotal_minor
-            base = tax_base(items, typed, tax_shipping=rules.tax_shipping)
-            amount = tax_minor(base, rules.tax_percent)
-        self.store.set_auto_tax(
-            conn,
-            order.id,
-            label=f"Tax {_plain(rules.tax_percent)}%",
-            amount_minor=amount or None,
-        )
+        charges = self.store.charges(order.id, conn=conn)
+        typed = [charge for charge in charges if not charge.auto]
+        if rules.tax_percent > 0 or len(typed) < len(charges):
+            amount = 0
+            if rules.tax_percent > 0 and not any(charge.kind == "tax" for charge in typed):
+                items = totals_of(self.store, conn, order.id).subtotal_minor
+                base = tax_base(items, typed, tax_shipping=rules.tax_shipping)
+                amount = tax_minor(base, rules.tax_percent)
+            self.store.set_auto_tax(
+                conn,
+                order.id,
+                label=f"Tax {_plain(rules.tax_percent)}%",
+                amount_minor=amount or None,
+            )
+        self._regate_balance(conn, order, by)
 
     # -- orders (§3.2) --------------------------------------------------------------------
 
@@ -772,17 +778,39 @@ class Lifecycle:
             if edited:
                 self._event(conn, order, by, "order.edited", fields=edited)
             if edit.charges is not None:
-                self.store.replace_charges(conn, order.id, edit.charges)
-                self._event(conn, order, by, "charges.replaced", count=len(edit.charges))
-                self._retax(conn, order)
+                typed = self._typed(conn, order, edit.charges)
+                self.store.replace_charges(conn, order.id, typed)
+                self._event(conn, order, by, "charges.replaced", count=len(typed))
+                self._retax(conn, order, by)
         self._told(_Change(order))
         return order
+
+    def _typed(self, conn: Conn, order: Order, charges: Sequence[ChargeInput]) -> list[ChargeInput]:
+        """The charges a replace writes: ``charges`` less the auto tax row sent back as it
+        was read (``auto``, its ``id``, or a `tax` charge with its label and amount), which
+        the order keeps and ``_retax`` recomputes. Any other `tax` charge is typed and
+        replaces the auto row."""
+        auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
+
+        def is_auto(charge: ChargeInput) -> bool:
+            if charge.auto:
+                return True
+            if auto is None:
+                return False
+            return charge.id == auto.id or (
+                charge.kind == "tax"
+                and charge.label == auto.label
+                and charge.amount_minor == auto.amount_minor
+            )
+
+        return [charge for charge in charges if not is_auto(charge)]
 
     def replace_charges_after_acceptance(
         self, order_id: str, by: Actor, charges: Sequence[ChargeInput]
     ) -> Order:
-        """The charges, replaced whole, on an order past `quoted` (#5351): a fee or a
-        discount that keeps an agreed total when an item is added after acceptance. It
+        """The typed charges, replaced whole (the auto tax row stays, ``_typed``), on an
+        order past `quoted` (#5351): a fee or a discount that keeps an agreed total when an
+        item is added after acceptance. It
         changes what the customer pays, so it is its own route and the agent's `outward`
         tier. Only an `accepted`, `in_production` or `ready` order (`TAKES_ITEMS`) that is
         not on hold takes it: `order_not_accepted` before that (use ``edit_order``),
@@ -805,8 +833,8 @@ class Lifecycle:
                 )
             self._not_on_hold(order)
             before = self.store.charges(order.id, conn=conn)
-            self.store.replace_charges(conn, order.id, charges)
-            self._retax(conn, order)
+            self.store.replace_charges(conn, order.id, self._typed(conn, order, charges))
+            self._retax(conn, order, by)
             after = self.store.charges(order.id, conn=conn)
             self._event(
                 conn,
@@ -876,7 +904,7 @@ class Lifecycle:
                 )
             self.store.replace_charges(conn, order.id, charges)
             self._event(conn, order, by, "shipping.option_set", option_id=option_id)
-            self._retax(conn, order, rules)
+            self._retax(conn, order, by, rules)
             order = self._rederive(conn, order, by)
             order = self.store.order(order.id, conn=conn) or order
         self._told(_Change(order))
@@ -1022,13 +1050,17 @@ class Lifecycle:
         return opened
 
     def cancel_payment_request(
-        self, order_id: str, request_id: str, by: Actor
+        self, order_id: str, request_id: str, by: Actor, reason: str | None = None
     ) -> PaymentRequestView:
+        """An open request cancelled, with the person's ``reason`` on the audit row when
+        given. Cancelling the `balance` request lifts `balance_unpaid` (gap 2), so the
+        reason says why the order may ship unpaid."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._open_request(conn, order, request_id)
             cancelled = payments.set_request_status(conn, request_id, "cancelled")
-            self._event(conn, order, by, "payment_request.cancelled", request_id=request_id)
+            why = {} if reason is None else {"reason": reason}
+            self._event(conn, order, by, "payment_request.cancelled", request_id=request_id, **why)
         self._told(_Change(order))
         return cancelled
 
@@ -1195,14 +1227,16 @@ class Lifecycle:
     # edit does not raise a quantity (`balance_unpaid`). A back-office order with no
     # request ships as it always did.
 
-    def _open_balance(self, conn: Conn, order: Order, by: Actor) -> None:
+    def _open_balance(self, conn: Conn, order: Order, by: Actor, *, reopened: bool = False) -> None:
         """At acceptance, when the order has a deposit or a payment request that is not
         cancelled, leaves one open request asking for what is not paid yet. A lone open
         `balance` request that already asks for it is kept. Otherwise every open or failed
         request is cancelled and a `balance` request for the rest opens on the default
-        provider."""
+        provider. ``reopened``: a cancelled order back past `quoted`, whose cancel ended
+        every request, so any request at all says it asked for money."""
         found = payments.requests_for_order(conn, order.id)
-        if order.deposit_minor is None and all(r.status == "cancelled" for r in found):
+        asked = bool(found) if reopened else any(r.status != "cancelled" for r in found)
+        if order.deposit_minor is None and not asked:
             return
         due = totals_of(self.store, conn, order.id).balance_minor
         live = [r for r in found if r.status in ("open", "failed")]
@@ -1242,6 +1276,42 @@ class Lifecycle:
         if not has_standing_balance(found):
             return 0
         return balance_due(found, totals_of(self.store, conn, order.id).balance_minor)
+
+    def _regate_balance(self, conn: Conn, order: Order, by: Actor) -> None:
+        """Gap 2's case with no balance request yet: an order past acceptance that asked
+        for money (a deposit, or a request not cancelled) but opened no balance request,
+        because the deposit paid the whole total at accept. Once its balance is above zero
+        again, a `balance` request for it opens on the default provider. It cancels no
+        request; one the shop cancelled, or one still open, pending or failed, leaves it
+        alone."""
+        if order.status not in TAKES_ITEMS:
+            return
+        found = payments.requests_for_order(conn, order.id)
+        if any(r.kind == "balance" for r in found) or any(
+            r.status in ("open", "pending", "failed") for r in found
+        ):
+            return
+        if order.deposit_minor is None and all(r.status == "cancelled" for r in found):
+            return
+        due = totals_of(self.store, conn, order.id).balance_minor
+        if due <= 0:
+            return
+        opened = payments.insert_request(
+            conn,
+            order_id=order.id,
+            kind="balance",
+            provider=payments.default_provider(conn, self.offered_providers),
+            amount_minor=due,
+            currency=order.currency,
+            created_by=by,
+        )
+        self.store.insert_event(
+            conn,
+            order.id,
+            by,
+            "payment_request.opened",
+            {"request_id": opened.id, "kind": "balance", "amount_minor": due},
+        )
 
     def _balance_paid(self, conn: Conn, order: Order) -> None:
         """Refuses (`balance_unpaid`) while the order has a `balance` request not
@@ -1911,7 +1981,10 @@ class Lifecycle:
                     attempted,
                 )
             reopened = self.store.reopen_order_row(conn, order.id, target)
-            self._retax(conn, reopened)
+            self._retax(conn, reopened, by)
+            if order.status == "cancelled" and target in TAKES_ITEMS:
+                # The cancel ended the balance request: the gate comes back with the order.
+                self._open_balance(conn, reopened, by, reopened=True)
             self._event(
                 conn,
                 order,
@@ -1964,7 +2037,7 @@ class Lifecycle:
             # After the rederive: an item reopened on a `shipped` order moves it back to
             # one `_retax` writes for, which the locked row is not.
             order = self._rederive(conn, order, by)
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             self._hold(conn, self._standing(conn, item.id))
         self._told(_Change(order, [(item, None)]))
         return item
@@ -2264,7 +2337,7 @@ class Lifecycle:
                 output_id=output_id,
                 after_acceptance=after_acceptance,
             )
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return revision
@@ -2448,7 +2521,7 @@ class Lifecycle:
                 self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
             ]
             # Once for the whole add, not once per item.
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None) for item in items]))
         return items
@@ -2525,7 +2598,7 @@ class Lifecycle:
                     conn, order, by, "item.parts_set", item_id=copy.id, parts=_parts_detail(parts)
                 )
             self._event(conn, order, by, "item.duplicated", item_id=copy.id, from_item_id=item.id)
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(copy, None)]))
         return copy
@@ -2858,7 +2931,7 @@ class Lifecycle:
             if price is not None:
                 item = self._custom_price(conn, order, item, price, by, accept=accept)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -2951,7 +3024,7 @@ class Lifecycle:
                     items=[item.id],
                 )
             self._event(conn, order, by, "item.deleted", item_id=item.id)
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
 
@@ -2965,7 +3038,7 @@ class Lifecycle:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             item = self.store.update_item(conn, item.id, status="cancelled")
             self._event(conn, order, by, "item.cancelled", item_id=item.id)
-            self._retax(conn, order)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
             # §3.4: cancelling the item releases every quote's sliced file.
             released = self._quote_ids(conn, [item.id])
@@ -3078,7 +3151,7 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="quoted")
             changed.append((item, None))
         self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
-        self._retax(conn, order)
+        self._retax(conn, order, by)
         order = self._rederive(conn, order, by)
         released = [
             other.id
@@ -3233,7 +3306,7 @@ class Lifecycle:
             conn, item.id, status="approved", revised_after_acceptance=False
         )
         self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
-        self._retax(conn, order)
+        self._retax(conn, order, by)
         order = self._rederive(conn, order, by)
         released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
         return order, item, released

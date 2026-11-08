@@ -11,7 +11,6 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
 
 from scadbuddy.orders.lifecycle import ManualQuoteInput, OrderEdit
 from scadbuddy.orders.models import ChargeInput, Order
@@ -287,11 +286,15 @@ def test_the_audit_row_after_acceptance_holds_the_recomputed_tax(shop: RulesShop
     assert row.detail["after"] == [{"kind": "tax", "label": "Tax 20%", "amount_minor": 201}]
 
 
-def test_a_charge_body_cannot_set_auto() -> None:
-    with pytest.raises(ValidationError):
-        OrderEdit.model_validate(
-            {"charges": [{"kind": "tax", "label": "x", "amount_minor": 1, "auto": True}]}
-        )
+def test_a_charge_body_cannot_set_auto(shop: RulesShop) -> None:
+    """A row sent with ``auto`` is the auto row sent back as read: it is dropped, never
+    written, so no body makes a tax row of its own (final review, Blocking 2)."""
+    order = shop.order()
+    edit = OrderEdit.model_validate(
+        {"charges": [{"kind": "tax", "label": "x", "amount_minor": 1, "auto": True}]}
+    )
+    shop.lifecycle.edit_order(order.id, BY, edit)
+    assert shop.rows.charges(order.id) == []
 
 
 def test_reopening_an_item_on_a_shipped_order_retaxes_after_the_rederive(

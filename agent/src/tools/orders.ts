@@ -87,11 +87,20 @@ const address = z
     default_billing: z.boolean().default(false),
   })
   .strict()
+const AUTO_TAX =
+  'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
+  'and recomputes it; sent back as read it is kept as it is. Any other `tax` charge is a typed tax and replaces it.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
     label: z.string().min(1).max(200),
     amount_minor: money.describe('Signed: a discount is negative'),
+    shipping_option_id: z
+      .string()
+      .regex(/^[a-z0-9_-]{1,40}$/)
+      .nullable()
+      .optional()
+      .describe('A shipping charge chosen from a shipping option (#5281): send it back as read to keep the link'),
   })
   .strict()
 const reference = z
@@ -833,8 +842,8 @@ export const orderTools: Tool[] = [
     label: 'Edit an order',
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
-      'charges, replaced whole, while draft or quoted (past that, charges answer 409 `order_not_editable`: use ' +
-      'order_charges_update_after_acceptance). `hold` puts it on hold or releases it (true/false): on hold, ' +
+      'typed charges, as a whole list, while draft or quoted (past that, charges answer 409 `order_not_editable`: ' +
+      'use order_charges_update_after_acceptance). ' + AUTO_TAX + ' `hold` puts it on hold or releases it (true/false): on hold, ' +
       'every step that advances the order is refused until released. Releasing is a write, as holding is: it ' +
       'commits nothing to the customer, and every step that does (accepting, fulfilling, shipping, closing) stays ' +
       'outward. `payment` records money the shop already received, in any state but cancelled.',
@@ -981,8 +990,8 @@ export const orderTools: Tool[] = [
     name: 'order_charges_update_after_acceptance',
     label: 'Change the charges of an accepted order',
     description:
-      'Replace the charges of an order that is accepted, in production or ready (#5351), whole, as order_update ' +
-      'takes them before that. It changes what the customer pays. Use it to keep an agreed total: when an item ' +
+      'Replace the typed charges of an order that is accepted, in production or ready (#5351), as a whole list, as ' +
+      'order_update takes them before that. ' + AUTO_TAX + ' It changes what the customer pays. Use it to keep an agreed total: when an item ' +
       'is added after acceptance, a `discount` (negative) or `fee` line absorbs its price. The audit row holds the ' +
       'charges before and after. Refused: `order_not_accepted` on a draft or quoted order (use order_update), ' +
       '`order_not_editable` once shipped, `order_closed`/`order_cancelled`, and `order_on_hold`.',
@@ -1086,7 +1095,8 @@ export const orderTools: Tool[] = [
     label: 'Send a design revision to the customer',
     description:
       "Send a design revision to the customer for their answer. Outward: it commits the shop to the customer. The " +
-      "customer's answer is recorded by a person, never by an agent.",
+      "customer's answer is recorded by a person, never by an agent. Refused with `deposit_unpaid` while the " +
+      "order's deposit is set and neither paid nor waived (#5281), and `order_not_submitted` on a storefront cart.",
     input: z.object({ order_id: orderId, item_id: itemId, revision_id: ID.describe("A revision id, as order_get lists an item's `revisions`") }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/send'],
@@ -1266,7 +1276,10 @@ export const orderTools: Tool[] = [
     label: 'Accept an order',
     description:
       'Accept an order: every open item must have an accepted quote (`items_not_quoted` names the rest). Copies ' +
-      "the customer's addresses onto the order and pins every item; the shop is committed to the customer.",
+      "the customer's addresses onto the order and pins every item; the shop is committed to the customer. An " +
+      'order that asked for money (a deposit, or a payment request) is left with one open `balance` request for ' +
+      'what is not paid, on the default provider: its other open or failed requests are cancelled (#5281). ' +
+      'Refused with `payment_in_flight` while a payment is pending and `order_not_submitted` on a storefront cart.',
     input: z.object({ order_id: orderId }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/accept'],
@@ -1351,7 +1364,8 @@ export const orderTools: Tool[] = [
       "filed under the item's project in the order's, and `options` sets the calibrations and timelapse. " +
       'Over the LAN the print files under no project, and a calibration value the LAN start cannot honour is refused ' +
       "(see `path` on print_output). A quote sliced over the LAN is sliced again when printed with `path: \"bambuddy\"`; " +
-      'quote with that `path` to print the quote\'s own slice. Outward: it prints.',
+      'quote with that `path` to print the quote\'s own slice. A test print of a revision is refused with ' +
+      "`deposit_unpaid` while the order's deposit is set and neither paid nor waived (#5281). Outward: it prints.",
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -1543,7 +1557,9 @@ export const orderTools: Tool[] = [
     description:
       'Record a shipment of fulfilled items (or edit one with `shipment_id`): carrier, service, tracking, when, the ' +
       "address (the order's shipping address when none is given) and which items in what quantity. The order is " +
-      'shipped once its shipments cover every fulfilled item.',
+      'shipped once its shipments cover every fulfilled item. Refused with `balance_unpaid` while a balance ' +
+      'request stands, the balance is above zero and no one waived it (order_balance_waive), as is an edit that ' +
+      'raises a quantity (#5281).',
     input: z.object({
       order_id: orderId,
       shipment_id: ID.optional(),

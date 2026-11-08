@@ -240,9 +240,11 @@ class Payments:
     # ``paid`` by hand. A provider that fails is logged and undoes nothing: the request
     # stays closed here, and a provider's paid event on it is still recorded.
 
-    async def cancel_request(self, order_id: str, request_id: str, by: Actor) -> PaymentRequestView:
+    async def cancel_request(
+        self, order_id: str, request_id: str, by: Actor, reason: str | None = None
+    ) -> PaymentRequestView:
         cancelled = await asyncio.to_thread(
-            self._orders.lifecycle.cancel_payment_request, order_id, request_id, by
+            self._orders.lifecycle.cancel_payment_request, order_id, request_id, by, reason
         )
         await self._close_pages([cancelled])
         return cancelled

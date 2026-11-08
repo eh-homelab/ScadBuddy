@@ -692,9 +692,23 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   cancel opens none and does not). A storefront cart refuses (`order_not_submitted`) a
   deposit set or applied, both waivers and accept, and refuses its shipping option and its
   charges (`PATCH` with `charges`) to anyone but the visitor (`check_visitors_cart`): the
-  back office never acts on a visitor's cart. The tax row is `orders_tax_percent` of the items plus, with
-  `orders_tax_shipping`, the shipping charges, rounded half up; a typed `tax` charge
-  removes it (gap 6). `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
+  back office never acts on a visitor's cart. A cancelled order reopened past `quoted`
+  that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
+  and an accepted order whose deposit paid the whole total opens one once its balance is
+  above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
+  request, and it cancels nothing). The routes that can open one that way (reopen, the
+  charges after acceptance, an item's edit, a quote's acceptance, a duplicate) link it
+  after the commit (`api/orders.py` `_run_linked`). A request's cancel takes an optional
+  `reason` (1 to 500 characters), kept on its `payment_request.cancelled` audit row:
+  cancelling the balance request lifts `balance_unpaid`, so the reason says why. The tax
+  row is `orders_tax_percent` of the items plus, with `orders_tax_shipping`, the shipping
+  charges, rounded half up; a typed `tax` charge removes it (gap 6). A charges replace
+  (`PATCH` and `…/charges/after-acceptance`) writes the typed charges only: the auto row
+  sent back as read (`auto`, its `id`, or a `tax` charge with its label and amount) is
+  dropped and kept (`Lifecycle._typed`), and a charge's `shipping_option_id` is kept when
+  sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
+  query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
+  `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address

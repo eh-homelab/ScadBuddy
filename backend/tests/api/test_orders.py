@@ -242,9 +242,10 @@ def test_only_a_shipping_charge_names_a_shipping_option(client: TestClient, kind
 
 
 def test_a_charge_body_cannot_set_auto(client: TestClient) -> None:
-    """The auto tax row (#5281) is ScadBuddy's: no body writes ``auto``."""
+    """The auto tax row (#5281) is ScadBuddy's: a row sent with ``auto`` is the auto row
+    sent back as read, so it is dropped and never written."""
     order = create_order(client, create_customer(client)["id"])
     charge = {"kind": "tax", "label": "x", "amount_minor": 1, "auto": True}
-    refused = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [charge]})
-    assert refused.status_code == 422, refused.text
-    assert "auto" in refused.text
+    patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [charge]})
+    assert patched.status_code == 200, patched.text
+    assert client.get(f"/api/v1/orders/{order['id']}").json()["charges"] == []

@@ -365,3 +365,133 @@ def test_a_pickup_option_needs_no_address(client: TestClient) -> None:
     removed = client.put(url, json={"option_id": None})
     assert removed.status_code == 200, removed.text
     assert detail(client, order["id"])["charges"] == []
+
+
+# -- the auto tax row in a charges round trip (final review, Blocking 2) --------------------
+
+
+def _tax(client: TestClient, order_id: str) -> list[tuple[int, bool]]:
+    charges = detail(client, order_id)["charges"]
+    return [(c["amount_minor"], c["auto"]) for c in charges if c["kind"] == "tax"]
+
+
+def test_charges_sent_back_as_read_keep_the_tax_auto(client: TestClient) -> None:
+    client.put(
+        "/api/v1/settings",
+        json={"orders_tax_percent": "10", "storefront_shipping_options": OPTIONS},
+    )
+    order, item = quoted(client)
+    url = f"/api/v1/orders/{order['id']}/shipping-option"
+    assert client.put(url, json={"option_id": "pickup"}).status_code == 200
+    assert _tax(client, order["id"]) == [(100, True)]
+    read = detail(client, order["id"])["charges"]
+    # As an agent sends them: kind, label, amount and the option, plus a new fee.
+    sent = [
+        {k: c[k] for k in ("kind", "label", "amount_minor", "shipping_option_id")} for c in read
+    ]
+    sent.append({"kind": "fee", "label": "Rush", "amount_minor": 500})
+    patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": sent})
+    assert patched.status_code == 200, patched.text
+    assert _tax(client, order["id"]) == [(100, True)]
+    shipping = [c for c in detail(client, order["id"])["charges"] if c["kind"] == "shipping"]
+    assert [c["shipping_option_id"] for c in shipping] == ["pickup"]
+    grown = client.patch(f"/api/v1/orders/{order['id']}/items/{item['id']}", json={"quantity": 3})
+    assert grown.status_code == 200, grown.text
+    assert _tax(client, order["id"]) == [(300, True)]
+
+
+def test_the_auto_row_sent_back_whole_stays_auto(client: TestClient) -> None:
+    client.put("/api/v1/settings", json={"orders_tax_percent": "10"})
+    order, _ = quoted(client)
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    [row] = detail(client, order["id"])["charges"]
+    sent = [{k: row[k] for k in ("id", "kind", "label", "amount_minor", "auto")}]
+    put = client.put(
+        f"/api/v1/orders/{order['id']}/charges/after-acceptance", json={"charges": sent}
+    )
+    assert put.status_code == 200, put.text
+    assert _tax(client, order["id"]) == [(100, True)]
+
+
+def test_a_typed_tax_replaces_the_auto_row(client: TestClient) -> None:
+    client.put("/api/v1/settings", json={"orders_tax_percent": "10"})
+    order, _ = quoted(client)
+    typed = {"kind": "tax", "label": "VAT", "amount_minor": 70}
+    assert (
+        client.patch(f"/api/v1/orders/{order['id']}", json={"charges": [typed]}).status_code == 200
+    )
+    assert _tax(client, order["id"]) == [(70, False)]
+
+
+# -- a request cancel records why (final review 5) ----------------------------------------
+
+
+def test_a_request_cancel_records_its_reason(client: TestClient) -> None:
+    order, _ = quoted(client)
+    put_deposit(client, order["id"], 300)
+    pay(client, order["id"], 300)
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    balance = detail(client, order["id"])["payment_requests"][-1]
+    cancelled = client.post(
+        f"/api/v1/orders/{order['id']}/payment-requests/{balance['id']}/cancel",
+        json={"reason": "paid at the counter"},
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    events = client.get(f"/api/v1/orders/{order['id']}/events").json()
+    [last] = [e for e in events if e["kind"] == "payment_request.cancelled"][-1:]
+    assert last["detail"] == {"request_id": balance["id"], "reason": "paid at the counter"}
+    too_long = client.post(
+        f"/api/v1/orders/{order['id']}/payment-requests/{balance['id']}/cancel",
+        json={"reason": "x" * 501},
+    )
+    assert too_long.status_code == 422
+
+
+# -- a reopened order's balance request is linked (final review, Blocking 1) ---------------
+
+
+def test_reopening_links_the_new_balance_request(client: TestClient) -> None:
+    connect_fake(client)
+    order, _ = quoted(client)
+    put_deposit(client, order["id"], 300)
+    pay(client, order["id"], 300)
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    assert client.post(f"/api/v1/orders/{order['id']}/cancel").status_code == 200
+    reopened = client.post(f"/api/v1/orders/{order['id']}/reopen")
+    assert reopened.status_code == 200, reopened.text
+    last = detail(client, order["id"])["payment_requests"][-1]
+    assert (last["kind"], last["amount_minor"], last["status"]) == ("balance", 700, "open")
+    assert last["hosted_url"]
+    assert detail(client, order["id"])["totals"]["shipping_held"] is True
+
+
+# -- the order rules are a narrow read (final review 8) -----------------------------------
+
+
+def test_the_rules_read_only_their_own_settings(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "orders_tax_percent": "7.5",
+            "orders_tax_shipping": True,
+            "orders_deposit_policy": [{"criterion": "first_order", "amount_minor": 400}],
+            "storefront_shipping_options": OPTIONS,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    store = _state(client).components.get(ORDERS).core.settings_store
+
+    def no_snapshot(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the order rules read the whole settings snapshot")
+
+    monkeypatch.setattr(store, "snapshot", no_snapshot)
+    rules = _state(client).components.get(ORDERS).rules()
+    assert (str(rules.tax_percent), rules.tax_shipping, rules.shop_currency) == (
+        "7.5",
+        True,
+        "USD",
+    )
+    assert [r.amount_minor for r in rules.deposit_policy] == [400]
+    assert [o.id for o in rules.shipping_options] == ["pickup", "post"]

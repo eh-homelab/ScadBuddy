@@ -94,18 +94,33 @@ async def request_payment(
         raise refused(error) from None
 
 
+class CancelRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Why, for the audit line; cancelling the balance request lets the order ship unpaid.
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+
 @router.post(
     "/{order_id}/payment-requests/{request_id}/cancel",
     response_model=PaymentRequestView,
     summary="Cancel an open payment request",
+    description=(
+        "`reason` (optional) goes on the audit line. Cancelling the `balance` request lifts"
+        " `balance_unpaid`, so the order may ship unpaid; give the reason then."
+    ),
 )
 async def cancel_payment_request(
-    order_id: str, request_id: str, service: PaymentsDep
+    order_id: str,
+    request_id: str,
+    service: PaymentsDep,
+    body: CancelRequestBody | None = None,
 ) -> PaymentRequestView:
     check_path(order_id, request_id)
     by = current_actor()
+    reason = None if body is None else body.reason
     try:
-        return await service.service.cancel_request(order_id, request_id, by)
+        return await service.service.cancel_request(order_id, request_id, by, reason)
     except LifecycleError as error:
         raise refused(error) from None
 

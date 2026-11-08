@@ -35,7 +35,7 @@ import json
 import logging
 import time
 import types
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -1009,6 +1009,40 @@ class SettingsStore:
 
     def load(self, timeout: float | None = None) -> StoredSettings:
         return self.snapshot(timeout).stored
+
+    def read(self, names: Collection[str]) -> dict[str, Any]:
+        """``names`` as ``snapshot`` gives them, from one query on just their rows (#5281:
+        the order rules, read in item, quote and charge transactions). An env-seeded name
+        is its runtime value (the stored one, else the environment's); any other is its
+        `StoredSettings` value. Never a secret: no row is unsealed."""
+        wanted = frozenset(names)
+        if wanted & SECRET_FIELDS or wanted & OWN_TABLES:
+            raise ValueError("read takes plain settings only")
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT name, value FROM settings WHERE name = ANY(%s)", [sorted(wanted)]
+            ).fetchall()
+        stored_rows = {row["name"]: row["value"] for row in rows}
+        runtime = self.defaults.model_copy()
+        out: dict[str, Any] = {}
+        plain: dict[str, Any] = {}
+        for name in sorted(wanted):
+            if name not in ENV_SEEDED:
+                plain[name] = stored_rows.get(name)
+                continue
+            if name in stored_rows:
+                try:
+                    coerced = check_value(name, stored_rows[name])
+                    Settings.__pydantic_validator__.validate_assignment(runtime, name, coerced)
+                except ValueError:
+                    logger.warning(
+                        "ignoring a stored setting this version refuses", extra={"setting": name}
+                    )
+            out[name] = getattr(runtime, name)
+        if plain:
+            stored = StoredSettings.model_validate(plain)
+            out.update({name: getattr(stored, name) for name in plain})
+        return out
 
     def plate_clear_required(self) -> bool:
         """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that

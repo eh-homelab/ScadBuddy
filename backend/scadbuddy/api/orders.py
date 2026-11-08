@@ -144,7 +144,7 @@ from scadbuddy.orders.store import (
     encode_cursor,
 )
 from scadbuddy.orders.totals import OrderTotals, order_totals
-from scadbuddy.payments.component import PaymentsDep
+from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
@@ -200,7 +200,11 @@ class OrderCreate(BaseModel):
 
 class OrderPatch(BaseModel):
     """Notes and the due date in any open state; the address ids (the order's own
-    customer's) and the charges, replaced whole, while `draft` or `quoted`. Past that,
+    customer's) and the typed charges, replaced whole, while `draft` or `quoted`.
+    The auto tax row (#5281) is not part of the list: leave it
+    out and the order keeps it and recomputes it; sent back as read (`auto`, its `id`, or a
+    `tax` charge with its label and amount) it is kept as it is. Any other `tax` charge
+    is a typed tax and replaces the auto row. Past that,
     charges are 409 ``order_not_editable``, which names
     `PUT /orders/{id}/charges/after-acceptance` (#5351). A field left out is untouched;
     ``null`` clears the due date or an address."""
@@ -228,7 +232,10 @@ class OrderPatch(BaseModel):
 
 class ChargesBody(BaseModel):
     """`PUT /orders/{id}/charges/after-acceptance` (#5351): the charges part of
-    `PATCH /orders/{id}`, replaced whole."""
+    `PATCH /orders/{id}`, the typed charges replaced whole. The auto tax row (#5281) is
+    not part of the list: leave it out and the order keeps it and recomputes it; sent back
+    as read (`auto`, its `id`, or a `tax` charge with its label and amount) it is kept as
+    it is. Any other `tax` charge is a typed tax and replaces the auto row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -541,6 +548,14 @@ async def _run[T](call: Callable[[], T]) -> T:
         return await asyncio.to_thread(call)
     except LifecycleError as error:
         raise refused(error) from None
+
+
+async def _run_linked[T](call: Callable[[], T], order_id: str, payments: PaymentsComponent) -> T:
+    """``_run``, then a link for any request it opened on a provider (#5281): a reopened
+    order's balance request, or one a total grown past a paid deposit opens."""
+    result = await _run(call)
+    await payments.service.link_pending(order_id)
+    return result
 
 
 def check_path(*values: str) -> None:
@@ -1093,10 +1108,12 @@ async def patch_order(order_id: str, body: OrderPatch, orders: OrdersDep) -> Ord
     summary="Change the charges of an accepted order",
 )
 async def put_charges_after_acceptance(
-    order_id: str, body: ChargesBody, orders: OrdersDep
+    order_id: str, body: ChargesBody, orders: OrdersDep, service: PaymentsDep
 ) -> Order:
-    """#5351: the charges, replaced whole, on an order that is `accepted`,
-    `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. It changes
+    """#5351: the typed charges, replaced whole, on an order that is `accepted`,
+    `in_production` or `ready`, as `PATCH /orders/{id}` takes them before that. The auto
+    tax row (#5281) is not part of the list: it is kept and recomputed, and a `tax`
+    charge sent that is not the auto row as read replaces it with a typed one. It changes
     what the customer pays: a fee or a discount (negative) keeps an agreed total when an
     item is added after acceptance. The audit row ``charges.replaced_after_acceptance``
     holds the charges before and after. 409 ``order_not_accepted`` while the order is
@@ -1104,8 +1121,10 @@ async def put_charges_after_acceptance(
     `shipped`, ``order_closed``/``order_cancelled``, and ``order_on_hold``."""
     check_path(order_id)
     by = current_actor()
-    return await _run(
-        lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges)
+    return await _run_linked(
+        lambda: orders.lifecycle.replace_charges_after_acceptance(order_id, by, body.charges),
+        order_id,
+        service,
     )
 
 
@@ -1332,14 +1351,15 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
         "shipments give it (`shipped`, as it closed, unless a row changed since). A "
         "cancelled one goes back to the status it was cancelled from, with the items "
         "that cancel took (an item cancelled on its own before stays cancelled), and "
-        "then follows its rows. 409 `order_not_ended` for an order neither closed nor "
-        "cancelled."
+        "then follows its rows. A cancelled order back past `quoted` that had asked for "
+        "money asks for the balance again: a `balance` request opens and is linked "
+        "(#5281). 409 `order_not_ended` for an order neither closed nor cancelled."
     ),
 )
-async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
+async def reopen_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
     check_path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.reopen_order(order_id, by))
+    return await _run_linked(lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service)
 
 
 @router.post(
@@ -1878,6 +1898,7 @@ async def patch_item(
     paths: PathsDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    service: PaymentsDep,
 ) -> OrderItem:
     check_path(order_id, item_id)
     given = body.model_fields_set
@@ -1895,7 +1916,7 @@ async def patch_item(
         )
     output_id: str | UnsetType | None = body.output_id if "output_id" in given else UNSET
     by = current_actor()
-    return await _run(
+    return await _run_linked(
         lambda: orders.lifecycle.update_item(
             order_id,
             item_id,
@@ -1911,7 +1932,9 @@ async def patch_item(
             requires_printing=body.requires_printing,
             accept=body.accept,
             approval=body.approval,
-        )
+        ),
+        order_id,
+        service,
     )
 
 
@@ -2229,10 +2252,14 @@ async def quote_item(
     response_model=OrderItem,
     summary="Accept a quote",
 )
-async def accept_quote(order_id: str, item_id: str, quote_id: str, orders: OrdersDep) -> OrderItem:
+async def accept_quote(
+    order_id: str, item_id: str, quote_id: str, orders: OrdersDep, service: PaymentsDep
+) -> OrderItem:
     check_path(order_id, item_id, quote_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by))
+    return await _run_linked(
+        lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by), order_id, service
+    )
 
 
 # -- printing an item (§5.4) ------------------------------------------------------------------
@@ -2374,6 +2401,7 @@ async def duplicate_item(
     body: DuplicateBody,
     orders: OrdersDep,
     catalogue: CatalogueDep,
+    service: PaymentsDep,
 ) -> OrderItem:
     check_path(order_id, item_id)
     by = current_actor()
@@ -2390,10 +2418,12 @@ async def duplicate_item(
             type_=TEMPLATE_DELETED,
             slug=slug,
         )
-    return await _run(
+    return await _run_linked(
         lambda: orders.lifecycle.duplicate_item(
             order_id, item_id, by, after_acceptance=body.after_acceptance
-        )
+        ),
+        order_id,
+        service,
     )
 
 

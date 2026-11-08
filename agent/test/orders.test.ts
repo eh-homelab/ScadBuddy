@@ -363,6 +363,37 @@ describe('order tools (#4249)', () => {
     expect(calls).toHaveLength(5)
   })
 
+  it('keeps the shipping option of a charge and says the auto tax row is left out (#5281)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.patch(`${BACKEND}/api/v1/orders/${ORDER}`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER })
+      }),
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/charges/after-acceptance`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER })
+      }),
+    )
+    const charges = [{ kind: 'shipping', label: 'Pick up', amount_minor: 0, shipping_option_id: 'pickup' }]
+    await tool('order_update').execute({ order_id: ORDER, charges }, ctx())
+    await tool('order_charges_update_after_acceptance').execute({ order_id: ORDER, charges }, ctx())
+    expect(sent).toEqual([{ charges }, { charges }])
+    for (const name of ['order_update', 'order_charges_update_after_acceptance']) {
+      expect(tool(name).description).toContain('auto tax row')
+      expect(tool(name).description).not.toContain('replaced whole')
+    }
+  })
+
+  it('names the deposit and balance refusals and side effects (#5281)', () => {
+    expect(tool('order_accept').description).toMatch(/balance.*request/)
+    expect(tool('order_accept').description).toContain('payment_in_flight')
+    expect(tool('order_accept').description).toContain('order_not_submitted')
+    expect(tool('order_ship').description).toContain('balance_unpaid')
+    expect(tool('order_item_revision_send').description).toContain('deposit_unpaid')
+    expect(tool('order_item_print').description).toContain('deposit_unpaid')
+  })
+
   it('sets or clears the shipping option, naming Settings → Orders (#5281)', async () => {
     const sent: unknown[] = []
     server.use(

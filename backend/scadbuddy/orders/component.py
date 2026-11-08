@@ -37,6 +37,17 @@ from scadbuddy.payments.registry import providers
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
 
+#: The settings ``OrdersComponent.rules`` reads (#5281).
+ORDER_RULE_SETTINGS = frozenset(
+    {
+        "orders_currency",
+        "orders_tax_percent",
+        "orders_tax_shipping",
+        "orders_deposit_policy",
+        "storefront_shipping_options",
+    }
+)
+
 
 class OrdersComponent:
     def __init__(self, core: Core, pool: ConnectionPool[Connection[DictRow]]) -> None:
@@ -77,16 +88,16 @@ class OrdersComponent:
 
     def rules(self) -> OrderRules:
         """The shop's money rules (#5281) as stored now: the lifecycle reads them on each
-        use, so a change applies to the next transition. Each call is a full settings
-        snapshot (three queries), so a transition reads it once."""
-        snapshot = self.core.settings_store.snapshot()
-        runtime, stored = snapshot.runtime, snapshot.stored
+        use, so a change applies to the next transition. One query on their five rows
+        (``SettingsStore.read``), never the whole snapshot or a secret; a transition reads
+        them once."""
+        values = self.core.settings_store.read(ORDER_RULE_SETTINGS)
         return OrderRules(
-            shop_currency=runtime.orders_currency,
-            tax_percent=Decimal(runtime.orders_tax_percent),
-            tax_shipping=runtime.orders_tax_shipping,
-            deposit_policy=tuple(stored.orders_deposit_policy or ()),
-            shipping_options=tuple(stored.storefront_shipping_options or ()),
+            shop_currency=values["orders_currency"],
+            tax_percent=Decimal(values["orders_tax_percent"]),
+            tax_shipping=values["orders_tax_shipping"],
+            deposit_policy=tuple(values["orders_deposit_policy"] or ()),
+            shipping_options=tuple(values["storefront_shipping_options"] or ()),
         )
 
     @property
