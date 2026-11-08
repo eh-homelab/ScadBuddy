@@ -367,6 +367,24 @@ async def test_a_read_that_ends_after_an_unlink_keeps_nothing(
     assert [part.why for part in rate.maintenance] == ["not_read"]
 
 
+async def test_a_printer_the_sync_links_to_another_bambuddy_printer_counts_no_old_interval(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    # Bambuddy printer 7 is gone from the strip; its serial now reports as printer 8.
+    relinked = printers.ensure_bambuddy(
+        8, serial=printer.serial, name="H2C", model="H2C", listed={8}
+    )
+    assert relinked.id == printer.id and relinked.bambuddy_printer_id == 8
+    rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
+    assert [part.why for part in rate.maintenance] == ["not_read"]
+
+
 def test_an_unlink_of_a_printer_never_linked_leaves_its_rows_alone(
     store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
 ) -> None:
