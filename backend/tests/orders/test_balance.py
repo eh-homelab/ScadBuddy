@@ -71,16 +71,51 @@ def test_a_fully_paid_order_opens_no_balance_request(shop: Shop) -> None:
     assert [r.kind for r in requests_for(shop, order)] == ["deposit"]
 
 
+def _open_sum(shop: Shop, order: Order) -> int:
+    return sum(r.amount_minor for r in requests_for(shop, order) if r.status == "open")
+
+
 def test_an_open_payment_request_opens_the_balance_request(shop: Shop) -> None:
     order = shop.order()
     item = shop.item(order)
     shop.quoted(order, item)
-    shop.lifecycle.open_payment_request(order.id, BY, amount_minor=200, provider=None)
+    first = shop.lifecycle.open_payment_request(order.id, BY, amount_minor=200, provider=None)
     order = shop.lifecycle.accept_order(order.id, BY)
-    assert [(r.kind, r.amount_minor, r.status) for r in requests_for(shop, order)] == [
-        ("balance", 200, "open"),
+    found = requests_for(shop, order)
+    assert [(r.kind, r.amount_minor, r.status) for r in found] == [
+        ("balance", 200, "cancelled"),
         ("balance", 1000, "open"),
     ]
+    assert _open_sum(shop, order) == 1000
+    cancels = [
+        e.detail for e in shop.rows.events(order.id) if e.kind == "payment_request.cancelled"
+    ]
+    assert cancels == [{"request_id": first.id}]
+
+
+def test_a_balance_request_that_asks_the_rest_is_kept_at_accept(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    first = shop.lifecycle.open_payment_request(order.id, BY, provider=None)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    assert [(r.id, r.amount_minor, r.status) for r in requests_for(shop, order)] == [
+        (first.id, 1000, "open")
+    ]
+    kinds = shop.kinds(order)
+    assert kinds.count("payment_request.opened") == 1
+    assert "payment_request.cancelled" not in kinds
+
+
+def test_a_deposit_and_a_balance_request_leave_one_request_at_accept(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    shop.lifecycle.set_deposit(order.id, BY, 300)
+    shop.lifecycle.open_payment_request(order.id, BY, provider=None)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    assert [(r.kind, r.status) for r in requests_for(shop, order)][-1] == ("balance", "open")
+    assert _open_sum(shop, order) == 1000
 
 
 def test_a_cancelled_request_alone_opens_no_balance_request(shop: Shop) -> None:
@@ -226,3 +261,40 @@ def test_a_shipment_edit_that_raises_a_quantity_is_held_by_the_balance(shop: Sho
     assert [line.quantity for line in same.items] == [2]
     lowered = shop.lifecycle.update_shipment(order.id, shipment.id, lines(1), BY)
     assert [line.quantity for line in lowered.items] == [1]
+
+
+def test_nothing_to_waive_writes_nothing(shop: Shop) -> None:
+    order, _ = shop.accepted()
+    shop.events.clear()
+    before = shop.kinds(order)
+    same = shop.lifecycle.waive_balance(order.id, BY, "pays on pickup")
+    assert same.balance_waived_reason is None
+    assert shop.kinds(order) == before and shop.events == []
+    paid, _ = with_deposit(shop)
+    bal = requests_for(shop, paid)[-1]
+    shop.lifecycle.add_payment(paid.id, BY, amount_minor=700, payment_request_id=bal.id)
+    shop.events.clear()
+    before = shop.kinds(paid)
+    assert shop.lifecycle.waive_balance(paid.id, BY, "x").balance_waived_reason is None
+    assert shop.kinds(paid) == before and shop.events == []
+
+
+def test_moving_quantity_between_items_is_held_by_the_balance(shop: Shop) -> None:
+    order = shop.order()
+    first, second = shop.item(order), shop.item(order)
+    shop.quoted(order, first)
+    shop.quoted(order, second)
+    shop.lifecycle.set_deposit(order.id, BY, 300)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=300, method="cash")
+    order = shop.lifecycle.accept_order(order.id, BY)
+    bal = requests_for(shop, order)[-1]
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=1700, payment_request_id=bal.id)
+    shop.fulfilled(order, shop.get_item(first))
+    shop.fulfilled(order, shop.get_item(second))
+    shipment = shop.shipped(order, shop.get_item(first))
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=-100, method="cash")
+    moved = ShipmentEdit(items=[ShipmentItem(order_item_id=second.id, quantity=1)])
+    assert (
+        _slug(lambda: shop.lifecycle.update_shipment(order.id, shipment.id, moved, BY))
+        == "balance_unpaid"
+    )

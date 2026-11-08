@@ -1089,24 +1089,28 @@ class Lifecycle:
                 payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
 
     # -- the balance (#5281, storefront spec §9) ------------------------------------------
-    # An order that asked for money (a deposit, or a payment request not cancelled) gets
-    # a `balance` request at acceptance, and its open deposit request is cancelled. While
-    # a balance request stands (not `cancelled`), the balance is above zero and no one
-    # waived it, the order does not ship, and a shipment edit does not raise a quantity
-    # (`balance_unpaid`). A back-office order with no request ships as it always did.
+    # An order that asked for money (a deposit, or a payment request not cancelled) is
+    # left at acceptance with one open `balance` request for the rest: its other open
+    # requests are cancelled. While a balance request stands (not `cancelled`), the
+    # balance is above zero and no one waived it, the order does not ship, and a shipment
+    # edit does not raise a quantity (`balance_unpaid`). A back-office order with no
+    # request ships as it always did.
 
     def _open_balance(self, conn: Conn, order: Order, by: Actor) -> None:
-        """At acceptance, cancels the open deposit requests and opens a `balance` request
-        for what is not paid yet, on the default provider, when the order has a deposit or
-        a payment request that is not cancelled. One open request then asks for the rest."""
+        """At acceptance, when the order has a deposit or a payment request that is not
+        cancelled, leaves one open request asking for what is not paid yet. A lone open
+        `balance` request that already asks for it is kept. Otherwise every open request
+        is cancelled and a `balance` request for the rest opens on the default provider."""
         found = payments.requests_for_order(conn, order.id)
         if order.deposit_minor is None and all(r.status == "cancelled" for r in found):
             return
-        for request in found:
-            if request.kind == "deposit" and request.status == "open":
-                payments.set_request_status(conn, request.id, "cancelled")
-                self._event(conn, order, by, "payment_request.cancelled", request_id=request.id)
         due = totals_of(self.store, conn, order.id).balance_minor
+        open_now = [r for r in found if r.status == "open"]
+        if len(open_now) == 1 and open_now[0].kind == "balance" and open_now[0].amount_minor == due:
+            return
+        for request in open_now:
+            payments.set_request_status(conn, request.id, "cancelled")
+            self._event(conn, order, by, "payment_request.cancelled", request_id=request.id)
         if due <= 0:
             return
         opened = payments.insert_request(
@@ -1126,18 +1130,23 @@ class Lifecycle:
             {"request_id": opened.id, "kind": "balance", "amount_minor": due},
         )
 
+    def _balance_due(self, conn: Conn, order: Order) -> int:
+        """The balance a `balance` request that is not cancelled asks of the order, or 0
+        when it has no such request or nothing is due."""
+        if not any(
+            found.kind == "balance" and found.status != "cancelled"
+            for found in payments.requests_for_order(conn, order.id)
+        ):
+            return 0
+        return max(totals_of(self.store, conn, order.id).balance_minor, 0)
+
     def _balance_paid(self, conn: Conn, order: Order) -> None:
         """Refuses (`balance_unpaid`) while the order has a `balance` request not
         cancelled, no one waived the balance, and the balance is above zero. A paid
         request does not free a balance that grew after it."""
         if order.balance_waived_reason is not None:
             return
-        if not any(
-            found.kind == "balance" and found.status != "cancelled"
-            for found in payments.requests_for_order(conn, order.id)
-        ):
-            return
-        balance = totals_of(self.store, conn, order.id).balance_minor
+        balance = self._balance_due(conn, order)
         if balance > 0:
             raise LifecycleError(
                 "balance_unpaid",
@@ -1148,7 +1157,8 @@ class Lifecycle:
     def waive_balance(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Ship without full payment": the order ships unpaid, for ``reason`` (trimmed,
         1 to 500 characters), once accepted (`order_not_accepted` before). The open
-        balance request stays open. The same reason again writes nothing."""
+        balance request stays open. The same reason again, or nothing to waive (no
+        balance request that is not cancelled, or no balance due), writes nothing."""
         reason = reason.strip()
         if not 1 <= len(reason) <= 500:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
@@ -1159,7 +1169,7 @@ class Lifecycle:
                 raise LifecycleError(
                     "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
                 )
-            if order.balance_waived_reason == reason:
+            if order.balance_waived_reason == reason or not self._balance_due(conn, order):
                 return order
             order = self.store.set_deposit_fields(conn, order.id, balance_waived_reason=reason)
             self._event(conn, order, by, "balance.waived", reason=reason)
