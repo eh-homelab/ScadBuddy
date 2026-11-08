@@ -139,6 +139,12 @@ class BambuddyUploadStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`, #5298)."""
+        return self._pool
+
     @asynccontextmanager
     async def copy_lock(self, key: str) -> AsyncIterator[None]:
         """Held, across every replica on this database, while one caller finds, uploads
@@ -442,10 +448,17 @@ class BambuddyUploadStore:
 
     def _record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
-                (library_file_id, job_id),
-            )
+            self.record_slice_start_in(conn, library_file_id, job_id)
+
+    @staticmethod
+    def record_slice_start_in(
+        conn: Connection[DictRow], library_file_id: int, job_id: int | None
+    ) -> None:
+        """`record_slice_start` on ``conn``, in the caller's transaction."""
+        conn.execute(
+            "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
+            (library_file_id, job_id),
+        )
 
     def _prune_slice_starts(self, before: datetime) -> int:
         with self._pool.connection() as conn:

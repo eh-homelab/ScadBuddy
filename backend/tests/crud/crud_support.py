@@ -12,10 +12,10 @@ test of the worker that renders nothing. `threaded_render_crud` is a render work
 blocking client of the render routes served on a thread of their own, for a test that
 calls them from its event loop or a sync test; `threaded_render_index` is the worker's
 `RemoteBlobIndex` over it. `print_crud_app` serves the print routes over the API's
-settings store (and its run, outcome and operation stores and its bus), `threaded_print_crud`
-is a blocking client of them on a thread of their own, `served_print_crud` an async one on
-a local port, and `static_print_crud` is a print worker's client of a stand-in API that
-answers fixed settings. `FakeClock` is a
+settings store (and its run, outcome, operation and upload stores and its bus),
+`threaded_print_crud` is a blocking client of them on a thread of their own,
+`served_print_crud` an async one on a local port, and `static_print_crud` is a print
+worker's client of a stand-in API that answers fixed settings. `FakeClock` is a
 client clock that moves only by the client's own waits, so a test's count of tries does
 not depend on wall time."""
 
@@ -51,6 +51,7 @@ from scadbuddy.auth.service_credentials import (
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.events import EventBus
 from scadbuddy.core.metrics import Metrics
@@ -440,7 +441,8 @@ def print_crud_app(
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
     through ``operations`` of ``kinds``, printer rows through ``printers``, and the queue
-    item a reprint queued through ``links``."""
+    item a reprint queued through ``links``, and the uploads and slices on
+    ``store``'s pool."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
@@ -452,6 +454,7 @@ def print_crud_app(
         settings_store=store,
         print_runs=SimpleNamespace(store=runs, outcomes=outcomes),
         print_links=links,
+        uploads=BambuddyUploadStore(store.pool),
         events=events,
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
@@ -519,7 +522,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = ["settings", "runs", "operations", "events", "printer-ensure", "reprints"]
+    areas = ["settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads"]
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

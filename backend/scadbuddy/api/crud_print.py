@@ -31,6 +31,11 @@ or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken e
 #4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
 those writes are the API's, never the worker's role's. Natural: decided under the
 registry's lock, so a call sent again finds the row and writes nothing.
+The uploads and slices (Q15, Q17) are `bambuddy/uploads.py` `BambuddyUploadStore`'s, for
+`RemoteUploadStore`. Each write but one is natural: a record is ``ON CONFLICT`` on the
+key the caller names, a touch, a hash and a forget set or delete by key. A slice start is
+a plain insert, so it takes an ``Idempotency-Key`` and runs with its ledger row
+(`crud/idempotency.py`): a resend after a lost answer records one start.
 
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
@@ -44,11 +49,14 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict
-from datetime import timedelta
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Query, Request, status
+from psycopg import Connection
+from psycopg.rows import DictRow
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import (
@@ -57,6 +65,7 @@ from scadbuddy.api.deps import (
     PrintRunsDep,
     SettingsStoreDep,
     StateDep,
+    UploadsDep,
 )
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
@@ -66,10 +75,12 @@ from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.idempotency import MaybeIdempotencyKey, Replay, idempotent_write, required_key
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
 from scadbuddy.printers.component import PrintersDep
@@ -377,3 +388,192 @@ async def publish_event(body: EventPost, events: EventsDep) -> Logged:
     # A test's in-process bus keeps no log to find a resend in.
     emit(events, event)
     return Logged(logged=True)
+
+
+# -- uploads and slices (inventory Q15, Q17) ----------------------------------------
+
+
+class CopyWrite(BaseModel):
+    output_id: str
+    upload: LibraryCopy
+
+
+class CopyKey(BaseModel):
+    output_id: str
+    library_file_id: int
+
+
+class FileIds(BaseModel):
+    ids: list[int]
+
+
+class HeldCopy(BaseModel):
+    """A copy that holds the content asked for, and the output it is recorded under."""
+
+    output_id: str
+    upload: LibraryCopy
+
+
+class SentBetween(BaseModel):
+    first_upload: datetime
+    last_slice: datetime
+
+
+class SliceWrite(BaseModel):
+    output_id: str
+    library_file_id: int
+    sliced: SlicedCopy
+
+
+class SliceHash(BaseModel):
+    output_id: str
+    file_hash: str
+
+
+class SliceStart(BaseModel):
+    library_file_id: int
+    job_id: int | None = None
+
+
+SLICE_START_ROUTE = "POST /slice-starts"
+
+
+@router.get("/uploads", name="crud_print_uploads")
+async def uploads_for(
+    uploads: UploadsDep,
+    output_id: Annotated[list[str], Query(default_factory=list)],
+    native: bool = False,
+) -> dict[str, list[LibraryCopy]]:
+    return await uploads.for_outputs(output_id, native=native)
+
+
+@router.post("/uploads", name="crud_print_record_upload", status_code=status.HTTP_204_NO_CONTENT)
+async def record_upload(body: CopyWrite, uploads: UploadsDep) -> None:
+    await uploads.record(body.output_id, body.upload)
+
+
+@router.get("/uploads/same-content", name="crud_print_same_content")
+async def same_content(
+    uploads: UploadsDep, target_key: str, content_key: str, folder_id: int | None = None
+) -> list[HeldCopy]:
+    found = await uploads.same_content(folder_id, target_key, content_key)
+    return [HeldCopy(output_id=output_id, upload=copy) for output_id, copy in found]
+
+
+@router.get("/uploads/shared", name="crud_print_shared_uploads")
+async def shared_uploads(
+    uploads: UploadsDep, output_id: str, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.shared(id, output_id))
+
+
+@router.get("/uploads/recorded", name="crud_print_recorded_uploads")
+async def recorded_uploads(
+    uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.recorded(id))
+
+
+@router.get("/uploads/sent-between", name="crud_print_sent_between")
+async def sent_between(output_id: str, uploads: UploadsDep) -> SentBetween | None:
+    window = await uploads.sent_between(output_id)
+    return None if window is None else SentBetween(first_upload=window[0], last_slice=window[1])
+
+
+@router.post(
+    "/uploads/touch", name="crud_print_touch_upload", status_code=status.HTTP_204_NO_CONTENT
+)
+async def touch_upload(body: CopyKey, uploads: UploadsDep) -> None:
+    await uploads.touch(body.output_id, body.library_file_id)
+
+
+@router.post(
+    "/uploads/forget", name="crud_print_forget_upload", status_code=status.HTTP_204_NO_CONTENT
+)
+async def forget_upload(body: CopyKey, uploads: UploadsDep) -> None:
+    await uploads.forget(body.output_id, body.library_file_id)
+
+
+@router.post(
+    "/uploads/forget-files",
+    name="crud_print_forget_upload_files",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_upload_files(body: FileIds, uploads: UploadsDep) -> None:
+    await uploads.forget_files(body.ids)
+
+
+@router.post("/slices", name="crud_print_record_slice", status_code=status.HTTP_204_NO_CONTENT)
+async def record_slice(body: SliceWrite, uploads: UploadsDep) -> None:
+    await uploads.record_sliced(body.output_id, body.library_file_id, body.sliced)
+
+
+@router.get("/slices", name="crud_print_slices_of")
+async def slices_of(
+    output_id: str, library_file_id: int, preset_key: str, uploads: UploadsDep
+) -> list[SlicedCopy]:
+    return await uploads.slices_of(output_id, library_file_id, preset_key)
+
+
+@router.post(
+    "/slices/{sliced_id}/forget",
+    name="crud_print_forget_slice",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_slice(sliced_id: int, output_id: str, uploads: UploadsDep) -> None:
+    """One subject's slice in ``sliced_id``."""
+    await uploads.forget_slice(output_id, sliced_id)
+
+
+@router.post(
+    "/slices/{sliced_id}/gone",
+    name="crud_print_forget_gone_slice",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_gone_slice(sliced_id: int, uploads: UploadsDep) -> None:
+    """Every subject's slice in ``sliced_id``: Bambuddy no longer has the file."""
+    await uploads.forget_gone_slice(sliced_id)
+
+
+@router.put(
+    "/slices/{sliced_id}/hash",
+    name="crud_print_record_slice_hash",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_slice_hash(sliced_id: int, body: SliceHash, uploads: UploadsDep) -> None:
+    await uploads.record_slice_hash(body.output_id, sliced_id, body.file_hash)
+
+
+def _once(
+    uploads: BambuddyUploadStore,
+    key: str,
+    route: str,
+    body: dict[str, Any],
+    write: Callable[[Connection[DictRow]], Any],
+) -> Any:
+    """``write``'s JSON answer, once per Idempotency-Key ``key``: the write and its
+    ledger row in one transaction (plan D5)."""
+    with uploads.pool.connection() as conn:
+        return idempotent_write(
+            conn, "print", key, route, body, lambda: Replay(200, write(conn))
+        ).body
+
+
+@router.post(
+    "/slice-starts", name="crud_print_record_slice_start", status_code=status.HTTP_204_NO_CONTENT
+)
+async def record_slice_start(
+    body: SliceStart, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A plain insert: once per ``Idempotency-Key``, so a resend records one start."""
+    key = required_key(idempotency_key)
+    await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        SLICE_START_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: BambuddyUploadStore.record_slice_start_in(
+            conn, body.library_file_id, body.job_id
+        ),
+    )

@@ -170,7 +170,14 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             asyncio.run(run())
         with store.pool.connection() as conn:
-            for table in ("print_outcomes", "events"):
+            # Its uploads, slices and slice starts too (#5298 Task 25).
+            for table in (
+                "print_outcomes",
+                "events",
+                "output_bambuddy_uploads",
+                "output_bambuddy_slices",
+                "print_slice_starts",
+            ):
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
                 conn.rollback()

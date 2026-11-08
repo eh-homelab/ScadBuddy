@@ -70,11 +70,10 @@ PRINT_GRANTS: Grants = {
     "print_runs": _ALL,
     "print_links": ("SELECT", "INSERT"),
     "print_sends": ("SELECT", "INSERT", "UPDATE"),
-    # Uploads, slices and projects (`bambuddy/uploads.py`).
-    "output_bambuddy_uploads": _ALL,
-    "output_bambuddy_slices": _ALL,
+    # Previews and projects (`bambuddy/uploads.py`). The uploads, slices and slice
+    # starts go through the API's CRUD routes (`crud/print.py` `RemoteUploadStore`,
+    # #5298 Task 25); an existing role keeps those grants until the revoke.
     "print_preview_slices": ("SELECT", "INSERT", "UPDATE"),
-    "print_slice_starts": ("INSERT",),
     "project_print_targets": ("SELECT", "INSERT", "UPDATE"),
     "folderless_projects": _ALL,
     # ON CONFLICT DO UPDATE reads the row it updates.
@@ -103,7 +102,6 @@ PRINT_GRANTS: Grants = {
 #: The bigserial keys the print worker inserts with.
 PRINT_SEQUENCES = (
     "print_preview_slices_id_seq",
-    "print_slice_starts_id_seq",
     "native_slices_id_seq",
 )
 

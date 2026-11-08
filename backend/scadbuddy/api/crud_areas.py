@@ -22,11 +22,12 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
 #: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283).
 #: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
-#: ``/release`` (#5299), the holds of its workspace files' blobs.
+#: ``/release`` (#5299), the holds of its workspace files' blobs. The print ``uploads``
+#: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
-    "print": ["settings", "runs", "operations", "events", "printer-ensure", "reprints"],
+    "print": ["settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads"],
     "storefront": ["listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"],
     "agent": ["order-costs", "workspace-blob-refs"],
 }
