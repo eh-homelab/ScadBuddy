@@ -2443,6 +2443,21 @@ export const api = {
   setDefaultPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}/default`, { method: 'POST' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the
+   * deposit requests it replaces and asks for what is not paid yet. */
+  setDeposit: (orderId: string, amount_minor: number | null) =>
+    request<Order>(`/orders/${seg(orderId)}/deposit`, { method: 'PUT', body: JSON.stringify({ amount_minor }) }),
+  /** #5281 — the deposit the shop's policy asks of the order now. */
+  applyDepositPolicy: (orderId: string) => request<Order>(`/orders/${seg(orderId)}/deposit/policy`, { method: 'POST' }),
+  /** #5281 — "Proceed without deposit", for `reason`. */
+  waiveDeposit: (orderId: string, reason: string) =>
+    request<Order>(`/orders/${seg(orderId)}/deposit/waive`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #5281 — "Ship without full payment", for `reason`, once accepted. */
+  waiveBalance: (orderId: string, reason: string) =>
+    request<Order>(`/orders/${seg(orderId)}/balance/waive`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #5281 — the order's one shipping charge from Settings → Orders' options (null removes it). */
+  setShippingOption: (orderId: string, option_id: string | null) =>
+    request<Order>(`/orders/${seg(orderId)}/shipping-option`, { method: 'PUT', body: JSON.stringify({ option_id }) }),
   cancelPaymentRequest: (orderId: string, requestId: string) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests/${seg(requestId)}/cancel`, { method: 'POST' }),
   linkPaymentRequest: (orderId: string, requestId: string) =>

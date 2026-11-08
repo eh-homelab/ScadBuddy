@@ -2,8 +2,9 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { Order, OrderCharge } from '../../api/types'
-import { resetMockState } from '../../mocks/handlers'
-import { ORDER_ACCEPTED, ORDER_DRAFT } from '../../mocks/features/orders/state'
+import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
+import { ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
+import { useAsync } from '../../lib/useAsync'
 import { renderPage } from '../../test/utils'
 import { addMode } from './afterAcceptance'
 import { ChargesEditor } from './ChargesEditor'
@@ -108,5 +109,57 @@ describe('ChargesEditor', () => {
     const region = screen.getByRole('region', { name: 'Charges' })
     expect(within(region).getByText('Post')).toBeInTheDocument()
     expect(within(region).queryByRole('button', { name: 'Save charges' })).toBeNull()
+  })
+
+  // #5281: ScadBuddy computes the auto tax row; the editor shows it and never sends it.
+  describe('the auto tax', () => {
+    function Host() {
+      const view = useAsync(() => api.order(ORDER_DRAFT), [])
+      if (!view.data) return null
+      const o = view.data.order
+      return <ChargesEditor order={o} charges={view.data.charges ?? []} mode={addMode(o)} onChanged={view.refresh} />
+    }
+
+    it('shows the auto tax read-only and keeps it on save', async () => {
+      setMockSettings({ ...mockSettings(), orders_tax_percent: '10', orders_tax_shipping: true })
+      await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }] })
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      const auto = await within(region).findByTestId('auto-tax')
+      expect(auto).toHaveTextContent('Tax 10%')
+      expect(auto).toHaveTextContent('auto')
+      expect(auto).toHaveTextContent('$1.00')
+      // One editable row, the shipping; the tax is not one of them.
+      expect(within(region).queryByLabelText('Charge 2 label')).toBeNull()
+
+      await user.clear(within(region).getByLabelText('Charge 1 amount'))
+      await user.type(within(region).getByLabelText('Charge 1 amount'), '20')
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 2000 }] }))
+      // Recomputed on the new shipping.
+      await waitFor(() => expect(within(region).getByTestId('auto-tax')).toHaveTextContent('$2.00'))
+      expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT && c.auto).map((c) => c.amount_minor)).toEqual([200])
+    })
+
+    it("keeps a charge's shipping option on save", async () => {
+      setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }] })
+      await api.setShippingOption(ORDER_DRAFT, 'post')
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      await user.click(await within(region).findByRole('button', { name: 'Add charge' }))
+      await user.type(within(region).getByLabelText('Charge 2 label'), 'Rush')
+      await user.type(within(region).getByLabelText('Charge 2 amount'), '3')
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() =>
+        expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, {
+          charges: [
+            { kind: 'shipping', label: 'Tracked post', amount_minor: 650, shipping_option_id: 'post' },
+            { kind: 'shipping', label: 'Rush', amount_minor: 300 },
+          ],
+        }),
+      )
+    })
   })
 })

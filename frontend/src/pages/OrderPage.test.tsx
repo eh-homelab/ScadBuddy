@@ -7,7 +7,7 @@ import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { choose } from '../test/select'
-import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -342,3 +342,39 @@ describe('OrderPage payment requests (#4957)', () => {
     await waitFor(() => expect(within(screen.getByRole('list', { name: 'Payments' })).getByText('$5.00')).toBeInTheDocument())
   })
 })
+
+// #5281: a balance request that stands holds the shipment until it is paid or waived.
+describe('OrderPage, the balance (#5281)', () => {
+  beforeEach(() => resetMockState())
+
+  it('says the balance is unpaid and offers Ship without full payment', async () => {
+    const found = state.items.find((i) => i.id === ITEM_APPROVED)!
+    found.status = 'fulfilled'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'ready'
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const shipments = screen.getByRole('region', { name: 'Shipments' })
+    await user.click(within(shipments).getByRole('button', { name: 'Add shipment' }))
+    expect(await within(shipments).findByRole('alert')).toHaveTextContent(/balance is not paid/)
+    await user.click(within(shipments).getByRole('button', { name: 'Ship without full payment' }))
+    await user.type(screen.getByLabelText('Reason'), 'pays on delivery')
+    await user.click(screen.getByRole('button', { name: 'Ship unpaid' }))
+    await waitFor(() => expect(within(shipments).queryByRole('alert')).toBeNull())
+    await user.click(within(shipments).getByRole('button', { name: 'Add shipment' }))
+    await waitFor(() => expect(screen.getByText('Shipped')).toBeInTheDocument())
+  })
+
+  it('shows the auto tax with its mark, the deposit due and the shipping hold in the summary', async () => {
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    state.charges.push({ id: 'h0000000-0000-4000-8000-0000000000aa', order_id: ORDER_ACCEPTED, kind: 'tax', label: 'Tax 10%', amount_minor: 300, position: 0, auto: true })
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.deposit_minor = 1000
+    render(ORDER_ACCEPTED)
+    const totals = await screen.findByTestId('order-totals')
+    expect(within(totals).getByText('auto')).toBeInTheDocument()
+    expect(within(totals).getByText('Deposit due')).toBeInTheDocument()
+    expect(totals).toHaveTextContent('$10.00')
+    expect(within(totals).getByText('Shipping held until the balance is paid')).toBeInTheDocument()
+  })
+})
+

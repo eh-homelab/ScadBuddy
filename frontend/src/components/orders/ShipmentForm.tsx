@@ -5,7 +5,8 @@ import { formatMoney, toMinor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { refusalText } from './refusal'
+import { ShipUnpaidDialog } from './DepositControls'
+import { refusalSlug, refusalText } from './refusal'
 
 /** What each fulfilled item still has to ship, after the shipments so far. */
 function remaining(items: OrderItemDetail[], shipments: Shipment[]): { item: OrderItemDetail; left: number }[] {
@@ -14,7 +15,9 @@ function remaining(items: OrderItemDetail[], shipments: Shipment[]): { item: Ord
   return items.filter((i) => i.status === 'fulfilled').map((item) => ({ item, left: Math.max(0, item.quantity - (shipped[item.id] ?? 0)) }))
 }
 
-/** Shipments (§6.3): the ones recorded, and a form for the next, carrying fulfilled items. */
+/** Shipments (§6.3): the ones recorded, and a form for the next, carrying fulfilled items.
+ * #5281: a shipment the unpaid balance holds (`balance_unpaid`) says so, with "Ship without
+ * full payment" beside it. */
 export function ShipmentForm({
   orderId,
   currency,
@@ -40,6 +43,8 @@ export function ShipmentForm({
   const [quantities, setQuantities] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [unpaid, setUnpaid] = useState(false)
+  const [waiving, setWaiving] = useState(false)
   const titles = Object.fromEntries(items.map((i) => [i.id, i.title]))
 
   return (
@@ -71,6 +76,7 @@ export function ShipmentForm({
             }
             setBusy(true)
             setError(null)
+            setUnpaid(false)
             api
               .addShipment(orderId, {
                 carrier: carrier.trim() || null,
@@ -85,7 +91,10 @@ export function ShipmentForm({
                 setQuantities({})
                 onChanged()
               })
-              .catch((err: unknown) => setError(refusalText(err)))
+              .catch((err: unknown) => {
+                setError(refusalText(err))
+                setUnpaid(refusalSlug(err) === 'balance_unpaid')
+              })
               .finally(() => setBusy(false))
           }}
         >
@@ -124,10 +133,27 @@ export function ShipmentForm({
       )}
       {enabled && left.length === 0 && shipments.length === 0 && <p className="text-[13px] text-muted-foreground">Nothing fulfilled to ship yet.</p>}
       {error && (
-        <p role="alert" className="text-[13px] text-warn">
-          {error}
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p role="alert" className="text-[13px] text-warn">
+            {error}
+          </p>
+          {unpaid && (
+            <Button type="button" size="sm" variant="outline" onClick={() => setWaiving(true)}>
+              Ship without full payment
+            </Button>
+          )}
+        </div>
       )}
+      <ShipUnpaidDialog
+        orderId={orderId}
+        open={waiving}
+        onOpenChange={setWaiving}
+        onChanged={() => {
+          setError(null)
+          setUnpaid(false)
+          onChanged()
+        }}
+      />
     </section>
   )
 }

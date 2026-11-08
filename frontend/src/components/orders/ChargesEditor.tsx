@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Order, OrderCharge } from '../../api/types'
 import { formatMoney, toMajor, toMinor } from '../../lib/money'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -8,11 +9,14 @@ import { refusalText } from './refusal'
 import { chargesWarning, saveCharges, type AddMode } from './afterAcceptance'
 
 const KINDS: OrderCharge['kind'][] = ['shipping', 'discount', 'fee', 'tax']
-type Row = { kind: OrderCharge['kind']; label: string; amount: string }
+/** An editable charge; `shipping_option_id` is kept so a save does not drop the option (#5281). */
+type Row = { kind: OrderCharge['kind']; label: string; amount: string; shipping_option_id?: string | null }
 
 /** The order's charges (§3.2: shipping, discount, fee, tax), replaced whole while draft or
  * quoted, and (#5351) on an accepted, in-production or ready order not on hold, through
- * `PUT …/charges/after-acceptance` after a confirm that names the order's status. */
+ * `PUT …/charges/after-acceptance` after a confirm that names the order's status. The auto
+ * tax row (#5281), which ScadBuddy computes from `orders_tax_percent`, is shown read-only
+ * with an "auto" tag and never sent: the backend keeps and recomputes it. */
 export function ChargesEditor({
   order,
   charges,
@@ -34,9 +38,18 @@ export function ChargesEditor({
   const [error, setError] = useState<string | null>(null)
   // #5351: the save to an accepted order waits for a second click on the confirm.
   const [confirming, setConfirming] = useState(false)
+  const auto = charges.find((c) => c.auto)
   useEffect(() => {
-    if (!dirty) setRows(charges.map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent) })))
+    if (!dirty) setRows(charges.filter((c) => !c.auto).map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent), shipping_option_id: c.shipping_option_id ?? null })))
   }, [charges, exponent, dirty])
+  const autoRow = auto && (
+    <p className="flex justify-between gap-2 text-[13px]" data-testid="auto-tax">
+      <span>
+        {auto.label} <Badge variant="secondary">auto</Badge>
+      </span>
+      <span className="sb-num">{formatMoney(auto.amount_minor, currency, exponent)}</span>
+    </p>
+  )
 
   if (!editable) {
     return (
@@ -49,7 +62,7 @@ export function ChargesEditor({
             {charges.map((c) => (
               <li key={c.id} className="flex justify-between gap-2">
                 <span>
-                  {c.label} <span className="text-muted-foreground">({c.kind})</span>
+                  {c.label} <span className="text-muted-foreground">({c.kind})</span> {c.auto && <Badge variant="secondary">auto</Badge>}
                 </span>
                 <span className="sb-num">{formatMoney(c.amount_minor, currency, exponent)}</span>
               </li>
@@ -80,7 +93,9 @@ export function ChargesEditor({
               setError('Each charge needs a label and an amount; a discount is negative.')
               return
             }
-            body.push({ kind: row.kind, label: row.label.trim(), amount_minor: minor })
+            // Only a shipping charge names an option; another kind drops it.
+            const option = row.kind === 'shipping' ? row.shipping_option_id : null
+            body.push({ kind: row.kind, label: row.label.trim(), amount_minor: minor, ...(option ? { shipping_option_id: option } : {}) })
           }
           if (mode === 'after_acceptance' && !confirming) {
             setConfirming(true)
@@ -132,6 +147,7 @@ export function ChargesEditor({
             </Button>
           </div>
         ))}
+        {autoRow}
         <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
