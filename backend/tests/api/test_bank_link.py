@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -245,17 +246,36 @@ def test_a_bad_signature_or_a_missing_key_changes_nothing(
     assert client.get(BANK).json()["login_required"] is False
 
 
-def test_a_lookup_over_the_limit_is_a_503_plaid_retries(
+def test_a_lookup_over_the_limit_is_a_429_plaid_retries_after(
     client: TestClient, plaid: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(bank_module, "KEY_LOOKUP_SPACING_SECONDS", 3600.0)
-    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.Spacing())
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.KeyLookups(burst=1, every=3600.0))
     plaid_key(plaid)
     linked(client)
     body = body_of("webhook.item_login_required.json")
     assert client.post(f"{BANK}/webhook", content=body, headers=signed(body)).status_code == 200
     limited = client.post(f"{BANK}/webhook", content=body, headers=signed(body, kid=OTHER_KID))
-    assert (limited.status_code, limited.json()["type"]) == (
-        503,
-        PROBLEMS + "provider_unavailable",
-    )
+    assert limited.status_code == 429, limited.text
+    # Plaid waits for Retry-After before it sends the webhook again
+    # (https://plaid.com/docs/api/webhooks/#webhook-retries).
+    assert 1 <= int(limited.headers["retry-after"]) <= 3600
+
+
+def test_the_lookup_limit_counts_the_peer_not_a_raw_forwarded_for(
+    client: TestClient, plaid: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources: list[str] = []
+    real = bank_module.BankLinks.handle_webhook
+
+    async def spy(self: bank_module.BankLinks, *args: Any, **kwargs: Any) -> Any:
+        sources.append(kwargs["source"])
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(bank_module.BankLinks, "handle_webhook", spy)
+    plaid_key(plaid)
+    linked(client)
+    body = body_of("webhook.item_login_required.json")
+    headers = {**signed(body), "X-Forwarded-For": "203.0.113.7"}
+    assert client.post(f"{BANK}/webhook", content=body, headers=headers).status_code == 200
+    # The test client is no trusted proxy, so its X-Forwarded-For is not believed.
+    assert sources == ["testclient"]

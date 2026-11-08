@@ -9,6 +9,7 @@ https://plaid.com/docs/api/items/#error)."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -110,9 +111,9 @@ class Clock:
 
 @pytest.fixture(autouse=True)
 def lookups_unspaced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The key lookup limit is process-wide; a test that does not test it lifts it."""
-    monkeypatch.setattr(bank_module, "KEY_LOOKUP_SPACING_SECONDS", 0.0)
-    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.Spacing())
+    """The key lookup limits are process-wide; a test that does not test them lifts them."""
+    unlimited = bank_module.KeyLookups(burst=10_000, source_burst=10_000)
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", unlimited)
 
 
 @pytest.fixture
@@ -237,26 +238,116 @@ async def test_a_kid_plaid_does_not_know_is_refused_and_remembered_for_a_while(
         assert unknown.call_count == 2
 
 
-async def test_key_lookups_are_spaced_process_wide(
+def limited(monkeypatch: pytest.MonkeyPatch, clock: Clock) -> None:
+    """The real limits, on the test's clock."""
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.KeyLookups(clock=clock))
+
+
+async def test_key_lookups_take_a_burst_then_one_per_interval_process_wide(
     rows: OrderStore, bank: BankLinks, clock: Clock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(bank_module, "KEY_LOOKUP_SPACING_SECONDS", 5.0)
-    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.Spacing())
+    limited(monkeypatch, clock)
     other = BankLinks(rows, KEK, clock=clock)
+    body = body_of("webhook.sync_updates_available.json")
+    burst = bank_module.KEY_LOOKUP_BURST
+    with respx.mock as router:
+        key = any_key(router)
+        for n in range(burst):
+            # A source each, so only the process bucket counts.
+            hook = signed(body, kid=kid_of(n))
+            assert await bank.handle_webhook(hook, body, source=f"192.0.2.{n}") == "sync"
+        # The burst is spent, from either instance.
+        for links in (bank, other):
+            with pytest.raises(WebhookKeyLookupLimitedError) as refused:
+                await links.handle_webhook(signed(body, kid=kid_of(99)), body, source="192.0.2.99")
+            assert 0 < refused.value.retry_after <= bank_module.KEY_LOOKUP_SECONDS
+        # A key that verified needs no lookup, so it is never limited.
+        assert await bank.handle_webhook(signed(body, kid=kid_of(0)), body) == "sync"
+        assert key.call_count == burst
+        clock.now += bank_module.KEY_LOOKUP_SECONDS
+        hook = signed(body, kid=kid_of(99))
+        assert await bank.handle_webhook(hook, body, source="192.0.2.99") == "sync"
+        assert key.call_count == burst + 1
+
+
+async def test_one_source_is_limited_before_the_process_bucket(
+    bank: BankLinks, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limited(monkeypatch, clock)
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        unknown = unknown_key(router)
+        for n in range(bank_module.SOURCE_LOOKUP_BURST):
+            with pytest.raises(BadSignatureError):
+                await bank.handle_webhook(signed(body, kid=kid_of(n)), body, source="attacker")
+        for n in range(100, 110):
+            with pytest.raises(WebhookKeyLookupLimitedError):
+                await bank.handle_webhook(signed(body, kid=kid_of(n)), body, source="attacker")
+        assert unknown.call_count == bank_module.SOURCE_LOOKUP_BURST
+    # The attacker's refusals spent nothing of the process bucket: Plaid's webhook still
+    # gets its lookup.
+    with respx.mock as router:
+        key = any_key(router)
+        assert await bank.handle_webhook(signed(body), body, source="plaid") == "sync"
+        assert key.call_count == 1
+
+
+async def test_random_kids_never_evict_a_key_that_verified(bank: BankLinks) -> None:
+    body = body_of("webhook.sync_updates_available.json")
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["key_id"] == KID:
+            jwk = {**KEY.as_dict(private=False), "alg": "ES256", "kid": KID, "use": "sig"}
+            return httpx.Response(200, json={"key": jwk, "request_id": "r"})
+        return httpx.Response(400, json=payload("error.invalid_webhook_key_id.json"))
+
+    with respx.mock as router:
+        route = router.post(VERIFY).mock(side_effect=answer)
+        assert await bank.handle_webhook(signed(body), body) == "sync"
+        for n in range(bank_module.MAX_UNKNOWN_KEYS + bank_module.MAX_WEBHOOK_KEYS + 10):
+            with pytest.raises(BadSignatureError):
+                await bank.handle_webhook(signed(body, kid=kid_of(n)), body)
+        calls = route.call_count
+        assert await bank.handle_webhook(signed(body), body) == "sync"
+        assert route.call_count == calls
+
+
+async def test_a_key_that_verified_nothing_is_not_kept(bank: BankLinks) -> None:
     body = body_of("webhook.sync_updates_available.json")
     with respx.mock as router:
         key = any_key(router)
-        assert await bank.handle_webhook(signed(body, kid=kid_of(1)), body) == "sync"
-        # A second kid within the spacing, from either instance, asks Plaid for nothing.
-        for links in (bank, other):
-            with pytest.raises(WebhookKeyLookupLimitedError):
-                await links.handle_webhook(signed(body, kid=kid_of(2)), body)
-        # A kept key needs no lookup, so it is never limited.
-        assert await bank.handle_webhook(signed(body, kid=kid_of(1)), body) == "sync"
-        assert key.call_count == 1
-        clock.now += 5
-        assert await other.handle_webhook(signed(body, kid=kid_of(2)), body) == "sync"
+        with pytest.raises(BadSignatureError):
+            await bank.handle_webhook(signed(body, key=OTHER, kid=kid_of(7)), body)
+        assert await bank.handle_webhook(signed(body, kid=kid_of(7)), body) == "sync"
         assert key.call_count == 2
+
+
+async def test_webhooks_waiting_on_one_lookup_share_it_when_the_bucket_is_empty(
+    bank: BankLinks, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.KeyLookups(clock=clock, burst=1))
+    body = body_of("webhook.sync_updates_available.json")
+    release = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        jwk = {**KEY.as_dict(private=False), "alg": "ES256", "kid": KID, "use": "sig"}
+        return httpx.Response(200, json={"key": jwk, "request_id": "r"})
+
+    with respx.mock as router:
+        route = router.post(VERIFY).mock(side_effect=slow)
+        first = asyncio.create_task(bank.handle_webhook(signed(body), body, source="plaid-1"))
+        await asyncio.sleep(0.05)
+        # The bucket is empty, but this kid's lookup is in flight: the second waits for it.
+        second = asyncio.create_task(bank.handle_webhook(signed(body), body, source="plaid-2"))
+        await asyncio.sleep(0.05)
+        release.set()
+        assert await first == "sync"
+        assert await second == "sync"
+        assert route.call_count == 1
+        # Another kid, with the bucket still empty, is refused.
+        with pytest.raises(WebhookKeyLookupLimitedError):
+            await bank.handle_webhook(signed(body, kid=kid_of(5)), body, source="plaid-1")
 
 
 async def test_a_full_key_cache_drops_its_least_recently_used_key_only(

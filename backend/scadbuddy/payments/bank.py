@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from scadbuddy.api.realtime import RateLimit
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments import plaid
@@ -35,15 +36,25 @@ _ROW = (
     " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error,"
     " login_required_at"
 )
-#: The verification keys kept in memory, by ``kid``; Plaid rotates them rarely. A full
-#: cache drops its least recently used key.
+#: The keys that verified a webhook, kept in memory by ``kid``; Plaid rotates them
+#: rarely. Only a verified webhook puts a key here, so forged ``kid``s never evict one; a
+#: full cache drops its least recently used key.
 MAX_WEBHOOK_KEYS = 8
-#: The ``kid``s Plaid said it does not have, kept as long as this, at most this many.
+#: The ``kid``s Plaid said it does not have, in a cache of their own, kept as long as
+#: this, at most this many.
 UNKNOWN_KEY_SECONDS = 300.0
 MAX_UNKNOWN_KEYS = 64
-#: A ``kid`` in neither cache asks Plaid at most once per this many seconds, process-wide
-#: (``_KEY_LOOKUPS``): a stream of forged ``kid``s cannot spend the shop's Plaid calls.
-KEY_LOOKUP_SPACING_SECONDS = 5.0
+#: Asking Plaid for a ``kid`` in neither cache (``KeyLookups``): per source address a
+#: burst of ``SOURCE_LOOKUP_BURST`` then one per ``SOURCE_LOOKUP_SECONDS``, and under that,
+#: process-wide, a burst of ``KEY_LOOKUP_BURST`` then one per ``KEY_LOOKUP_SECONDS``. A
+#: stream of forged ``kid``s cannot spend the shop's Plaid calls, and one sender cannot
+#: empty the process bucket alone.
+KEY_LOOKUP_BURST = 5
+KEY_LOOKUP_SECONDS = 5.0
+SOURCE_LOOKUP_BURST = 2
+SOURCE_LOOKUP_SECONDS = 60.0
+#: Sources with a bucket of their own; the least recently seen is forgotten past it.
+MAX_LOOKUP_SOURCES = 1024
 
 WebhookOutcome = Literal["sync", "login_required", "login_repaired", "ignored"]
 
@@ -181,30 +192,53 @@ class BankWebhookAnswer(BaseModel):
 
 
 class WebhookKeyLookupLimitedError(Exception):
-    """A webhook's key is not kept and Plaid was asked for one too recently; Plaid sends
-    the webhook again."""
+    """A webhook's key is not kept and its source, or the process, asked Plaid for keys
+    too often; Plaid sends the webhook again, after ``retry_after`` seconds."""
 
-    def __init__(self) -> None:
-        super().__init__("Plaid was asked for a webhook key too recently")
+    def __init__(self, retry_after: float) -> None:
+        super().__init__("Plaid was asked for webhook keys too often")
+        self.retry_after = retry_after
 
 
-class Spacing:
-    """At most one admission per ``KEY_LOOKUP_SPACING_SECONDS``, across threads."""
+class KeyLookups:
+    """Token buckets for webhook key lookups: one per source address, checked first, and
+    one for the process. A refusal by either spends no token from the other."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        burst: int = KEY_LOOKUP_BURST,
+        every: float = KEY_LOOKUP_SECONDS,
+        source_burst: int = SOURCE_LOOKUP_BURST,
+        source_every: float = SOURCE_LOOKUP_SECONDS,
+    ) -> None:
         self._lock = threading.Lock()
-        self._last = float("-inf")
+        self._clock = clock
+        self._process = RateLimit(burst, 1 / every, clock)
+        self._source_burst = source_burst
+        self._source_every = source_every
+        self._sources: OrderedDict[str, RateLimit] = OrderedDict()
 
-    def admit(self, now: float) -> bool:
+    def take(self, source: str) -> float:
+        """0 and one token from both buckets, or the seconds until the refusing bucket
+        holds one again."""
         with self._lock:
-            if now - self._last < KEY_LOOKUP_SPACING_SECONDS:
-                return False
-            self._last = now
-            return True
+            limit = self._sources.get(source)
+            if limit is None:
+                limit = RateLimit(self._source_burst, 1 / self._source_every, self._clock)
+            _keep(self._sources, source, limit, MAX_LOOKUP_SOURCES)
+            for bucket in (limit, self._process):
+                wait = bucket.retry_after()
+                if wait > 0:
+                    return wait
+            limit.take()
+            self._process.take()
+            return 0.0
 
 
 #: One per process: every ``BankLinks`` shares it.
-_KEY_LOOKUPS = Spacing()
+_KEY_LOOKUPS = KeyLookups()
 
 
 def _keep[V](cache: OrderedDict[str, V], key: str, value: V, limit: int) -> None:
@@ -239,9 +273,13 @@ class BankLinks:
         #: Where Plaid sends the Item's webhooks; read on each link token (live settings).
         self._webhook_url = webhook_url
         self._clock = clock
+        #: Keys that verified a webhook, by ``kid``.
         self._webhook_keys: OrderedDict[str, dict[str, Any]] = OrderedDict()
         #: ``kid`` -> when Plaid's "no such key" stops being trusted (``clock`` time).
         self._unknown_keys: OrderedDict[str, float] = OrderedDict()
+        #: Lookups in flight, by ``kid``: a second webhook with the same ``kid`` waits for
+        #: the first lookup instead of taking a token of its own.
+        self._lookups: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     @property
     def store(self) -> OrderStore:
@@ -424,19 +462,26 @@ class BankLinks:
     # -- webhooks ---------------------------------------------------------------------
 
     async def handle_webhook(
-        self, headers: Mapping[str, str], body: bytes, *, now: float | None = None
+        self,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        source: str = "unknown",
+        now: float | None = None,
     ) -> WebhookOutcome:
         """Verify Plaid's webhook, then read it. ``sync``: the caller syncs the deposits
         after answering. A `BadSignatureError` reads nothing, including a ``kid`` Plaid
         does not have; a `PlaidError` is the key Plaid could not give, and
-        `WebhookKeyLookupLimitedError` a lookup refused by ``_KEY_LOOKUPS``."""
+        `WebhookKeyLookupLimitedError` a lookup ``_KEY_LOOKUPS`` refused ``source`` (the
+        sender's address as the app trusts it)."""
         token, kid = plaid.webhook_key_id(headers)
         linked = await asyncio.to_thread(self.access)
         if linked is None:
             # Nothing linked: no keys to ask Plaid with, and nothing to change.
             raise BadSignatureError("no bank account is linked")
-        jwk = await self._webhook_key(linked.keys, kid)
+        jwk = await self._webhook_key(linked.keys, kid, source)
         plaid.verify_webhook(token, jwk, body, now=time.time() if now is None else now)
+        _keep(self._webhook_keys, kid, jwk, MAX_WEBHOOK_KEYS)
         try:
             event = json.loads(body)
         except ValueError:
@@ -456,28 +501,37 @@ class BankLinks:
             return "login_repaired"
         return "ignored"
 
-    async def _webhook_key(self, keys: PlaidKeys, kid: str) -> dict[str, Any]:
-        """``kid``'s JWK: kept, or asked of Plaid within ``_KEY_LOOKUPS``' spacing."""
-        now = self._clock()
+    async def _webhook_key(self, keys: PlaidKeys, kid: str, source: str) -> dict[str, Any]:
+        """``kid``'s JWK: one that verified before, the lookup already in flight, or a
+        new lookup that ``_KEY_LOOKUPS`` lets ``source`` make."""
         jwk = self._webhook_keys.get(kid)
         if jwk is not None:
-            self._webhook_keys.move_to_end(kid)
             return jwk
         until = self._unknown_keys.get(kid)
-        if until is not None and now < until:
+        if until is not None and self._clock() < until:
             raise BadSignatureError("Plaid has no webhook key with this kid")
-        if not _KEY_LOOKUPS.admit(now):
-            raise WebhookKeyLookupLimitedError()
+        pending = self._lookups.get(kid)
+        if pending is None:
+            wait = _KEY_LOOKUPS.take(source)
+            if wait > 0:
+                # Once more before refusing: a webhook may have verified this kid since.
+                jwk = self._webhook_keys.get(kid)
+                if jwk is not None:
+                    return jwk
+                raise WebhookKeyLookupLimitedError(wait)
+            pending = asyncio.ensure_future(self._lookup(keys, kid))
+            self._lookups[kid] = pending
+            pending.add_done_callback(lambda _: self._lookups.pop(kid, None))
+        return await asyncio.shield(pending)
+
+    async def _lookup(self, keys: PlaidKeys, kid: str) -> dict[str, Any]:
         try:
-            jwk = await plaid.verification_key(keys, kid)
+            return await plaid.verification_key(keys, kid)
         except PlaidError as error:
             if error.code != plaid.UNKNOWN_KEY_ID:
                 raise
-            _keep(self._unknown_keys, kid, now + UNKNOWN_KEY_SECONDS, MAX_UNKNOWN_KEYS)
+            _keep(self._unknown_keys, kid, self._clock() + UNKNOWN_KEY_SECONDS, MAX_UNKNOWN_KEYS)
             raise BadSignatureError("Plaid has no webhook key with this kid") from None
-        self._unknown_keys.pop(kid, None)
-        _keep(self._webhook_keys, kid, jwk, MAX_WEBHOOK_KEYS)
-        return jwk
 
     async def link(self, public_token: str, account_ids: Sequence[str]) -> BankStatus:
         """Exchange Link's public token and keep the one chosen account. No account or

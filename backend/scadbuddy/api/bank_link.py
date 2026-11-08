@@ -11,9 +11,11 @@ runtime (``api/components.py``).
 
 import asyncio
 import logging
+import math
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response, status
 
+from scadbuddy.api.deps import StateDep
 from scadbuddy.api.payment_webhooks import read_body
 from scadbuddy.core.problems import ApiError
 from scadbuddy.payments.bank import (
@@ -36,6 +38,7 @@ from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissing
 from scadbuddy.payments.deposits import sync_deposits
 from scadbuddy.payments.plaid import PlaidError, PlaidUnavailableError
 from scadbuddy.payments.provider import BadSignatureError
+from scadbuddy.telemetry.admission import bucket_key, relay_client
 
 logger = logging.getLogger(__name__)
 
@@ -211,31 +214,40 @@ async def _sync_logged(payments: PaymentsDep) -> None:
     description=(
         "Public: the `Plaid-Verification` JWT is the credential. 400 when it does not"
         " verify or Plaid has no key with its `kid` (nothing changes), 413 above 256 KiB,"
-        " 503 `provider_unavailable` when Plaid could not give its key, or a key lookup"
-        " came within 5 seconds of the last (Plaid sends it again). `SYNC_UPDATES_AVAILABLE`"
+        " 503 `provider_unavailable` when Plaid could not give its key, 429 with"
+        " `Retry-After` when the sender or the process asked Plaid for keys too often (Plaid"
+        " sends it again in both cases). `SYNC_UPDATES_AVAILABLE`"
         " syncs the deposits once the answer is sent; an `ITEM` `ERROR` with"
         ' `ITEM_LOGIN_REQUIRED` shows "Reconnect"; `LOGIN_REPAIRED` clears it.'
     ),
 )
 async def receive_bank_webhook(
-    request: Request, payments: PaymentsDep, later: BackgroundTasks
+    request: Request, payments: PaymentsDep, state: StateDep, later: BackgroundTasks
 ) -> BankWebhookAnswer:
     body = await read_body(request)
+    # The sender as the app trusts it: a trusted proxy's X-Forwarded-For, else the peer.
+    peer = request.client.host if request.client else None
+    trusted = state.settings.trusted_proxy_networks
     headers = {name.lower(): value for name, value in request.headers.items()}
     try:
-        outcome = await payments.bank.handle_webhook(headers, body)
+        outcome = await payments.bank.handle_webhook(
+            headers, body, source=bucket_key(relay_client(request.headers, peer, trusted))
+        )
     except BadSignatureError:
         raise ApiError(
             status.HTTP_400_BAD_REQUEST,
             "the webhook signature does not match",
             type_=PROBLEMS + "bad_signature",
         ) from None
-    except WebhookKeyLookupLimitedError:
+    except WebhookKeyLookupLimitedError as limited:
         logger.warning("a Plaid webhook was not read: its key lookup is over the limit")
+        # Plaid retries a 429 after its Retry-After
+        # (https://plaid.com/docs/api/webhooks/#webhook-retries).
         raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Plaid was asked for a webhook key too recently",
-            type_=PROBLEMS + "provider_unavailable",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Plaid was asked for webhook keys too often",
+            title="Too Many Requests",
+            headers={"Retry-After": str(max(1, math.ceil(limited.retry_after)))},
         ) from None
     except PlaidError as error:
         logger.warning("a Plaid webhook was not read: %s", error.code)
