@@ -283,9 +283,9 @@ class PrintRunStore:
         return await asyncio.to_thread(self._get_many, run_ids)
 
     async def lan_started(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
-        """The subject's succeeded runs with a LAN start under one of ``subtask_names``
-        (#5661), oldest first: a start's name names its run, so more than one is a name
-        two runs share."""
+        """The subject's runs whose result holds a LAN start under one of
+        ``subtask_names`` (#5661), whatever their status (#5733), oldest first: a start's
+        name names its run, so more than one is a name two runs share."""
         if not subtask_names:
             return []
         return await asyncio.to_thread(self._lan_started, run_subject, subtask_names)
@@ -443,7 +443,7 @@ class PrintRunStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
-                " AND status = 'succeeded' AND EXISTS (SELECT 1 FROM"
+                " AND EXISTS (SELECT 1 FROM"
                 " jsonb_array_elements(result->'lan') AS start"
                 " WHERE start->>'subtask_name' = ANY(%s))"
                 " ORDER BY created_at",
