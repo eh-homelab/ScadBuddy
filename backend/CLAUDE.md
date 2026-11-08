@@ -824,7 +824,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Past prints (#4777, §3.2): `ItemCreate.archive_id` alone (any other source or `kind` is
   422) makes a Bambuddy archive an item (`api/orders.py` `_archive_item`): a `model` item of
   the output whose `print_links` row owns it, else a `library_file` item of the library file
-  that owns it, else (an output or file gone since falls through too) a `library_file` item of
+  that owns it, else (an output or file gone since, or an output whose template was deleted,
+  falls through too) a `library_file` item of
   a copy of its printed file (`/archives/{id}/download`) in the native library,
   `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
   the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is
@@ -839,6 +840,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a status other than `completed`, `archive_gone`), grams per slot from
   `extra_data.filament_slots` (slot id less one), the actual seconds else the estimate, each
   plate an `ArchivePlate` naming its archive, recorded by `Lifecycle.record_archive_quote`
+  (the whole run is one unit: a run that printed several units, on one plate or as copies,
+  overstates the unit cost: `ArchiveFacts` carries no count of the units a plate held)
   (no sliced file; printing it re-slices, as a manual quote). A library file item with no
   slots gets the slots the print used (`archive_colours`). Job cost reads an `archive`
   quote's plates as a slice quote's (`models.py` `MEASURED_SOURCES`). Agent

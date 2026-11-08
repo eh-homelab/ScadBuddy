@@ -262,7 +262,9 @@ async def quote_from_archive(
     ``order_not_open``/``item_not_open``, 422 ``filaments``/``price_book``), then every
     plate archive of the print run read, the body's filaments written on the item (or,
     on a library file item with no slots, the slots the print used), priced and
-    recorded (`Lifecycle.record_archive_quote`)."""
+    recorded (`Lifecycle.record_archive_quote`). The run is priced as one unit of the item:
+    `ArchiveFacts` carries no count of the units a plate held, so a run of several overstates
+    the unit cost."""
     store = lifecycle.store
     _, policy, _ = await asyncio.to_thread(book.policy)
     # `filament_id` stands for every slot the print used, which only its archives name:
