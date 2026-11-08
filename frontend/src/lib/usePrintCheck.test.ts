@@ -164,4 +164,68 @@ describe('usePrintCheck', () => {
     expect(result.current.processValuesRead).toBe(true)
     expect(result.current.processPartSettings).toEqual({ top_shell_layers: 7 })
   })
+
+  it("asks for the process's values only until they are read for this process (#5686)", async () => {
+    const parts: PrintCheck = { errors: [], warnings: [], rack: null, process_part_settings: { top_shell_layers: 5 } }
+    check.mockResolvedValue(parts)
+    const { result, rerender } = renderHook(
+      ({ size, top }: { size: Size; top?: number }) =>
+        usePrintCheck(
+          SOURCE,
+          { ...request(size), ...(top === undefined ? {} : { part_settings: { '1': { top_shell_layers: top } } }) },
+          true,
+        ),
+      { initialProps: { size: '0.4' } as { size: Size; top?: number } },
+    )
+    await settle()
+    expect(check).toHaveBeenCalledTimes(1)
+    expect(check.mock.calls[0]![2]).toBe(true)
+
+    // A settled edit of the settings alone checks again, but does not read the preset again.
+    rerender({ size: '0.4', top: 9 })
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    expect(check).toHaveBeenCalledTimes(2)
+    expect(check.mock.calls[1]![2]).toBe(false)
+    expect(result.current.processValuesRead).toBe(true)
+    expect(result.current.processPartSettings).toEqual({ top_shell_layers: 5 })
+
+    // Another process asks again.
+    rerender({ size: '0.2', top: 9 })
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    expect(check).toHaveBeenCalledTimes(3)
+    expect(check.mock.calls[2]![2]).toBe(true)
+  })
+
+  it("keeps the process's values when a re-check fails, but never another process's (#5686)", async () => {
+    const parts: PrintCheck = { errors: [], warnings: [], rack: null, process_part_settings: { top_shell_layers: 5 } }
+    check.mockResolvedValueOnce(parts)
+    const { result, rerender } = renderHook(
+      ({ size, top }: { size: Size; top?: number }) =>
+        usePrintCheck(
+          SOURCE,
+          { ...request(size), ...(top === undefined ? {} : { part_settings: { '1': { top_shell_layers: top } } }) },
+          true,
+        ),
+      { initialProps: { size: '0.4' } as { size: Size; top?: number } },
+    )
+    await settle()
+    expect(result.current.processValuesRead).toBe(true)
+
+    // The check after an edit fails: the controls stay enabled on the values already read.
+    check.mockRejectedValueOnce(new ApiError(502, 'Bambuddy did not answer'))
+    rerender({ size: '0.4', top: 9 })
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    expect(result.current.error).toBeInstanceOf(ApiError)
+    expect(result.current.verdict).toBeNull()
+    expect(result.current.processValuesRead).toBe(true)
+    expect(result.current.processPartSettings).toEqual({ top_shell_layers: 5 })
+
+    // Another process whose check fails has no values: the old process's are not used.
+    check.mockRejectedValueOnce(new ApiError(502, 'Bambuddy did not answer'))
+    rerender({ size: '0.2', top: 9 })
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    expect(result.current.error).toBeInstanceOf(ApiError)
+    expect(result.current.processValuesRead).toBe(false)
+    expect(result.current.processPartSettings).toBeNull()
+  })
 })
