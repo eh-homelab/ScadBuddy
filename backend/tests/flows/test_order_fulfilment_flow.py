@@ -255,6 +255,15 @@ def test_a_stale_quote_asks_a_person_and_never_re_quotes() -> None:
     assert "accept the new quote, then answer print" in host.questions[0]
 
 
+def test_the_print_leaves_the_tower_supports_and_sequence_to_the_quote() -> None:
+    """#4673: the flow's request names none of them, so `order_item_print` prints each
+    item with its accepted quote's (`print_body`'s `setup`), what the quote priced."""
+    host = _Host([_item("a")], [_OK], [])
+    host.run()
+    [request] = host.requests
+    assert not {"prime_tower", "supports", "print_sequence"} & set(request)
+
+
 def test_a_hold_asks_until_the_order_is_released() -> None:
     held = _refused("order_on_hold")
     host = _Host([_item("a")], [held, held, _OK], ["print", "print"])
@@ -422,3 +431,21 @@ def test_a_library_file_item_reads_its_choices_by_its_file() -> None:
     host.run()
     assert host.sources == [{"library_file_id": 7}]
     assert host.printed == ["a"]
+
+
+async def test_a_registration_lost_to_another_replica_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5682: the pre-check saw no version, but another replica registered it
+    first (`register_new` answers None); the log tells that apart from the pre-check."""
+
+    async def register_new(*args: object, **kwargs: object) -> None:
+        return None
+
+    history = SimpleNamespace(available=True, versions=lambda name: [])
+    definitions = SimpleNamespace(history=history, register_new=register_new)
+    with caplog.at_level("INFO", logger="scadbuddy.orders.builtin_flow"):
+        made = await ensure_builtin_flow(cast(FlowDefinitions, definitions))
+    assert made is False
+    assert "another replica registered it first" in caplog.text
+    assert "the name has versions" not in caplog.text

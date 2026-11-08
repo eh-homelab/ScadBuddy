@@ -282,6 +282,14 @@ class PrintRunStore:
             return {}
         return await asyncio.to_thread(self._get_many, run_ids)
 
+    async def lan_started(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
+        """The subject's runs whose result holds a LAN start under one of
+        ``subtask_names`` (#5661), whatever their status (#5733), oldest first: a start's
+        name names its run, so more than one is a name two runs share."""
+        if not subtask_names:
+            return []
+        return await asyncio.to_thread(self._lan_started, run_subject, subtask_names)
+
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         """The output's newest run, for as long as retention keeps it (#1049): the one
         place a run that failed before it queued anything is recorded."""
@@ -430,6 +438,18 @@ class PrintRunStore:
         with self._pool.connection() as conn:
             row = conn.execute(query, args).fetchone()
         return PrintRun.model_validate(row) if row else None
+
+    def _lan_started(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
+                " AND EXISTS (SELECT 1 FROM"
+                " jsonb_array_elements(result->'lan') AS start"
+                " WHERE start->>'subtask_name' = ANY(%s))"
+                " ORDER BY created_at",
+                (run_subject, subtask_names),
+            ).fetchall()
+        return [PrintRun.model_validate(row) for row in rows]
 
     def _latest_for_output(self, output_id: str) -> PrintRun | None:
         with self._pool.connection() as conn:

@@ -318,7 +318,10 @@ async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
         logger.exception("could not register the built-in %s flow", NAME)
         return False
     if made is None:
-        # "Why is the built-in not in my list" answers from the logs (review of #5682).
-        logger.info("the built-in %s flow was not registered: the name has versions", NAME)
+        # The pre-check saw no version, but `register_new`'s locked check did: another
+        # replica registered it first (review of #5682).
+        logger.info(
+            "the built-in %s flow was not registered: another replica registered it first", NAME
+        )
         return False
     return True

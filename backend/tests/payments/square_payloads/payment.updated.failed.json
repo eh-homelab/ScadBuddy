@@ -1,0 +1,54 @@
+{
+  "created_at": "2026-11-08T17:10:00.512Z",
+  "data": {
+    "id": "hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+    "object": {
+      "payment": {
+        "amount_money": {
+          "amount": 700,
+          "currency": "USD"
+        },
+        "approved_money": {
+          "amount": 700,
+          "currency": "USD"
+        },
+        "created_at": "2026-11-08T17:09:58.086Z",
+        "id": "hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+        "location_id": "L88917AVBK2S5",
+        "order_id": "o4b7saqp4HzhNttf5AJxC0Srjd4F",
+        "receipt_number": "hYy9",
+        "receipt_url": "https://squareup.com/receipt/preview/hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+        "risk_evaluation": {
+          "created_at": "2026-11-08T17:09:58.198Z",
+          "risk_level": "NORMAL"
+        },
+        "source_type": "BANK_ACCOUNT",
+        "status": "FAILED",
+        "total_money": {
+          "amount": 700,
+          "currency": "USD"
+        },
+        "updated_at": "2026-11-08T17:10:00.331Z",
+        "version_token": "bhC3b8qKJvNDdxqKzXaeDsAjS1oMFuAKxGgT32HbE6S6o",
+        "note": "Order ORD-2026-7 (ScadBuddy request req-1)",
+        "bank_account_details": {
+          "bank_name": "Citizens Bank",
+          "transfer_type": "ACH",
+          "account_ownership_type": "INDIVIDUAL",
+          "fingerprint": "sq-1-ElNeDpZZqUBNDI7yNghyKO-o0yLPLnzE-IvnTMR6bnGq-pnz6dsSy9BK8CcoxFJlgw",
+          "country": "US",
+          "statement_description": "SQ* ELAN'S PRINTS",
+          "ach_details": {
+            "routing_number": "011401533",
+            "account_number_suffix": "000",
+            "account_type": "CHECKING"
+          }
+        }
+      }
+    },
+    "type": "payment"
+  },
+  "event_id": "d3c2b1a0-9e8f-4d7c-b6a5-0f1e2d3c4b5a",
+  "merchant_id": "6SSW7HV8K2ST5",
+  "type": "payment.updated"
+}

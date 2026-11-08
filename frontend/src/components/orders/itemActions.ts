@@ -1,5 +1,5 @@
 import type { Order, OrderItemDetail, Shipment } from '../../api/types'
-import { isCart, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from './afterAcceptance'
+import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, reviseMode, TAKES_ITEMS } from './afterAcceptance'
 import { orderItemSource } from '../../lib/printSource'
 import { offersUnfulfil, UNFULFIL_OFF, unfulfilBlock } from './unfulfilRules'
 
@@ -22,10 +22,51 @@ export function offersPrint(order: Order, item: OrderItemDetail): boolean {
   )
 }
 
+/** Why an accepted item's quantity and price are read-only (`item_locked`); `lockedText` adds
+ * the ways out the backend takes now. */
+export const LOCKED_TEXT = 'Locked: the customer accepted this price.'
+/** Why a revised item's quantity is read-only while its price is open (#5350). */
+export const REVISED_TEXT = 'Revised after acceptance: the new design takes a new price. The quantity stays as accepted.'
+
+export interface ItemEdits {
+  title: boolean
+  quantity: boolean
+  price: boolean
+  /** Why the quantity (and the price, when it is read-only too) can't change; null when it can,
+   * and when nothing changes on the row (a settled item, an ended order, a cart). */
+  locked: string | null
+}
+
+/**
+ * #4955 step 2, spec 2026-11-07 §4.1 — what the row edits in place. The title while the item
+ * is open; the quantity while `itemOpen` (`lifecycle.py` `item_open`); the price while
+ * `priceOpen` (`requote_open`, #5350), and a custom item's own price while `itemOpen`, as
+ * its update takes it. A visitor's cart (#5282) is the visitor's: the row edits nothing.
+ */
+/** `LOCKED_TEXT`, and the ways out the drawer offers now: a new revision of a model item
+ * (`reviseMode`, #5350; a custom or library file item takes none), and an added item
+ * (`addMode`, #5349). A shipped order, or one on hold, offers neither. */
+function lockedText(order: Order, item: OrderItemDetail): string {
+  const revise = item.kind === 'model' && reviseMode(order, item, item.quotes, item.fulfilments) === 'after_acceptance'
+  const add = addMode(order) !== null
+  if (revise && add) return `${LOCKED_TEXT} To change what they get, revise the design or add an item.`
+  if (revise) return `${LOCKED_TEXT} To change what they get, revise the design.`
+  if (add) return `${LOCKED_TEXT} To change what they get, add an item.`
+  return LOCKED_TEXT
+}
+
+export function itemEdits(order: Order, item: OrderItemDetail): ItemEdits {
+  const settled = item.status === 'fulfilled' || item.status === 'cancelled'
+  if (settled || ENDED.has(order.status) || isCart(order)) return { title: false, quantity: false, price: false, locked: null }
+  const quantity = itemOpen(order, item.quotes)
+  const price = item.kind === 'custom' ? quantity : priceOpen(order, item, item.quotes)
+  return { title: true, quantity, price, locked: quantity ? null : price ? REVISED_TEXT : lockedText(order, item) }
+}
+
 /** The drawer's sections an action opens it at. */
 export type ItemSection = 'quote' | 'print' | 'fulfil'
 
-export type ItemActionKey = 'open' | 'quote' | 'print' | 'fulfil' | 'unfulfil' | 'reopen' | 'delete' | 'cancel'
+export type ItemActionKey = 'open' | 'quote' | 'print' | 'fulfil' | 'unfulfil' | 'reopen' | 'duplicate' | 'delete' | 'cancel'
 
 export interface ItemAction {
   key: ItemActionKey
@@ -69,6 +110,13 @@ export function itemActions(
       // `item_not_priced`: a shipped order takes back a priced item only (#5349).
       blocked: takesBack ? null : "This item had no accepted price, so it can't come back into a shipped order.",
     })
+  }
+  // A copy is added as an add is (`_takes_item`): on an open order, or after acceptance while
+  // the order takes items and is not on hold (#5349). On an open order a custom item's copy
+  // has its price accepted as it is made, which a hold refuses too (`duplicate_item`).
+  if (OPEN_FOR_EDITS.has(order.status) || TAKES_ITEMS.has(order.status)) {
+    const held = order.on_hold && (TAKES_ITEMS.has(order.status) || item.kind === 'custom')
+    actions.push({ key: 'duplicate', label: 'Duplicate', blocked: held ? ON_HOLD : null })
   }
   if (!settled) {
     actions.push(item.status === 'draft' ? { key: 'delete', label: 'Delete item', blocked: null } : { key: 'cancel', label: 'Cancel item', blocked: null })

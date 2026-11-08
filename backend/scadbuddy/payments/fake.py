@@ -24,6 +24,7 @@ from scadbuddy.payments.provider import (
     Credential,
     ProviderError,
     ProviderField,
+    Verified,
 )
 
 SIGNATURE_HEADER: Final = "x-fake-signature"
@@ -56,8 +57,8 @@ class FakeProvider:
         #: Each ``(provider_ref, event_id)`` captured after an ``approved`` event (#4959).
         self.captured: list[tuple[str, str]] = []
 
-    async def verify(self, credential: Credential) -> str:
-        return f"Fake account {credential.settings.get('account', '')}"
+    async def verify(self, credential: Credential) -> Verified:
+        return Verified(account_label=f"Fake account {credential.settings.get('account', '')}")
 
     async def create_request(
         self,

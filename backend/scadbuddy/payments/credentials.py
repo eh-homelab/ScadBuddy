@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments.provider import Credential
-from scadbuddy.payments.store import has_open_requests
+from scadbuddy.payments.store import has_open_requests, resume_closes
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,8 @@ class PaymentCredentials:
         secrets: Mapping[str, str],
         account_label: str,
     ) -> ProviderRow:
-        """Upsert. The first row connected becomes the default."""
+        """Upsert. The first row connected becomes the default. The provider's pages the
+        sweep could not close start their tries over (`resume_closes`)."""
         if self._kek is None:
             raise KekMissingError()
         plaintext = json.dumps(dict(secrets), sort_keys=True)
@@ -132,6 +133,7 @@ class PaymentCredentials:
                     f" RETURNING {_ROW}",
                     (row_id, provider, *values),
                 ).fetchone()
+            resume_closes(conn, provider)
         assert row is not None
         return ProviderRow.model_validate(row)
 
@@ -236,7 +238,10 @@ class PaymentCredentials:
 
     def clear_webhook_error(self, provider: str, *, since: datetime) -> None:
         """Clear the last failure once a webhook that began at ``since`` succeeded; a
-        failure written after it began (a webhook handled at the same time) stands."""
+        failure written after it began (a webhook handled at the same time) stands. One
+        trade-off of ``WEBHOOK_ERROR_QUIET``: a same-category failure skipped inside the
+        quiet window after this success began keeps the older stamp, so it is cleared with
+        it; the next failure of any category after the clear is written at once."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = NULL,"

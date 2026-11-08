@@ -16,7 +16,7 @@ from scadbuddy.auth.service_credentials import TokenReader
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.payments.fake import FAKE
-from scadbuddy.payments.provider import ProviderError
+from scadbuddy.payments.provider import ProviderError, Verified
 from tests.api.test_auth_enforce import HEADER, _sign_in
 from tests.api.test_order_payments import (
     FAKE_CONNECT,
@@ -62,6 +62,18 @@ def test_paypal_is_offered_with_its_environment_and_one_secret(client: TestClien
         ("client_id", False),
         ("webhook_id", False),
         ("client_secret", True),
+    ]
+
+
+def test_square_is_offered_with_its_location_webhook_and_two_secrets(client: TestClient) -> None:
+    [square] = [s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "square"]
+    assert (square["label"], square["connected"]) == ("Square", False)
+    assert [(f["name"], f["secret"]) for f in square["fields"]] == [
+        ("environment", False),
+        ("location_id", False),
+        ("notification_url", False),
+        ("access_token", True),
+        ("signature_key", True),
     ]
 
 
@@ -111,7 +123,7 @@ def test_a_field_not_declared_or_missing_is_422_naming_it(client: TestClient) ->
 
 def test_an_unknown_provider_is_404(client: TestClient) -> None:
     for answer in (
-        client.put("/api/v1/payments/providers/square", json=FAKE_CONNECT),
+        client.put("/api/v1/payments/providers/nowhere", json=FAKE_CONNECT),
         client.delete(PROVIDER),
         client.post(f"{PROVIDER}/default"),
     ):
@@ -130,6 +142,31 @@ def test_a_failed_verify_is_422_with_its_text(
     assert refused.status_code == 422
     assert refused.json()["detail"] == "the account is closed"
     assert fake_status(client)["connected"] is False
+
+
+def test_an_account_in_another_currency_is_409_and_not_connected(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5666: an account that takes one currency (a Square location's) must take the
+    shop's ``orders_currency`` (USD by default); a provider that names none is not
+    compared."""
+
+    async def in_euros(*args: object) -> Verified:
+        return Verified(account_label="Fake account a", currency="EUR")
+
+    monkeypatch.setattr(FAKE, "verify", in_euros)
+    refused = client.put(PROVIDER, json=FAKE_CONNECT)
+    assert refused.status_code == 409
+    problem = refused.json()
+    assert problem["type"] == PROBLEMS + "currency_mismatch"
+    assert problem["detail"] == ("fake takes payments in EUR, but the shop's orders are in USD")
+    assert fake_status(client)["connected"] is False
+
+    async def in_dollars(*args: object) -> Verified:
+        return Verified(account_label="Fake account a", currency="USD")
+
+    monkeypatch.setattr(FAKE, "verify", in_dollars)
+    assert client.put(PROVIDER, json=FAKE_CONNECT).status_code == 200
 
 
 def test_connecting_without_a_kek_is_409(settings: Settings) -> None:
@@ -155,7 +192,7 @@ def test_a_provider_says_whether_a_failed_page_can_be_approved_again(client: Tes
     """#4959: only a provider that captures an approval (PayPal, and the fake) keeps a
     failed request's page payable; the order page says so only for those."""
     found = {s["id"]: s["reapprovable"] for s in client.get("/api/v1/payments/providers").json()}
-    assert found == {"fake": True, "paypal": True, "stripe": False}
+    assert found == {"fake": True, "paypal": True, "square": False, "stripe": False}
 
 
 def test_the_default_is_chosen(client: TestClient) -> None:

@@ -91,6 +91,7 @@ from scadbuddy.payments.provider import (
     ProviderError,
     ProviderField,
     ProviderUnavailableError,
+    Verified,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,9 +105,10 @@ TIMEOUT: Final = httpx.Timeout(20.0)
 TOKEN_MARGIN_SECONDS: Final = 60
 #: The ``custom_id`` a cancelled request's order carries, as defence in depth: ScadBuddy
 #: captures an approval only while its request is open or failed (``capture_request``), so
-#: an unmarked order of a cancelled request is not captured either. The mark is set once,
-#: after the cancel commits; a failed PATCH is logged, not retried. A capture completed or
-#: under way before the cancel is recorded as a payment on the cancelled request.
+#: an unmarked order of a cancelled request is not captured either. The mark is set after
+#: the cancel commits. A failed PATCH is logged and tried again by the housekeeping sweep,
+#: with a backoff (#5700). A capture completed or under way before the cancel is recorded
+#: as a payment on the cancelled request.
 CANCELLED: Final = "scadbuddy-cancelled"
 #: Currencies PayPal takes in whole units only.
 NO_DECIMALS: Final = frozenset({"HUF", "JPY", "TWD"})
@@ -325,7 +327,7 @@ class PayPalProvider:
 
     # -- the seam ---------------------------------------------------------------------
 
-    async def verify(self, credential: Credential) -> str:
+    async def verify(self, credential: Credential) -> Verified:
         environment = credential.settings.get("environment", "")
         self._base(credential)
         if not credential.settings.get("client_id"):
@@ -354,7 +356,8 @@ class PayPalProvider:
                 raise ProviderError(
                     f"the PayPal webhook {webhook_id} does not send {', '.join(missing)}"
                 )
-        return f"PayPal app {token.app_id} ({environment})"
+        # An app takes many currencies: none to compare.
+        return Verified(account_label=f"PayPal app {token.app_id} ({environment})")
 
     async def create_request(
         self,
@@ -415,7 +418,7 @@ class PayPalProvider:
         approval only while its request is open or failed. An order already completed,
         voided or gone is no error, and neither is one still awaiting the payer, which
         PATCH cannot change (it updates CREATED or APPROVED orders only). A failure here
-        is logged by the service and not retried."""
+        is tried again by the housekeeping sweep (#5700)."""
         path = f"/v2/checkout/orders/{_path_id(provider_ref)}"
         patch = [
             {

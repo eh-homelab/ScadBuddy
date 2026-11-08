@@ -7,9 +7,13 @@ import {
   partSettings,
   partSettingsPhrase,
   presetRef,
+  primeTowerChoice,
   printOptionFields,
   printPath,
+  printSequence,
+  setupPhrase,
   slotChoice,
+  supportsChoice,
   tier,
 } from './print.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -61,6 +65,16 @@ interface NoticeCustomer {
   contacts: { kind: string; value: string; primary?: boolean }[]
 }
 
+/** `minor` integer units as a major amount with `exponent` places, from the integer's
+ *  digits: a division through a float misplaces the last digit of a large total
+ *  (review of #5682). */
+function majorText(minor: number, exponent: number): string {
+  const sign = minor < 0 ? '-' : ''
+  const digits = String(Math.abs(minor)).padStart(exponent + 1, '0')
+  if (exponent === 0) return `${sign}${digits}`
+  return `${sign}${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`
+}
+
 /** The message for `template`, addressed to the customer's primary contacts (every
  *  contact when none is primary). Plain text, never sent from here. */
 export function composeNotice(
@@ -77,7 +91,7 @@ export function composeNotice(
   warning?: string
 } {
   const { number, currency, minor_exponent } = detail.order
-  const total = `${(detail.totals.total_minor / 10 ** minor_exponent).toFixed(minor_exponent)} ${currency}`
+  const total = `${majorText(detail.totals.total_minor, minor_exponent)} ${currency}`
   const lines: Record<NotifyTemplate, [string, string]> = {
     quoted: [`Your quote for order ${number}`, `Your quote for order ${number} is ready: ${total}. Reply to accept it.`],
     accepted: [`Order ${number} accepted`, `We have accepted order ${number} (${total}) and will start on it.`],
@@ -317,6 +331,10 @@ const sliceQuote = z
     path: printPath,
     // #5571: recorded with the quote; order_item_print prints with them when it sends none.
     part_settings: partSettings,
+    // #4673: print_output's own, sliced with and recorded as the quote's print setup.
+    prime_tower: primeTowerChoice,
+    supports: supportsChoice,
+    print_sequence: printSequence,
   })
   .strict()
 
@@ -1129,7 +1147,9 @@ export const orderTools: Tool[] = [
     description:
       'Quote a line item, in one of three modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
       'it is now). `slice`: render the item if it has no matching output, slice every plate with the print ' +
-      "dialog's own choices (printer, a spool per slot, nozzles and quality, as print_output takes them) and price " +
+      "dialog's own choices (printer, a spool per slot, nozzles and quality, prime tower, supports and print " +
+      'sequence, as print_output takes them; the quote records them as its print setup, `choices` and ' +
+      '`filament_plan`, which order_get lists) and price ' +
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
@@ -1180,7 +1200,8 @@ export const orderTools: Tool[] = [
       'GET /api/v1/orders/history/unit-cost',
     ],
     title: ({ order_id, item_id, slice, archive }) =>
-      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}`,
+      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}` +
+      (slice ? setupPhrase(slice) : ''),
     handler: async ({ order_id, item_id, manual, slice, archive }, ctx) => {
       if ([manual, slice, archive].filter((mode) => mode !== undefined).length !== 1) {
         throw new ToolError(
@@ -1337,6 +1358,16 @@ export const orderTools: Tool[] = [
         "Omit to print with the accepted quote's own (order_item_quote's `slice.part_settings`), so the print slices " +
           'what was priced. Settings that differ from the quote\'s are refused `requote_needed`: quote with them first',
       ),
+      // #4673: each omitted is the accepted quote's own (its `choices`); one that differs is `requote_needed`.
+      prime_tower: primeTowerChoice.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.prime_tower`); another is refused `requote_needed`",
+      ),
+      supports: supportsChoice.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.supports`); others are refused `requote_needed`",
+      ),
+      print_sequence: printSequence.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.print_sequence`); another is refused `requote_needed`",
+      ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
           'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
@@ -1347,11 +1378,12 @@ export const orderTools: Tool[] = [
       'POST /api/v1/orders/{order_id}/items/{item_id}/print',
       'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
     ],
-    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings }) =>
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings, ...setup }) =>
       `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
       (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
       (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : '') +
-      partSettingsPhrase(part_settings),
+      partSettingsPhrase(part_settings) +
+      setupPhrase(setup),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined
