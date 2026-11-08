@@ -850,3 +850,33 @@ def test_a_replayed_slice_makes_no_revision_after_anothers(bambuddy: TestClient)
     assert again.status_code == 200, again.text
     assert again.json()["id"] == op["result"]["id"]
     assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2, 3]
+
+
+def test_a_slice_with_new_inputs_and_no_filaments_keeps_the_items(bambuddy: TestClient) -> None:
+    """#5761 review: the new revision has no slots until its render, so the item's own
+    filaments go with the slice: one with new inputs and no `filaments` prices every
+    slot as before, rather than failing after its revision was written."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+
+    quote = _slice(shop, inputs=WIDER, filaments={})["result"]
+    item = shop.get_item()
+    assert quote["revision_id"] == item["current_revision_id"]
+    assert [(c["slot"], c["filament_id"]) for c in item["colours"]] == [
+        (0, shop.pla),
+        (1, shop.petg),
+    ]
+
+
+def test_a_short_commit_of_the_items_design_makes_no_revision(bambuddy: TestClient) -> None:
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    commit = shop.get_item()["reference"]["commit"]
+    _slice(shop, commit=commit[:7])
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
+    malformed = shop.post(commit="not-a-commit")
+    assert malformed.status_code == 422, malformed.text

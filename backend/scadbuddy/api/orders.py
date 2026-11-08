@@ -45,7 +45,6 @@ from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
     operation_answer,
-    recorded,
     run_operation,
 )
 from scadbuddy.api.printing import asked_by_api
@@ -122,6 +121,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.operations import (
     BODY_ONLY,
+    CARRIED,
     ORDER_ATTEMPT_COPY,
     ORDER_ITEM_PRINT,
     ORDER_ITEM_QUOTE,
@@ -2311,7 +2311,11 @@ async def quote_item(
     own checks above run before the revision, so their refusals write nothing; a
     storefront cart is refused first (``order_not_submitted``). A replayed key is
     answered from its operation with no revision made, and the same design again makes
-    none."""
+    none, so two first sends of one key racing make one. The new revision's slots are
+    known only once it renders: each takes the filament the item had on that slot
+    before, unless the body names one. A slot the new design adds that neither names
+    is refused by the quote's run (422 ``filaments``) after the revision is written:
+    the revision stays, and a slice that names its filament quotes it."""
     check_path(order_id, item_id)
     kind = ops.kinds[ORDER_ITEM_QUOTE]
     subject = subject_of(item_id)
@@ -2323,17 +2327,16 @@ async def quote_item(
         "by": current_actor().model_dump(mode="json"),
         "revision_id": None,
     }
+    before_start = None
     if body.inputs is not None or body.commit is not None:
         # #4673: the design keys the request; the revision it makes does not (`unkeyed`).
         request["design"] = body.model_dump(mode="json", include={"inputs", "commit"})
-        # A replayed key is answered from its operation, with no revision made (#5761
-        # review); else the body's own checks first, so a refusal writes nothing.
-        found = await recorded(
-            ops, kind=kind, subject=subject, request=request, idempotency_key=idempotency_key
-        )
-        if found is None:
+
+        async def revise() -> None:
+            # Only when no record answers the key and its operation is not running
+            # (#5761 review): the body's own checks first, so a refusal writes nothing.
             await kind.check({**request, BODY_ONLY: True})
-            request["revision_id"] = await _slice_revision(
+            request["revision_id"], request[CARRIED] = await _slice_revision(
                 order_id,
                 item_id,
                 body,
@@ -2346,6 +2349,8 @@ async def quote_item(
                 fetcher=fetcher,
                 payments=service,
             )
+
+        before_start = revise
     result = await run_operation(
         ops,
         response,
@@ -2353,6 +2358,7 @@ async def quote_item(
         subject=subject,
         request=request,
         idempotency_key=idempotency_key,
+        before_start=before_start,
     )
     return operation_answer(result, Quote)
 
@@ -2370,9 +2376,10 @@ async def _slice_revision(
     config: ConfigDep,
     fetcher: FetcherDep,
     payments: PaymentsComponent,
-) -> str | None:
+) -> tuple[str | None, dict[str, str]]:
     """The revision a slice with new ``inputs`` or ``commit`` quotes (#4673): made
-    through the revise path, or the item's current one when the design is unchanged."""
+    through the revise path, or the item's current one when the design is unchanged;
+    and the filaments the item had pinned, by slot, for the new revision's render."""
     store = orders.store
     order = await asyncio.to_thread(store.order, order_id)
     if order is None:
@@ -2408,8 +2415,9 @@ async def _slice_revision(
         config=config,
         fetcher=fetcher,
     )
+    pinned = {str(slot.slot): slot.filament_id for slot in item.colours if slot.filament_id}
     if (resolved.reference.commit, resolved.reference.inputs) == (current.commit, current.inputs):
-        return item.current_revision_id
+        return item.current_revision_id, pinned
     quotes = await asyncio.to_thread(store.quotes, item.id)
     after_acceptance = (
         order.status in TAKES_ITEMS
@@ -2424,7 +2432,7 @@ async def _slice_revision(
         order_id,
         payments,
     )
-    return revision.id
+    return revision.id, pinned
 
 
 @router.post(

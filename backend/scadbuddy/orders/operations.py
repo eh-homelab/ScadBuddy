@@ -106,6 +106,9 @@ ORDER_ITEM_QUOTE = "order_item_quote"
 #: Set, in a copy of the quote's request only, by the quote route's check of a slice's
 #: own body before it makes the slice's revision (#4673, #5761 review).
 BODY_ONLY = "body_only"
+#: The item's pinned filaments before a slice's revision (#4673, #5761 review), set by
+#: the quote route with that revision and not keyed: the render's slots take them.
+CARRIED = "carried_filaments"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
 ORDER_ATTEMPT_COPY = "order_attempt_copy"
@@ -546,6 +549,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 Actor.model_validate(request["by"]),
                 quote_id=operation_quote_id(OPERATION_RUN.get()),
                 expected_revision_id=request.get("revision_id"),
+                carried_filaments={
+                    int(slot): filament_id
+                    for slot, filament_id in (request.get(CARRIED) or {}).items()
+                },
             )
         except QUOTE_RETRYABLE:
             raise
@@ -953,7 +960,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             where="the item's quotes",
             # #4673: the revision a slice's new design made is the route's, after the
             # key is looked up; the body's `design` keys the request instead.
-            unkeyed=frozenset({"revision_id"}),
+            unkeyed=frozenset({"revision_id", CARRIED}),
             # The render and every plate's slice outlast the command deadline: the
             # caller follows the operation anyway.
             answers_running=True,

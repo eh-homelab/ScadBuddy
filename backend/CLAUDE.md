@@ -679,8 +679,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   quote route's body (`ItemSliceQuoteRequest`) also takes `inputs` and `commit`: a design
   that differs from the item's is made a revision first (`api/orders.py` `_slice_revision`,
   through `Lifecycle.add_revision`, after acceptance for an accepted item on a
-  `TAKES_ITEMS` order) after the key's lookup and the quote's check of the body alone
-  (`quote_check` `body_only`, so a 422 writes nothing), and the quote is of it (`revision_id` in the operation's request;
+  `TAKES_ITEMS` order) in `run_operation`'s `before_start`, after the quote's check of
+  the body alone (`quote_check` `body_only`, so a 422 writes nothing); the render's slots
+  take the item's earlier filaments (`carried_filaments`, unkeyed), and a slot the new
+  design adds that neither the item nor the body covers is refused after the revision is
+  written; the quote is of it (`revision_id` in the operation's request;
   409 `revision_superseded` once another is current, the record's locked check
   included; a cart is refused `order_not_submitted` first). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)

@@ -225,13 +225,20 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   `_slice_revision`) resolves them as a revision's reference and makes the revision through
   `Lifecycle.add_revision`, `after_acceptance` for an item with an accepted quote on a
   `TAKES_ITEMS` order not yet revised after acceptance, so every refusal of that path
-  applies unchanged. Before it, the route looks up the request's key (a replay is
-  answered from its operation, with no revision made) and runs the quote's own check on
-  the body alone (`quote_check` `body_only`: the cart, the filaments, the support slots,
-  the price book and the machine rate), so a refusal there writes nothing and leaves an
-  accepted item's one revise after acceptance unused. The same design makes no revision.
-  The design keys the operation's request (`design`); the revision does not (the kind's
-  `unkeyed`). The operation's request carries the revision as `revision_id`, and the check
+  applies unchanged. That step is `run_operation`'s `before_start`, so it runs only when
+  no record answers the key and its operation is not running (a replay makes no
+  revision), and it first runs the quote's own check on the body alone (`quote_check`
+  `body_only`: the cart, the filaments, the support slots, the price book and the machine
+  rate), so a refusal there writes nothing and leaves an accepted item's one revise after
+  acceptance unused. The same design makes no revision, so two first sends of one key
+  that race make one. The new revision has no colour slots until it renders, so the
+  route carries the item's pinned filaments with it (`carried_filaments`), and the
+  render's slots take them by slot number where the body names none (`quote.py`
+  `ensure_output`). A slot the new design adds that neither names is known only after
+  the render: the run refuses it (422 `filaments`) after the revision is written, and a
+  slice that names its filament quotes that revision. The design keys the operation's
+  request (`design`); the revision and the carried filaments do not (the kind's
+  `unkeyed`). `commit` is 7 to 40 hex characters. The operation's request carries the revision as `revision_id`, and the check
   (`quote_check`), the run (`quote_run`) and the record (`record_slice_quote`, under the
   order's lock) refuse 409 `revision_superseded` once another revision is current; the
   order page says to slice again (`refusal.ts` `SUPERSEDED_TEXT`). A storefront cart is
