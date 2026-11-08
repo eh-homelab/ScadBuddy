@@ -4,6 +4,7 @@ one when it does not, and a fee that arrives after the payment it belongs to."""
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -34,7 +35,10 @@ PENDING = ProviderEvent(
 )
 SETTLED = EVENT.model_copy(update={"event_id": "p2", "fee_minor": None})
 FAILED = ProviderEvent(event_id="p3", kind="failed", provider_ref="fake_r")
-FEE = ProviderEvent(event_id="p4", kind="fee", provider_ref="fake_r", fee_minor=31)
+FEE = ProviderEvent(
+    event_id="p4", kind="fee", provider_ref="fake_r", fee_minor=31,
+    created_at=datetime.now(UTC),
+)  # fmt: skip
 
 
 def _outcomes(shop: PayShop) -> list[str]:
@@ -162,7 +166,8 @@ def test_a_fee_is_written_once(shop: PayShop) -> None:
 
 def test_a_fee_before_its_payment_is_too_early_and_leaves_no_row(shop: PayShop) -> None:
     """Stripe does not keep event order: a fee can arrive before the paid event commits.
-    It is refused with nothing written, so the provider sends it again."""
+    While the request is open and the event young, it is refused with nothing written,
+    so the provider sends it again."""
     order, _ = shop.linked()
     with pytest.raises(EventTooEarlyError):
         shop.lifecycle.record_provider_event("fake", FEE)
@@ -172,18 +177,42 @@ def test_a_fee_before_its_payment_is_too_early_and_leaves_no_row(shop: PayShop) 
     assert [f.amount_minor for f in shop.rows.cost_entries(order.id)] == [31]
 
 
-def test_a_fee_goes_on_the_providers_payment_when_the_request_was_paid_by_hand(
-    shop: PayShop,
-) -> None:
-    order, req = shop.linked()
-    shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
+def test_a_fee_before_a_pending_request_settles_is_too_early(shop: PayShop) -> None:
+    _pending(shop)
     with pytest.raises(EventTooEarlyError):
         shop.lifecycle.record_provider_event("fake", FEE)
-    shop.lifecycle.record_provider_event("fake", SETTLED)
-    assert shop.lifecycle.record_provider_event("fake", FEE) == "recorded"
-    [stripe_paid] = [p for p in shop.rows.payments(order.id) if p.provider]
-    [fee] = shop.rows.cost_entries(order.id)
-    assert fee.source == f"payment:{stripe_paid.id}"
+
+
+@pytest.mark.parametrize("end", ["cancelled", "expired", "failed", "by_hand"])
+def test_a_fee_with_no_payment_on_an_ended_request_is_ignored(shop: PayShop, end: str) -> None:
+    """A poison event must not answer 503 for ever: once the request has left open and
+    pending, a fee with no provider payment is recorded as ignored."""
+    order, req = shop.linked()
+    if end == "cancelled":
+        shop.lifecycle.cancel_payment_request(order.id, req.id, BY)
+    elif end == "expired":
+        shop.lifecycle.record_provider_event(
+            "fake", ProviderEvent(event_id="x1", kind="expired", provider_ref="fake_r")
+        )
+    elif end == "failed":
+        shop.lifecycle.record_provider_event("fake", FAILED)
+    else:
+        shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
+    assert shop.lifecycle.record_provider_event("fake", FEE) == "ignored"
+    assert shop.rows.cost_entries(order.id) == []
+
+
+def test_a_fee_event_older_than_a_day_is_ignored(shop: PayShop) -> None:
+    order, _ = shop.linked()
+    old = FEE.model_copy(update={"created_at": datetime.now(UTC) - timedelta(hours=25)})
+    assert shop.lifecycle.record_provider_event("fake", old) == "ignored"
+    assert shop.rows.cost_entries(order.id) == []
+
+
+def test_a_fee_event_with_no_time_is_ignored_rather_than_retried(shop: PayShop) -> None:
+    _, _ = shop.linked()
+    bare = FEE.model_copy(update={"created_at": None})
+    assert shop.lifecycle.record_provider_event("fake", bare) == "ignored"
 
 
 def test_a_fee_event_with_no_fee_is_ignored(shop: PayShop) -> None:

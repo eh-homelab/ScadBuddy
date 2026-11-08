@@ -5,6 +5,8 @@ network."""
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -58,8 +60,11 @@ def stripe() -> Iterator[respx.MockRouter]:
         yield router
 
 
-def send(client: TestClient, name: str) -> httpx.Response:
+def send(client: TestClient, name: str, *, now: bool = False) -> httpx.Response:
+    """The recorded event ``name``; with ``now``, made by Stripe just now."""
     body = (PAYLOADS / name).read_bytes()
+    if now:
+        body = json.dumps(json.loads(body) | {"created": int(time.time())}).encode()
     answer: httpx.Response = client.post(HOOK, content=body, headers=signed(body))
     return answer
 
@@ -189,12 +194,24 @@ def test_a_fee_that_arrives_before_its_payment_is_sent_again(
     """``charge.updated`` can land before the paid event commits: it answers 503 with
     nothing recorded, and Stripe's retry records the fee."""
     stripe_request(client)
-    early = send(client, "charge.updated.balance_transaction.json")
+    early = send(client, "charge.updated.balance_transaction.json", now=True)
     assert early.status_code == 503
     assert early.json()["type"] == "https://scadbuddy.dev/problems/payments/provider_unavailable"
     assert send(client, "checkout.session.completed.card.json").json() == {"outcome": "recorded"}
-    assert send(client, "charge.updated.balance_transaction.json").json() == {"outcome": "recorded"}
+    assert send(client, "charge.updated.balance_transaction.json", now=True).json() == {
+        "outcome": "recorded"
+    }
     assert [f[0] for f in fees(pg_conninfo)] == [50]
+
+
+def test_a_fee_whose_payment_never_came_is_ignored_after_a_day(
+    client: TestClient, stripe: respx.MockRouter, pg_conninfo: str
+) -> None:
+    """The recorded event was made long ago: no 503 for ever, it is recorded as ignored."""
+    stripe_request(client)
+    late = send(client, "charge.updated.balance_transaction.json")
+    assert late.json() == {"outcome": "ignored"}
+    assert fees(pg_conninfo) == []
 
 
 def test_a_forged_event_records_nothing(client: TestClient, stripe: respx.MockRouter) -> None:

@@ -46,6 +46,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import httpx
@@ -286,7 +287,13 @@ class StripeProvider:
             previous = event["data"].get("previous_attributes") or {}
             if not isinstance(obj, dict) or not isinstance(previous, dict):
                 raise TypeError
-            return await self._event(credential, event_id, kind, obj, previous)
+            found = await self._event(credential, event_id, kind, obj, previous)
+            created = event.get("created")
+            if isinstance(created, int):
+                found = found.model_copy(
+                    update={"created_at": datetime.fromtimestamp(created, UTC)}
+                )
+            return found
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError):
             raise ProviderError("the event body is malformed") from None
 

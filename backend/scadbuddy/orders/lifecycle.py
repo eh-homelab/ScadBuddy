@@ -136,6 +136,11 @@ QUOTE_HOLDER = "order_item_quote"
 QUOTE_TIMEOUT = timedelta(minutes=30)
 
 
+#: How long a provider's fee that arrived before its payment is sent back for a retry
+#: (#4958); after it, the fee is recorded as ignored.
+FEE_RETRY_WINDOW = timedelta(hours=24)
+
+
 class LifecycleError(Exception):
     """A transition the record refuses: ``slug`` names why (the problem type's last
     segment), ``items`` and ``shipments`` the rows in the way."""
@@ -1051,7 +1056,10 @@ class Lifecycle:
         on a request paid by hand), under the order's lock taken by the caller, once: a
         payment that already has its fee keeps it. Events come in any order, so a fee
         whose payment is not recorded yet is `EventTooEarlyError`: the transaction rolls
-        back, its event row too, and the provider's retry is read again."""
+        back, its event row too, and the provider's retry is read again. Only while the
+        request is open or pending and the event is younger than `FEE_RETRY_WINDOW`:
+        after that the payment is not coming, and the event is recorded as ignored, so
+        a poison event is not answered 503 for ever."""
         if not event.fee_minor:
             return "ignored", None
         payment = next(
@@ -1066,6 +1074,12 @@ class Lifecycle:
             None,
         )
         if payment is None:
+            young = (
+                event.created_at is not None
+                and datetime.now(UTC) - event.created_at < FEE_RETRY_WINDOW
+            )
+            if found.status not in ("open", "pending") or not young:
+                return "ignored", None
             raise EventTooEarlyError(
                 f"the {provider} payment this fee belongs to is not recorded yet"
             )

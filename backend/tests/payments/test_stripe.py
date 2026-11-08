@@ -37,6 +37,8 @@ CRED = Credential(settings={}, secrets={"secret_key": KEY, "webhook_secret": WHS
 CS = "cs_test_a11YYufWQzNY63zpQ6QSNRQhkUpVph4WRmzW0zWJO2znZKdVujZ0N0S22u"
 PI = "pi_3MtwBwLkdIwHu7ix28a3tqPa"
 TXN = "txn_3MtwBwLkdIwHu7ix2rw9Uyaf"
+#: When the recorded session and charge events were made (their ``created``).
+MADE = datetime.fromtimestamp(1762560000, UTC)
 
 
 def payload(name: str) -> Any:
@@ -298,7 +300,7 @@ async def test_a_card_payment_is_paid_with_its_fee() -> None:
     event = await parse("checkout.session.completed.card.json")
     assert event == ProviderEvent(
         event_id="evt_1card", kind="paid", provider_ref=CS, amount_minor=700,
-        currency="USD", fee_minor=50,
+        currency="USD", fee_minor=50, created_at=MADE,
     )  # fmt: skip
     assert fetched.calls.last.request.url.params["expand[]"] == "latest_charge.balance_transaction"
 
@@ -341,8 +343,9 @@ async def test_a_bank_debit_is_pending_then_paid_or_failed() -> None:
     with respx.mock:
         pending = await parse("checkout.session.completed.ach.json")
     assert pending == ProviderEvent(
-        event_id="evt_1ach", kind="pending", provider_ref=CS, amount_minor=700, currency="USD"
-    )
+        event_id="evt_1ach", kind="pending", provider_ref=CS, amount_minor=700, currency="USD",
+        created_at=MADE,
+    )  # fmt: skip
     with respx.mock:
         respx.get(f"{API}/v1/payment_intents/{PI}").mock(
             return_value=httpx.Response(200, json=payload("api.payment_intent.expanded.json"))
@@ -371,7 +374,7 @@ async def test_each_refund_is_recorded_once_for_its_own_amount() -> None:
     first = await parse("refund.created.json")
     assert first == ProviderEvent(
         event_id="refund:re_1first", kind="refunded", provider_ref=CS, amount_minor=400,
-        currency="USD",
+        currency="USD", created_at=datetime.fromtimestamp(1762560100, UTC),
     )  # fmt: skip
     assert listed.calls.last.request.url.params["payment_intent"] == PI
     second = await parse("refund.created.second.json")
@@ -431,8 +434,9 @@ async def test_the_balance_transaction_arriving_is_a_fee_event() -> None:
     )
     event = await parse("charge.updated.balance_transaction.json")
     assert event == ProviderEvent(
-        event_id="evt_1fee", kind="fee", provider_ref=CS, currency="USD", fee_minor=50
-    )
+        event_id="evt_1fee", kind="fee", provider_ref=CS, currency="USD", fee_minor=50,
+        created_at=MADE,
+    )  # fmt: skip
 
 
 async def test_another_charge_update_is_other_with_no_call() -> None:

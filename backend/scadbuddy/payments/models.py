@@ -54,6 +54,9 @@ class ProviderEvent(BaseModel):
     amount_minor: Money | None = Field(default=None, ge=1)
     currency: str | None = None
     fee_minor: Money | None = Field(default=None, ge=0)
+    #: When the provider made the event (#4958): how long a ``fee`` that arrived
+    #: before its payment is sent back for a retry (``Lifecycle._late_fee``).
+    created_at: datetime | None = None
 
 
 class HostedRequest(BaseModel):

@@ -850,7 +850,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   §4.4); a manual payment writes none. A `fee` event (#4958, Stripe's balance transaction made after the
   payment) writes the same entry later, once (`_late_fee`, under the order lock, on the
   unique `(order_id, kind, source)` index); one that arrives before its payment is
-  `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again. A `pending` event (a bank debit on its way)
+  `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
+  only while the request is open or pending and the event (`ProviderEvent.created_at`) is
+  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. `parse_webhook` is

@@ -90,6 +90,7 @@ class FakeProvider:
                 amount_minor=data.get("amount_minor"),
                 currency=data.get("currency"),
                 fee_minor=data.get("fee_minor"),
+                created_at=data.get("created_at"),
             )
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError):
             raise ProviderError("the event body is malformed") from None
