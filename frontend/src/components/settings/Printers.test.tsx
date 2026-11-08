@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
@@ -11,18 +10,13 @@ import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
 import { PrintersPanel } from './Printers'
+import { readSpec } from '../../test/spec'
 
 /** `LanLink.access_code`'s `maxLength` in the spec `pnpm gen:api` (run before `pnpm test`)
  * exported: the backend's bound, read rather than restated (#4497 review). */
 function specAccessCodeMax(): number {
-  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch (cause) {
-    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
-  }
-  const spec = JSON.parse(text) as {
+  const { json, path } = readSpec()
+  const spec = json as {
     components?: { schemas?: { LanLink?: { properties?: { access_code?: { maxLength?: unknown } } } } }
   }
   const max = spec.components?.schemas?.LanLink?.properties?.access_code?.maxLength
