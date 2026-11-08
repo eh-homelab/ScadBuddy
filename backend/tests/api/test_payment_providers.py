@@ -187,7 +187,7 @@ def test_a_reconnect_that_names_no_currency_keeps_the_row(
     """#5752 review: a provider whose account takes one currency, reconnected to an
     account that names none, is refused before anything is written; the row keeps its
     label and its stored currency."""
-    monkeypatch.setattr(FAKE, "reports_currency", True, raising=False)
+    monkeypatch.setattr(FAKE, "reports_currency", True)
 
     async def in_dollars(*args: object) -> Verified:
         return Verified(account_label="Fake account a", currency="USD")

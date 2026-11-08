@@ -232,6 +232,89 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     ])
     expect(screen.getByText(/abcdef012345/)).toBeInTheDocument()
   })
+
+  // #4625 §6.3 — a slot that prints only support is priced with its own filament.
+  it('sends a support slot with its filament, and no slot without one', async () => {
+    const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockResolvedValue(undefined)
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} />,
+    )
+    await user.click(screen.getByTestId('quote-from-slice'))
+    const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    const slots = await within(dialog).findAllByRole('combobox', { name: /^Filament for slot/ })
+    for (const slot of slots) await selectOption(user, slot, /^Bambu PLA/)
+    const support = within(dialog).getByRole('group', { name: 'Support filaments' })
+    await user.type(within(support).getByLabelText('Support slot'), '1')
+    await user.click(within(support).getByRole('button', { name: 'Add support filament' }))
+    expect(within(support).getByRole('alert')).toHaveTextContent('Slot 1 is a colour slot')
+    await user.clear(within(support).getByLabelText('Support slot'))
+    await user.type(within(support).getByLabelText('Support slot'), '6')
+    await user.click(within(support).getByRole('button', { name: 'Add support filament' }))
+    await user.type(within(support).getByLabelText('Support slot'), '7')
+    await user.click(within(support).getByRole('button', { name: 'Add support filament' }))
+    await selectOption(user, within(support).getByRole('combobox', { name: 'Support filament for slot 6' }), /^Bambu PETG/)
+    const quote = within(dialog).getByTestId('run-quote')
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1))
+    // Slot 7 has no filament chosen: it prices nothing, so it is not sent.
+    expect(start.mock.calls[0]?.[0].support_filaments).toEqual({ '5': FILAMENT_PETG })
+  })
+
+  // #4625 §6.2 — the rate a slice quote was priced at, kept with it, explains its machine time.
+  it('shows the machine rate a slice quote was priced at, and its parts', async () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'quoted')
+    const { user } = renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        quotes={[
+          {
+            id: 'q-rate',
+            order_item_id: ITEM_DRAFT,
+            created_at: '2026-10-22T10:00:00Z',
+            source: 'slice',
+            accepted: false,
+            sliced_sha256: null,
+            sliced_blob_key: null,
+            plates: [],
+            lines: [{ kind: 'machine_time', label: 'Machine time, 1 h at 0.665 per hour', quantity: 1, unit_minor: 67, amount_minor: 67 }],
+            unit_cost_minor: 67,
+            unit_price_minor: 67,
+            quantity: 1,
+            total_minor: 67,
+            created_by: { kind: 'browser', principal: null, session: null },
+            printer: 'p-1',
+            machine_rate_breakdown: {
+              printer: 'p-1',
+              printer_name: 'Garage',
+              source: 'profile',
+              rate_per_hour: '0.665',
+              currency: 'USD',
+              intervals: 'stored',
+              purchase_price: '2400',
+              watts: '200',
+              kwh_price: '0.15',
+              depreciation_per_hour: '0.48',
+              power_per_hour: '0.03',
+              wear_per_hour: '0.035',
+              maintenance_per_hour: '0.12',
+            },
+          },
+        ]}
+      />,
+    )
+    const rate = screen.getByTestId('quote-machine-rate')
+    expect(rate).toHaveTextContent('Machine rate 0.665 per hour for Garage, with the intervals last read: Bambuddy did not answer')
+    await user.click(within(rate).getByRole('button', { name: /Machine rate 0.665/ }))
+    expect(within(rate).getByRole('list', { name: 'Machine rate parts' })).toHaveTextContent('Depreciation 0.48 per hour')
+  })
 })
 
 // #5328, job cost spec §6.3: the quote warning, advice only, and one click to its price.
