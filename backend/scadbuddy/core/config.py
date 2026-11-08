@@ -87,9 +87,10 @@ DEFAULT_ASSET_SWEEP_GRACE = 7 * 86400.0
 MIN_ASSET_SWEEP_GRACE = 3600.0
 # How often the sweep runs after the one at boot; 0 turns the sweep off entirely.
 DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
-#: Where blobs live (spec 2026-09-27 §6.2). `local` is the data volume and is correct
-#: only with one render worker sharing the API's volume; `bambuddy` is Bambuddy's library;
-#: `s3` is an S3-compatible bucket (spec 2026-10-16 §4).
+#: Where blobs live (spec 2026-09-27 §6.2). `local` is the API's data volume: renders on
+#: it run only in-process (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), and a render worker
+#: refuses it (#5298 plan D11); `bambuddy` is Bambuddy's library; `s3` is an
+#: S3-compatible bucket (spec 2026-10-16 §4).
 StoreBackend = Literal["local", "bambuddy", "s3"]
 #: Whose library `/print/library/*` serves (spec 2026-10-17 §4.5): Bambuddy's, or
 #: ScadBuddy's own over the blob store (`native`, which needs a `store_backend` that is

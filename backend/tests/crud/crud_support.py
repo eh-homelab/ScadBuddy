@@ -242,16 +242,25 @@ def render_crud_app(
     *,
     projection: JobProjection | None = None,
     content: ContentStore | None = None,
+    bootstrap: BootstrapVerifier | None = None,
 ) -> FastAPI:
     """The render routes, reading the store settings from ``pool`` under ``settings``
     (none: a test of the job routes only), writing the job rows through ``projection``,
     and the blob refs, piece geometry, blob index, the uploads' rows and the library
     leases, pin holds and install slots (`INSTALL_CONCURRENCY` of them) on ``pool`` (the
     API's upload files and checkouts are not these routes': its `AssetStore` and
-    `CheckoutLeases` have no root to read). ``content`` is the API's blob store, which
-    drops an upload's copy (none: the local store, which keeps no copies)."""
+    `CheckoutLeases` have no root to read); the exchange too, of the proofs ``bootstrap``
+    takes, when given. ``content`` is the API's blob store, which drops an upload's copy
+    (none: the local store, which keeps no copies)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
-    parts: dict[Any, Any] = {AUTH: SimpleNamespace(would_refuse=_Noted())}
+    parts: dict[Any, Any] = {
+        AUTH: SimpleNamespace(
+            would_refuse=_Noted(),
+            verifiers={} if bootstrap is None else {"bootstrap": bootstrap},
+            credentials=credentials,
+            core=SimpleNamespace(metrics=Metrics()),
+        )
+    }
     app.state.scadbuddy = SimpleNamespace(
         settings=settings or SimpleNamespace(auth_mode="enforce"),
         settings_store=SimpleNamespace(pool=pool),
@@ -265,6 +274,8 @@ def render_crud_app(
     )
     app.include_router(crud_render.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
+    if bootstrap is not None:
+        app.include_router(service_token.router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
     return app

@@ -123,7 +123,7 @@ export function Component() {
           value={store.backend}
           onValueChange={(next) => setField('store_backend', next)}
           choices={[
-            { value: 'local', label: 'This server’s volume (one render worker)' },
+            { value: 'local', label: 'This server’s volume (renders in the API only)' },
             {
               value: 'bambuddy',
               label: 'Bambuddy library (any number of render workers)',
