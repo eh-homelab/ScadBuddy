@@ -50,6 +50,16 @@ const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
 /** The "For request" select's value for a payment that answers no request. */
 const NO_REQUEST = '__no_request__'
+/** #4960 — the methods a payment received by hand can name, stored as the value. */
+const MANUAL_METHODS = [
+  { value: 'cash', label: 'Cash' },
+  { value: 'check', label: 'Check' },
+  { value: 'bank_transfer', label: 'Bank transfer' },
+  { value: 'venmo', label: 'Venmo' },
+  { value: 'zelle', label: 'Zelle' },
+] as const
+const OTHER_METHOD = '__other__'
+const methodLabel = (method: string) => MANUAL_METHODS.find((m) => m.value === method)?.label ?? method
 /** #4693 — the search parameter naming the open line item: `/orders/<id>?item=<item id>`. */
 const ITEM_PARAM = 'item'
 const ITEM_HASH = `#${itemAnchor('')}`
@@ -134,7 +144,8 @@ export function OrderPage() {
   const [due, setDue] = useState<string | null>(null)
   const providers = useAsync(() => api.paymentProviders(), []).data
   const providerLabel = (id: string) => (providers ?? []).find((p) => p.id === id)?.label ?? id
-  const [payment, setPayment] = useState({ amount: '', method: '', request: NO_REQUEST })
+  const [payment, setPayment] = useState({ amount: '', method: NONE, other: '', request: NO_REQUEST })
+  const paymentMethod = payment.method === OTHER_METHOD ? payment.other.trim() || 'other' : payment.method === NONE ? null : payment.method
   // #5281 — the charges editor's unsaved rows hold the shipping option picker, which writes
   // the same list: a save of stale rows would undo the option.
   const [chargesDirty, setChargesDirty] = useState(false)
@@ -400,7 +411,7 @@ export function OrderPage() {
                   {payments.map((p) => (
                     <li key={p.id} className="flex justify-between gap-2">
                       <span>
-                        {p.provider ? `Paid by ${providerLabel(p.provider)}` : (p.method ?? 'Payment')} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
+                        {p.provider ? `Paid by ${providerLabel(p.provider)}` : (p.method ? methodLabel(p.method) : 'Payment')} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
                       </span>
                       <span className="sb-num">{formatMoney(p.amount_minor, order.currency, order.minor_exponent)}</span>
                     </li>
@@ -419,7 +430,7 @@ export function OrderPage() {
                       setRefusal({ text: 'Enter the amount received, such as 12.50.', items: [] })
                       return
                     }
-                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: payment.method.trim() || null, ...(chosenRequest === NO_REQUEST ? {} : { payment_request_id: chosenRequest }) })).then(() => setPayment({ amount: '', method: '', request: NO_REQUEST }))
+                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: paymentMethod, ...(chosenRequest === NO_REQUEST ? {} : { payment_request_id: chosenRequest }) })).then(() => setPayment({ amount: '', method: NONE, other: '', request: NO_REQUEST }))
                   }}
                 >
                   <div className="flex flex-col gap-1">
@@ -428,8 +439,27 @@ export function OrderPage() {
                   </div>
                   <div className="flex flex-col gap-1">
                     <Label htmlFor="payment-method">Method</Label>
-                    <Input id="payment-method" className="w-28" placeholder="cash, card" value={payment.method} onChange={(e) => setPayment({ ...payment, method: e.target.value })} />
+                    <Select value={payment.method} onValueChange={(method) => setPayment({ ...payment, method })}>
+                      <SelectTrigger id="payment-method" aria-label="Method" className="w-36">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value={NONE}>Not given</SelectItem>
+                        {MANUAL_METHODS.map((m) => (
+                          <SelectItem key={m.value} value={m.value}>
+                            {m.label}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value={OTHER_METHOD}>Other</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
+                  {payment.method === OTHER_METHOD && (
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor="payment-other">Other method</Label>
+                      <Input id="payment-other" className="w-28" value={payment.other} onChange={(e) => setPayment({ ...payment, other: e.target.value })} />
+                    </div>
+                  )}
                   {openRequests.length > 0 && (
                     <div className="flex flex-col gap-1">
                       <Label htmlFor="payment-request">For request</Label>
