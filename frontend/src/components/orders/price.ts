@@ -62,6 +62,23 @@ export async function recordQuote(orderId: string, itemId: string, body: ManualQ
 }
 
 /**
+ * #5627 — the quote an item's print sends the settings of: the accepted one, or for a
+ * test print of `revisionId` the newest slice quote of that revision, as
+ * `orders/printing.py` `test_print_check` takes it (`quotes[-1]` of the store's
+ * `ORDER BY created_at, id`). A quote that names no revision is the current revision's.
+ */
+export function quoteToPrint(
+  item: Pick<OrderItemDetail, 'quotes' | 'current_revision_id'>,
+  revisionId?: string,
+): Quote | undefined {
+  if (revisionId === undefined) return item.quotes.find((quote) => quote.accepted)
+  return item.quotes
+    .filter((quote) => quote.source === 'slice' && (quote.revision_id ?? item.current_revision_id) === revisionId)
+    .sort(byCreated)
+    .at(-1)
+}
+
+/**
  * Oldest first by `created_at` as an instant, then `id`, as the backend's `max` over
  * `(created_at, id)`. Never by the text: `…00Z` (no fraction) sorts after `…00.123Z`.
  * `Date.parse` keeps milliseconds only, and the backend's `created_at` has microseconds,

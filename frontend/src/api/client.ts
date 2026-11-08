@@ -94,6 +94,9 @@ import type {
   ModelVersion,
   Output,
   RecentOutputsQuery,
+  ArchiveOutcome,
+  ArchiveQuoteRequest,
+  FarmArchivesQuery,
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
@@ -1074,10 +1077,12 @@ export const api = {
   // Flows (#1057): runs, and a person's answers and approvals for them. An answer or
   // a decision is an operation, keyed per call (`command`); a stale one is a 409
   // `stale-entry`.
-  listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
+  listFlowRuns: (query: { session?: string; definition_id?: string; order_id?: string; limit?: number } = {}) => {
     const params = new URLSearchParams()
     if (query.session) params.set('session', query.session)
     if (query.definition_id) params.set('definition_id', query.definition_id)
+    if (query.order_id) params.set('order_id', query.order_id)
+    if (query.limit) params.set('limit', String(query.limit))
     const search = params.toString()
     return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
   },
@@ -1880,6 +1885,18 @@ export const api = {
     return { items, total: header !== null ? Number(header) : items.length }
   },
 
+  /** #4777 — every Bambuddy archive, newest first (`GET /farm/archives`); a page shorter than `limit` is the last. */
+  listFarmArchives: (filters: FarmArchivesQuery, page: { limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams()
+    if (filters.date_from) query.set('date_from', filters.date_from)
+    if (filters.date_to) query.set('date_to', filters.date_to)
+    if (filters.printer_id !== undefined) query.set('printer_id', String(filters.printer_id))
+    if (filters.project_id !== undefined) query.set('project_id', String(filters.project_id))
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.offset !== undefined) query.set('offset', String(page.offset))
+    return request<ArchiveOutcome[]>(`/farm/archives?${query}`, { signal })
+  },
+
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
@@ -2090,8 +2107,10 @@ export const api = {
    * #755 — the check before Print for the body the run would take: `errors` are what
    * it would refuse as a 422, `warnings` its advisories. Reads only.
    */
-  checkPrint: (outputId: string, body: PrintRunRequest) =>
-    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
+  /** `processValues` (#5627) also reads the process's part settings, which the dialog's
+   * "Settings for this colour" open on: asked only once one is open. */
+  checkPrint: (outputId: string, body: PrintRunRequest, processValues = false) =>
+    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check${processValues ? '?process_values=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2536,6 +2555,9 @@ export const api = {
     }),
   quoteOrderItem: (orderId: string, itemId: string, body: ManualQuoteInput) =>
     request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #4777 — an `archive` quote: priced from what a past print used, no re-slice. */
+  quoteItemFromArchive: (orderId: string, itemId: string, body: ArchiveQuoteRequest) =>
+    request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/archive`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the
    * dialog's choices, price with the book; followed to the quote as every command is. */
   /** `onAccepted` (#4693): the quote is running as its operation, past its check, with that operation. */
@@ -2819,8 +2841,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
-    request<PrintCheck>(`/print/library/${fileId}/check`, {
+  checkLibraryPrint: (fileId: number, body: PrintRunRequest, processValues = false) =>
+    request<PrintCheck>(`/print/library/${fileId}/check${processValues ? '?process_values=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

@@ -370,6 +370,8 @@ def print_body(
     if project_id is not None:
         body = {**body, "project_id": project_id, "folder_id": None}
     run = PrintRunRequest.model_validate(body)
+    # One that sets nothing (`{}`, #5627) is none sent too: it prints the quote's. The
+    # field's validator (`_part_settings_set`) already makes it `None`.
     if run.part_settings is None and part_settings is not None:
         # Validated as the request's would be, so the run keys them alike.
         run = PrintRunRequest.model_validate({**body, "part_settings": part_settings})
@@ -721,7 +723,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             item = await asyncio.to_thread(store.item, item_id)
             if item is None or item.order_id != order.id:
                 raise ApiError(
-                    status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
+                    status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}"
                 )
         # A request recorded before attempts had files names none (#4251).
         fulfilment_id = request.get("fulfilment_id")

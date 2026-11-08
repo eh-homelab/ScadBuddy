@@ -139,7 +139,8 @@ async def ensure_projects(
         return await asyncio.to_thread(store.projects, order_id)
     async with _locked(store, order_id):
         order = await asyncio.to_thread(store.order, order_id)
-        if order is None:
+        # A storefront cart (#5282) has no number and never a project.
+        if order is None or order.number is None:
             return []
         known = await asyncio.to_thread(store.projects_seen, order_id, EXISTS_TTL_SECONDS)
         top_subject = order_subject(order_id)

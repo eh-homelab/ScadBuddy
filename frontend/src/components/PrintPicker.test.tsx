@@ -3437,6 +3437,8 @@ describe('PrintPicker · Remembered choices', () => {
       tier: 'standard',
       process_name: null,
       print_sequence: null,
+      // #5627 — no settings per colour changed: none remembered.
+      part_settings: null,
     })
   })
 

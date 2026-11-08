@@ -74,6 +74,9 @@ def trigger_event(event: Event) -> TriggerEvent | None:
             "printer": event.printer,
         }
         return TriggerEvent(kind, {"template": event.slug}, f"print:{event.run_id}", print_facts)
+    if isinstance(event, OrderChanged | OrderItemChanged) and event.cart:
+        # A storefront visitor's cart (#5282): a visitor never starts the owner's flows.
+        return None
     if isinstance(event, OrderChanged):
         # The key names the order; `fire_event` adds each status change it fires for.
         order_facts: dict[str, Any] = {

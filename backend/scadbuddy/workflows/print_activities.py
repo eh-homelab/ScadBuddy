@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.dispatch import (
 )
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
 from scadbuddy.bambuddy.output_reader import OutputNaming, OutputReader, invalid_meta, require
+from scadbuddy.bambuddy.part_settings import normalised
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
@@ -64,13 +65,13 @@ from scadbuddy.bambuddy.print_source import (
     given_filaments,
 )
 from scadbuddy.bambuddy.progress import ProgressObserver
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRuns
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
-from scadbuddy.library.settings_store import SettingsReader, StoredSettings
+from scadbuddy.library.settings_store import PrintSettings, SettingsReader, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
@@ -151,7 +152,8 @@ class PrintDeps:
     #: Where a print records the output's last print (#1060).
     prints: OutputPrintStore | None
     uploads: BambuddyUploadStore
-    store: PrintRunStore
+    #: The run record: SQL in the API, the CRUD routes on the print worker (#5298).
+    store: PrintRuns
     observer: ProgressObserver
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
     rack: RackUsage | None = None
@@ -192,13 +194,21 @@ def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
     return [LanPlateSend(plate_id=plate_id, copies=copies) for plate_id, copies in counts.items()]
 
 
-def plate_clear_of(planned: PlannedRun, settings: SettingsReader) -> PlannedRun:
-    """``planned`` with ``lan_require_plate_clear`` as it is now (#4939), for a native run
-    of several prints: the run keeps it, so a change applies from the next run. Any
-    other run has no print to wait between, and reads nothing."""
+def plate_clear_of(
+    planned: PlannedRun, settings: SettingsReader, loaded: StoredSettings
+) -> PlannedRun:
+    """``planned`` with ``lan_require_plate_clear`` (#4939), for a native run of several
+    prints: the run keeps it, so a change applies from the next run. Any other run has no
+    print to wait between, and reads nothing. ``loaded`` are the settings the plan read:
+    the print worker's (`PrintSettings`, #5298) hold the field, so it is read from them
+    and nothing is fetched again; the API's `StoredSettings` do not, so ``settings``
+    reads it as it is now."""
     if not planned.lan_start or planned.copies * len(planned.plates) < 2:
         return planned
-    required = settings.plate_clear_required()
+    if isinstance(loaded, PrintSettings):
+        required = loaded.lan_require_plate_clear
+    else:
+        required = settings.plate_clear_required()
     return planned.model_copy(update={"plate_clear": required})
 
 
@@ -424,7 +434,10 @@ class PrintActivities:
         """The record, idempotent on this execution: a retry returns the same row."""
         info = activity.info()
         assert info.workflow_id is not None and info.workflow_run_id is not None
-        retention = (await self._settings()).print_run_retention_seconds
+        # Over the CRUD routes the API prunes past its own setting (#5298): no read here.
+        retention = None
+        if self.d.store.uses_retention:
+            retention = (await self._settings()).print_run_retention_seconds
         return await self.d.store.insert_accepted(
             uuid.uuid4().hex,
             subject=PrintSubject.from_run_subject(input.input.subject),
@@ -462,7 +475,7 @@ class PrintActivities:
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
-        return await asyncio.to_thread(plate_clear_of, planned, self.d.settings_store)
+        return await asyncio.to_thread(plate_clear_of, planned, self.d.settings_store, settings)
 
     async def _overlay(
         self, prepared: PreparedPlates
@@ -691,7 +704,11 @@ class PrintActivities:
                 logger.warning(
                     "run %s queued without a Bambuddy link: %s", input.run_id, error.detail
                 )
-        return finish_run(config, planned, input.outcomes, input.queued)
+        result = finish_run(config, planned, input.outcomes, input.queued)
+        # #5627: what the copy was laid out with, for the print record.
+        return result.model_copy(
+            update={"part_settings": normalised(input.input.request.part_settings)}
+        )
 
     @activity.defn(name="print_succeed")
     async def succeed(self, input: SucceedInput) -> PrintRun:

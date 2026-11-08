@@ -75,7 +75,7 @@ def test_a_token_is_shown_once_and_acts_as_its_person(client: TestClient, app: F
     bearer = {"Authorization": f"Bearer {created['token']}"}
     response = client.post("/api/v1/orders", json={"customer_id": customer["id"]}, headers=bearer)
     assert response.status_code == 201, response.text
-    expected = {"kind": "browser", "principal": principal, "session": None}
+    expected = {"kind": "browser", "principal": principal, "session": None, "run_id": None}
     assert response.json()["created_by"] == expected
     assert _count(app, "api", "signed_out") == 0
     # Never a person's route: no token mints another.

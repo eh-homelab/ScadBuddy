@@ -52,15 +52,15 @@ PRINT_GRANTS: Grants = {
     "printer_bed_types": ("SELECT", "UPDATE", "DELETE"),
     # Whether the API has migrated (`wait_until_ready`).
     "scadbuddy_migrations": _READ,
-    # Events written in the row's transaction (`core/pg_events.py`; RETURNING seq).
-    "events": ("SELECT", "INSERT"),
-    # Activity rows (`activity/index.py` `upsert_in`), and the merge's repoint.
+    # The merge's repoint of activity rows until #5298 Task 29. The runs' and operations'
+    # rows are the API's to write (#5298 Task 24).
     "activity": ("SELECT", "INSERT", "UPDATE"),
-    # The Bambuddy operation kinds (`operations/store.py`; insert prunes past retention).
-    "operations": _ALL,
-    # Print runs (`printers/runs.py`; insert prunes past retention).
+    # Read by a native print's spool uses (`spools/native.py`) and rewritten by the
+    # printer merge (`PrinterReference("print_runs", "printer")`) until #5298 Task 31.
+    # The runs themselves, their outcomes, the operations and the events go through the
+    # API's CRUD routes (`crud/print.py`, `crud/operations.py`, #5298 Task 24); an
+    # existing role keeps those grants until the revoke.
     "print_runs": _ALL,
-    "print_outcomes": ("SELECT", "INSERT"),
     "print_links": ("SELECT", "INSERT"),
     "print_sends": ("SELECT", "INSERT", "UPDATE"),
     # Uploads, slices and projects (`bambuddy/uploads.py`).

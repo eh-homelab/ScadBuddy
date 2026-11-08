@@ -137,7 +137,7 @@ def test_the_role_holds_its_list_and_cannot_migrate(
         pool.close()
 
 
-def test_a_worker_on_its_own_role_opens_and_runs_an_operation(
+def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
     owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
 ) -> None:
     _grant(owner, role, "print")
@@ -148,11 +148,13 @@ def test_a_worker_on_its_own_role_opens_and_runs_an_operation(
         # (`crud/print.py`), so its list leaves out the remembered choices a snapshot reads.
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             store.snapshot()
+        # Its operations, outcomes and events go through the API's CRUD routes too
+        # (#5298 Task 24): a new role is granted none of them.
         operations = OperationStore(store.pool)
 
         async def run() -> Any:
             op_id = uuid.uuid4().hex
-            await operations.insert(
+            return await operations.insert(
                 op_id,
                 kind="test",
                 subject="test:1",
@@ -162,11 +164,18 @@ def test_a_worker_on_its_own_role_opens_and_runs_an_operation(
                 workflow_run_id="run",
                 retention=timedelta(days=1),
             )
-            return await operations.finish(op_id, result={"ok": True})
 
         import asyncio
 
-        assert asyncio.run(run()).status == "succeeded"
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            asyncio.run(run())
+        with store.pool.connection() as conn:
+            for table in ("print_outcomes", "events"):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
+                conn.rollback()
+            # A native print's spool uses and the printer merge still read the runs.
+            conn.execute("SELECT 1 FROM print_runs")
     finally:
         store.close()
 

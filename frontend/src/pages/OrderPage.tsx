@@ -4,13 +4,14 @@ import { api } from '../api/client'
 import type { ItemPartRow, OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
-import { addMode, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
+import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
+import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
@@ -37,6 +38,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { dueAt, dueDay, timeAgo } from '../lib/format'
 import { formatMoney, toMajor, toMinor } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
+import { flowRunPath } from '../lib/flows'
 
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
@@ -72,7 +74,9 @@ export function OrderPage() {
   // #4953 — `orders_allow_unfulfil`; on until the settings answer, as the backend's default.
   const unfulfilAllowed = useAsync(() => api.getSettings(), []).data?.orders_allow_unfulfil ?? true
   const detail = view.data
-  const customer = useAsync(() => (detail ? api.customer(detail.order.customer_id) : Promise.resolve(undefined)), [detail?.order.customer_id])
+  // #5282: a storefront cart has no customer until it is submitted.
+  const customerId = detail?.order.customer_id
+  const customer = useAsync(() => (customerId ? api.customer(customerId) : Promise.resolve(undefined)), [customerId])
   const [refusal, setRefusal] = useState<{ text: string; items: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useSearchParams()
@@ -169,6 +173,7 @@ export function OrderPage() {
   // #5349: `after_acceptance` on an accepted, in-production or ready order not on hold.
   const adds = addMode(order)
   const ended = ENDED.has(order.status)
+  const cart = isCart(order)
   const titles = new Map(items.map((i) => [i.id, i.title]))
   const current = items.find((i) => i.id === openItem)
   const addresses = customer.data?.addresses ?? []
@@ -178,14 +183,18 @@ export function OrderPage() {
     <div className="h-full overflow-y-auto" data-testid="order-page">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">{order.number}</h1>
+          <h1 className="text-xl font-semibold tracking-tight">{order.number ?? 'Cart'}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
           <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
-            <Link to={`/customers/${order.customer_id}`} className="text-primary underline-offset-4 hover:underline">
-              {customer.data?.display_name ?? 'the customer'}
-            </Link>
+            {order.customer_id ? (
+              <Link to={`/customers/${order.customer_id}`} className="text-primary underline-offset-4 hover:underline">
+                {customer.data?.display_name ?? 'the customer'}
+              </Link>
+            ) : (
+              'a storefront visitor'
+            )}
             , made {timeAgo(order.created_at)}
           </span>
           {orderProject && <BambuddyProject projectId={orderProject.project_id} label="Bambuddy project" />}
@@ -198,7 +207,12 @@ export function OrderPage() {
             </Button>
           </div>
         )}
-        {!ended && (
+        {cart && (
+          <p role="status" data-testid="order-cart" className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px]">
+            A storefront cart the visitor has not submitted. Nothing on it can be quoted, accepted, held, cancelled or printed.
+          </p>
+        )}
+        {!ended && !cart && (
           <div className="flex flex-wrap items-center gap-2" aria-label="Order actions">
             {editable && (
               <Button disabled={busy} onClick={() => void act(() => api.acceptOrder(order.id))}>
@@ -246,7 +260,7 @@ export function OrderPage() {
             }}
           >
             <div className="flex flex-col gap-1">
-              <Label htmlFor="cancel-reason">Why cancel {order.number}?</Label>
+              <Label htmlFor="cancel-reason">Why cancel {order.number ?? 'this cart'}?</Label>
               <Input id="cancel-reason" className="w-64" value={reason} onChange={(e) => setReason(e.target.value)} />
             </div>
             <Button type="submit" variant="destructive" size="sm">
@@ -273,7 +287,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
-          addTo={adds && { mode: adds, number: order.number }}
+          addTo={adds && { mode: adds, number: order.number ?? 'Cart' }}
           selected={current?.id ?? null}
           quoting={slices.runs}
           onHold={order.on_hold}
@@ -468,6 +482,8 @@ export function OrderPage() {
           )
         )}
 
+        <OrderFlowRuns orderId={order.id} />
+
         <section className="flex flex-col gap-1" aria-label="Audit line">
           <h2 className="text-sm font-medium">History</h2>
           {events.data && events.data.length > 0 ? (
@@ -476,6 +492,15 @@ export function OrderPage() {
                 <li key={e.id}>
                   <span className="text-foreground">{e.kind}</span>
                   {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : 'browser'}
+                  {/* #4252 (§7.4): what a flow did, under which run. */}
+                  {e.by.run_id && (
+                    <>
+                      {' · '}
+                      <Link to={flowRunPath(e.by.run_id)} className="text-primary hover:underline">
+                        flow run
+                      </Link>
+                    </>
+                  )}
                 </li>
               ))}
             </ol>
@@ -734,7 +759,7 @@ function ItemDrawer({
       </dl>
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
-      {custom ? (
+      {isCart(order) ? null : custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
@@ -742,7 +767,7 @@ function ItemDrawer({
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
-      <PrintItem order={order} item={item} onChanged={onChanged} />
+      {!isCart(order) && <PrintItem order={order} item={item} onChanged={onChanged} />}
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={production} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       <OrderAttachments
         orderId={order.id}

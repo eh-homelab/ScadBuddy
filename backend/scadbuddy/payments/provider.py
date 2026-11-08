@@ -1,5 +1,5 @@
 """The provider seam (#4957): what a payment provider must offer ScadBuddy. A provider
-adapter (the fake one here, Stripe in #4958) holds no state; the shop's credential comes
+adapter (the fake one, Stripe's in ``stripe.py``) holds no state; the shop's credential comes
 in with each call."""
 
 from __future__ import annotations
@@ -38,6 +38,18 @@ class ProviderError(Exception):
     """A provider call failed. The message is safe to show: it carries no secret."""
 
 
+class EventTooEarlyError(Exception):
+    """A provider event that needs a record not written yet: a fee that arrived before
+    its payment's event committed (#4958). The lifecycle writes nothing, not even the
+    event's row, so the provider's retry is read again."""
+
+
+class ProviderUnavailableError(Exception):
+    """A signed webhook whose reading needs the provider's API, and that call failed
+    (#4958). Nothing is recorded and the webhook answers 503, so the provider sends the
+    event again. The message is safe to show."""
+
+
 class PaymentProvider(Protocol):
     id: str
     label: str
@@ -54,6 +66,7 @@ class PaymentProvider(Protocol):
         *,
         return_url: str | None,
         idempotency_key: str,
+        order_number: str,
     ) -> HostedRequest: ...
 
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
@@ -61,8 +74,10 @@ class PaymentProvider(Protocol):
         pays it. A page already closed is no error."""
         ...
 
-    def parse_webhook(
+    async def parse_webhook(
         self, credential: Credential, headers: Mapping[str, str], body: bytes
     ) -> ProviderEvent:
-        """Raises `BadSignatureError` before it parses anything."""
+        """Raises `BadSignatureError` before it parses anything. Once the signature holds
+        it may call the provider (#4958: Stripe's fee and a refund's session); a failed
+        call is `ProviderUnavailableError`."""
         ...

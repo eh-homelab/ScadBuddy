@@ -995,3 +995,28 @@ def test_an_unreadable_money_rule_is_dropped_and_the_settings_still_load(
             "UPDATE settings SET value = '\"lots\"'::jsonb WHERE name = 'orders_deposit_policy'"
         )
     assert store.snapshot().stored.orders_deposit_policy is None
+
+
+def test_the_storefront_settings_have_their_defaults(settings: Settings) -> None:
+    store = _store_over(settings)
+    try:
+        s = store.snapshot().runtime
+    finally:
+        store.close()
+    assert (
+        s.storefront_renders_per_minute,
+        s.storefront_renders_per_day,
+        s.storefront_render_concurrency,
+        s.storefront_draft_ttl_days,
+        s.storefront_requests_enabled,
+    ) == (3, 30, 2, 30, False)
+
+
+def test_the_storefront_settings_are_stored(settings: Settings) -> None:
+    store = _store_over(settings)
+    try:
+        store.save(SettingsPatch(storefront_renders_per_minute=5, storefront_requests_enabled=True))
+        s = store.snapshot().runtime
+    finally:
+        store.close()
+    assert (s.storefront_renders_per_minute, s.storefront_requests_enabled) == (5, True)

@@ -68,7 +68,10 @@ interface RowDraft {
   args: ArgDraft[]
 }
 
-const MAX_ORDERS = 256
+/** The backend's `OrderIds` (`flows/grants.py`); `GrantEditor.test.tsx` checks both
+ *  against the exported spec. */
+export const MAX_ORDERS = 256
+export const ORDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 
 const numberText = (value: number | null | undefined) => (value == null ? '' : String(value))
 
@@ -150,7 +153,7 @@ function typingProblems(rows: RowDraft[]): string[] {
     if (
       row.orders !== null &&
       !row.anyOrder &&
-      listOf(row.orders).some((id) => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id))
+      listOf(row.orders).some((id) => !ORDER_ID.test(id))
     ) {
       problems.push(`${name}: an order id is letters, digits, "-" and "_", at most 64.`)
     }

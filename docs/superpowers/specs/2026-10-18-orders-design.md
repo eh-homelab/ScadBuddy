@@ -1022,6 +1022,23 @@ What this relies on, and what the design adds for it:
   on. That is the "subflow" the user asked about, kept as a run that is not a child
   workflow (Ruling 21): a parent's Reset does not reset its children, and a child
   outlives a terminated parent and says so.
+
+  As built (#4252): the link is its own table, `workflow_run_links` (a run's parent and
+  its order; a trigger's run for an order records the order too), and an inherited
+  or requested child grant names its parent's (`flow_grants.parent_grant_id`), so a
+  requested one a person approves is in force only while the parent's is. The child's grant is
+  approved by inheritance only when the projects worker itself starts it: the caller
+  holds the `projects` credential, a valid run token whose run id is the
+  `X-ScadBuddy-Flow-Run` header, and the parent run is still open (`api/flows.py`
+  `may_inherit`). It takes the parent's expiry, kept to the order, a rule with a limit
+  gets no calls of its own, it spends only while its whole chain is in force, and it is
+  revoked with its parent. Every other start with no `grant` of its own, from a parent
+  whose grant is in force, gives the child a `requested` grant for a person, its limits
+  as the parent's are, for that person to see and edit; a parent
+  with no grant in force passes none on. `start_flow_run` is not a `flow.host` route, so a script's
+  `tool("start_flow_run", …)` reaches it through the agent as the run's starter, and
+  today no child grant is approved by inheritance; approved inheritance needs the start route
+  among the projects worker's own, a widening left out for now.
 - `on_hold` on the order makes every tool that advances it (accepting, a quote's
   acceptance, an attempt, a shipment, closing) answer 409 `order_on_hold`, from the
   lifecycle (`orders/lifecycle.py`), never from each tool; `release`, the cancels, a

@@ -753,6 +753,19 @@ def test_a_print_that_sends_no_part_settings_prints_with_the_quotes(
     assert dumped(request.part_settings) == settings
 
 
+def test_a_print_whose_part_settings_set_nothing_prints_with_the_quotes() -> None:
+    """#5627: `{}` (or slots that set nothing) is none sent, as the check takes it, so
+    the run slices what the quote priced, never a copy without the quote's settings."""
+    settings = {"2": {"top_shell_layers": 8}}
+    sent: dict[str, Any]
+    for sent in ({}, {"1": {}}):
+        request = {"request": {**body(), "part_settings": sent}, "request_id": "r-5627"}
+
+        run = print_body(request, 1, part_settings=settings)
+
+        assert dumped(run.part_settings) == settings
+
+
 def test_a_test_print_takes_its_slice_quotes_part_settings(
     bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

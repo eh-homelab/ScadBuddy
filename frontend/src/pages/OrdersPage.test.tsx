@@ -3,7 +3,7 @@ import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
-import { ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
+import { ORDER_ACCEPTED, ORDER_DRAFT, seedCart } from '../mocks/features/orders/state'
 import { seedPart } from '../mocks/features/orders/parts'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
@@ -69,6 +69,29 @@ describe('OrdersPage (#4249)', () => {
     await waitFor(() => expect(screen.getByText('No orders match.')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
     expect(screen.getByTestId('location')).toHaveTextContent(/\/orders$/)
+  })
+
+  it('shows a draft as a cart with no customer (#5282)', async () => {
+    const cart = seedCart()
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+    await screen.findByRole('table', { name: 'Orders' })
+    // The list leaves the storefront's unsubmitted carts out until they are asked for.
+    expect(screen.queryByTestId(`order-row-${cart.id}`)).toBeNull()
+    await user.click(screen.getByRole('radio', { name: 'Unsubmitted carts' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?unsubmitted=1')
+    const row = await screen.findByTestId(`order-row-${cart.id}`)
+    expect(within(row).getByRole('link', { name: 'Cart' })).toHaveAttribute('href', `/orders/${cart.id}`)
+    expect(within(row).getByText('Visitor')).toBeInTheDocument()
+    expect(screen.queryByTestId(`order-row-${ORDER_DRAFT}`)).toBeNull()
+    await user.click(screen.getByRole('radio', { name: 'Storefront' }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/orders?source=storefront&unsubmitted=1')
+    expect(await screen.findByText('Cart')).toBeInTheDocument()
   })
 
   it('makes a new order for a customer and moves to it', async () => {

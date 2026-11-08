@@ -1,33 +1,95 @@
 """The print worker's CRUD routes (#5298): the settings it prints with, for
-`crud/print.py` `RemoteSettingsStore`.
+`crud/print.py` `RemoteSettingsStore`; its print runs (inventory Q10-Q13), for
+`RemotePrintRunStore`; how each print ended (Q14), for `RemoteOutcomes`; the records of
+its operation kinds (Q9, `crud/operations.py`); and the events it publishes outside a
+transaction (Q5), for `RemoteEvents`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.print`` (plan D8):
 the Bambuddy key, which the Bambuddy spool provider also uses (`PRINT_SECRETS`). Every
 other sealed field is null (`print_projection`). The CRUD router answers
 ``Cache-Control: no-store``, and each answer is logged with the secrets it released and
 the credential it released them to, never their values: at INFO the first time per
-credential in this process, then at DEBUG, since the worker reads them on every use.
+credential in this process (of the last `RELEASED_KEPT`), then at DEBUG, since the worker
+reads them on every use.
+
+Every run write is natural (plan D5). An insert sent again finds the execution's row by
+its workflow ids and answers it. A start-enqueue sets its flag again. A succeed, fail,
+fail-lost or lan-stopped sent again finds the row ended (or stopped) and answers it as it
+is, so only the write that changed it announces it. A result rewrite sent again finds
+the same result there and answers the row, unannounced. Each write runs
+the API's `PrintRunStore`, so its ``print.run`` event and activity row commit with it
+(D7). The insert prunes past the API's own ``print_run_retention_seconds``. An outcome's
+record is natural on its run (``ON CONFLICT (run_id) DO NOTHING``), and its
+``print.outcome`` commits with it.
+
+An event the worker posts is logged once by its id, and NOTIFYed only when logged
+(`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
+outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
+only the API writes.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections import OrderedDict
+from datetime import timedelta
+from typing import Annotated, Any
+from uuid import UUID
 
-from fastapi import Request
+from fastapi import Query, Request, status
+from pydantic import BaseModel
 
-from scadbuddy.api.deps import StateDep
+from scadbuddy.api.deps import EventsDep, PrintRunsDep, SettingsStoreDep, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_run import PrintRunResult
+from scadbuddy.bambuddy.progress import PrintProgress
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.core.events import PrintOutcome, decode_event, emit
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.operations import operations_router
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
+from scadbuddy.printers.lan_models import LanStopped
 
 logger = logging.getLogger(__name__)
 
 router = crud_router("print")
+# The `Operation` records of the Bambuddy kinds the worker runs (Q9).
+router.routes.extend(operations_router("print").routes)
 
-#: The credentials this process has released the settings to, logged at INFO.
-_released_to: set[str | None] = set()
+#: A run the request names that is not kept.
+NO_SUCH_RUN = "no-such-run"
+#: An event of a kind the print worker does not publish.
+EVENT_KIND_REFUSED = "event-kind-refused"
+#: The kinds the print worker publishes outside a transaction (inventory Q5):
+#: `bambuddy/progress.py` `ProgressObserver` and `bambuddy/follow.py` (``print.progress``,
+#: ``print.settled``), `printers/watch.py` (``printer.report``) and `printers/store.py`
+#: (``printer.changed``).
+EVENT_KINDS = frozenset({"print.progress", "print.settled", "printer.report", "printer.changed"})
+
+#: How many credentials `_released_to` keeps. A credential lives 15 minutes and one print
+#: worker holds one at a time, so this is many hours of them; one dropped from it is
+#: logged at INFO again, once.
+RELEASED_KEPT = 256
+#: The credentials this process has released the settings to lately, logged at INFO,
+#: newest last. Bounded: a long-lived API would otherwise keep every id it ever saw.
+_released_to: OrderedDict[str | None, None] = OrderedDict()
+
+
+def _first_release(credential_id: str | None) -> bool:
+    """Whether ``credential_id`` is not among the last `RELEASED_KEPT`; it is kept now."""
+    first = credential_id not in _released_to
+    _released_to[credential_id] = None
+    _released_to.move_to_end(credential_id)
+    while len(_released_to) > RELEASED_KEPT:
+        _released_to.popitem(last=False)
+    return first
 
 
 def released(current: PrintSettings) -> list[str]:
@@ -43,8 +105,7 @@ async def print_settings(request: Request, state: StateDep) -> PrintSettings:
     principal = caller_of(request.scope)
     assert isinstance(principal, Service)
     # The worker reads them on every use: INFO once per credential in this process.
-    first = principal.credential_id not in _released_to
-    _released_to.add(principal.credential_id)
+    first = _first_release(principal.credential_id)
     logger.log(
         logging.INFO if first else logging.DEBUG,
         "released the print settings to service credential %s, secrets: %s",
@@ -52,3 +113,202 @@ async def print_settings(request: Request, state: StateDep) -> PrintSettings:
         ", ".join(released(current)) or "none",
     )
     return current
+
+
+class RunInsert(BaseModel):
+    run_id: str
+    #: The run subject (`PrintSubject.run_subject`).
+    subject: str
+    key: str
+    slug: str
+    workflow_id: str
+    workflow_run_id: str
+    printer: str | None = None
+
+
+class RunResult(BaseModel):
+    slug: str
+    result: PrintRunResult
+
+
+class RunFailure(BaseModel):
+    slug: str
+    error: PrintRunError
+    unqueued: bool = False
+
+
+class OutcomeWrite(BaseModel):
+    #: The run subject.
+    subject: str
+    slug: str
+    progress: PrintProgress
+    #: One run's outcome (`PrintOutcomeStore.record_run`); none, the subject's newest.
+    run_id: str | None = None
+
+
+class Recorded(BaseModel):
+    #: The event this write published; none when it was recorded already, or the read
+    #: is not its run's print.
+    outcome: PrintOutcome | None
+
+
+class EventPost(BaseModel):
+    event: dict[str, Any]
+
+
+class Logged(BaseModel):
+    #: False when the log held the event already: a resend.
+    logged: bool
+
+
+def _no_such_run(run_id: str) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"No print run {run_id}.", reason=NO_SUCH_RUN)
+
+
+def _outcomes(runs: PrintRunsDep) -> PrintOutcomeStore:
+    if runs.outcomes is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "Print outcomes are not kept here.")
+    return runs.outcomes
+
+
+@router.post("/runs", name="crud_print_insert_run")
+async def insert_run(body: RunInsert, runs: PrintRunsDep, settings: SettingsStoreDep) -> PrintRun:
+    seconds = (await asyncio.to_thread(settings.load)).print_run_retention_seconds
+    return await runs.store.insert_accepted(
+        body.run_id,
+        subject=PrintSubject.from_run_subject(body.subject),
+        key=body.key,
+        slug=body.slug,
+        workflow_id=body.workflow_id,
+        workflow_run_id=body.workflow_run_id,
+        retention=timedelta(seconds=seconds) if seconds is not None else None,
+        printer=body.printer,
+    )
+
+
+# The fixed paths come before `/runs/{run_id}`, which would take them for a run id.
+@router.get("/runs", name="crud_print_get_runs")
+async def get_runs(
+    runs: PrintRunsDep, ids: Annotated[list[str], Query(default_factory=list)]
+) -> dict[str, PrintRun]:
+    return await runs.store.get_many(ids)
+
+
+@router.get("/runs/latest", name="crud_print_latest_run")
+async def latest_run(output_id: str, runs: PrintRunsDep) -> PrintRun | None:
+    return await runs.store.latest_for_output(output_id)
+
+
+@router.get("/runs/find", name="crud_print_find_run")
+async def find_run(key: str, has_request_id: bool, runs: PrintRunsDep) -> PrintRun | None:
+    return await runs.store.find(key, has_request_id=has_request_id)
+
+
+@router.get("/runs/lan-waiting", name="crud_print_lan_waiting")
+async def lan_waiting(
+    runs: PrintRunsDep, printers: Annotated[list[UUID], Query(default_factory=list)]
+) -> dict[str, PrintRun]:
+    return await runs.store.lan_waiting([str(printer) for printer in printers])
+
+
+@router.get("/runs/running", name="crud_print_running_runs")
+async def running_runs(
+    runs: PrintRunsDep, output_id: Annotated[list[str], Query(default_factory=list)]
+) -> dict[str, list[PrintRun]]:
+    return await runs.store.running_for_outputs(output_id)
+
+
+@router.get("/runs/{run_id}", name="crud_print_get_run")
+async def get_run(run_id: str, runs: PrintRunsDep) -> PrintRun:
+    run = await runs.store.get(run_id)
+    if run is None:
+        raise _no_such_run(run_id)
+    return run
+
+
+@router.post(
+    "/runs/{run_id}/start-enqueue",
+    name="crud_print_start_enqueue",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def start_enqueue(run_id: str, runs: PrintRunsDep) -> None:
+    await runs.store.start_enqueue(run_id)
+
+
+@router.post("/runs/{run_id}/succeed", name="crud_print_succeed_run")
+async def succeed_run(run_id: str, body: RunResult, runs: PrintRunsDep) -> PrintRun:
+    try:
+        return await runs.store.succeed(run_id, body.slug, body.result)
+    except LookupError:
+        raise _no_such_run(run_id) from None
+
+
+@router.post("/runs/{run_id}/result", name="crud_print_update_result")
+async def update_result(run_id: str, body: RunResult, runs: PrintRunsDep) -> PrintRun:
+    try:
+        return await runs.store.update_result(run_id, body.slug, body.result)
+    except LookupError:
+        raise _no_such_run(run_id) from None
+
+
+@router.post("/runs/{run_id}/fail", name="crud_print_fail_run")
+async def fail_run(run_id: str, body: RunFailure, runs: PrintRunsDep) -> PrintRun:
+    try:
+        return await runs.store.fail(run_id, body.slug, body.error, unqueued=body.unqueued)
+    except LookupError:
+        raise _no_such_run(run_id) from None
+
+
+@router.post("/runs/{run_id}/fail-lost", name="crud_print_fail_lost_run")
+async def fail_lost_run(run_id: str, runs: PrintRunsDep) -> PrintRun:
+    try:
+        return await runs.store.fail_lost(run_id)
+    except LookupError:
+        raise _no_such_run(run_id) from None
+
+
+@router.post("/runs/{run_id}/lan-stopped", name="crud_print_lan_stopped")
+async def lan_stopped(run_id: str, body: LanStopped, runs: PrintRunsDep) -> PrintRun:
+    run = await runs.store.record_lan_stopped(run_id, body)
+    if run is None:
+        raise _no_such_run(run_id)
+    return run
+
+
+@router.post("/outcomes", name="crud_print_record_outcome")
+async def record_outcome(body: OutcomeWrite, runs: PrintRunsDep) -> Recorded:
+    outcomes = _outcomes(runs)
+    if body.run_id is None:
+        return Recorded(outcome=await outcomes.record(body.subject, body.slug, body.progress))
+    run = await runs.store.get(body.run_id)
+    if run is None or run.output_id != body.subject:
+        raise _no_such_run(body.run_id)
+    return Recorded(outcome=await outcomes.record_run(run, body.slug, body.progress))
+
+
+@router.get("/outcomes/older-open", name="crud_print_older_open_runs")
+async def older_open(subject: str, runs: PrintRunsDep) -> list[PrintRun]:
+    return await _outcomes(runs).older_open(subject)
+
+
+@router.post("/events", name="crud_print_publish_event")
+async def publish_event(body: EventPost, events: EventsDep) -> Logged:
+    kind = body.event.get("kind")
+    # Not a string (a list, an object) is no kind: refused, never hashed.
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            f"The print worker does not publish {kind!r} events.",
+            reason=EVENT_KIND_REFUSED,
+        )
+    try:
+        event = decode_event(json.dumps(body.event))
+    except ValueError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"Not a {kind} event: {error}"
+        ) from None
+    if isinstance(events, PgNotifyEventBus):
+        return Logged(logged=await events.publish_once(event))
+    # A test's in-process bus keeps no log to find a resend in.
+    emit(events, event)
+    return Logged(logged=True)

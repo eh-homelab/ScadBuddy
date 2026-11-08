@@ -818,3 +818,31 @@ def test_the_lifecycle_reads_the_money_rules_as_saved(client: TestClient) -> Non
     assert rules.shipping_options == (
         ShippingOption(id="post", label="Post", amount_minor=500, ships=True),
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("storefront_renders_per_minute", 0),
+        ("storefront_renders_per_day", 0),
+        ("storefront_render_concurrency", 0),
+        ("storefront_draft_ttl_days", 0),
+        ("storefront_renders_per_minute", 61),
+    ],
+)
+def test_a_storefront_limit_out_of_bounds_is_refused(
+    client: TestClient, name: str, value: int
+) -> None:
+    assert client.put("/api/v1/settings", json={name: value}).status_code == 422
+
+
+def test_the_storefront_settings_are_written_through_put(client: TestClient) -> None:
+    sent = {
+        "storefront_renders_per_minute": 5,
+        "storefront_renders_per_day": 50,
+        "storefront_render_concurrency": 4,
+        "storefront_draft_ttl_days": 7,
+        "storefront_requests_enabled": True,
+    }
+    body = client.put("/api/v1/settings", json=sent).json()
+    assert {name: body[name] for name in sent} == sent

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 import psycopg
 from psycopg import Connection, errors, sql
@@ -139,13 +139,24 @@ _ORDER = (
     "id, number, customer_id, status, currency, on_hold, shipping_address_id,"
     " billing_address_id, shipping_address, billing_address, notes, due_at, accepted_at,"
     " closed_at, cancelled_at, created_at, updated_at, created_by, deposit_minor,"
-    " deposit_waived_reason, balance_waived_reason"
+    " deposit_waived_reason, balance_waived_reason, source, submitted_at,"
+    " storefront_visitor_id"
 )
+
+
+class ArchiveOrigin(NamedTuple):
+    """What printed a Bambuddy archive (#4777): an output, or a library file."""
+
+    output_id: str | None
+    library_file_id: int | None
+
+
 _ITEM = (
     "id, order_id, position, status, quantity, title, notes, kind, requires_printing, sku,"
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
     " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
-    " revised_after_acceptance, library_file_id, library_filename, library_source"
+    " revised_after_acceptance, library_file_id, library_filename, library_source,"
+    " origin_archive_ids"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -251,6 +262,7 @@ def _item_of(row: DictRow) -> OrderItem:
         current_revision_id=row["current_revision_id"],
         approval=row["approval"],
         revised_after_acceptance=row["revised_after_acceptance"],
+        origin_archive_ids=row["origin_archive_ids"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -813,6 +825,30 @@ class OrderStore:
         assert row is not None
         return Order.model_validate(row)
 
+    def insert_storefront_draft(
+        self, conn: Conn, *, visitor_id: str, currency: str, created_by: Actor
+    ) -> Order:
+        """The visitor's cart (#5282): a `draft` with no number and no customer, so it
+        takes no number from the year's counter. The unique index
+        ``orders_one_draft_per_visitor`` refuses a second one (``UniqueViolation``)."""
+        row = conn.execute(
+            "INSERT INTO orders (source, storefront_visitor_id, currency, created_by)"
+            f" VALUES ('storefront', %s, %s, %s) RETURNING {_ORDER}",
+            (visitor_id, currency, Jsonb(created_by.model_dump(mode="json"))),
+        ).fetchone()
+        assert row is not None
+        return Order.model_validate(row)
+
+    def draft_of(self, visitor_id: str, *, conn: Conn | None = None) -> Order | None:
+        """The visitor's unsubmitted cart, if it has one."""
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_ORDER} FROM orders WHERE storefront_visitor_id = %s"
+                " AND source = 'storefront' AND submitted_at IS NULL",
+                (visitor_id,),
+            ).fetchone()
+        return None if row is None else Order.model_validate(row)
+
     def order(self, order_id: str, *, conn: Conn | None = None) -> Order | None:
         with self._read(conn) as c:
             row = c.execute(f"SELECT {_ORDER} FROM orders WHERE id = %s", (order_id,)).fetchone()
@@ -838,6 +874,13 @@ class OrderStore:
             where.append(sql.SQL(clause))
             params.extend(values)
 
+        # The storefront's unsubmitted carts (#5282) are left out unless asked for.
+        if filters.unsubmitted:
+            add("o.source = 'storefront' AND o.submitted_at IS NULL")
+        else:
+            add("NOT (o.source = 'storefront' AND o.submitted_at IS NULL)")
+        if filters.source is not None:
+            add("o.source = %s", filters.source)
         if filters.status:
             add("o.status = ANY(%s)", list(filters.status))
         if filters.customer_id is not None:
@@ -1048,6 +1091,7 @@ class OrderStore:
         notes: str = "",
         sku: str | None = None,
         approval: Approval | None = None,
+        origin_archive_ids: Sequence[int] = (),
     ) -> OrderItem:
         """Appended after the order's items; ``title`` defaults to the template's name
         and is required for a ``request`` item, which has no reference yet. ``approval``
@@ -1058,9 +1102,9 @@ class OrderStore:
         row = conn.execute(
             "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
             " approval, slug, commit, inputs, libraries, template_name, render_key, colours,"
-            " output_id) VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items"
-            " WHERE order_id = %s),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            " output_id, origin_archive_ids) VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0)"
+            " FROM order_items WHERE order_id = %s),"
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
@@ -1078,6 +1122,7 @@ class OrderStore:
                 None if reference is None else reference.render_key,
                 Jsonb(_dump(list(colours))),
                 output_id,
+                list(origin_archive_ids),
             ),
         ).fetchone()
         assert row is not None
@@ -1116,15 +1161,16 @@ class OrderStore:
         title: str | None = None,
         notes: str = "",
         sku: str | None = None,
+        origin_archive_ids: Sequence[int] = (),
     ) -> OrderItem:
         """A library file item (#5544), appended after the order's items: the file's
         reference, no template reference, no colours until its first slice quote, no
         output. ``title`` defaults to the file's name."""
         row = conn.execute(
             "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
-            " library_file_id, library_filename, library_source) VALUES (%s,"
-            " (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items WHERE order_id = %s),"
-            f" 'library_file', %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            " library_file_id, library_filename, library_source, origin_archive_ids) VALUES"
+            " (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items WHERE order_id = %s),"
+            f" 'library_file', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
@@ -1135,6 +1181,7 @@ class OrderStore:
                 file.id,
                 file.filename,
                 file.library,
+                list(origin_archive_ids),
             ),
         ).fetchone()
         assert row is not None
@@ -1624,6 +1671,80 @@ class OrderStore:
                 {"run": run_id},
             ).fetchall()
         return [int(row["archive_id"]) for row in rows]
+
+    def archive_origin(self, archive_id: int, *, conn: Conn | None = None) -> ArchiveOrigin | None:
+        """What printed Bambuddy archive ``archive_id`` (#4777): the output or library file
+        whose link owns it, an output's before a library file's as every owner lookup
+        orders (``bambuddy/print_links.py`` ``_OWNER_ORDER``); None when ScadBuddy printed
+        neither."""
+        with self._read(conn) as c:
+            row = c.execute(
+                "SELECT subject FROM print_links WHERE archive_id = %s"
+                " ORDER BY (subject LIKE 'library:%%'), first_seen, subject, queue_item_id"
+                " LIMIT 1",
+                (archive_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        kind, _, key = str(row["subject"]).partition(":")
+        if kind == "library":
+            return ArchiveOrigin(output_id=None, library_file_id=int(key))
+        return ArchiveOrigin(output_id=key, library_file_id=None)
+
+    def archive_run_plates(
+        self, archive_id: int, *, conn: Conn | None = None
+    ) -> list[tuple[int | None, int | None]]:
+        """Every plate of the print run that made ``archive_id`` (#4777): each queue item
+        the run sent for the archive's owner, as ``(plate_id, archive_id)``, the archive
+        None for a plate Bambuddy has reported none for, by plate. Empty when the archive
+        is no run's (a print ScadBuddy never sent, or a send recorded before runs were)."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
+                "  WHERE archive_id = %(a)s"
+                "  ORDER BY (subject LIKE 'library:%%'), first_seen, subject, queue_item_id"
+                "  LIMIT 1),"
+                " run AS (SELECT s.subject, s.run_id FROM print_sends s JOIN owner o"
+                "  ON s.subject = o.subject AND s.queue_item_id = o.queue_item_id"
+                "  WHERE s.run_id IS NOT NULL)"
+                " SELECT s.plate_id, (SELECT min(l.archive_id) FROM print_links l"
+                "  WHERE l.subject = s.subject AND l.queue_item_id = s.queue_item_id) AS archive_id"
+                " FROM print_sends s JOIN run r ON s.subject = r.subject AND s.run_id = r.run_id"
+                " ORDER BY s.plate_id NULLS LAST, s.queue_item_id",
+                {"a": archive_id},
+            ).fetchall()
+        return [(row["plate_id"], row["archive_id"]) for row in rows]
+
+    def archive_copy(self, archive_id: int) -> int | None:
+        """The native library file archive ``archive_id`` was copied to (#4777), if any."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT library_file_id FROM archive_library_copies WHERE archive_id = %s",
+                (archive_id,),
+            ).fetchone()
+        return None if row is None else int(row["library_file_id"])
+
+    def record_archive_copy(
+        self, archive_id: int, library_file_id: int, *, replace: int | None
+    ) -> int:
+        """Records the copy of ``archive_id``; the copy that stands after it. A copy recorded
+        meanwhile by another pick wins, unless it is ``replace`` (the copy found gone)."""
+        with self.transaction() as conn:
+            row = conn.execute(
+                "INSERT INTO archive_library_copies (archive_id, library_file_id)"
+                " VALUES (%(a)s, %(f)s) ON CONFLICT (archive_id) DO UPDATE"
+                " SET library_file_id = EXCLUDED.library_file_id, copied_at = clock_timestamp()"
+                " WHERE archive_library_copies.library_file_id = %(old)s"
+                " RETURNING library_file_id",
+                {"a": archive_id, "f": library_file_id, "old": replace},
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT library_file_id FROM archive_library_copies WHERE archive_id = %s",
+                    (archive_id,),
+                ).fetchone()
+        assert row is not None
+        return int(row["library_file_id"])
 
     def archives_named_elsewhere(
         self, conn: Conn, attempt_id: str, archive_ids: Sequence[int]

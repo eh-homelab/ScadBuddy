@@ -136,9 +136,7 @@ async def _require(
     if item_id is not None:
         item = await asyncio.to_thread(store.item, item_id)
         if item is None or item.order_id != order.id:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
-            )
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
     if fulfilment_id is not None:
         attempt = await asyncio.to_thread(store.fulfilment, fulfilment_id)
         if attempt is None or attempt.order_item_id != item_id:

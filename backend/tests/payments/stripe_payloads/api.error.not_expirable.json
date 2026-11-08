@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "Only Checkout Sessions with a status in [\"open\"] can be expired.",
+    "type": "invalid_request_error"
+  }
+}

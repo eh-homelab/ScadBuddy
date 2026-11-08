@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
+import type { OrderItem, PartSettingsMap, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
 import { orderItemSource } from '../../lib/printSource'
@@ -11,6 +11,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { byCreated, parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
+import { ArchiveQuote } from './ArchiveQuote'
 import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
@@ -41,6 +42,7 @@ const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
  * page (`slice`, #4693), so it outlives the dialog and this drawer. `acceptPending` offers
  * Accept on the pending quote alone, with nothing to record (#5541: a custom item, whose
  * price is its own field, added after acceptance or by the agent with its price `quoted`).
+ * An item taken from a past print (#4777) also quotes from that print (`ArchiveQuote`).
  */
 export function QuoteEditor({
   orderId,
@@ -66,7 +68,7 @@ export function QuoteEditor({
   acceptPending?: boolean
   onChanged: () => void
   /** What a slice quote slices: the item's output or library file, and its colours' filaments. */
-  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> & Partial<Pick<OrderItem, 'library_file'>>
+  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> & Partial<Pick<OrderItem, 'library_file' | 'origin_archive_ids'>>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
   slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
   /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
@@ -74,6 +76,7 @@ export function QuoteEditor({
   parts?: string
 }) {
   const [slicing, setSlicing] = useState(false)
+  const [fromPrint, setFromPrint] = useState(false)
   // What a slice quote slices: the item's output, or a library file item's file (#5544).
   const sliceSource = item ? orderItemSource(item) : null
   const [price, setPrice] = useState('')
@@ -91,6 +94,9 @@ export function QuoteEditor({
   const current = price.trim() ? parseUnitPrice(price, exponent) : (pending?.unit_price_minor ?? null)
   // #5554 — the newest quote is marked when there are several to tell apart.
   const newest = quotes.length > 1 ? [...quotes].sort(byCreated).at(-1)?.id : undefined
+  // #5627 — a new slice quote opens on the newest one's settings per colour, so a quote
+  // made again keeps them; with none, on the model's remembered ones.
+  const lastSlice = quotes.filter((q) => q.source === 'slice').sort(byCreated).at(-1)
   const running = slice?.run && !slice.run.error ? slice.run : undefined
   const now = useNow(running !== undefined)
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
@@ -142,7 +148,7 @@ export function QuoteEditor({
               <span className="flex flex-wrap items-center gap-2">
                 <span className="sb-num">{formatMoney(quote.unit_price_minor, currency, exponent)} × {quote.quantity} = {formatMoney(quote.total_minor, currency, exponent)}</span>
                 <span className="text-muted-foreground">
-                  {quote.source === 'slice' ? 'From a slice' : (quote.lines[0]?.label ?? quote.source)}
+                  {quote.source === 'slice' ? 'From a slice' : quote.source === 'archive' ? 'From a past print' : (quote.lines[0]?.label ?? quote.source)}
                   {quote.sliced_sha256 ? <span className="font-mono text-xs"> · {quote.sliced_sha256.slice(0, 12)}</span> : null}
                 </span>
                 <span className="text-xs text-muted-foreground">
@@ -159,7 +165,7 @@ export function QuoteEditor({
                   )
                 )}
               </span>
-              {quote.source === 'slice' && (
+              {quote.source !== 'manual' && (
                 <ul className="ml-3 flex flex-col text-xs text-muted-foreground" aria-label="Quote lines">
                   {quote.lines.map((line, index) => (
                     <li key={index} className="flex justify-between gap-3">
@@ -225,10 +231,27 @@ export function QuoteEditor({
           >
             Quote from a slice…
           </Button>
+          {(item.origin_archive_ids ?? []).length > 0 && (
+            <Button type="button" size="sm" variant="outline" disabled={busy || fromPrint} onClick={() => setFromPrint(true)} data-testid="quote-from-print">
+              Quote from the print…
+            </Button>
+          )}
           {!item.output_id && !item.library_file && (
             <span className="text-xs text-muted-foreground">Render the item first: a slice quote slices its output.</span>
           )}
         </div>
+      )}
+      {editable && item && fromPrint && (
+        <ArchiveQuote
+          orderId={orderId}
+          itemId={itemId}
+          colours={item.colours}
+          onCancel={() => setFromPrint(false)}
+          onQuoted={() => {
+            setFromPrint(false)
+            onChanged()
+          }}
+        />
       )}
       {item && slice && slicing && sliceSource && (
         <PrintPicker
@@ -240,6 +263,7 @@ export function QuoteEditor({
             orderId,
             itemId,
             filaments: Object.fromEntries(item.colours.map((colour) => [String(colour.slot), colour.filament_id ?? null])),
+            ...(lastSlice ? { partSettings: (lastSlice.part_settings ?? null) as PartSettingsMap | null } : {}),
             start: slice.start,
           }}
         />

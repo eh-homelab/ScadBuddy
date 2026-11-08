@@ -166,8 +166,10 @@ def hold_provider(conn: Conn, provider: str) -> bool:
 
 
 def has_open_requests(conn: Conn, provider: str) -> bool:
+    """An open request, or a pending one: its settling event still needs the credential."""
     row = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM payment_requests WHERE provider = %s AND status = 'open')"
+        "SELECT EXISTS (SELECT 1 FROM payment_requests WHERE provider = %s"
+        " AND status IN ('open', 'pending'))"
         " AS found",
         (provider,),
     ).fetchone()

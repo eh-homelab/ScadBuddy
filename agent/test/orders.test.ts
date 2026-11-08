@@ -62,6 +62,8 @@ describe('order tools (#4249)', () => {
       'order_item_print',
       'order_item_fulfil',
       'order_item_unfulfil',
+      'order_item_duplicate',
+      'order_fulfil',
       'order_ship',
       'order_close',
       'order_cancel',
@@ -89,6 +91,8 @@ describe('order tools (#4249)', () => {
       order_item_print: 'outward',
       order_item_fulfil: 'outward',
       order_item_unfulfil: 'outward',
+      order_item_duplicate: 'outward',
+      order_fulfil: 'outward',
       order_ship: 'outward',
       order_close: 'outward',
       order_cancel: 'outward',
@@ -237,6 +241,11 @@ describe('order tools (#4249)', () => {
     await tool('order_list').execute(row, ctx())
     expect(Object.fromEntries(new URL(url).searchParams)).toEqual(row)
     expect(() => tool('order_list').execute({ product: 'nope' }, ctx())).toThrow()
+
+    // #5282: the storefront's unsubmitted carts, which the list leaves out unless asked.
+    await tool('order_list').execute({ source: 'storefront', unsubmitted: true }, ctx())
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual({ source: 'storefront', unsubmitted: 'true' })
+    expect(() => tool('order_list').execute({ source: 'shop' }, ctx())).toThrow()
   })
 
   it('reads the profit report for a period (#5329)', async () => {
@@ -380,6 +389,21 @@ describe('order tools (#4249)', () => {
     ])
     expect(add.summarize({ order_id: ORDER, library_file_id: 89 })).toContain('"library_file_id":89')
     expect(() => z.object(add.shape).parse({ order_id: ORDER, library_file_id: 0 })).toThrow()
+  })
+
+  it('adds a past print by its archive (#4777)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'model', origin_archive_ids: [81] }, { status: 201 })
+      }),
+    )
+    const add = tool('order_item_add')
+    await add.execute({ order_id: ORDER, archive_id: 81 }, ctx())
+    expect(sent).toEqual([{ archive_id: 81, quantity: 1, notes: '' }])
+    expect(add.title({ order_id: ORDER, archive_id: 81 })).toBe(`Add past print 81 to order ${ORDER}`)
+    expect(() => z.object(add.shape).parse({ order_id: ORDER, archive_id: 0 })).toThrow()
   })
 
   it('adds several items in one request, all or none (#4777)', async () => {
@@ -596,6 +620,37 @@ describe('order tools (#4249)', () => {
     await expect(unfulfil.execute({ order_id: ORDER, item_id: ITEM }, ctx())).rejects.toMatchObject({ status: 409 })
     expect(calls).toEqual(['UNFULFIL', 'UNFULFIL'])
     expect(unfulfil.summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+  })
+
+  it('duplicates an item, after acceptance when asked (#4955)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/duplicate`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: 'copy', status: 'draft' }, { status: 201 })
+      }),
+    )
+    const duplicate = tool('order_item_duplicate')
+    expect(firstText(await duplicate.execute({ order_id: ORDER, item_id: ITEM }, ctx()))).toEqual({ id: 'copy', status: 'draft' })
+    await duplicate.execute({ order_id: ORDER, item_id: ITEM, after_acceptance: true }, ctx())
+    expect(sent).toEqual([{ after_acceptance: false }, { after_acceptance: true }])
+    expect(duplicate.summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+  })
+
+  it('fulfils several items in one call (#4955)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/fulfil`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json([{ id: 'f1', order_item_id: ITEM, quantity: 2 }], { status: 201 })
+      }),
+    )
+    const fulfil = tool('order_fulfil')
+    const items = [{ item_id: ITEM, quantity: 2 }]
+    expect(firstText(await fulfil.execute({ order_id: ORDER, items }, ctx()))).toEqual([{ id: 'f1', order_item_id: ITEM, quantity: 2 }])
+    expect(sent).toEqual([{ items }])
+    expect(fulfil.summarize({ order_id: ORDER, items })).toContain('1 item')
+    expect(z.object(fulfil.shape).safeParse({ order_id: ORDER, items: [] }).success).toBe(false)
   })
 
   it('passes the setting refusal on (#4953)', async () => {
@@ -824,6 +879,28 @@ describe('pricing tools (#4250)', () => {
     await expect(
       tool('order_item_quote').execute(
         { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 1 }, slice: SLICE },
+        ctx(),
+      ),
+    ).rejects.toThrow('exactly one')
+  })
+
+  it('quotes from a past print in archive mode (#4777)', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes/archive`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: 'q4', source: 'archive' }, { status: 201 })
+      }),
+    )
+    const answer = await tool('order_item_quote').execute(
+      { order_id: ORDER, item_id: ITEM, archive: { archive_id: 81, filaments: { 0: 'f1' } } },
+      ctx(),
+    )
+    expect(firstText(answer)).toEqual({ id: 'q4', source: 'archive' })
+    expect(body).toEqual({ archive_id: 81, filaments: { 0: 'f1' } })
+    await expect(
+      tool('order_item_quote').execute(
+        { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 1 }, archive: {} },
         ctx(),
       ),
     ).rejects.toThrow('exactly one')

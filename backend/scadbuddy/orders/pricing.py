@@ -50,6 +50,13 @@ class Plate(BaseModel):
     sha256: str | None = None
 
 
+class ArchivePlate(Plate):
+    """A plate of an `archive` quote (#4777): read from a past print's archive, not a
+    slice, so it names that archive and no sliced file."""
+
+    archive_id: int
+
+
 class Priced(BaseModel):
     lines: list[QuoteLine]
     unit_cost_minor: Money

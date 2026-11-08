@@ -127,6 +127,12 @@ class SettingsView(BaseModel):
     pricing_markup_percent: str
     pricing_rounding: Literal["to_minor_unit", "to_major"]
     rough_estimate_factor: str
+    #: The public storefront's limits and switch (#5282).
+    storefront_renders_per_minute: int = 3
+    storefront_renders_per_day: int = 30
+    storefront_render_concurrency: int = 2
+    storefront_draft_ttl_days: int = 30
+    storefront_requests_enabled: bool = False
     #: Job cost (#5326).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"

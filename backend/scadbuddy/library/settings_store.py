@@ -62,6 +62,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -73,6 +74,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -260,6 +262,14 @@ class BambuddyIds(BaseModel):
     printer_id: int | None = None
 
 
+def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
+    """A choices entry as stored and answered: no ``part_settings`` key for none, and only
+    the settings set in each slot (#5627, ``parts_set_only``)."""
+    if dumped.get("part_settings") is None:
+        dumped.pop("part_settings", None)
+    return parts_set_only(dumped, maps=("part_settings",))
+
+
 class ModelPrintChoices(BaseModel):
     """What the print dialog last chose for one model (#78). ``printer_id`` is the
     printer it printed on. ``filament_plan`` is only a plan the user moved off the
@@ -268,8 +278,12 @@ class ModelPrintChoices(BaseModel):
 
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
     (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
-    the template's or the process's. All default to "nothing remembered", so a settings
-    file written before them still loads; an empty ``nozzles`` means the dialog's default.
+    the template's or the process's. ``part_settings`` are its slicer settings per
+    filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
+    (#5628). Kept per model or file only, never at the print options' global or printer
+    scope, since a slot number means one file's colour. All default to "nothing remembered", so
+    a settings file written before them still loads; an empty ``nozzles`` means the
+    dialog's default.
     """
 
     printer_id: int | None = None
@@ -281,6 +295,7 @@ class ModelPrintChoices(BaseModel):
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
+    part_settings: PartSettingsMap | None = None
 
     @model_validator(mode="after")
     def _one_printer_key(self) -> Self:
@@ -288,6 +303,19 @@ class ModelPrintChoices(BaseModel):
         if self.printer_id is not None and self.printer is not None:
             self.printer = None
         return self
+
+    @field_validator("part_settings")
+    @classmethod
+    def _settings_set(cls, value: PartSettingsMap | None) -> PartSettingsMap | None:
+        """Only slots that set something (#5627): none set is nothing remembered."""
+        return normalised(value)
+
+    # `part_settings` only when some are remembered (#5627): an entry with none reads as
+    # it did before the field existed. A lambda with no return annotation, so the schema
+    # stays the model's (`part_settings.parts_set_only` says why).
+    _parts_when_set = model_serializer(mode="wrap")(
+        lambda self, handler: _parts_only_when_set(handler(self))
+    )
 
     @field_validator("nozzles")
     @classmethod
@@ -726,6 +754,12 @@ class SettingsPatch(BaseModel):
     pricing_rounding: Literal["to_minor_unit", "to_major"] | None = None
     #: The rough estimate's factor over a part's volume (orders spec §5.3).
     rough_estimate_factor: str | None = None
+    #: The public storefront's limits and switch (#5282).
+    storefront_renders_per_minute: int | None = None
+    storefront_renders_per_day: int | None = None
+    storefront_render_concurrency: int | None = None
+    storefront_draft_ttl_days: int | None = None
+    storefront_requests_enabled: bool | None = None
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None

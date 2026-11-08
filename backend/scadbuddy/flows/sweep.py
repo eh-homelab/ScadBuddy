@@ -40,16 +40,16 @@ async def sweep_flow_runs(
     return ended
 
 
-#: A grant with no run row older than this is from a start that failed after inserting
-#: it (#2481, plan 2026-10-11 Task A1), unless its run is still starting.
+#: A grant or run link with no run row older than this is from a start that failed after
+#: inserting it (#2481, plan 2026-10-11 Task A1), unless its run is still starting.
 ORPHAN_GRANT_AGE = timedelta(hours=1)
 
 
 async def sweep_orphan_grants(
     store: FlowStore, client: Client, *, older_than: timedelta = ORPHAN_GRANT_AGE
 ) -> list[str]:
-    """Delete the grants whose run has no row and no open execution. Returns their run
-    ids."""
+    """Delete the grants and run links whose run has no row and no open execution.
+    Returns their run ids."""
     deleted: list[str] = []
     for run_id in await store.orphan_grants(older_than):
         try:

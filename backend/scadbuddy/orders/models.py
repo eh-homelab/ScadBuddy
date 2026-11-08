@@ -65,7 +65,11 @@ ContactKind = Literal[
     "phone", "email", "instagram", "facebook", "tiktok", "etsy", "website", "other"
 ]
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
-QuoteSource = Literal["slice", "manual"]
+#: A ``slice`` quote is priced from the item's slice; ``manual`` is typed; ``archive``
+#: (#4777) is priced from what a past print used, with no re-slice.
+QuoteSource = Literal["slice", "manual", "archive"]
+#: The sources whose plates hold measured grams and seconds, which job cost prices by.
+MEASURED_SOURCES: frozenset[str] = frozenset({"slice", "archive"})
 #: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
 #: ``custom`` item is a title, a quantity and a typed price with nothing behind it; a
 #: ``library_file`` item (#5544) names a file of the library (its ``library_file``).
@@ -124,13 +128,17 @@ Country = Annotated[str, Field(pattern=r"^[A-Z]{2}$")]
 
 class Actor(BaseModel):
     """Who did it: the browser, or the agent principal (and session) a request was
-    authored as, exactly as ``api/flows.py`` ``_started_by`` reads it."""
+    authored as, exactly as ``api/flows.py`` ``_started_by`` reads it. A ``visitor`` is a
+    storefront visitor (#5282), ``storefront_visitor:<row id>``, which only the CRUD side
+    builds (``orders/storefront/visitors.py`` ``visitor_actor``)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["browser", "agent", "provider"]
+    kind: Literal["browser", "agent", "provider", "visitor"]
     principal: str | None = None
     session: str | None = None
+    #: The flow run the agent's call was made from (#4252, spec §7.4), when it was.
+    run_id: str | None = None
 
 
 # -- customers (§3.1) -------------------------------------------------------------------
@@ -248,10 +256,17 @@ class OrderEvent(BaseModel):
     detail: dict[str, Any]
 
 
+#: Where an order was made (#5282, storefront spec §6.1): the back office, or a visitor's
+#: cart on the storefront.
+OrderSource = Literal["back_office", "storefront"]
+
+
 class Order(BaseModel):
     id: str
-    number: str
-    customer_id: str
+    #: None only on an unsubmitted storefront draft (a visitor's cart, #5282): it takes
+    #: its number and customer when it is submitted.
+    number: str | None
+    customer_id: str | None
     #: The spec carries `OPEN_FOR_EDITS` and `TAKES_ITEMS`, so the browser's copy
     #: (``afterAcceptance.ts``) is checked against them (``afterAcceptance.test.ts``, #5349).
     status: OrderStatus = Field(
@@ -282,6 +297,21 @@ class Order(BaseModel):
     deposit_waived_reason: str | None = None
     #: ...and why it ships without full payment ("Ship without full payment").
     balance_waived_reason: str | None = None
+    source: OrderSource = "back_office"
+    #: When the visitor submitted the cart; None on every back-office order and on a draft.
+    submitted_at: datetime | None = None
+    #: The visitor whose cart it is (``storefront_visitors.id``); None once that row goes.
+    storefront_visitor_id: str | None = None
+
+    @property
+    def label(self) -> str:
+        """How a message names the order: its number, or ``cart <id>`` for a cart."""
+        return self.number if self.number is not None else f"cart {self.id}"
+
+    @property
+    def unsubmitted(self) -> bool:
+        """A storefront draft: the shop may read it, but never act on it."""
+        return self.source == "storefront" and self.submitted_at is None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -334,6 +364,9 @@ class OrderFilter(BaseModel):
     accepted_until: datetime | None = None
     currency: str | None = None
     product: Product | None = None
+    source: OrderSource | None = None
+    #: False leaves out the unsubmitted storefront drafts; True lists only those.
+    unsubmitted: bool = False
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -408,6 +441,9 @@ class OrderItem(BaseModel):
     #: waits for its own quote to be accepted. The old accepted quote stays accepted (the
     #: price the customer agreed) until then; accepting a quote clears it.
     revised_after_acceptance: bool = False
+    #: The Bambuddy archives a past print's item was taken from (#4777, order operations
+    #: spec §3.2): the one picked and its run's other plates; empty for any other source.
+    origin_archive_ids: list[int] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

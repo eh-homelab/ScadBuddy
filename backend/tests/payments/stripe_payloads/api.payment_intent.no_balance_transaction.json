@@ -1,0 +1,32 @@
+{
+  "id": "pi_3MtwBwLkdIwHu7ix28a3tqPa",
+  "object": "payment_intent",
+  "amount": 700,
+  "currency": "usd",
+  "status": "succeeded",
+  "metadata": {
+    "scadbuddy_order_number": "ORD-2026-7",
+    "scadbuddy_order_id": "order-1",
+    "scadbuddy_payment_request_id": "req-1"
+  },
+  "latest_charge": {
+    "id": "ch_3MtwBwLkdIwHu7ix2KhxTz3v",
+    "object": "charge",
+    "amount": 700,
+    "amount_captured": 700,
+    "amount_refunded": 0,
+    "balance_transaction": null,
+    "captured": true,
+    "currency": "usd",
+    "livemode": false,
+    "metadata": {
+      "scadbuddy_order_number": "ORD-2026-7",
+      "scadbuddy_order_id": "order-1",
+      "scadbuddy_payment_request_id": "req-1"
+    },
+    "paid": true,
+    "payment_intent": "pi_3MtwBwLkdIwHu7ix28a3tqPa",
+    "refunded": false,
+    "status": "succeeded"
+  }
+}

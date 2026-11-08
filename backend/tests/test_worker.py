@@ -2278,18 +2278,19 @@ WORKER_OWN = {
         "scadbuddy_build_info",
         "scadbuddy_print_follows_running",
         "scadbuddy_rack_watch_settle_failed",
-        "scadbuddy_events_received",
         "scadbuddy_event_loop_lag_seconds",
-        "scadbuddy_operation_duration_seconds",
-        "scadbuddy_operations_finished",
     },
     "projects": {
         "scadbuddy_build_info",
-        "scadbuddy_events_received",
         "scadbuddy_event_loop_lag_seconds",
-        "scadbuddy_operation_duration_seconds",
-        "scadbuddy_operations_finished",
     },
+}
+#: What no worker sets any more (#5298): it neither listens on the event bus nor ends an
+#: operation's record. The API does both.
+API_SINCE_5298 = {
+    "scadbuddy_events_received",
+    "scadbuddy_operation_duration_seconds",
+    "scadbuddy_operations_finished",
 }
 
 
@@ -2308,6 +2309,7 @@ def test_a_worker_exports_its_own_series_and_none_of_the_apis(role: str) -> None
     if role != "render":
         assert "scadbuddy_render_stage_seconds" not in exposed
         assert "scadbuddy_worker_cache_bytes" not in exposed
+        assert not exposed & API_SINCE_5298
 
 
 async def test_the_render_workers_scrape_carries_no_api_series(tmp_path: Path) -> None:

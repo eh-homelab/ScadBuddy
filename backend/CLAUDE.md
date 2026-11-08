@@ -454,7 +454,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
   settings, the Bambuddy key among them, come from the API's CRUD route
   (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
-  every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; every
+  every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; its print
+  runs, their outcomes, its operations and the events it publishes go through the same
+  routes (`RemotePrintRunStore`, `RemoteOutcomes`, `crud/operations.py`
+  `RemoteOperationStore`, `RemoteEvents`; the API writes each with its event and
+  activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), and it
+  does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
   behavior), so an `Operation` moves to the current build, which #4139's deferral
@@ -803,7 +808,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `tag` (the model's catalogue tags), `q` (name, or the params that differ from the cached
   schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
   `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
-  writes on save (a failure is logged), rename and delete; the API's start runs
+  writes on save (a failure is logged), rename and delete, and whose rows of a model go
+  when its outputs directory does (`Catalogue._forget_cover` → `OutputStore.forget_indexed`:
+  a model's delete, the orphan sweep and a reused slug); the API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. `POST /orders/{id}/items/batch` and
@@ -814,6 +821,43 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and `order_item_add`'s `items`; frontend `components/orders/RecentRendersPicker.tsx`
   ("Recent renders" in `AddItemDialog`), mocks `mocks/features/recentOutputs.ts` and
   `orders/orders.ts` `addItems`.
+  Past prints (#4777, §3.2): `ItemCreate.archive_id` alone (any other source or `kind` is
+  422) makes a Bambuddy archive an item (`api/orders.py` `_archive_item`): a `model` item of
+  the output whose `print_links` row owns it, else a `library_file` item of the library file
+  that owns it, else (an output or file gone since, or an output whose template was deleted,
+  falls through too) a `library_file` item of
+  a copy of its printed file (`/archives/{id}/download`) in the native library,
+  `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
+  the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is
+  needed and the Bambuddy library serves. The copy's download makes the spool directory
+  first, and a pick that loses a race to record its copy trashes its own. The item keeps `origin_archive_ids` (the archive and
+  its print run's other linked plates, `OrderStore.archive_run_plates`). Quote source
+  `archive`: `POST …/items/{item}/quotes/archive` (`ArchiveQuoteRequest`: `archive_id`,
+  default the item's first origin, one of its origins or printed by its output or library
+  file, else 422; `filaments`; `filament_id` for every slot the print used), `quote_from_archive`: the slice quote's
+  check, then every plate archive of the run (`print_sends` by `run_id`, `print_links` by
+  queue item; 409 `archive_plates_missing` for a plate with none, `archive_not_succeeded` for
+  a status other than `completed`, `archive_gone`), grams per slot from
+  `extra_data.filament_slots` (slot id less one), the actual seconds else the estimate, each
+  plate an `ArchivePlate` naming its archive, recorded by `Lifecycle.record_archive_quote`
+  (the whole run is one unit: a run that printed several units, on one plate or as copies,
+  overstates the unit cost: `ArchiveFacts` carries no count of the units a plate held)
+  (no sliced file; printing it re-slices, as a manual quote). A library file item with no
+  slots gets the slots the print used (`archive_colours`). Job cost reads an `archive`
+  quote's plates as a slice quote's (`models.py` `MEASURED_SOURCES`). Agent
+  `order_item_add`'s `archive_id`, `order_item_quote`'s `archive`; frontend
+  `components/orders/PastPrintsPicker.tsx` ("Past prints" in `AddItemDialog`, over
+  `GET /farm/archives`; status and name filter the listed page), `ArchiveQuote.tsx` ("Quote
+  from the print" in `QuoteEditor`), the grid's "From past print" line; mocks
+  `orders/pastPrints.ts`, `orders.ts` `addArchiveItem` and `priceBook.ts`.
+  The items card's writes (#4955, §4.2): `POST …/items/{item}/duplicate`
+  (`Lifecycle.duplicate_item`, body `{after_acceptance}`: the item's kind, current design,
+  past print archives, quantity, title, notes and SKU, added as `add_items` adds one; no
+  quote copied but a custom item's own price; audit `item.duplicated`) and `POST
+  /orders/{id}/fulfil` (`Lifecycle.fulfil_items`, `FulfilLine`s: per item an attempt by hand
+  of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
+  `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
+  `failed`, or named twice, refuses all).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
@@ -829,6 +873,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `PaymentProvider` protocol, `BadSignatureError`, `ProviderError`), `registry.py` (the
   offered providers; the fake one only with the bootstrap
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
+  `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
+  own code, no SDK; the facts it rests on, each with its Stripe link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -848,7 +894,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   failure stays on the open request as `link_error` (`POST …/payment-requests/{id}/link`
   retries). A provider's `paid` event with a fee writes a `payment_fee` cost entry,
   `source` `payment:<payment id>`, in the payment's own transaction (job cost spec
-  §4.4); a manual payment writes none. Routes: `api/order_payments.py`
+  §4.4); a manual payment writes none. A `fee` event (#4958, Stripe's balance transaction made after the
+  payment) writes the same entry later, once (`_late_fee`, under the order lock, on the
+  unique `(order_id, kind, source)` index); one that arrives before its payment is
+  `EventTooEarlyError`, which writes nothing and answers 503, so the provider sends it again,
+  only while the request is open or pending and the event (`ProviderEvent.created_at`) is
+  younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
+  moves an open request to `pending`, and `failed` moves an open or pending one to
+  `failed`; neither writes money, a pending request is never cancelled or closed by a
+  manual payment, and a disconnect is refused while one is pending. `parse_webhook` is
+  async and may call its provider once the signature holds; a failed call is
+  `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at

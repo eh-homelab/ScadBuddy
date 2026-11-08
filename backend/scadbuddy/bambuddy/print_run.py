@@ -21,14 +21,14 @@ from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 
 from fastapi import status
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from scadbuddy.bambuddy.catalogue import Catalogue, ReadCatalogue
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, ReadPresetValues, client_for
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -90,6 +90,7 @@ from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     FilamentRequirements,
     FlowType,
+    PresetRef,
     Printer,
     PrinterStatus,
     RackAlgorithm,
@@ -103,10 +104,14 @@ from scadbuddy.bambuddy.options import (
     lan_calibration_refusal,
 )
 from scadbuddy.bambuddy.part_settings import (
+    PartSettings,
     PartSettingsMap,
+    inexact_part_settings,
     laid_under,
     normalised,
     overrides_of,
+    parts_set_only,
+    process_part_settings,
     unknown_slots,
 )
 from scadbuddy.bambuddy.prime_tower import (
@@ -505,6 +510,16 @@ class PrintRunResult(BaseModel):
     #: waits for someone to say its plate is clear before it starts it (#4939,
     #: ``lan_require_plate_clear``): ``POST /print/runs/{id}/plate-cleared``.
     lan_awaiting_clear: bool = False
+    #: The slicer settings per filament slot this print was laid out with (#5571,
+    #: #5627), as the request set them (``part_settings.normalised``); ``None`` for none.
+    #: Only the request's: a template's ``part_print_settings`` (#5626) are not recorded,
+    #: and apply again, as the template has them then, when the print is sent again. The
+    #: print record (``GET /prints/{archive_id}``) lists them.
+    part_settings: PartSettingsMap | None = None
+
+    _parts_set_only = model_serializer(mode="wrap")(
+        lambda self, handler: parts_set_only(handler(self), maps=("part_settings",))
+    )
 
 
 async def known_slots(
@@ -799,6 +814,14 @@ async def part_settings_refusal(
     )
 
 
+#: The check routes' ``process_values`` query parameter (#5627).
+PROCESS_VALUES_QUERY = (
+    "Also read the process's own value of each part setting (`process_part_settings`,"
+    " #5627), which the dialog's Settings for this colour open on: one more read of the"
+    " process preset's values."
+)
+
+
 async def _part_slots(source: PrintSource, client: BambuddyClient | None) -> set[int] | None:
     """``part_settings_slots`` of the source's 3MF, read once per source
     (``PrintPipeline.part_slots``); ``None`` for an ``as_is`` 3MF or none. Raises
@@ -809,23 +832,30 @@ async def _part_slots(source: PrintSource, client: BambuddyClient | None) -> set
     return None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
 
 
+async def template_part_settings(
+    source: PrintSource, client: BambuddyClient | None
+) -> PartSettingsMap | None:
+    """The template's settings per slot (#5626, ``OutputSource.part_settings``) that the
+    run's copy carries: only an output whose 3MF is laid out (not ``as_is``), on the slots
+    a printed part is made in. Elsewhere they set nothing, so a template's settings never
+    refuse a run."""
+    template = source.part_settings if isinstance(source, OutputSource) else None
+    if template is None:
+        return None
+    try:
+        slots = await _part_slots(source, client) or set()
+    except PartSettingsUnwritableError:
+        slots = set()  # a template's settings never refuse a run
+    return normalised({slot: value for slot, value in template.items() if slot in slots})
+
+
 async def run_part_settings(
     source: PrintSource, request: PrintRunRequest, client: BambuddyClient | None
 ) -> PartSettingsMap | None:
-    """The settings per slot the run's copy carries: the template's (#5626,
-    ``OutputSource.part_settings``) with the request's ``part_settings`` over them, per
-    key. The template's go only where a copy can carry them: an output whose 3MF is laid
-    out (not ``as_is``), on the slots a printed part is made in. Elsewhere they set
-    nothing, so a template's settings never refuse a run; the request's were judged by
-    :func:`part_settings_refusal`."""
-    template = source.part_settings if isinstance(source, OutputSource) else None
-    if template is not None:
-        try:
-            slots = await _part_slots(source, client) or set()
-        except PartSettingsUnwritableError:
-            slots = set()  # a template's settings never refuse a run
-        template = {slot: value for slot, value in template.items() if slot in slots}
-    return laid_under(template, request.part_settings)
+    """The settings per slot the run's copy carries: the template's
+    (:func:`template_part_settings`) with the request's ``part_settings`` over them, per
+    key. The request's were judged by :func:`part_settings_refusal`."""
+    return laid_under(await template_part_settings(source, client), request.part_settings)
 
 
 class PrintCheck(BaseModel):
@@ -844,6 +874,30 @@ class PrintCheck(BaseModel):
     #: (#956); ``None`` when it was not read, or when every plate was checked at once
     #: (#2976), whose warnings name each plate.
     objects: int | None = None
+    #: The process's own value of each part setting (#5627), which the dialog's
+    #: "Settings for this colour" controls open on; a value it has none of is left out.
+    #: ``None`` when the process was not read: a check that did not ask
+    #: (``process_values``), a sliced file, which takes no part settings, a preset whose
+    #: values cannot be read, or a check that answers with an error before the process is
+    #: read (a refusal such as ``part_settings_refusal``'s, or no process chosen).
+    process_part_settings: PartSettings | None = None
+    #: The keys of ``process_part_settings`` that were rounded to fit a control (#5627,
+    #: ``part_settings.inexact_part_settings``): the process's own value is not that
+    #: number, so choosing it is still a change and is sent.
+    process_inexact: list[str] = Field(default_factory=list)
+    #: What a slot prints with when the request sets nothing (#5627, #5626): for each slot
+    #: a template's ``part_print_settings`` set (:func:`template_part_settings`), the
+    #: process's values with the template's laid over them, per key, as
+    #: :func:`run_part_settings` lays the request over the template's. A slot not listed
+    #: prints with ``process_part_settings``. ``None`` when that is ``None``, or when the
+    #: template sets nothing.
+    slot_part_settings: PartSettingsMap | None = None
+
+    _parts_set_only = model_serializer(mode="wrap")(
+        lambda self, handler: parts_set_only(
+            handler(self), maps=("slot_part_settings",), single=("process_part_settings",)
+        )
+    )
 
 
 ChooseRack = Callable[[int], Awaitable[RackChoice | None]]
@@ -1099,6 +1153,7 @@ async def check_print(
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -1136,7 +1191,11 @@ async def check_print(
     On a printer a run reaches natively (`run_route`, plan 2026-10-18 D2) the check is
     the native run's own, and reads nothing of Bambuddy (D3): the image's presets
     (``profiles``, D5), the report's trays (D1) and ``source``'s native library for the
-    folder (D6). ``client`` is used only off that path."""
+    folder (D6). ``client`` is used only off that path.
+
+    ``process_values`` asks for the process's values of the part settings too
+    (``PrintCheck.process_part_settings``, #5627): only a dialog showing its "Settings
+    for this colour" asks, since the read can be one more Bambuddy call."""
     named = request.printer is not None and printers is not None
     if (
         not named
@@ -1161,7 +1220,15 @@ async def check_print(
     if refusal is not None:
         return PrintCheck(errors=[refusal])
     if route is not None and route.native:
-        return await _native_check(source, settings, request, route, rack=rack, profiles=profiles)
+        return await _native_check(
+            source,
+            settings,
+            request,
+            route,
+            rack=rack,
+            profiles=profiles,
+            process_values=process_values,
+        )
     client = bambuddy_client(client)
     # The 3MF's download and the inventory wait on nothing `prepare_run` reads, so they
     # are read beside it (#4196): awaited after it in the order they were read in, so a
@@ -1329,6 +1396,8 @@ async def check_print(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # Last, so the read above (`read` keeps each preset's answer) is not made again.
+        **(await _part_baselines(source, process, read, client) if process_values else {}),
     )
 
 
@@ -1340,6 +1409,7 @@ async def _native_check(
     *,
     rack: RackUsage | None,
     profiles: Profiles | None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """:func:`check_print` on a native run: its refusals and advisories, judged on the
     report's status, the trays and the image's presets, with no Bambuddy client."""
@@ -1453,7 +1523,59 @@ async def _native_check(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # Last, so the read above (`read` keeps each preset's answer) is not made again.
+        **(await _part_baselines(source, process, read, None) if process_values else {}),
     )
+
+
+async def _part_baselines(
+    source: PrintSource,
+    process: PresetRef | None,
+    read: ReadPresetValues,
+    client: BambuddyClient | None,
+) -> dict[str, Any]:
+    """``PrintCheck.process_part_settings`` and ``slot_part_settings`` (#5627): what each
+    slot prints with when the request sets nothing, which the dialog's controls open on
+    and compare against."""
+    read_parts = await _process_part_settings(source, process, read)
+    process_parts, inexact = read_parts if read_parts else (None, [])
+    template = await template_part_settings(source, client) if process_parts else None
+    under = process_parts.model_dump(exclude_none=True) if process_parts else {}
+    return {
+        "process_part_settings": process_parts,
+        "process_inexact": inexact,
+        "slot_part_settings": (
+            {
+                slot: PartSettings(**{**under, **settings.model_dump(exclude_none=True)})
+                for slot, settings in template.items()
+            }
+            if template
+            else None
+        ),
+    }
+
+
+async def _process_part_settings(
+    source: PrintSource, process: PresetRef | None, read: ReadPresetValues
+) -> tuple[PartSettings, list[str]] | None:
+    """The process's values of the part settings (#5627), for a file the run lays out (an
+    output or a library file, #5628), with the keys rounded to fit
+    (``inexact_part_settings``); ``None`` for a sliced file, which takes none
+    (:func:`part_settings_refusal`), and when the preset's values cannot be read. Only an
+    advisory read: a failed one never fails the check."""
+    if process is None or source.is_sliced:
+        return None
+    try:
+        answer = await read(process)
+    except ApiError as error:
+        logger.info(
+            "the process preset's part settings could not be read",
+            extra={"source": process.source, "status": error.status},
+        )
+        return None
+    if not answer.resolved:
+        return None
+    return process_part_settings(answer.values), inexact_part_settings(answer.values)
 
 
 def _listed(warning: FilamentWarning | None) -> list[FilamentWarning]:
@@ -1801,11 +1923,14 @@ async def check_for_output(
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
     native: NativeCopies | None = None,
+    process_values: bool = False,
+    part_settings: PartSettingsMap | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered, with its template's
     ``print_settings`` as the run reads them, so a template that prints by object is
     checked by object (#2976). ``native`` is the native library a native run's folder is
-    checked in (D6)."""
+    checked in (D6). ``part_settings`` are the template's per slot (#5626), which the
+    slots' defaults hold (``PrintCheck.slot_part_settings``)."""
     return await check_print(
         client,
         OutputSource(
@@ -1814,6 +1939,7 @@ async def check_for_output(
             uploads=uploads,
             settings=settings,
             print_settings=print_settings or {},
+            part_settings=part_settings,
             native=native,
         ),
         settings,
@@ -1823,6 +1949,7 @@ async def check_for_output(
         reports=reports,
         catalogue=catalogue,
         profiles=profiles,
+        process_values=process_values,
     )
 
 
@@ -1840,6 +1967,7 @@ async def check_for_library(
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
+    process_values: bool = False,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
     slots read from the file itself (#2550): from their cache, else from the download
@@ -1862,6 +1990,7 @@ async def check_for_library(
         reports=reports,
         catalogue=catalogue,
         profiles=profiles,
+        process_values=process_values,
     )
 
 

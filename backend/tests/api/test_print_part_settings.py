@@ -34,6 +34,9 @@ from tests.bambuddy.test_part_settings import author_two_colours, without_projec
 
 pytestmark = pytest.mark.requires_postgres
 
+#: The dialog's check, asking for the process's part settings too (#5627).
+WITH_VALUES = "?process_values=true"
+
 
 @respx.mock
 def test_the_slots_settings_go_into_the_uploaded_copy(client: TestClient, model: str) -> None:
@@ -50,6 +53,111 @@ def test_the_slots_settings_go_into_the_uploaded_copy(client: TestClient, model:
         settings = archive.read(MODEL_SETTINGS_NAME).decode()
     assert '<metadata key="ironing_type" value="top"/>' in settings
     assert '<metadata key="top_shell_layers" value="8"/>' in settings
+    # #5627: the result keeps them, for the print record: only what is set.
+    assert response.json()["part_settings"] == {"1": {"top_shell_layers": 8, "ironing_type": "top"}}
+
+
+@respx.mock
+def test_a_run_without_settings_records_none(client: TestClient, model: str) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    routes()
+    preset_values({})
+    request = {**body(), "part_settings": {"1": {}}}
+
+    response = run_print(client, output_id, json=request)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["part_settings"] is None
+
+
+@respx.mock
+def test_the_check_gives_the_process_values_the_controls_open_on(
+    client: TestClient, model: str
+) -> None:
+    """#5627: each control opens on the process's own value, read with the check."""
+    output_id = prepared(client, model)
+    routes()
+    preset_values(
+        {
+            "top_shell_layers": "5",
+            "bottom_shell_layers": "3",
+            "wall_loops": ["2"],
+            "sparse_infill_density": "15%",
+            "sparse_infill_pattern": "grid",
+            "ironing_type": "sideways",
+        }
+    )
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check{WITH_VALUES}", json=body())
+
+    assert check.status_code == 200, check.text
+    # A value out of the bounds (`ironing_type` here) is left out.
+    assert check.json()["process_part_settings"] == {
+        "top_shell_layers": 5,
+        "bottom_shell_layers": 3,
+        "wall_loops": 2,
+        "sparse_infill_density": 15,
+        "sparse_infill_pattern": "grid",
+    }
+
+
+@respx.mock
+def test_an_unreadable_process_leaves_the_controls_without_values(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    routes()
+    preset_values(resolved=False, values={}, reason="sidecar_unavailable")
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check{WITH_VALUES}", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["process_part_settings"] is None
+
+
+@respx.mock
+def test_a_check_that_does_not_ask_reads_no_process_values(client: TestClient, model: str) -> None:
+    """#5627: the read can be one more Bambuddy call, so only a check that asks makes it."""
+    output_id = prepared(client, model)
+    routes()
+    values = preset_values({"top_shell_layers": "5"})
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["process_part_settings"] is None
+    assert not values.called
+
+
+@respx.mock
+def test_a_library_files_check_gives_the_process_values(client: TestClient) -> None:
+    """#5628 lets a library file take part settings, so its controls open on them too."""
+    configure(client)
+    routes()
+    library_file(89)
+    preset_values({"top_shell_layers": "5"})
+    plan = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+
+    check = client.post(
+        f"/api/v1/print/library/89/check{WITH_VALUES}", json={**body(), "filament_plan": plan}
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["process_part_settings"] == {"top_shell_layers": 5}
+
+
+def test_a_models_choices_remember_its_part_settings(client: TestClient, model: str) -> None:
+    """#5627: kept with the model's other choices; a slot that sets nothing is dropped."""
+    choices = {"part_settings": {"2": {"top_shell_layers": 8}, "1": {}}}
+
+    saved = client.put(f"/api/v1/print/models/{model}/choices", json=choices)
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["part_settings"] == {"2": {"top_shell_layers": 8}}
+    forgot = client.put(f"/api/v1/print/models/{model}/choices", json={"part_settings": {"1": {}}})
+    # None remembered reads as an entry from before the field existed.
+    assert "part_settings" not in forgot.json()
 
 
 @respx.mock

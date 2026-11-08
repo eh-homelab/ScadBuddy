@@ -78,6 +78,7 @@ from scadbuddy.orders.lifecycle import (
     ClaimRefusedError,
     Lifecycle,
     LifecycleError,
+    check_submitted,
 )
 from scadbuddy.orders.models import Actor, Fulfilment, Order, OrderItem, Quote, Reference
 from scadbuddy.orders.problems import PROBLEMS, refused
@@ -158,7 +159,8 @@ async def print_check(
     part_settings: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
-    unknown order or item; 409 ``order_<status>`` for an ended order,
+    unknown order or item; 409 ``order_not_submitted`` for a storefront cart (#5282),
+    ``order_<status>`` for an ended order,
     ``order_not_accepted`` before it is accepted, ``order_on_hold``, ``item_custom``,
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
     `failed` (one already printing among them), ``print_in_flight`` while a test print of
@@ -176,13 +178,11 @@ async def print_check(
     ``part_settings``, which a request that sends none prints with."""
     order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
-        raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
+        raise _refused(f"order_{order.status}", f"order {order.label} is {order.status}")
     if order.status not in DERIVED:
-        raise _refused(
-            "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
-        )
+        raise _refused("order_not_accepted", f"order {order.label} is {order.status}, not accepted")
     if order.on_hold:
-        raise _refused("order_on_hold", f"order {order.number} is on hold")
+        raise _refused("order_on_hold", f"order {order.label} is on hold")
     reference = None if item.library_file is not None else reference_of(item)
     if item.status not in FULFILLABLE:
         raise _refused(
@@ -222,7 +222,8 @@ async def test_print_check(
 ) -> dict[str, Any]:
     """A test print's refusals (storefront spec §4.4), writing nothing: one copy of the
     item's output, on an order accepted or not and an item in any open state. 404 for an
-    unknown order, item or revision (``revision_not_found``); 409 ``order_<status>`` for
+    unknown order, item or revision (``revision_not_found``); 409 ``order_not_submitted``
+    for a storefront cart (#5282), ``order_<status>`` for
     an ended order, ``order_on_hold``, ``item_custom`` and ``item_has_no_design``,
     ``item_not_open`` for a settled item, ``print_in_flight`` while a print of the item,
     of either purpose, is open, ``revision_not_newest`` for a revision that is
@@ -242,9 +243,9 @@ async def test_print_check(
     except LifecycleError as error:
         raise refused(error) from None
     if order.status in ENDED:
-        raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
+        raise _refused(f"order_{order.status}", f"order {order.label} is {order.status}")
     if order.on_hold:
-        raise _refused("order_on_hold", f"order {order.number} is on hold")
+        raise _refused("order_on_hold", f"order {order.label} is on hold")
     reference = reference_of(item)
     if item.status in SETTLED:
         raise _refused("item_not_open", f"item {item.id} is {item.status}", items=[item.id])
@@ -307,12 +308,18 @@ async def _none_in_flight(store: OrderStore, item: OrderItem) -> None:
 async def _order_and_item(
     store: OrderStore, order_id: str, item_id: str
 ) -> tuple[Order, OrderItem]:
+    """The order and its item; 409 ``order_not_submitted`` for a storefront cart (#5282),
+    which the shop never prints."""
     order = await asyncio.to_thread(store.order, order_id)
     if order is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
     item = await asyncio.to_thread(store.item, item_id)
     if item is None or item.order_id != order.id:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
     return order, item
 
 

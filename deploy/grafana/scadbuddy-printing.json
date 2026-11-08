@@ -529,7 +529,7 @@
       "id": 27,
       "type": "timeseries",
       "title": "Operation time",
-      "description": "Print worker operations: from the operation's record to its end, by kind (#2295): p50 and p95 of those that succeeded, p95 of those that failed. On 2026-10-11 a save (output_create) took ~37 s.",
+      "description": "Print operations, the Bambuddy kinds picked by kind (the API ends their records, #5298; the list is checked against the worker's, backend/tests/test_dashboard_operation_kinds.py): from the operation's record to its end, by kind (#2295): p50 and p95 of those that succeeded, p95 of those that failed. On 2026-10-11 a save (output_create) took ~37 s.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 0, "y": 62, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
@@ -537,19 +537,19 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-print\", outcome=\"succeeded\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", kind=~\"assign_tray_spool|attach_project|bambuddy_vp_create|bambuddy_vp_delete|bambuddy_vp_update|create_project|output_inbox_delete|preview_slice|project_file|register_sidebar|reprint|send|timelapse_pull\", outcome=\"succeeded\"}[$__rate_interval])))",
           "legendFormat": "p50 {{kind}}"
         },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-print\", outcome=\"succeeded\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", kind=~\"assign_tray_spool|attach_project|bambuddy_vp_create|bambuddy_vp_delete|bambuddy_vp_update|create_project|output_inbox_delete|preview_slice|project_file|register_sidebar|reprint|send|timelapse_pull\", outcome=\"succeeded\"}[$__rate_interval])))",
           "legendFormat": "p95 {{kind}}"
         },
         {
           "refId": "C",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-print\", outcome=\"failed\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", kind=~\"assign_tray_spool|attach_project|bambuddy_vp_create|bambuddy_vp_delete|bambuddy_vp_update|create_project|output_inbox_delete|preview_slice|project_file|register_sidebar|reprint|send|timelapse_pull\", outcome=\"failed\"}[$__rate_interval])))",
           "legendFormat": "p95 failed {{kind}}"
         }
       ]
@@ -558,7 +558,7 @@
       "id": 28,
       "type": "timeseries",
       "title": "Operations",
-      "description": "Print worker operations: operations whose record ended, by kind and outcome (#2295).",
+      "description": "Print operations, the Bambuddy kinds picked by kind (the API ends their records, #5298; the list is checked against the worker's, backend/tests/test_dashboard_operation_kinds.py): operations whose record ended, by kind and outcome (#2295).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 8, "y": 62, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
@@ -566,7 +566,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=\"scadbuddy-print\"}[$__rate_interval]))",
+          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\", kind=~\"assign_tray_spool|attach_project|bambuddy_vp_create|bambuddy_vp_delete|bambuddy_vp_update|create_project|output_inbox_delete|preview_slice|project_file|register_sidebar|reprint|send|timelapse_pull\"}[$__rate_interval]))",
           "legendFormat": "{{kind}} {{outcome}}"
         }
       ]
@@ -575,7 +575,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "Operations past the deadline",
-      "description": "Print worker operations: requests the API answered 202 to follow (or 503 to send again) because the operation had not ended within the deadline, by kind (#2295). Once per request: a re-send counts again.",
+      "description": "Print operations, the Bambuddy kinds picked by kind (the API ends their records, #5298; the list is checked against the worker's, backend/tests/test_dashboard_operation_kinds.py): requests the API answered 202 to follow (or 503 to send again) because the operation had not ended within the deadline, by kind (#2295). Once per request: a re-send counts again.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 16, "y": 62, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
@@ -583,7 +583,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\"}[$__rate_interval])) and on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=\"scadbuddy-print\"}[1h]))",
+          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\", kind=~\"assign_tray_spool|attach_project|bambuddy_vp_create|bambuddy_vp_delete|bambuddy_vp_update|create_project|output_inbox_delete|preview_slice|project_file|register_sidebar|reprint|send|timelapse_pull\"}[$__rate_interval]))",
           "legendFormat": "{{kind}}"
         }
       ]

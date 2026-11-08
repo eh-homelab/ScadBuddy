@@ -55,6 +55,7 @@ from scadbuddy.orders.lifecycle import (
     SETTLED,
     Lifecycle,
     LifecycleError,
+    check_submitted,
     requote_open,
 )
 from scadbuddy.orders.models import (
@@ -120,6 +121,21 @@ class SliceQuoteRequest(BaseModel):
     #: Slicer settings for each slot's parts (#5571, `PrintRunRequest.part_settings`):
     #: recorded with the quote, and the item's print prints with them when it sends none.
     part_settings: PartSettingsMap | None = None
+
+
+class ArchiveQuoteRequest(BaseModel):
+    """`POST /orders/{id}/items/{item}/quotes/archive` (#4777, order operations spec
+    §3.2): the past print to price the item from (``archive_id``: one the item was taken
+    from, or one its output or library file printed; omitted, the first archive it was
+    taken from) and the price-book filament of each colour slot, as a slice quote's
+    ``filaments``. ``filament_id`` prices every slot the print used that ``filaments``
+    does not name, for an item with no slots yet (a library file item)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    archive_id: int | None = Field(default=None, ge=1)
+    filaments: dict[int, str] = Field(default_factory=dict)
+    filament_id: str | None = None
 
 
 class QuoteError(ValueError):
@@ -208,12 +224,30 @@ def merged_slots(item: OrderItem, filaments: Mapping[int, str]) -> dict[int, str
     return slots
 
 
+def check_filaments(store: OrderStore, slots: Mapping[int, str]) -> list[Filament]:
+    """422 ``filaments`` when a slot names a filament the price book lacks, or one that is
+    archived. Blocking. The filaments, in slot order."""
+    named: list[Filament] = []
+    for slot, filament_id in sorted(slots.items()):
+        record = store.filament(filament_id)
+        if record is None:
+            raise _unprocessable(
+                "filaments", f"colour slot {slot}: no filament {filament_id} in the price book"
+            )
+        if record.archived_at is not None:
+            raise _unprocessable(
+                "filaments", f"colour slot {slot}: filament {filament_id} is archived"
+            )
+        named.append(record)
+    return named
+
+
 def quote_check(
     store: OrderStore,
     policy: PricingPolicy,
     order_id: str,
     item_id: str,
-    request: SliceQuoteRequest,
+    request: SliceQuoteRequest | ArchiveQuoteRequest,
 ) -> dict[int, str | None]:
     """Ruling 8's refusals, from the rows: 404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
@@ -221,18 +255,23 @@ def quote_check(
     acceptance, #5350), 409 ``item_not_open``
     for a settled item, 422 ``filaments`` for a slot the item lacks, a slot with no
     filament once the body's are applied, or one unknown or archived, and 422
-    ``price_book`` when nothing would price the item. Blocking; writes nothing. The
-    merged slots, which the run writes first."""
+    ``price_book`` when nothing would price the item, and 409 ``order_not_submitted`` for
+    a storefront cart (#5282). Blocking; writes nothing. The merged slots, which the run
+    writes first."""
     order = store.order(order_id)
     if order is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
     if not requote_open(order, item, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            f"order {order.number} is {order.status}: an item is quoted while the order is"
+            f"order {order.label} is {order.status}: an item is quoted while the order is"
             " draft or quoted, or, past that, while the item has no accepted quote or was"
             " revised after acceptance",
             type_=PROBLEMS + "order_not_open",
@@ -256,19 +295,7 @@ def quote_check(
         raise _unprocessable(
             "filaments", f"colour slot {empty[0]} has no filament to price it with"
         )
-    named: list[Filament] = []
-    for slot, filament_id in sorted(slots.items()):
-        assert filament_id is not None
-        record = store.filament(filament_id)
-        if record is None:
-            raise _unprocessable(
-                "filaments", f"colour slot {slot}: no filament {filament_id} in the price book"
-            )
-        if record.archived_at is not None:
-            raise _unprocessable(
-                "filaments", f"colour slot {slot}: filament {filament_id} is archived"
-            )
-        named.append(record)
+    named = check_filaments(store, {slot: f for slot, f in slots.items() if f is not None})
     if prices_nothing(policy, named):
         raise _unprocessable(
             "price_book",
@@ -451,7 +478,7 @@ async def ensure_output(
             "job_id": job.id,
             "index": 0,
             "inputs": reference.inputs,
-            "name": f"{order.number} {item.title}",
+            "name": f"{order.label} {item.title}",
             **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )
@@ -616,14 +643,14 @@ def library_colours(
     return [
         ColourSlot(
             slot=slot,
-            colour=_hex(colours.get(slot + 1)) or "#808080",
+            colour=file_colour(colours.get(slot + 1)) or "#808080",
             filament_id=filaments.get(slot),
         )
         for slot in used
     ]
 
 
-def _hex(colour: str | None) -> str | None:
+def file_colour(colour: str | None) -> str | None:
     """``#RRGGBB`` of a colour the file names (``#RRGGBBAA`` drops its alpha)."""
     if colour is None:
         return None

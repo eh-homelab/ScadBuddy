@@ -1031,6 +1031,12 @@ export const settingsDefaults = {
   pricing_markup_percent: '0',
   pricing_rounding: 'to_minor_unit',
   rough_estimate_factor: '1.15',
+  // #5282 — the public storefront's limits and switch.
+  storefront_renders_per_minute: 3,
+  storefront_renders_per_day: 30,
+  storefront_render_concurrency: 2,
+  storefront_draft_ttl_days: 30,
+  storefront_requests_enabled: false,
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
   // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,
@@ -1731,6 +1737,7 @@ function printOf(
       other: { original_archive_id: null, time_accuracy_source: null },
     },
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
+    part_settings: null,
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
   }

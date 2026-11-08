@@ -37,6 +37,7 @@ from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
+    ArchiveSlot,
     CopiedMedia,
     MediaTooLargeError,
     ShelfSpool,
@@ -98,7 +99,8 @@ def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
 
 
 def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
-    """What an attempt copies of one archive (§8.2)."""
+    """What an attempt copies of one archive (§8.2), and what a past print's item is
+    priced from (#4777): its plate, estimate, file name and slots."""
     grams = archive.total_filament_actual_grams
     if grams is None:
         grams = archive.filament_used_grams
@@ -112,7 +114,20 @@ def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
         finish_photos=[p for p in archive.photos if p.startswith(FINISH_PHOTO_PREFIX)],
         timelapse=bool(archive.timelapse_path),
         timelapse_name=_timelapse_name(archive) if archive.timelapse_path else None,
+        plate_id=archive.plate_id,
+        print_seconds=archive.print_time_seconds,
+        filename=_file_name(archive),
+        slots=[
+            ArchiveSlot(slot_id=slot.slot_id, used_g=slot.used_g, color=slot.color)
+            for slot in archive.extra_data.filament_slots
+        ],
     )
+
+
+def _file_name(archive: ArchiveDetail) -> str:
+    """The printed file's own name, without any folder Bambuddy archived it under."""
+    name = PurePosixPath((archive.filename or "").replace("\\", "/")).name
+    return name or f"archive-{archive.id}.3mf"
 
 
 def _timelapse_name(archive: ArchiveDetail) -> str:
@@ -199,6 +214,11 @@ class BambuddyIntegrations:
                 assert name is not None
                 path, filename = f"/archives/{archive_id}/photos/{name}", name
                 operation = "media.photo"
+            elif what == "file":
+                if name is None:
+                    name = _file_name(await client.archive(archive_id))
+                path, filename = f"/archives/{archive_id}/download", name
+                operation = "media.download"
             else:
                 if name is None:
                     name = _timelapse_name(await client.archive(archive_id))

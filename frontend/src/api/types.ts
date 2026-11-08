@@ -107,6 +107,19 @@ export interface RecentOutputsQuery {
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
 }
+/** #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went. */
+export type ArchiveOutcome = Schemas['ArchiveOutcome']
+/** #4777 — the filters `GET /farm/archives` takes; status and name are the browser's. */
+export interface FarmArchivesQuery {
+  /** First day, inclusive (`YYYY-MM-DD`). */
+  date_from?: string
+  /** Last day, inclusive (`YYYY-MM-DD`). */
+  date_to?: string
+  printer_id?: number
+  project_id?: number
+}
+/** #4777 — `POST /orders/{id}/items/{item}/quotes/archive`. */
+export type ArchiveQuoteRequest = Schemas['ArchiveQuoteRequest']
 export type ArrangeRequest = Schemas['ArrangeRequest']
 /** #3637 — one object of an arrange, maybe in other colours. */
 export type ArrangeObject = Schemas['ArrangeObject']
@@ -180,6 +193,10 @@ export type PrintRunRequest = Schemas['PrintRunRequest']
  */
 export type RegistryRunRequest = PrintRunRequest & { printer?: string }
 export type PrintRunResult = Schemas['PrintRunResult']
+/** #5571, #5627 — a print's slicer settings for the parts of one filament slot. */
+export type PartSettings = Schemas['PartSettings']
+/** #5627 — the settings per slot, keyed by the slot (from 1) as a string. */
+export type PartSettingsMap = Record<string, PartSettings>
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
@@ -472,8 +489,13 @@ export type SpoolImportRow = Schemas['SpoolImportRow']
  * colour slot (`colours[].slot`, from 0). */
 export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
- * item's copies, plates and request id are the server's. */
-export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printer_id' | 'filament_plan' | 'choices'>
+ * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
+ * sends the quote's own, so the body matches the background slice's; the server refuses
+ * others (`requote_needed`), and a body with none prints with the quote's. */
+export type OrderItemPrintRequest = Pick<
+  RegistryRunRequest,
+  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings'
+>
 export type OrderEstimate = Schemas['OrderEstimate']
 /** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */
 export type UnitCostHistory = Schemas['UnitCostHistory']
