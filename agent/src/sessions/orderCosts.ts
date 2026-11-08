@@ -27,8 +27,9 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // answers no entry) stays to report, with the next turn's spend; once the session is over
 // (`done`, `failed`, or `idle` with no session activity for IDLE_OVER_AFTER), such a share is
 // closed out, reported with nothing carried. A session that works again later loses nothing:
-// the closed-out spend was never carried, so it folds into the next turn's share. One turn's reports
-// share one deadline (REPORT_DEADLINE_MS); what it leaves waits for the next turn's end. The
+// the closed-out spend was never carried, so it folds into the next turn's share, split equally
+// across that turn's orders. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it
+// leaves waits for the next turn's end. The
 // finish activity does not wait for `report`. A session runs one report at a time across
 // replicas (a session-level advisory lock on a connection of the lock client, never one of
 // the stores', freed with it if the process dies). `record` waits at most RECORD_WAIT_MS for
@@ -262,7 +263,8 @@ export class OrderCosts implements TouchedSink {
     // with no session activity (`updated_at`) for IDLE_OVER_AFTER: a chat turn that ends well
     // leaves the session idle, and the sweep finds it there once that turn's own report has run.
     // Nothing carried means nothing lost: if the session works again, the closed-out spend is
-    // still in `cost - carried`, so it folds into the next order's share.
+    // still in `cost - carried`, so it folds into the next turn's share, split equally across
+    // that turn's orders.
     const over = row.over
     if (over && share < 1e-4) {
       for (const order of fresh) await this.closeOut(sessionId, order.id)
