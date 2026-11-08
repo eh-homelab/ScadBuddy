@@ -11,6 +11,7 @@ import {
   printOptionFields,
   printPath,
   printSequence,
+  setupPhrase,
   slotChoice,
   supportsChoice,
   tier,
@@ -1189,7 +1190,8 @@ export const orderTools: Tool[] = [
       'GET /api/v1/orders/history/unit-cost',
     ],
     title: ({ order_id, item_id, slice, archive }) =>
-      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}`,
+      `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}` +
+      (slice ? setupPhrase(slice) : ''),
     handler: async ({ order_id, item_id, manual, slice, archive }, ctx) => {
       if ([manual, slice, archive].filter((mode) => mode !== undefined).length !== 1) {
         throw new ToolError(
@@ -1346,6 +1348,16 @@ export const orderTools: Tool[] = [
         "Omit to print with the accepted quote's own (order_item_quote's `slice.part_settings`), so the print slices " +
           'what was priced. Settings that differ from the quote\'s are refused `requote_needed`: quote with them first',
       ),
+      // #4673: each omitted is the accepted quote's own (its `choices`); one that differs is `requote_needed`.
+      prime_tower: primeTowerChoice.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.prime_tower`); another is refused `requote_needed`",
+      ),
+      supports: supportsChoice.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.supports`); others are refused `requote_needed`",
+      ),
+      print_sequence: printSequence.describe(
+        "Omit to print with the accepted quote's (order_item_quote's `slice.print_sequence`); another is refused `requote_needed`",
+      ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
           'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
@@ -1356,11 +1368,12 @@ export const orderTools: Tool[] = [
       'POST /api/v1/orders/{order_id}/items/{item_id}/print',
       'POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/test-print',
     ],
-    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings }) =>
+    summarize: ({ order_id, item_id, printer, printer_id, test_revision_id, path, part_settings, ...setup }) =>
       `Print ${test_revision_id ? `a test of revision ${test_revision_id} of ` : ''}item ${item_id} of order ${order_id}` +
       (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
       (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : '') +
-      partSettingsPhrase(part_settings),
+      partSettingsPhrase(part_settings) +
+      setupPhrase(setup),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined

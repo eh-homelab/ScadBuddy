@@ -193,7 +193,15 @@ have "versions" (git commits: `list_versions`, `diff_version`, `restore_version`
   `choices`, `prime_tower`, `supports`, `print_sequence`, each present, null when left out;
   `orders/quote.py` `print_setup`) and `filament_plan` are written with a slice quote and
   shown on `Quote`, so `order_get` lists them. A manual or archive quote has neither. The
-  agent's `order_item_quote.slice` takes the three. The print does not read them yet.
+  agent's `order_item_quote.slice` takes the three.
+- The print reads only `prime_tower`, `supports` and `print_sequence` of `choices`
+  (`orders/printing.py` `QUOTED_SETUP`, pulled into PR 1 by its review): an item's print or
+  test print that omits one prints with the quote's (`operations.py` `print_body`'s
+  `setup`, from the check's `quoted_setup`), and one that differs is `requote_needed`
+  (`_same_setup`), as `part_settings` are (#5571). A quote with no `choices` checks
+  nothing. The agent's `order_item_print` takes the three, optional. The rest of
+  `choices` and `filament_plan` are read from PR 2 on: until then the print's own
+  printer, path, `choices` and spools stand, as before.
 
 ### 5.3 Depends on
 

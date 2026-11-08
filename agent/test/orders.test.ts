@@ -813,6 +813,11 @@ describe('pricing tools (#4250)', () => {
     expect(input.safeParse({ ...args, slice: { ...SLICE, ...setup } }).success).toBe(true)
     expect(input.safeParse({ ...args, slice: { ...SLICE, print_sequence: 'by plate' } }).success).toBe(false)
     expect(input.safeParse({ ...args, slice: { ...SLICE, supports: { enabled: true, threshold_angle: 91 } } }).success).toBe(false)
+    // The call's line names them (#5720 review).
+    const title = tool('order_item_quote').title?.({ ...args, slice: { ...SLICE, ...setup } } as never)
+    expect(title).toContain('with tree supports at 40°')
+    expect(title).toContain('with a prime tower (no sparse layers)')
+    expect(title).toContain('by object')
   })
 
   it('answers a slice quote still running past the follow window', async () => {
@@ -864,6 +869,19 @@ describe('pricing tools (#4250)', () => {
     expect(
       tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings } as never),
     ).toContain("slot 1's parts at wall_loops 4")
+    // #4673: omitted, the quote's tower, supports and sequence print; sent, the backend
+    // compares them with the quote's, and the approval line names them.
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog }, ctx())
+    expect(body).not.toHaveProperty('prime_tower')
+    expect(body).not.toHaveProperty('supports')
+    expect(body).not.toHaveProperty('print_sequence')
+    const setup = { prime_tower: { enabled: false }, supports: { enabled: false }, print_sequence: 'by object' }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, ...setup }, ctx())
+    expect(body).toMatchObject(setup)
+    const line = tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, ...setup } as never)
+    expect(line).toContain('without supports')
+    expect(line).toContain('without a prime tower')
+    expect(line).toContain('by object')
   })
 
   it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {

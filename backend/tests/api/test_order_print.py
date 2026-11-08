@@ -800,3 +800,92 @@ def test_a_test_print_takes_its_slice_quotes_part_settings(
     assert attempt["purpose"] == "test"
     [request] = sent
     assert dumped(request.part_settings) == settings
+
+
+#: A print setup beyond the dialog's choices (#4673): the tower, supports and sequence.
+SETUP: dict[str, Any] = {
+    "prime_tower": {"enabled": True, "no_sparse_layers": True},
+    "supports": {"enabled": False},
+    "print_sequence": "by object",
+}
+SETUP_KEYS = ("prime_tower", "supports", "print_sequence")
+
+
+def _quoted_with_setup(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> tuple[QuoteShop, dict[str, Any], list[PrintRunRequest]]:
+    """A slice quote of SETUP, its print run requests recorded."""
+    sent: list[PrintRunRequest] = []
+
+    async def recorded(*args: Any, request: PrintRunRequest, **kwargs: Any) -> Any:
+        sent.append(request)
+        return await accept_run(*args, request=request, **kwargs)
+
+    monkeypatch.setattr(printing_api, "accept_run", recorded)
+    shop = QuoteShop(client)
+    BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    # A support setting is written in the preset's shape, so the preset is read (#1899).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {"enable_support": "0"}})
+    )
+    started = shop.post(**SETUP)
+    assert started.status_code == 202, started.text
+    op = follow_operation(client, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op.get("error")
+    return shop, op["result"], sent
+
+
+def _setup_of(request: PrintRunRequest) -> dict[str, Any]:
+    return request.model_dump(mode="json", include=set(SETUP_KEYS))
+
+
+def test_a_print_that_sends_no_setup_prints_with_the_quotes(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4673 (PR #5720 review): the quote sliced with a tower, supports and sequence, so
+    a print that sends none prints with them, and one that sends another wants a new
+    quote: it would print what was not priced."""
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    _books_spools(shop)
+
+    for other in (
+        {"print_sequence": "by layer"},
+        {"supports": {"enabled": True}},
+        {"prime_tower": {"enabled": False}},
+    ):
+        problem(
+            bambuddy.post(f"{shop.path}/print", json={**body(), **other}, headers=press()),
+            "requote_needed",
+        )
+    assert not sent
+
+    queue_route()
+    same = {**body(), "print_sequence": "by object"}
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=same, headers=press()))
+    assert attempt["sliced_sha256"] == quote["sliced_sha256"]
+    [request] = sent
+    assert _setup_of(request) == {key: quote["choices"][key] for key in SETUP_KEYS}
+
+
+def test_a_test_print_takes_its_slice_quotes_setup(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4673: a test print (the revision's newest slice quote) refuses a tower, supports
+    or sequence its quote was not sliced with, and one that sends none prints with the
+    quote's."""
+    shop, quote, sent = _quoted_with_setup(bambuddy, monkeypatch)
+    revision = shop.get_item()["current_revision_id"]
+    _books_spools(shop)
+    url = f"{shop.path}/revisions/{revision}/test-print"
+
+    other = {**body(), "print_sequence": "by layer"}
+    problem(bambuddy.post(url, json=other, headers=press()), "requote_needed")
+    assert not sent
+
+    queue_route()
+    attempt = answered(bambuddy, bambuddy.post(url, json=body(), headers=press()))
+    assert attempt["purpose"] == "test"
+    [request] = sent
+    assert _setup_of(request) == {key: quote["choices"][key] for key in SETUP_KEYS}

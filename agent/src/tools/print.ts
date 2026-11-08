@@ -110,6 +110,19 @@ function towerPhrase(tower: { enabled: boolean; no_sparse_layers?: boolean } | u
   )
 }
 
+/** #4673 — the supports, prime tower and print sequence a quote or an item's print names, in its line. */
+export function setupPhrase(args: {
+  supports?: { enabled: boolean; type?: string; threshold_angle?: number; on_build_plate_only?: boolean } | undefined
+  prime_tower?: { enabled: boolean; no_sparse_layers?: boolean } | undefined
+  print_sequence?: string | undefined
+}): string {
+  return (
+    supportsPhrase(args.supports) +
+    towerPhrase(args.prime_tower) +
+    (args.print_sequence === undefined ? '' : `, printed ${args.print_sequence}`)
+  )
+}
+
 /** The folder a library move or copy names, in its approval line (#2670). */
 function folderName(folderId: number | undefined, folderPath: string | undefined): string {
   if (folderId !== undefined) return `library folder ${folderId}`
