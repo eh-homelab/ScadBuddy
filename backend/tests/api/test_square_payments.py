@@ -39,7 +39,7 @@ from tests.payments.test_square import (
     signed,
 )
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("app_payment_sweep_off")]
 
 HOOK = "/api/v1/payments/webhooks/square"
 CONNECT = {
