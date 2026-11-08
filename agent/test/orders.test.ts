@@ -382,6 +382,21 @@ describe('order tools (#4249)', () => {
     expect(() => z.object(add.shape).parse({ order_id: ORDER, library_file_id: 0 })).toThrow()
   })
 
+  it('adds a past print by its archive (#4777)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ITEM, kind: 'model', origin_archive_ids: [81] }, { status: 201 })
+      }),
+    )
+    const add = tool('order_item_add')
+    await add.execute({ order_id: ORDER, archive_id: 81 }, ctx())
+    expect(sent).toEqual([{ archive_id: 81, quantity: 1, notes: '' }])
+    expect(add.title({ order_id: ORDER, archive_id: 81 })).toBe(`Add past print 81 to order ${ORDER}`)
+    expect(() => z.object(add.shape).parse({ order_id: ORDER, archive_id: 0 })).toThrow()
+  })
+
   it('adds several items in one request, all or none (#4777)', async () => {
     const sent: [string, unknown][] = []
     server.use(
@@ -824,6 +839,28 @@ describe('pricing tools (#4250)', () => {
     await expect(
       tool('order_item_quote').execute(
         { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 1 }, slice: SLICE },
+        ctx(),
+      ),
+    ).rejects.toThrow('exactly one')
+  })
+
+  it('quotes from a past print in archive mode (#4777)', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes/archive`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: 'q4', source: 'archive' }, { status: 201 })
+      }),
+    )
+    const answer = await tool('order_item_quote').execute(
+      { order_id: ORDER, item_id: ITEM, archive: { archive_id: 81, filaments: { 0: 'f1' } } },
+      ctx(),
+    )
+    expect(firstText(answer)).toEqual({ id: 'q4', source: 'archive' })
+    expect(body).toEqual({ archive_id: 81, filaments: { 0: 'f1' } })
+    await expect(
+      tool('order_item_quote').execute(
+        { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 1 }, archive: {} },
         ctx(),
       ),
     ).rejects.toThrow('exactly one')

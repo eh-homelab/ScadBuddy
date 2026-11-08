@@ -1,10 +1,11 @@
 import { http, HttpResponse } from 'msw'
-import type { Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
+import type { ArchiveQuoteRequest, Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
 import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
 import { pushRevision } from './revisions'
+import { pastPrint } from './pastPrints'
 import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
 
 /**
@@ -104,30 +105,37 @@ function identity(f: Pick<Filament, 'material' | 'subtype' | 'brand' | 'colour'>
   return [f.material, f.subtype ?? '', f.brand ?? '', f.colour].map((part) => part.toUpperCase()).join('|')
 }
 
-/** `orders/pricing.py` over the mock's one plate. */
-function priced(colours: { slot: number; filament_id?: string | null }[], currency: string): Omit<Quote, 'id' | 'order_item_id' | 'created_at' | 'accepted' | 'quantity' | 'total_minor' | 'created_by'> {
+/**
+ * `orders/pricing.py` over `plates`: each slot's grams at the filament of the item's colour
+ * slot, the plates' seconds at the machine rate, a setup fee per plate.
+ */
+export function pricePlates(
+  plates: { index: number; print_seconds: number; filaments: { slot: number; used_g: number }[] }[],
+  colours: { slot: number; filament_id?: string | null }[],
+  currency: string,
+): Pick<Quote, 'lines' | 'unit_cost_minor' | 'unit_price_minor'> {
   const exponent = minorExponent(currency)
   const rules = policy()
   const lines: QuoteLine[] = []
-  const filaments = colours.map((colour, index) => {
-    const record = state.filaments.find((f) => f.id === colour.filament_id)
-    const grams = MOCK_SLICE.grams[index] ?? 1
-    return { slot: colour.slot, grams, record }
-  })
-  for (const { grams, record } of filaments) {
+  const grams = new Map<number, number>()
+  for (const plate of plates) for (const f of plate.filaments) grams.set(f.slot, (grams.get(f.slot) ?? 0) + f.used_g)
+  for (const [slot, used] of [...grams].sort((a, b) => a[0] - b[0])) {
+    const record = state.filaments.find((f) => f.id === colours.find((c) => c.slot === slot)?.filament_id)
     if (!record) continue
-    const amount = toMinor((grams * Number(record.cost_per_kg)) / 1000, exponent)
+    const amount = toMinor((used * Number(record.cost_per_kg)) / 1000, exponent)
     const name = [record.material, record.subtype, record.colour_name].filter(Boolean).join(' ')
-    lines.push({ kind: 'filament', label: `${name}, ${grams} g at ${record.cost_per_kg} per kg`, quantity: 1, unit_minor: amount, amount_minor: amount })
+    lines.push({ kind: 'filament', label: `${name}, ${used} g at ${record.cost_per_kg} per kg`, quantity: 1, unit_minor: amount, amount_minor: amount })
   }
   if (Number(rules.machine_rate_per_hour)) {
-    const amount = toMinor((MOCK_SLICE.seconds / 3600) * Number(rules.machine_rate_per_hour), exponent)
-    lines.push({ kind: 'machine_time', label: `Machine time, 1 h at ${rules.machine_rate_per_hour} per hour`, quantity: 1, unit_minor: amount, amount_minor: amount })
+    const seconds = plates.reduce((sum, plate) => sum + plate.print_seconds, 0)
+    const hours = Math.round((seconds / 3600) * 100) / 100
+    const amount = toMinor((seconds / 3600) * Number(rules.machine_rate_per_hour), exponent)
+    lines.push({ kind: 'machine_time', label: `Machine time, ${hours} h at ${rules.machine_rate_per_hour} per hour`, quantity: 1, unit_minor: amount, amount_minor: amount })
   }
   const cost = lines.reduce((sum, line) => sum + line.amount_minor, 0)
   if (Number(rules.setup_fee)) {
     const amount = toMinor(Number(rules.setup_fee), exponent)
-    lines.push({ kind: 'setup', label: 'Setup, plate 1', quantity: 1, unit_minor: amount, amount_minor: amount })
+    for (const plate of plates) lines.push({ kind: 'setup', label: `Setup, plate ${plate.index}`, quantity: 1, unit_minor: amount, amount_minor: amount })
   }
   if (Number(rules.labour_per_item)) {
     const amount = toMinor(Number(rules.labour_per_item), exponent)
@@ -143,6 +151,12 @@ function priced(colours: { slot: number; filament_id?: string | null }[], curren
     lines.push({ kind: 'rounding', label: 'Rounded up to a whole unit', quantity: 1, unit_minor: whole - price, amount_minor: whole - price })
     price = whole
   }
+  return { lines, unit_cost_minor: cost, unit_price_minor: price }
+}
+
+/** `orders/pricing.py` over the mock's one plate. */
+function priced(colours: { slot: number; filament_id?: string | null }[], currency: string): Omit<Quote, 'id' | 'order_item_id' | 'created_at' | 'accepted' | 'quantity' | 'total_minor' | 'created_by'> {
+  const filaments = colours.map((colour, index) => ({ slot: colour.slot, used_g: MOCK_SLICE.grams[index] ?? 1 }))
   const sha = 'b'.repeat(64)
   return {
     source: 'slice',
@@ -152,14 +166,12 @@ function priced(colours: { slot: number; filament_id?: string | null }[], curren
       {
         index: 1,
         print_seconds: MOCK_SLICE.seconds,
-        filaments: filaments.map(({ slot, grams }) => ({ slot, used_g: String(grams) })),
+        filaments: filaments.map(({ slot, used_g }) => ({ slot, used_g: String(used_g) })),
         blob_key: `quote-${sha}`,
         sha256: sha,
       },
     ],
-    lines,
-    unit_cost_minor: cost,
-    unit_price_minor: price,
+    ...pricePlates([{ index: 1, print_seconds: MOCK_SLICE.seconds, filaments }], colours, currency),
   }
 }
 
@@ -308,6 +320,79 @@ export const handlers = [
       event(order, 'quote.recorded', { item_id: found.id, quote_id: made.id })
       rederive(order)
       return acceptOperation('order_item_quote', `order_item:${found.id}`, made as unknown as Record<string, unknown>)
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
+
+  // #4777 — an `archive` quote (`orders/past_prints.py` `quote_from_archive`): every plate
+  // archive of the past print's run, its grams per slot and actual seconds, no slice.
+  http.post(`${base}/:id/items/:item/quotes/archive`, async ({ request, params }) => {
+    const body = (await request.json()) as ArchiveQuoteRequest
+    try {
+      const order = lock(String(params.id))
+      const found = itemOf(order, String(params.item))
+      if (!requoteOpen(order, found)) {
+        throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is quoted while it is draft or quoted`)
+      }
+      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (found.kind === 'custom') throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field`, [found.id])
+      const archiveId = body.archive_id ?? found.origin_archive_ids?.[0]
+      if (archiveId == null) return fieldProblem(request, 'archive_id', `item ${found.id} was not taken from a past print: name its archive_id`)
+      const picked = pastPrint(archiveId)
+      // `past_prints.py` `_prints_item`: one the item was taken from, or one its output or file printed.
+      const its =
+        (found.origin_archive_ids ?? []).includes(archiveId) ||
+        (picked?.output_id !== undefined && picked.output_id === found.output_id) ||
+        (picked?.library_file_id !== undefined && picked.library_file_id === found.library_file?.id)
+      if (!its) return fieldProblem(request, 'archive_id', `archive ${archiveId} is not a print of item ${found.id}`)
+      if (!picked) return problem(request, 409, `Bambuddy has no archive ${archiveId} any more`, PROBLEMS + 'archive_gone', { archive_id: archiveId })
+      const run = picked.run.map((id) => pastPrint(id))
+      if (run.some((p) => !p)) return problem(request, 409, `archive ${archiveId}'s print run has plates with no archive`, PROBLEMS + 'archive_plates_missing', { archive_id: archiveId })
+      const failed = run.find((p) => p?.status !== 'completed')
+      if (failed) {
+        return problem(request, 409, `archive ${failed.id} is ${failed.status ?? 'of unknown status'}: only a completed print is a quote source`, PROBLEMS + 'archive_not_succeeded', { archive_id: failed.id })
+      }
+      const used = run.flatMap((p) => p!.slots.filter((s) => s.used_g > 0).map((s) => String(s.slot_id - 1)))
+      const filaments: Record<string, string> = { ...(body.filament_id ? Object.fromEntries(used.map((slot) => [slot, body.filament_id!])) : {}), ...(body.filaments ?? {}) }
+      const plates = run.map((p) => ({
+        index: p!.plate_id ?? 1,
+        print_seconds: p!.actual_time_seconds ?? p!.print_time_seconds ?? 0,
+        filaments: p!.slots.filter((s) => s.used_g > 0).map((s) => ({ slot: s.slot_id - 1, used_g: s.used_g })),
+        archive_id: p!.id,
+      }))
+      notEnded(order)
+      if (found.colours.length === 0) {
+        // A library file item takes the slots the print used.
+        const used = [...new Map(run.flatMap((p) => p!.slots).map((s) => [s.slot_id - 1, s.color])).entries()].sort((a, b) => a[0] - b[0])
+        found.colours = used.map(([slot, colour]) => ({ slot, colour, filament_id: filaments[String(slot)] ?? null }))
+      } else {
+        found.colours = withFilaments(found, filaments).colours
+      }
+      const empty = found.colours.find((c) => !c.filament_id)
+      if (empty) throw new FilamentsRefused(`colour slot ${empty.slot} has no filament to price it with`)
+      const made: Quote = {
+        id: newId('q'),
+        order_item_id: found.id,
+        revision_id: found.current_revision_id,
+        created_at: now(),
+        source: 'archive',
+        accepted: false,
+        sliced_sha256: null,
+        sliced_blob_key: null,
+        plates: plates.map((plate) => ({ ...plate, filaments: plate.filaments.map((f) => ({ slot: f.slot, used_g: String(f.used_g) })) })),
+        quantity: found.quantity,
+        created_by: BROWSER,
+        ...pricePlates(plates, found.colours, order.currency),
+        total_minor: 0,
+      }
+      made.total_minor = made.unit_price_minor * made.quantity
+      state.quotes.push(made)
+      if (found.status === 'draft') found.status = 'quoted'
+      found.updated_at = now()
+      event(order, 'quote.recorded', { item_id: found.id, quote_id: made.id })
+      rederive(order)
+      return HttpResponse.json(made, { status: 201 })
     } catch (error) {
       return refused(request, error)
     }

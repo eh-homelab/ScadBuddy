@@ -57,7 +57,7 @@ class Unit {
   }
 }
 
-const unitOf = (quote: Quote | undefined) => (quote && quote.source === 'slice' && quote.plates.length ? new Unit(quote) : null)
+const unitOf = (quote: Quote | undefined) => (quote && (quote.source === 'slice' || quote.source === 'archive') && quote.plates.length ? new Unit(quote) : null)
 
 function sum(values: (number | null | undefined)[]): number | null {
   const known = values.filter((v): v is number => v != null)

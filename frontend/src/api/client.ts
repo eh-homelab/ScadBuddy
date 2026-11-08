@@ -94,6 +94,9 @@ import type {
   ModelVersion,
   Output,
   RecentOutputsQuery,
+  ArchiveOutcome,
+  ArchiveQuoteRequest,
+  FarmArchivesQuery,
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
@@ -1880,6 +1883,18 @@ export const api = {
     return { items, total: header !== null ? Number(header) : items.length }
   },
 
+  /** #4777 — every Bambuddy archive, newest first (`GET /farm/archives`); a page shorter than `limit` is the last. */
+  listFarmArchives: (filters: FarmArchivesQuery, page: { limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams()
+    if (filters.date_from) query.set('date_from', filters.date_from)
+    if (filters.date_to) query.set('date_to', filters.date_to)
+    if (filters.printer_id !== undefined) query.set('printer_id', String(filters.printer_id))
+    if (filters.project_id !== undefined) query.set('project_id', String(filters.project_id))
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.offset !== undefined) query.set('offset', String(page.offset))
+    return request<ArchiveOutcome[]>(`/farm/archives?${query}`, { signal })
+  },
+
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
@@ -2538,6 +2553,9 @@ export const api = {
     }),
   quoteOrderItem: (orderId: string, itemId: string, body: ManualQuoteInput) =>
     request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #4777 — an `archive` quote: priced from what a past print used, no re-slice. */
+  quoteItemFromArchive: (orderId: string, itemId: string, body: ArchiveQuoteRequest) =>
+    request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/archive`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the
    * dialog's choices, price with the book; followed to the quote as every command is. */
   /** `onAccepted` (#4693): the quote is running as its operation, past its check, with that operation. */

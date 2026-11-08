@@ -65,7 +65,8 @@ export const handlers = [
   http.delete('/api/v1/payments/providers/:id', ({ request, params }) => {
     const id = String(params.id)
     if (!state.providers.some((p) => p.id === id)) return unknown(request, id)
-    if (state.paymentRequests.some((r) => r.provider === id && r.status === 'open')) {
+    // A pending request (#4958) still needs the provider's webhook secret, as `has_open_requests` says.
+    if (state.paymentRequests.some((r) => r.provider === id && (r.status === 'open' || r.status === 'pending'))) {
       return problem(request, 409, `payment provider ${id} has open payment requests`, PROBLEMS + 'provider_has_open_requests')
     }
     state.providers = state.providers.filter((p) => p.id !== id)
@@ -91,15 +92,24 @@ export const FAKE_FEE_MINOR = 30
  * A provider's event on a request, as `Lifecycle._apply_event` records it: `paid` writes a
  * payment and the request's `paid`, closes the open balance requests once the balance is
  * clear and writes the provider's fee entry; `refunded` writes a negative payment and
- * closes nothing; `expired` ends an open request. It is recorded on a cancelled order too.
+ * closes nothing; `expired` ends an open request. `pending` makes an open request pending
+ * and `failed` ends an open or pending one (#4958); neither writes money. It is recorded on
+ * a cancelled order too.
  */
-export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid' | 'refunded' | 'expired'): void {
+export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid' | 'pending' | 'failed' | 'refunded' | 'expired'): void {
   const order: Order = lock(orderId)
   const found: PaymentRequestView | undefined = state.paymentRequests.find((r) => r.id === requestId && r.order_id === orderId)
   if (!found?.provider) throw new Error(`no provider request ${requestId}`)
   const provider = state.providers.find((p) => p.id === found.provider)
   if (provider) provider.last_webhook_at = now()
   const by = { kind: 'provider' as const, principal: `payment:${found.provider}`, session: null }
+  if (kind === 'pending' || kind === 'failed') {
+    if (found.status === 'open' || (kind === 'failed' && found.status === 'pending')) {
+      settleRequest(found, kind)
+      state.events.push({ id: state.events.length + 1, order_id: order.id, at: now(), by, kind: `payment_request.${kind}`, detail: { request_id: found.id } })
+    }
+    return
+  }
   if (kind === 'expired') {
     if (found.status === 'open') {
       settleRequest(found, 'expired')

@@ -107,6 +107,19 @@ export interface RecentOutputsQuery {
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
 }
+/** #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went. */
+export type ArchiveOutcome = Schemas['ArchiveOutcome']
+/** #4777 — the filters `GET /farm/archives` takes; status and name are the browser's. */
+export interface FarmArchivesQuery {
+  /** First day, inclusive (`YYYY-MM-DD`). */
+  date_from?: string
+  /** Last day, inclusive (`YYYY-MM-DD`). */
+  date_to?: string
+  printer_id?: number
+  project_id?: number
+}
+/** #4777 — `POST /orders/{id}/items/{item}/quotes/archive`. */
+export type ArchiveQuoteRequest = Schemas['ArchiveQuoteRequest']
 export type ArrangeRequest = Schemas['ArrangeRequest']
 /** #3637 — one object of an arrange, maybe in other colours. */
 export type ArrangeObject = Schemas['ArrangeObject']

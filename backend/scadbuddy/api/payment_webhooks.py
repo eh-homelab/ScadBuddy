@@ -1,9 +1,11 @@
 """`POST /api/v1/payments/webhooks/{provider}` (#4957): a provider tells ScadBuddy that a
-request was paid, refunded or expired. It is the one back-office route the public
+request was paid, refunded or expired, that a payment is pending or failed, or what its fee
+was (#4958). It is the one back-office route the public
 reaches (``auth/routes.py`` ``PUBLIC_ENDPOINTS``): the provider's signature is its only
 credential. The route reads the raw body itself, as the signature covers those exact
 bytes; a body above ``MAX_WEBHOOK_BYTES`` is 413 before anything parses it. A bad
-signature is 400 and records nothing. Neither the body nor the headers are logged.
+signature is 400 and records nothing; a provider call the reading needed that failed is
+503 and records nothing. Neither the body nor the headers are logged.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -17,7 +19,11 @@ from scadbuddy.api.payments import PROBLEMS, not_found
 from scadbuddy.core.problems import ApiError
 from scadbuddy.payments.component import PaymentsDep
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
-from scadbuddy.payments.provider import BadSignatureError, ProviderError
+from scadbuddy.payments.provider import (
+    BadSignatureError,
+    ProviderError,
+    ProviderUnavailableError,
+)
 from scadbuddy.payments.service import ProviderNotFoundError, WebhookAnswer
 
 logger = logging.getLogger(__name__)
@@ -55,7 +61,9 @@ async def _body(request: Request) -> bytes:
     description=(
         "Public: the provider's signature is the credential. 400 for a bad signature"
         " (nothing is recorded), 404 for a provider not connected, 413 above 256 KiB,"
-        " 503 when the stored credential cannot be opened. A replayed event answers"
+        " 503 when the stored credential cannot be opened, and 503 `provider_unavailable`"
+        " when reading the event needed the provider's API and that call failed (nothing"
+        " is recorded, so the provider sends it again). A replayed event answers"
         " `replayed` and records nothing more."
     ),
 )
@@ -75,6 +83,14 @@ async def receive_webhook(provider: str, request: Request, payments: PaymentsDep
     except ProviderError as error:
         raise ApiError(
             status.HTTP_400_BAD_REQUEST, str(error), type_=PROBLEMS + "malformed_event"
+        ) from None
+    except ProviderUnavailableError as error:
+        # #4958: nothing was recorded; the provider sends the event again.
+        logger.warning("a webhook from %s was not read: %s", provider, error)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(error),
+            type_=PROBLEMS + "provider_unavailable",
         ) from None
     except (CredentialUnreadableError, KekMissingError) as error:
         # The caller is anyone: the real reason goes to the log, a fixed text to them.

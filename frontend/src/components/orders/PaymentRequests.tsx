@@ -15,16 +15,20 @@ import { refusalText } from './refusal'
 type Variant = 'default' | 'secondary' | 'outline' | 'destructive'
 const STATUS: Record<PaymentRequestView['status'], { label: string; variant: Variant }> = {
   open: { label: 'Open', variant: 'secondary' },
+  // #4958: a bank payment (US ACH) on its way, and one that did not settle.
+  pending: { label: 'Pending', variant: 'secondary' },
   paid: { label: 'Paid', variant: 'default' },
   expired: { label: 'Expired', variant: 'outline' },
   cancelled: { label: 'Cancelled', variant: 'destructive' },
+  failed: { label: 'Failed', variant: 'destructive' },
 }
 const ENDED = new Set<Order['status']>(['closed', 'cancelled'])
 
 /**
  * #4957 — an order's payment requests: ask the customer for money through a provider's
  * hosted page or by hand. The link is shown only while the request is open: once it is
- * paid, cancelled or expired, no one should pay it. `balanceMinor` is the amount the
+ * pending, paid, cancelled, expired or failed, no one should pay it. A pending request
+ * (#4958) cannot be cancelled: the money is on its way. `balanceMinor` is the amount the
  * form starts from.
  */
 export function PaymentRequests({
@@ -156,6 +160,7 @@ export function PaymentRequests({
                 </span>
                 <span className="sb-num">{money(r.amount_minor)}</span>
               </div>
+              {r.status === 'pending' && <span className="text-xs text-muted-foreground">The bank payment is on its way</span>}
               {r.status === 'open' && (
                 <div className="flex flex-wrap items-center gap-2">
                   {r.hosted_url ? (

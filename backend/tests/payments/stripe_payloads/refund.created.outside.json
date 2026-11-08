@@ -1,0 +1,28 @@
+{
+  "id": "evt_6ref",
+  "object": "event",
+  "api_version": "2026-10-28.endive",
+  "created": 1762560100,
+  "data": {
+    "object": {
+      "id": "re_6other",
+      "object": "refund",
+      "amount": 900,
+      "balance_transaction": null,
+      "charge": "ch_3MtwBwLkdIwHu7ix2KhxTz3v",
+      "created": 1762560100,
+      "currency": "usd",
+      "metadata": {},
+      "payment_intent": "pi_3OtherSale",
+      "reason": null,
+      "status": "succeeded"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "refund.created"
+}

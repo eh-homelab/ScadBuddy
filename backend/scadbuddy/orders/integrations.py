@@ -61,6 +61,15 @@ class ShelfSpool(BaseModel):
     loaded_printer_id: int | None = None
 
 
+class ArchiveSlot(BaseModel):
+    """One filament slot a plate archive's sliced file used (``extra_data.filament_slots``):
+    ``slot_id`` from 1, the slicer's grams, and the colour the file names."""
+
+    slot_id: int
+    used_g: float | None = None
+    color: str | None = None
+
+
 class ArchiveFacts(BaseModel):
     """One Bambuddy archive (one plate's print) as an attempt copies it (§8.2), in
     orders' own shape."""
@@ -80,10 +89,20 @@ class ArchiveFacts(BaseModel):
     #: The name its timelapse is attached under (``timelapse-<id>.mp4``), so the copy
     #: needs no second read of the archive (#5263).
     timelapse_name: str | None = None
+    #: The plate of its file it printed (from 1); None when Bambuddy did not say.
+    plate_id: int | None = None
+    #: The slicer's estimate of the print time (``print_time_seconds``).
+    print_seconds: int | None = None
+    #: The printed file's name, as Bambuddy archived it.
+    filename: str | None = None
+    #: The filament slots the sliced file used, with the slicer's grams (#4777).
+    slots: list[ArchiveSlot] = Field(default_factory=list)
 
 
-#: What of an archive an attempt can copy into its attachments (§8.2).
-ArchiveMedia = Literal["finished_photo", "timelapse"]
+#: What of an archive can be copied: an attempt's finish photo and timelapse (§8.2), or
+#: the printed file itself, which a past print's item copies into the native library
+#: (#4777, order operations spec §3.2).
+ArchiveMedia = Literal["finished_photo", "timelapse", "file"]
 
 
 class CopiedMedia(BaseModel):
@@ -140,8 +159,9 @@ class OrderIntegrations(Protocol):
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
-        """The archive's ``finish_`` photo ``name`` or its timelapse (attached as ``name``,
-        else as its archive names it) written to
+        """The archive's ``finish_`` photo ``name``, its timelapse (attached as ``name``,
+        else as its archive names it) or its printed file (``file``, named as archived)
+        written to
         ``target``, through Bambuddy's media routes. :class:`MediaTooLargeError` past
         ``limit`` bytes, with ``target`` removed."""
         ...

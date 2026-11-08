@@ -1,0 +1,26 @@
+{
+  "object": "list",
+  "url": "/v1/checkout/sessions",
+  "has_more": false,
+  "data": [
+    {
+      "id": "cs_test_a11YYufWQzNY63zpQ6QSNRQhkUpVph4WRmzW0zWJO2znZKdVujZ0N0S22u",
+      "object": "checkout.session",
+      "amount_subtotal": 700,
+      "amount_total": 700,
+      "client_reference_id": "req-1",
+      "currency": "usd",
+      "livemode": false,
+      "metadata": {
+        "scadbuddy_order_number": "ORD-2026-7",
+        "scadbuddy_order_id": "order-1",
+        "scadbuddy_payment_request_id": "req-1"
+      },
+      "mode": "payment",
+      "payment_intent": "pi_3MtwBwLkdIwHu7ix28a3tqPa",
+      "payment_status": "paid",
+      "status": "complete",
+      "url": null
+    }
+  ]
+}
