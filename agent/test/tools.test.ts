@@ -2659,9 +2659,9 @@ describe('prints (#308)', () => {
     expect(asked).toEqual(['', '?printer_media=true'])
   })
 
-  it("gives part settings print_output takes again, for an exact reprint (#5627)", async () => {
+  it("gives part settings print_output takes again, for a reprint (#5627)", async () => {
     // As `GET /prints/{archive_id}` answers them: only the settings set
-    // (`backend/scadbuddy/bambuddy/part_settings.py` `PartSettings._set_only`).
+    // (`backend/scadbuddy/bambuddy/part_settings.py` `parts_set_only`, on the read models).
     const recorded = { '2': { top_shell_layers: 8, ironing_type: 'top' }, '3': { sparse_infill_density: 20 } }
     server.use(http.get(`${BACKEND}/api/v1/prints/35`, () => HttpResponse.json({ archive_id: 35, part_settings: recorded })))
     const read = firstText(await runTool(tool('get_print'), { archive_id: 35 }, ctx())) as { part_settings: unknown }

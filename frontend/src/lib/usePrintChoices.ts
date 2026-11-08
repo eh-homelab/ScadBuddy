@@ -112,6 +112,12 @@ export function usePrintChoices(
    * takes none and the dialog shows no controls for it.
    */
   const [partSettings, setPartSettings] = useState<PartSettingsMap>({})
+  /**
+   * #5627 — the settings the open seeded (remembered, quoted or a batch step's), per slot,
+   * until the user changes that slot: the only ones the dialog drops once it knows they
+   * equal the slot's default. A value the user set is never dropped.
+   */
+  const [seededParts, setSeededParts] = useState<PartSettingsMap>({})
   // Read when the first read lands, as the other seeds are.
   const partSeedLatest = useLatest(partSeed)
   /** #83 — the output's plates, and the ones to print: every plate unless chosen (#3652). */
@@ -160,8 +166,10 @@ export function usePrintChoices(
     setTier(nextTier)
     setProcessName(nextProcess)
     setPrintSequence(nextSequence)
-    const seededParts = partSeedNow === undefined ? last?.part_settings : partSeedNow
-    setPartSettings(next.sliced ? {} : (sentPartSettings(seededParts) ?? {}))
+    const seedSource = partSeedNow === undefined ? last?.part_settings : partSeedNow
+    const seeds = next.sliced ? {} : (sentPartSettings(seedSource) ?? {})
+    setPartSettings(seeds)
+    setSeededParts(seeds)
     // A named process, a different flow per side and a print sequence (#4970) are
     // Advanced choices; opening in Simple would send them unseen. One flow for both is
     // Simple's own choice (#2166).
@@ -224,6 +232,7 @@ export function usePrintChoices(
     setSides({})
     setPrintSequence(null)
     setPartSettings({})
+    setSeededParts({})
     seeded.current = false
   }, [resetKey, carry])
 
@@ -256,6 +265,7 @@ export function usePrintChoices(
     setSides({})
     setPrintSequence(null)
     setPartSettings({})
+    setSeededParts({})
     seeded.current = false
     defaulted.current = false
   }
@@ -263,6 +273,11 @@ export function usePrintChoices(
   /** #5627 — one slot's settings, only what is changed from the slot's default. */
   const setSlotPartSettings = useCallback((slotId: number, settings: PartSettings) => {
     setPartSettings((current) => ({ ...current, [String(slotId)]: settings }))
+    setSeededParts((current) => {
+      if (!(String(slotId) in current)) return current
+      const { [String(slotId)]: _changed, ...rest } = current
+      return rest
+    })
   }, [])
 
   /** #2166 — Simple's one choice: High Flow or Standard, on both sides. */
@@ -359,6 +374,8 @@ export function usePrintChoices(
     setPrintSequence,
     partSettings,
     setPartSettings,
+    seededParts,
+    setSeededParts,
     setSlotPartSettings,
     toggleAdvanced,
     reset,

@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from scadbuddy.bambuddy.part_settings import (
     PartSettings,
+    inexact_part_settings,
     overrides_of,
     process_part_settings,
     unknown_slots,
@@ -118,7 +119,15 @@ def test_the_process_values_are_read_as_the_settings_take_them() -> None:
 
 @pytest.mark.parametrize(
     ("density", "read"),
-    [("15.5%", 16), ("15.4%", 15), ("0.5%", 1), ("99.5%", 100), ("100.5%", None), ("x%", None)],
+    [
+        ("15.5%", 16),
+        ("15.4%", 15),
+        ("0.5%", 1),
+        ("99.5%", 100),
+        ("100.5%", None),
+        ("x%", None),
+        ("1e30%", None),
+    ],
 )
 def test_a_fractional_preset_density_is_rounded_to_a_whole_percent(
     density: str, read: int | None
@@ -126,6 +135,14 @@ def test_a_fractional_preset_density_is_rounded_to_a_whole_percent(
     """#5627 review: Bambu Studio's density may carry a fraction; the control takes whole
     percents, so it opens on the nearest, half up, not empty."""
     assert process_part_settings({"sparse_infill_density": density}).sparse_infill_density == read
+
+
+def test_a_rounded_density_is_named_inexact() -> None:
+    """#5627 review: 15.5% opens the control on 16, and 16 is still a change."""
+    assert inexact_part_settings({"sparse_infill_density": "15.5%"}) == ["sparse_infill_density"]
+    assert inexact_part_settings({"sparse_infill_density": ["15%"]}) == []
+    assert inexact_part_settings({"sparse_infill_density": "1e30%"}) == []
+    assert inexact_part_settings({}) == []
 
 
 def test_slot_zero_is_refused() -> None:

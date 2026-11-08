@@ -153,15 +153,39 @@ def dumped(value: PartSettingsMap | None) -> dict[str, dict[str, Any]] | None:
     return {str(slot): settings.model_dump(exclude_none=True) for slot, settings in kept.items()}
 
 
-def _whole_percent(text: str) -> str:
-    """``text`` rounded to a whole number, half up; as it is when it is not a number."""
+def _decimal(text: str) -> Decimal | None:
+    """``text`` as a finite number; ``None`` when it is not one."""
     try:
         number = Decimal(text)
     except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _whole_percent(text: str) -> str:
+    """``text`` rounded to a whole number, half up; as it is when it is not a number, or
+    too large to round (``1e30``: ``quantize`` refuses it), so the bounds refuse it."""
+    number = _decimal(text)
+    if number is None:
         return text
-    if not number.is_finite():
+    try:
+        return str(number.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
         return text
-    return str(number.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def inexact_part_settings(values: Mapping[str, Any]) -> list[str]:
+    """The part settings whose process value :func:`process_part_settings` rounded (#5627):
+    a fractional density (``15.5%``) opens the control on 16, but 16 is still a change
+    from what the process prints, so the dialog sends it."""
+    value = values.get("sparse_infill_density")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str):
+        return []
+    number = _decimal(value.strip().removesuffix("%").strip())
+    whole = number is None or number == number.to_integral_value()
+    return [] if whole else ["sparse_infill_density"]
 
 
 def process_part_settings(values: Mapping[str, Any]) -> PartSettings:

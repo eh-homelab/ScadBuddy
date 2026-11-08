@@ -20,6 +20,11 @@ type Props = {
    * `slot_part_settings`, else `process_part_settings`); `null` while unknown.
    */
   baseline: PartSettings | null
+  /**
+   * The default a setting is compared against (`comparedBaseline`): `baseline` without a
+   * value the check rounded to fit, which is then still a change. `baseline` when omitted.
+   */
+  compared?: PartSettings | null
   /** Held until a check has read the process's values. */
   disabled?: boolean
   /** The disclosure opened: the dialog then asks the check for the process's values. */
@@ -48,7 +53,7 @@ function outOfRange(text: string, max: number): boolean {
  * and only a setting changed from it is sent; a setting set back to the default, or reset,
  * is unset. A number outside the setting's bounds is kept within them, and says so.
  */
-export function PartSettingsDisclosure({ slotId, value, baseline, disabled = false, onOpen, onChange }: Props) {
+export function PartSettingsDisclosure({ slotId, value, baseline, compared = baseline, disabled = false, onOpen, onChange }: Props) {
   const [open, setOpen] = useState(false)
   /**
    * The text of the number field being typed in, while it has the focus: a controlled
@@ -84,6 +89,7 @@ export function PartSettingsDisclosure({ slotId, value, baseline, disabled = fal
           {NUMBER_SETTINGS.map(({ key, label, max, unit }) => {
             const own = value?.[key]
             const fromBaseline = baseline?.[key] ?? null
+            const against = compared?.[key] ?? null
             const set = own !== null && own !== undefined
             const clamped = draft?.key === key && outOfRange(draft.text, max)
             return (
@@ -110,11 +116,11 @@ export function PartSettingsDisclosure({ slotId, value, baseline, disabled = fal
                       const text = event.target.value
                       setDraft({ key, text })
                       const read = parsed(text, max)
-                      if (read !== null) onChange(withSetting(value, key, read, fromBaseline))
+                      if (read !== null) onChange(withSetting(value, key, read, against))
                     }}
                     onBlur={(event) => {
                       setDraft(null)
-                      onChange(withSetting(value, key, parsed(event.target.value, max), fromBaseline))
+                      onChange(withSetting(value, key, parsed(event.target.value, max), against))
                     }}
                     className="sb-num w-24 text-right"
                   />
@@ -127,7 +133,7 @@ export function PartSettingsDisclosure({ slotId, value, baseline, disabled = fal
                       disabled={disabled}
                       onClick={() => {
                         setDraft(null)
-                        onChange(withSetting(value, key, null, fromBaseline))
+                        onChange(withSetting(value, key, null, against))
                       }}
                       data-testid={`${id}-${key}-reset`}
                     >
@@ -146,6 +152,7 @@ export function PartSettingsDisclosure({ slotId, value, baseline, disabled = fal
           {CHOICE_SETTINGS.map(({ key, label, values }) => {
             const own = value?.[key] ?? null
             const fromBaseline = baseline?.[key] ?? null
+            const against = compared?.[key] ?? null
             return (
               <div key={key} className="grid gap-1">
                 <Label htmlFor={`${id}-${key}`} className="text-xs font-normal text-muted-foreground">
@@ -161,7 +168,7 @@ export function PartSettingsDisclosure({ slotId, value, baseline, disabled = fal
                         value,
                         key,
                         next === DEFAULT ? null : (next as NonNullable<PartSettings[typeof key]>),
-                        fromBaseline,
+                        against,
                       ),
                     )
                   }

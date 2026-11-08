@@ -90,8 +90,29 @@ export function slotBaseline(
 }
 
 /**
- * `value` without the settings that equal their slot's default (`slotBaseline`): such a
- * setting changes nothing, so a remembered or quoted one is not counted as changed. Each
+ * The slot's default as a setting is compared against it (`withSetting`, `withoutDefaults`):
+ * `slotBaseline` without the keys the check rounded to fit a control (`inexact`, the check's
+ * `process_inexact`) where the slot still has the process's value. A process density of
+ * 15.5% shows 16, but 16 is not what the process prints, so choosing it is a change.
+ */
+export function comparedBaseline(
+  slot: string,
+  process: PartSettings | null | undefined,
+  slots: PartSettingsMap | null | undefined,
+  inexact: readonly string[] = [],
+): PartSettings | null {
+  const baseline = slotBaseline(slot, process, slots)
+  if (baseline === null || inexact.length === 0) return baseline
+  return Object.fromEntries(
+    Object.entries(baseline).filter(
+      ([key, setting]) => !(inexact.includes(key) && process?.[key as PartSettingKey] === setting),
+    ),
+  ) as PartSettings
+}
+
+/**
+ * `value` without the settings that equal their slot's default (`comparedBaseline`): such
+ * a setting changes nothing, so a remembered or quoted one is not counted as changed. Each
  * slot keeps only what it sets. A value equal to the process's but not to the template's
  * for that slot stays: it is what makes the slot print the process's.
  */
@@ -99,10 +120,11 @@ export function withoutDefaults(
   value: PartSettingsMap | null | undefined,
   process: PartSettings | null | undefined,
   slots?: PartSettingsMap | null,
+  inexact: readonly string[] = [],
 ): PartSettingsMap {
   const kept = Object.entries(sentPartSettings(value) ?? {})
     .map(([slot, settings]) => {
-      const baseline = slotBaseline(slot, process, slots)
+      const baseline = comparedBaseline(slot, process, slots, inexact)
       return [
         slot,
         Object.fromEntries(
@@ -112,6 +134,33 @@ export function withoutDefaults(
     })
     .filter(([, settings]) => Object.keys(settings).length > 0)
   return Object.fromEntries(kept)
+}
+
+/**
+ * `current` without the seeded settings (`seeded`: remembered, quoted or a batch step's)
+ * that equal their slot's default and are still as seeded. A setting the user set in this
+ * dialog is never dropped, even when it equals a default read later.
+ */
+export function withoutSeededDefaults(
+  current: PartSettingsMap,
+  seeded: PartSettingsMap,
+  process: PartSettings | null | undefined,
+  slots?: PartSettingsMap | null,
+  inexact: readonly string[] = [],
+): PartSettingsMap {
+  const changes = withoutDefaults(seeded, process, slots, inexact)
+  const next: PartSettingsMap = {}
+  for (const [slot, settings] of Object.entries(current)) {
+    const kept = Object.fromEntries(
+      Object.entries(settings ?? {}).filter(([key, setting]) => {
+        const seed = seeded[slot]?.[key as PartSettingKey]
+        const isDefault = seed !== undefined && changes[slot]?.[key as PartSettingKey] === undefined
+        return !(isDefault && seed === setting)
+      }),
+    ) as PartSettings
+    next[slot] = kept
+  }
+  return next
 }
 
 /** Whether two maps set the same, slots that set nothing aside. */

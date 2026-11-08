@@ -87,6 +87,64 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '2': { top_shell_layers: 3 } } })
   })
 
+  it('keeps a value the user set when a later check reads a process whose default equals it', async () => {
+    const real = api.checkPrint.bind(api)
+    let flagged = 0
+    vi.spyOn(api, 'checkPrint').mockImplementation(async (outputId, body, processValues) => {
+      const answer = await real(outputId, body, processValues)
+      if (!processValues) return answer
+      flagged += 1
+      // The first answer's process has 5 top shell layers; every later one, 8.
+      return { ...answer, process_part_settings: { ...answer.process_part_settings, top_shell_layers: flagged === 1 ? 5 : 8 } }
+    })
+    const run = vi.spyOn(api, 'runPrint')
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const slot = await openSlot(1)
+    const top = within(slot).getByLabelText(/Top shell layers/)
+    await waitFor(() => expect(top).toHaveValue(5))
+
+    fireEvent.change(top, { target: { value: '8' } })
+    // The request changed, so the check reads again: now the default is 8 too.
+    await waitFor(() => expect(flagged).toBeGreaterThan(1))
+    await waitFor(() => expect(printButton()).toBeEnabled())
+    expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
+    fireEvent.click(printButton())
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { top_shell_layers: 8 } } })
+  })
+
+  it('sends a whole-percent density that differs from a fractional process value', async () => {
+    const real = api.checkPrint.bind(api)
+    vi.spyOn(api, 'checkPrint').mockImplementation(async (outputId, body, processValues) => {
+      const answer = await real(outputId, body, processValues)
+      if (!processValues) return answer
+      // The process's 15.5% shows as 16.
+      return {
+        ...answer,
+        process_part_settings: { ...answer.process_part_settings, sparse_infill_density: 16 },
+        process_inexact: ['sparse_infill_density'],
+      }
+    })
+    const run = vi.spyOn(api, 'runPrint')
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const slot = await openSlot(1)
+    const density = within(slot).getByLabelText(/Sparse infill density/)
+    await waitFor(() => expect(density).toHaveValue(16))
+
+    // The field already shows 16: type another number, then 16 (the same text fires no change).
+    fireEvent.focus(density)
+    fireEvent.change(density, { target: { value: '1' } })
+    fireEvent.change(density, { target: { value: '16' } })
+    fireEvent.blur(density)
+    expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
+    await waitFor(() => expect(printButton()).toBeEnabled())
+    fireEvent.click(printButton())
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { sparse_infill_density: 16 } } })
+  })
+
   it('says a number out of range was kept within the bounds', async () => {
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()

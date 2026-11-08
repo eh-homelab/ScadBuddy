@@ -331,7 +331,8 @@ laid over it, per key, as the run lays the request over the template's
 (`?process_values=true` on `POST …/check`). The check reads the process's values with the
 preset's other values (`PrintCheck.process_part_settings`,
 `part_settings.process_part_settings`; a fractional density is rounded to a whole
-percent), and gives, for each slot the template sets on the copy
+percent, and named in `PrintCheck.process_inexact`, so choosing that whole percent is still
+sent), and gives, for each slot the template sets on the copy
 (`template_part_settings`), the process's values with the template's over them
 (`PrintCheck.slot_part_settings`). A check that does not ask reads nothing more, since the
 read can be one more Bambuddy call. The values are `None` when the preset cannot be read;
@@ -340,7 +341,8 @@ stand has answered. A value set back to the slot's default, or reset, is unset, 
 what is set is sent (`lib/partSettings.ts` `sentPartSettings`, `withSetting`,
 `slotBaseline`). So on a slot whose template sets 5 top shell layers over the process's 3,
 choosing 3 sends 3. A remembered or quoted value equal to the slot's default is dropped once
-the defaults are read (`withoutDefaults`). The check,
+the defaults are read (`withoutSeededDefaults`); a value the user set in the dialog is never
+dropped. The check,
 the background slice, the run, a batch step and the quote send the same field
 (`sliceOverrides`), so the check lists a slot the file lacks. A print remembers them with
 the model's or file's other choices (`ModelPrintChoices.part_settings`, left out of the

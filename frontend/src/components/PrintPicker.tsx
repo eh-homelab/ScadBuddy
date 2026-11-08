@@ -45,7 +45,14 @@ import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, single
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
-import { samePartSettings, sentPartSettings, slotBaseline, withoutDefaults } from '../lib/partSettings'
+import {
+  comparedBaseline,
+  samePartSettings,
+  sentPartSettings,
+  slotBaseline,
+  withoutDefaults,
+  withoutSeededDefaults,
+} from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
@@ -1150,6 +1157,7 @@ export function PrintPicker({
   const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
   const processParts = check.processPartSettings
   const slotParts = check.slotPartSettings
+  const inexact = check.processInexact
   /**
    * #5627 — an item's print with settings other than its accepted quote's. A setting equal
    * to its slot's default changes nothing, so it is left out on both sides.
@@ -1158,22 +1166,22 @@ export function PrintPicker({
     itemPrint !== undefined &&
     takesParts &&
     !samePartSettings(
-      withoutDefaults(picker.partSettings, processParts, slotParts),
-      withoutDefaults(itemPrint.quoted, processParts, slotParts),
+      withoutDefaults(picker.partSettings, processParts, slotParts, inexact),
+      withoutDefaults(itemPrint.quoted, processParts, slotParts, inexact),
     )
   /**
    * #5627 — once the process's values are read, a remembered or quoted setting equal to
    * its slot's default (the process's value, or the template's for the slot, #5626) is
    * dropped: it changes nothing, so it is not shown as changed.
    */
-  const { setPartSettings: dropProcessValues } = picker
+  const { setPartSettings: dropProcessValues, seededParts } = picker
   useEffect(() => {
     if (processParts === null) return
     dropProcessValues((current) => {
-      const next = withoutDefaults(current, processParts, slotParts)
+      const next = withoutSeededDefaults(current, seededParts, processParts, slotParts, inexact)
       return samePartSettings(next, current) ? current : next
     })
-  }, [processParts, slotParts, dropProcessValues])
+  }, [processParts, slotParts, inexact, seededParts, dropProcessValues])
   /**
    * #2169 — the choices on screen, sliced in the background once the check finds nothing
    * the run would refuse. A run of the same choices queues that slice.
@@ -1319,7 +1327,7 @@ export function PrintPicker({
    * again for it), then, once this file's spools are known, the rest.
    */
   const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
-  const { askPrinter, changeNozzles, changeQuality, setPlate, setPartSettings } = picker
+  const { askPrinter, changeNozzles, changeQuality, setPlate, setPartSettings, setSeededParts } = picker
   const restoreProfiles = filamentProfiles.restore
   useEffect(() => {
     const seed = batch?.seed
@@ -1367,7 +1375,10 @@ export function PrintPicker({
       setSupports(seed.supports ?? null)
       setPrimeTower(seed.prime_tower ?? null)
       restoreProfiles(seed.filament_profiles ?? [])
-      if (!sliced) setPartSettings(seed.part_settings ?? {})
+      if (!sliced) {
+        setPartSettings(seed.part_settings ?? {})
+        setSeededParts(seed.part_settings ?? {})
+      }
     }
   }, [
     batch,
@@ -1386,6 +1397,7 @@ export function PrintPicker({
     setPlate,
     setPrintSequence,
     setPartSettings,
+    setSeededParts,
     restoreProfiles,
     clearLanCleared,
   ])
@@ -1856,6 +1868,7 @@ export function PrintPicker({
                                 slotId={slotId}
                                 value={picker.partSettings[String(slotId)]}
                                 baseline={slotBaseline(String(slotId), processParts, slotParts)}
+                                compared={comparedBaseline(String(slotId), processParts, slotParts, inexact)}
                                 // Until a check has read the process's values, a value typed
                                 // could not be told from the process's own.
                                 disabled={!check.processValuesRead}
@@ -1876,7 +1889,11 @@ export function PrintPicker({
                         variant="link"
                         size="sm"
                         className="h-auto px-0"
-                        onClick={() => setPartSettings(sentPartSettings(itemPrint?.quoted) ?? {})}
+                        onClick={() => {
+                          const quoted = sentPartSettings(itemPrint?.quoted) ?? {}
+                          setPartSettings(quoted)
+                          setSeededParts(quoted)
+                        }}
                         data-testid="part-settings-use-quoted"
                       >
                         use the quote&rsquo;s

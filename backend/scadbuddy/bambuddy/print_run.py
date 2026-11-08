@@ -106,6 +106,7 @@ from scadbuddy.bambuddy.options import (
 from scadbuddy.bambuddy.part_settings import (
     PartSettings,
     PartSettingsMap,
+    inexact_part_settings,
     laid_under,
     normalised,
     overrides_of,
@@ -876,9 +877,14 @@ class PrintCheck(BaseModel):
     #: The process's own value of each part setting (#5627), which the dialog's
     #: "Settings for this colour" controls open on; a value it has none of is left out.
     #: ``None`` when the process was not read: a check that did not ask
-    #: (``process_values``), a sliced file, which takes no part settings, or a preset
-    #: whose values cannot be read.
+    #: (``process_values``), a sliced file, which takes no part settings, a preset whose
+    #: values cannot be read, or a check that answers with an error before the process is
+    #: read (a refusal such as ``part_settings_refusal``'s, or no process chosen).
     process_part_settings: PartSettings | None = None
+    #: The keys of ``process_part_settings`` that were rounded to fit a control (#5627,
+    #: ``part_settings.inexact_part_settings``): the process's own value is not that
+    #: number, so choosing it is still a change and is sent.
+    process_inexact: list[str] = Field(default_factory=list)
     #: What a slot prints with when the request sets nothing (#5627, #5626): for each slot
     #: a template's ``part_print_settings`` set (:func:`template_part_settings`), the
     #: process's values with the template's laid over them, per key, as
@@ -1531,11 +1537,13 @@ async def _part_baselines(
     """``PrintCheck.process_part_settings`` and ``slot_part_settings`` (#5627): what each
     slot prints with when the request sets nothing, which the dialog's controls open on
     and compare against."""
-    process_parts = await _process_part_settings(source, process, read)
+    read_parts = await _process_part_settings(source, process, read)
+    process_parts, inexact = read_parts if read_parts else (None, [])
     template = await template_part_settings(source, client) if process_parts else None
     under = process_parts.model_dump(exclude_none=True) if process_parts else {}
     return {
         "process_part_settings": process_parts,
+        "process_inexact": inexact,
         "slot_part_settings": (
             {
                 slot: PartSettings(**{**under, **settings.model_dump(exclude_none=True)})
@@ -1549,9 +1557,10 @@ async def _part_baselines(
 
 async def _process_part_settings(
     source: PrintSource, process: PresetRef | None, read: ReadPresetValues
-) -> PartSettings | None:
+) -> tuple[PartSettings, list[str]] | None:
     """The process's values of the part settings (#5627), for a file the run lays out (an
-    output or a library file, #5628); ``None`` for a sliced file, which takes none
+    output or a library file, #5628), with the keys rounded to fit
+    (``inexact_part_settings``); ``None`` for a sliced file, which takes none
     (:func:`part_settings_refusal`), and when the preset's values cannot be read. Only an
     advisory read: a failed one never fails the check."""
     if process is None or source.is_sliced:
@@ -1564,7 +1573,9 @@ async def _process_part_settings(
             extra={"source": process.source, "status": error.status},
         )
         return None
-    return process_part_settings(answer.values) if answer.resolved else None
+    if not answer.resolved:
+        return None
+    return process_part_settings(answer.values), inexact_part_settings(answer.values)
 
 
 def _listed(warning: FilamentWarning | None) -> list[FilamentWarning]:

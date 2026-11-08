@@ -37,6 +37,8 @@ export interface PrintCheckState {
    * laid over them (`slot_part_settings`), only while `processValuesRead`; else `null`.
    */
   slotPartSettings: PartSettingsMap | null
+  /** #5627 — the keys of `processPartSettings` rounded to fit a control (`process_inexact`). */
+  processInexact: readonly string[]
 }
 
 /** The request without its `part_settings`: what decides the process's values. */
@@ -85,6 +87,7 @@ export function usePrintCheck(
     reload: state.reload,
     processValuesRead: processRead,
     processPartSettings: processRead ? (answer?.verdict.process_part_settings ?? null) : null,
+    processInexact: processRead ? (answer?.verdict.process_inexact ?? []) : [],
     slotPartSettings: processRead ? ((answer?.verdict.slot_part_settings as PartSettingsMap | null | undefined) ?? null) : null,
   }
 }
