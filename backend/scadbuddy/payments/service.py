@@ -24,6 +24,7 @@ from scadbuddy.payments.credentials import (
     KekMissingError,
     PaymentCredentials,
     ProviderNotConnectedError,
+    WebhookError,
 )
 from scadbuddy.payments.models import (
     EventOutcome,
@@ -81,6 +82,15 @@ class FieldError(ValueError):
         self.loc = loc
 
 
+def _webhook_error(failed: Exception) -> WebhookError:
+    """The fixed category Settings shows for a failed webhook; never its text."""
+    if isinstance(failed, BadSignatureError):
+        return "signature"
+    if isinstance(failed, ProviderUnavailableError):
+        return "provider_unavailable"
+    return "handler_error"
+
+
 class ProviderStatus(BaseModel):
     id: str
     label: str
@@ -91,6 +101,9 @@ class ProviderStatus(BaseModel):
     is_default: bool
     connected_at: datetime | None
     last_webhook_at: datetime | None
+    #: Why the last webhook failed, cleared by the next that succeeds (#5684).
+    last_webhook_error: WebhookError | None
+    last_webhook_error_at: datetime | None
 
 
 class ProviderConnect(BaseModel):
@@ -289,7 +302,24 @@ class Payments:
         """Check the signature, then record the event. ``BadSignatureError`` leaves
         before anything is written; ``ProviderError`` is a signed body it cannot read;
         ``ProviderUnavailableError`` is a provider call the reading needed that failed,
-        and also leaves before anything is written."""
+        and also leaves before anything is written. Each failure but an unknown provider
+        keeps its category on the credential row, and the next success clears it (#5684).
+        """
+        try:
+            outcome = await self._handle_webhook(provider, headers, body)
+        except ProviderNotFoundError:
+            raise
+        except Exception as failed:
+            await asyncio.to_thread(
+                self._credentials.set_webhook_error, provider, _webhook_error(failed)
+            )
+            raise
+        await asyncio.to_thread(self._credentials.set_webhook_error, provider, None)
+        return outcome
+
+    async def _handle_webhook(
+        self, provider: str, headers: Mapping[str, str], body: bytes
+    ) -> EventOutcome:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
@@ -368,6 +398,8 @@ class Payments:
                     is_default=row is not None and row.is_default,
                     connected_at=None if row is None else row.connected_at,
                     last_webhook_at=None if row is None else row.last_webhook_at,
+                    last_webhook_error=None if row is None else row.last_webhook_error,
+                    last_webhook_error_at=None if row is None else row.last_webhook_error_at,
                 )
             )
         return found

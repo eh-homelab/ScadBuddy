@@ -128,6 +128,16 @@ def insert_event(conn: Conn, provider: str, event: ProviderEvent) -> int | None:
     return None if row is None else int(row["id"])
 
 
+def recorded_payment(conn: Conn, provider: str, event_id: str) -> str | None:
+    """The payment this provider's event wrote, when it was recorded with one."""
+    row = conn.execute(
+        "SELECT payment_id FROM payment_events WHERE provider = %s AND event_id = %s"
+        " AND outcome = 'recorded'",
+        (provider, event_id),
+    ).fetchone()
+    return None if row is None else row["payment_id"]
+
+
 def finish_event(
     conn: Conn,
     event_row: int,

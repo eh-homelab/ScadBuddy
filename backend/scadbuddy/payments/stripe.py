@@ -30,8 +30,14 @@ Stripe's documented behaviour this relies on:
   and ``data.previous_attributes`` is documented only for ``*.updated`` events
   (https://docs.stripe.com/api/events/object#event_object-data-previous_attributes).
   A Refund is recorded once it is ``succeeded``, under the event id ``refund:<id>``, so
-  its ``refund.created`` and a later ``refund.updated`` record it once. A refund that
-  fails after it succeeded (``refund.failed``, rare) is not reversed yet (#5681).
+  its ``refund.created`` and a later ``refund.updated`` record it once.
+- A refund can fail after it succeeded: the bank returns the money, Stripe adds it back to
+  the balance, the Refund's status moves to ``failed``, and Stripe sends ``refund.failed``;
+  a ``canceled`` Refund is a kind of failure too
+  (https://docs.stripe.com/refunds#failed-refunds). Either status, from ``refund.failed``
+  or ``refund.updated``, is one ``refund_failed`` event, ``refund-failed:<id>``, naming
+  the refund's own event id (``reverses``), so only a refund that was recorded is
+  reversed, and once (#5681).
 - Events can arrive in any order (https://docs.stripe.com/webhooks#event-ordering), and a
   non-2xx answer makes Stripe send the event again
   (https://docs.stripe.com/webhooks#automatic-retries).
@@ -310,7 +316,7 @@ class StripeProvider:
         other = ProviderEvent(event_id=event_id, kind="other")
         if kind.startswith("checkout.session."):
             return await self._session_event(credential, event_id, kind, obj) or other
-        if kind in ("refund.created", "refund.updated"):
+        if kind in ("refund.created", "refund.updated", "refund.failed"):
             return await self._refund(credential, obj) or other
         if kind == "charge.updated":
             return await self._late_fee(credential, event_id, obj, previous) or other
@@ -385,11 +391,22 @@ class StripeProvider:
         credential: Credential,
         refund: dict[str, Any],
     ) -> ProviderEvent | None:
-        """A succeeded Refund, keyed by its own id, for its own amount."""
-        if refund.get("status") != "succeeded":
+        """A succeeded Refund, keyed by its own id, for its own amount; or a failed or
+        cancelled one, which reverses that refund if it was recorded."""
+        status = refund.get("status")
+        refund_key = f"refund:{_path_id(refund['id'])}"
+        if status in ("failed", "canceled"):
+            return ProviderEvent(
+                event_id=f"refund-failed:{_path_id(refund['id'])}",
+                kind="refund_failed",
+                provider_ref=await self._session_of(credential, refund.get("payment_intent")),
+                currency=str(refund["currency"]).upper(),
+                reverses=refund_key,
+            )
+        if status != "succeeded":
             return None
         return ProviderEvent(
-            event_id=f"refund:{_path_id(refund['id'])}",
+            event_id=refund_key,
             kind="refunded",
             provider_ref=await self._session_of(credential, refund.get("payment_intent")),
             amount_minor=int(refund["amount"]),

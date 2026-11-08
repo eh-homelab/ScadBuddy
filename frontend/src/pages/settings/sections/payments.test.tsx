@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../../api/client'
 import { resetMockState } from '../../../mocks/handlers'
-import { mockConnectProvider, mockPaymentEvent, setMockKek } from '../../../mocks/features/payments'
+import { mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
 import { ORDER_ACCEPTED } from '../../../mocks/features/orders/state'
 import { enter, region, renderSettingsSection } from '../testing'
 import { Component as Payments } from './payments'
@@ -44,6 +44,20 @@ describe('Settings → Payments (#4957)', () => {
     mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'expired')
     renderSettingsSection(<Payments />, { route })
     expect(await screen.findByText(/Last webhook/)).toBeInTheDocument()
+  })
+
+  it('shows why the last webhook failed until one succeeds (#5684)', async () => {
+    mockConnectProvider()
+    setMockWebhookError('signature')
+    const first = renderSettingsSection(<Payments />, { route })
+    expect(await screen.findByRole('status')).toHaveTextContent(/signature did not match/)
+    first.unmount()
+    await api.addPayment(ORDER_ACCEPTED, { amount_minor: 100 })
+    const opened = await api.requestPayment(ORDER_ACCEPTED, {})
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'expired')
+    renderSettingsSection(<Payments />, { route })
+    expect(await screen.findByText(/Last webhook/)).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('refuses to disconnect while a request is open, with the backend’s reason', async () => {

@@ -970,6 +970,8 @@ class Lifecycle:
             return "recorded", None
         if event.kind == "fee":
             return self._late_fee(conn, order, found, provider, event, by)
+        if event.kind == "refund_failed":
+            return self._reverse_refund(conn, order, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
@@ -1010,6 +1012,48 @@ class Lifecycle:
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return "recorded", payment
+
+    def _reverse_refund(
+        self, conn: Conn, order: Order, provider: str, event: ProviderEvent, by: Actor
+    ) -> tuple[EventOutcome, Payment | None]:
+        """#5681: a refund the provider recorded and then could not pay out. A positive
+        payment cancels the refund's negative one, with its provider, request and reference,
+        so the customer's page can pair them. A refund closes no request, so this opens or
+        closes none, and the balance follows from the payments sum. A refund never recorded
+        (still pending when it failed) wrote nothing, so there is nothing to reverse."""
+        if event.currency != order.currency:
+            return "currency_mismatch", None
+        refund_id = (
+            None
+            if event.reverses is None
+            else payments.recorded_payment(conn, provider, event.reverses)
+        )
+        refund = next(
+            (p for p in self.store.payments(order.id, conn=conn) if p.id == refund_id), None
+        )
+        if refund is None or refund.amount_minor >= 0:
+            return "ignored", None
+        payment = self.store.insert_payment(
+            conn,
+            order.id,
+            amount_minor=-refund.amount_minor,
+            method=provider,
+            reference=refund.reference,
+            received_at=None,
+            notes="",
+            provider=refund.provider,
+            payment_request_id=refund.payment_request_id,
+        )
+        self._event(
+            conn,
+            order,
+            by,
+            "payment.added",
+            payment_id=payment.id,
+            payment_request_id=refund.payment_request_id,
+            provider=provider,
+        )
         return "recorded", payment
 
     def _write_fee(

@@ -241,3 +241,62 @@ def test_two_fee_events_at_once_write_one_fee(shop: PayShop) -> None:
         w.join(timeout=10)
     assert sorted(outcomes) == ["ignored", "recorded"]
     assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+# -- a refund that failed (#5681) ----------------------------------------------------------
+
+REFUND = ProviderEvent(
+    event_id="refund:re_1", kind="refunded", provider_ref="fake_r", amount_minor=200,
+    currency="USD",
+)  # fmt: skip
+REFUND_FAILED = ProviderEvent(
+    event_id="refund-failed:re_1", kind="refund_failed", provider_ref="fake_r",
+    currency="USD", reverses="refund:re_1",
+)  # fmt: skip
+
+
+def _refunded(shop: PayShop) -> tuple[Order, PaymentRequestView]:
+    order, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    assert shop.lifecycle.record_provider_event("fake", REFUND) == "recorded"
+    return order, req
+
+
+def test_a_failed_refund_writes_a_payment_that_cancels_it(shop: PayShop) -> None:
+    order, req = _refunded(shop)
+    before = shop.rows_request(req.id)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "recorded"
+    pays = [p for p in shop.rows.payments(order.id) if p.provider]
+    assert [p.amount_minor for p in pays] == [700, -200, 200]
+    refund, reversal = pays[1], pays[2]
+    assert (reversal.provider, reversal.payment_request_id, reversal.reference) == (
+        refund.provider, refund.payment_request_id, refund.reference,
+    )  # fmt: skip
+    after = shop.rows_request(req.id)
+    assert (after.status, after.payment_id, after.paid_at) == (
+        before.status, before.payment_id, before.paid_at,
+    )  # fmt: skip
+    # The manual 300, the provider's 700, its refund and the reversal.
+    assert shop.kinds(order).count("payment.added") == 4
+
+
+def test_a_failed_refund_told_again_is_replayed(shop: PayShop) -> None:
+    order, _ = _refunded(shop)
+    shop.lifecycle.record_provider_event("fake", REFUND_FAILED)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "replayed"
+    assert _provider_payments(shop, order) == [700, -200, 200]
+
+
+def test_a_failed_refund_never_recorded_is_ignored(shop: PayShop) -> None:
+    """A refund still pending when it failed wrote no row, so there is nothing to cancel."""
+    order, _ = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
+    assert _provider_payments(shop, order) == [700]
+
+
+def test_a_failed_refund_in_another_currency_is_refused(shop: PayShop) -> None:
+    order, _ = _refunded(shop)
+    other = REFUND_FAILED.model_copy(update={"currency": "EUR"})
+    assert shop.lifecycle.record_provider_event("fake", other) == "currency_mismatch"
+    assert _provider_payments(shop, order) == [700, -200]

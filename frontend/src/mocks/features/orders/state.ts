@@ -14,6 +14,7 @@ import type {
   OrderProject,
   Payment,
   PaymentRequestView,
+  ProviderStatus,
   Quote,
   Revision,
   Shipment,
@@ -68,7 +69,16 @@ export class Refused extends Error {
 }
 
 /** What the mock keeps of a connected provider: no secret, only that it was sent. */
-export type ConnectedProvider = { id: string; account_label: string; is_default: boolean; connected_at: string; last_webhook_at: string | null }
+export type ConnectedProvider = {
+  id: string
+  account_label: string
+  is_default: boolean
+  connected_at: string
+  last_webhook_at: string | null
+  /** #5684 — the last webhook failure's category and time, cleared by the next success. */
+  last_webhook_error: ProviderStatus['last_webhook_error']
+  last_webhook_error_at: string | null
+}
 
 export type State = {
   customers: Customer[]

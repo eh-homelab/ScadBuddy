@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
@@ -396,6 +396,30 @@ async def test_a_pending_refund_is_recorded_when_it_succeeds() -> None:
     assert (settled.event_id, settled.kind, settled.amount_minor) == (
         "refund:re_3bank", "refunded", 700,
     )  # fmt: skip
+
+
+@respx.mock
+@pytest.mark.parametrize("status", ["failed", "canceled"])
+async def test_a_failed_refund_reverses_the_refund(status: str) -> None:
+    """#5681: a Refund's status moves to ``failed`` (or ``canceled``, a kind of failure)
+    and Stripe sends ``refund.failed`` (https://docs.stripe.com/refunds#failed-refunds).
+    Its ``refund.failed`` and ``refund.updated`` share one event id, so it reverses once,
+    and it names the refund's own event id, so only a recorded refund is reversed."""
+    respx.get(f"{API}/v1/checkout/sessions").mock(
+        return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.json"))
+    )
+    want = ProviderEvent(
+        event_id="refund-failed:re_3bank", kind="refund_failed", provider_ref=CS,
+        currency="USD", reverses="refund:re_3bank",
+        created_at=MADE + timedelta(seconds=200),
+    )  # fmt: skip
+    failed = payload("refund.failed.json")
+    failed["data"]["object"]["status"] = status
+    body = json.dumps(failed).encode()
+    assert await STRIPE.parse_webhook(CRED, signed(body), body) == want
+    failed["type"] = "refund.updated"
+    body = json.dumps(failed).encode()
+    assert await STRIPE.parse_webhook(CRED, signed(body), body) == want
 
 
 @respx.mock

@@ -10,6 +10,7 @@ import logging
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -20,7 +21,13 @@ from scadbuddy.payments.store import has_open_requests
 
 logger = logging.getLogger(__name__)
 
-_ROW = "provider, account_label, settings, is_default, connected_at, last_webhook_at"
+_ROW = (
+    "provider, account_label, settings, is_default, connected_at, last_webhook_at,"
+    " last_webhook_error, last_webhook_error_at"
+)
+
+#: Why the last webhook failed (#5684): a fixed category, never a provider's text.
+WebhookError = Literal["signature", "provider_unavailable", "handler_error"]
 
 
 def credential_aad(credential_id: str, provider: str) -> str:
@@ -61,6 +68,8 @@ class ProviderRow(BaseModel):
     is_default: bool
     connected_at: datetime
     last_webhook_at: datetime | None
+    last_webhook_error: WebhookError | None = None
+    last_webhook_error_at: datetime | None = None
 
 
 class PaymentCredentials:
@@ -108,7 +117,8 @@ class PaymentCredentials:
                 row = conn.execute(
                     "UPDATE payment_credentials SET account_label = %s, settings = %s::jsonb,"
                     " secret_sealed = %s, dek_sealed = %s, kek_id = %s, connected_at ="
-                    f" clock_timestamp() WHERE id = %s RETURNING {_ROW}",
+                    " clock_timestamp(), last_webhook_error = NULL, last_webhook_error_at ="
+                    f" NULL WHERE id = %s RETURNING {_ROW}",
                     (*values, row_id),
                 ).fetchone()
             else:
@@ -196,4 +206,14 @@ class PaymentCredentials:
                 "UPDATE payment_credentials SET last_webhook_at = clock_timestamp()"
                 " WHERE provider = %s",
                 (provider,),
+            )
+
+    def set_webhook_error(self, provider: str, error: WebhookError | None) -> None:
+        """Keep why the last webhook failed, or clear it once one succeeds (#5684)."""
+        with self._store.transaction() as conn:
+            conn.execute(
+                "UPDATE payment_credentials SET last_webhook_error = %s,"
+                " last_webhook_error_at = CASE WHEN %s::text IS NULL THEN NULL"
+                " ELSE clock_timestamp() END WHERE provider = %s",
+                (error, error, provider),
             )

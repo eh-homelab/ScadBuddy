@@ -863,11 +863,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
-  manual payment, and a disconnect is refused while one is pending. `parse_webhook` is
+  manual payment, and a disconnect is refused while one is pending. A `refund_failed`
+  event (#5681, Stripe's `refund.failed`) names the refund's event id (`ProviderEvent.reverses`)
+  and writes a positive payment that cancels that refund's row, with its provider, request
+  and reference (`Lifecycle._reverse_refund`); a refund never recorded is `ignored`, and
+  no request's status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
   most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
-  `payment:<id>`). No route, log, problem or audit row carries a secret.
+  `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
+  (`last_webhook_error`: `signature`, `provider_unavailable` or `handler_error`, and
+  `last_webhook_error_at`; #5684), never a provider's text, and the next success or a
+  reconnect clears it; Settings shows it (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.
