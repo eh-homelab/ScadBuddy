@@ -24,7 +24,7 @@ from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here.
-EDGE_AREAS: Final[frozenset[str]] = frozenset()
+EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings"})
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 
 
@@ -70,5 +70,12 @@ class StorefrontCrud:
         return response.json()
 
     async def listings(self, *, visitor_id: str, client: str) -> Any:
-        """``GET …/storefront/listings``: the published listings (Task 6 adds the route)."""
+        """``GET …/storefront/listings``: the published listings."""
         return await self._call("GET", "/listings", visitor_id=visitor_id, client=client)
+
+    async def listing(self, listing_id: str, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/listings/{id}``: one published listing. ``listing_id`` must
+        be a listing id (`storefront/routes.py` checks it), so it cannot leave the path."""
+        return await self._call(
+            "GET", f"/listings/{listing_id}", visitor_id=visitor_id, client=client
+        )

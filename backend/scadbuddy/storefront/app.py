@@ -1,5 +1,11 @@
 """The edge's FastAPI app (#5282). It mounts no `/api/v1` route and never proxies one.
 
+Every request passes three middlewares, outermost first: `RequestLimit` (the per-client
+request limit, spec §5.8), `CrossSiteGate` (a write whose ``Origin`` is not the page's,
+``SCADBUDDY_STOREFRONT_PUBLIC_URL``, is 403 before any CRUD call; plan point 16) and
+`VisitorCookie` (the visitor id, spec §5.2). As in the API, the gate passes a write with
+no ``Origin`` (not a browser page) and one from a loopback origin.
+
 Its lifespan waits until the CRUD service serves every area the edge calls
 (`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait, and the edge then
 closes its client and never serves. A CRUD route's refusal
@@ -22,6 +28,7 @@ from types import FrameType
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.core.problems import (
     PROBLEM_MEDIA_TYPE,
     install_problem_handlers,
@@ -30,6 +37,7 @@ from scadbuddy.core.problems import (
 from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
+from scadbuddy.storefront.ratelimit import RequestLimit
 from scadbuddy.storefront.routes import router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
 from scadbuddy.storefront.visitors import VisitorCookie
@@ -38,6 +46,7 @@ from scadbuddy.storefront.wire import public_problem
 logger = logging.getLogger(__name__)
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+CROSS_SITE_REFUSED = "This request must come from the shop's own page."
 
 
 @contextmanager
@@ -123,5 +132,13 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     app.include_router(router)
     app.include_router(visitor_router)
     key = settings.storefront_cookie_key_file.read_bytes()
+    # The last added runs first.
     app.add_middleware(VisitorCookie, key=key, prefix=STOREFRONT_PREFIX)
+    app.add_middleware(
+        CrossSiteGate,
+        public_url=lambda: settings.storefront_public_url,
+        allowed_origins=lambda: (),
+        refused=CROSS_SITE_REFUSED,
+    )
+    app.add_middleware(RequestLimit, prefix=STOREFRONT_PREFIX, trusted=app.state.trusted_proxies)
     return app

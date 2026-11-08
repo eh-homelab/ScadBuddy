@@ -67,7 +67,7 @@ def crud_mock() -> Iterator[respx.Router]:
             200, json={"access_token": TOKEN, "expires_in": 900}
         )
         router.get("/api/v1/internal/crud/storefront/areas", name="areas").respond(
-            200, json={"areas": []}, headers=CRUD
+            200, json={"areas": ["listings"]}, headers=CRUD
         )
         router.get("/api/v1/internal/crud/storefront/listings", name="listings").respond(
             200, json=LISTINGS, headers=CRUD

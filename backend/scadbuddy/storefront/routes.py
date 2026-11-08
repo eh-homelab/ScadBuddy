@@ -4,7 +4,8 @@ address. `app.py` answers a CRUD refusal."""
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+import re
+from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, Request
 
@@ -12,6 +13,10 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
+
+#: A listing id (``gen_random_uuid()::text``): any other never reaches the CRUD side.
+LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 router = APIRouter()
 visitor_router = APIRouter(prefix=STOREFRONT_PREFIX)
@@ -51,3 +56,12 @@ Client = Annotated[str, Depends(_client)]
 @visitor_router.get("/listings")
 async def listings(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     return await crud.listings(visitor_id=visitor_id, client=client)
+
+
+@visitor_router.get("/listings/{listing_id}")
+async def listing(listing_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    if LISTING_ID.fullmatch(listing_id) is None:
+        raise ApiError(
+            404, "There is no such listing.", type_=f"{STOREFRONT_PROBLEMS}listing_not_found"
+        )
+    return await crud.listing(listing_id, visitor_id=visitor_id, client=client)

@@ -30,7 +30,8 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from scadbuddy.api.realtime import _origin, origin_allowed
+from scadbuddy.core.origins import normalised_origin as _origin
+from scadbuddy.core.origins import origin_allowed
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,11 @@ class CrossSiteGate:
         *,
         public_url: Callable[[], str | None],
         allowed_origins: Callable[[], Sequence[str]],
+        refused: str = REFUSED,
     ) -> None:
         self.app = app
+        #: The refusal's ``detail``: the storefront edge (#5282) shows a visitor its own.
+        self.refused = refused
         # Callables: the public URL is a stored setting that can change while running.
         self.public_url = public_url
         self.allowed_origins = allowed_origins
@@ -99,7 +103,7 @@ class CrossSiteGate:
                 "type": "about:blank",
                 "title": "Forbidden",
                 "status": 403,
-                "detail": REFUSED,
+                "detail": self.refused,
                 "instance": scope["path"],
             },
             status_code=403,

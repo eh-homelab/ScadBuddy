@@ -1,5 +1,6 @@
 """The storefront listing's shapes (#5282, spec 2026-11-02 §5.3): the back office's body,
-the stored row, and what publish captures from the template's commit.
+the stored row, what publish captures from the template's commit, and the public site's
+view of a published listing (`PublicListing`).
 
 A listing offers one commit of a template. Each parameter a customer may change has a
 bound (``ParamBound``) inside the schema's own; every other parameter is fixed. Publish
@@ -127,3 +128,68 @@ class ListingOrder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ids: list[str]
+
+
+# -- the public site's view (Task 6) --------------------------------------------------
+
+
+class _Shown(BaseModel):
+    """What the page shows beside a bound: the schema's label (its caption, else its
+    name), help and group, and whether it is a ``// color`` parameter, whose choices are
+    the colours of the listing's filaments."""
+
+    label: str
+    help: str | None = None
+    group: str = ""
+    colour: bool = False
+
+
+class PublicNumber(NumberBound, _Shown):
+    pass
+
+
+class PublicChoice(ChoiceBound, _Shown):
+    pass
+
+
+class PublicText(TextBound, _Shown):
+    pass
+
+
+PublicParam = Annotated[PublicNumber | PublicChoice | PublicText, Field(discriminator="kind")]
+
+
+class PublicFilament(BaseModel):
+    """A filament a visitor may pick: never its price."""
+
+    id: str
+    colour: str
+    colour_name: str | None
+    material: str
+
+
+class PublicMedia(BaseModel):
+    """A media file as a presigned GET (`PUBLIC_MEDIA_TTL`)."""
+
+    url: str
+    kind: MediaKind
+    caption: str
+
+
+class PublicListing(BaseModel):
+    """A published listing as the public site shows it. Every text is the shop's, shown
+    as text, never as HTML (spec §5.8)."""
+
+    id: str
+    title: str
+    description: str
+    params: dict[str, PublicParam]
+    colours: list[PublicFilament]
+    media: list[PublicMedia]
+    updated_at: datetime
+
+
+class PublicListings(BaseModel):
+    listings: list[PublicListing]
+    #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
+    requests_enabled: bool
