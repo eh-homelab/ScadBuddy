@@ -379,8 +379,22 @@ Bambuddy has deleted the archive, and list none once the run is pruned or the ar
 belongs to another subject. A send or a recorded start is read while the archive is
 fetched; only the file name waits for the archive (#5733). Any other case (no such name, no such start, two runs that share the name)
 records nothing and lists none: the link is never a guess. A LAN print reaches `/prints`
-only through a content hash link (`linking.link_subject_by_hash`), which matches the
-hashes of the subject's sliced files in Bambuddy's library. Every answer gives a slot's settings
+only through a content hash link. A native run uploads its slice straight to the printer,
+so no file in Bambuddy's library has its hash, and the queue path's scan
+(`linking.link_subject_by_hash`) never finds it (#5724). Bambuddy computes an archive's
+`content_hash` as the SHA-256 of the 3MF it downloads from the printer (`archive_print`,
+`compute_file_hash`, same commit), and that file holds the bytes the run uploaded
+(`printers/print_activities.py` `lan_upload`, from the slice's blob). The native library
+row of the same slice holds the SHA-256 of the same blob (`library_files.sha256`, written
+by `print_sliced_upload`). So the first page of `GET /prints` looks for each subject
+with a LAN start in the last 14 days that no archive names yet
+(`PrintRunStore.lan_unnamed`, over `lan_print_archives`): it scans Bambuddy's archives
+of the starts' days for the hashes of the subject's slices, native and Bambuddy's
+(`linking.link_lan_starts`), records each match as a `content_hash` link, and names the
+start from the archive's file name as above. At most four subjects are scanned per
+request, and one subject at most once per process every 10 minutes
+(`linking.LAN_SCANS_PER_CALL`, `LAN_SCAN_INTERVAL`). A start whose print never reached
+Bambuddy is looked for until its 14 days end. Every answer gives a slot's settings
 with only what is set (`part_settings.parts_set_only`, on the read models: the run result,
 the print record, the remembered choices and the check), so a reprint can send them again as
 they are. A request's own dump keeps every key, so `run_key` is what it was before #5627.
