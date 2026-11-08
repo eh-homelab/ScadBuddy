@@ -241,6 +241,8 @@ class OrderChanged(BaseEvent):
     kind: Literal["order.changed"] = "order.changed"
     order_id: str
     status: str
+    #: A storefront visitor's cart, not yet submitted (#5282): it starts no flow.
+    cart: bool = False
 
 
 class OrderItemChanged(BaseEvent):
@@ -252,6 +254,8 @@ class OrderItemChanged(BaseEvent):
     item_id: str
     status: str
     attempt: int | None = None
+    #: As :class:`OrderChanged`'s.
+    cart: bool = False
 
 
 class AuthSessionRevoked(BaseEvent):

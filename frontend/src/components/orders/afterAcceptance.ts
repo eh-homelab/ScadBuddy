@@ -20,6 +20,11 @@ export const TAKES_ITEMS: ReadonlySet<string> = new Set(['accepted', 'in_product
  * (shipped, ended, or on hold past `quoted`). */
 export type AddMode = 'open' | 'after_acceptance'
 
+/** #5282: a storefront visitor's cart, not yet submitted. Nobody quotes, accepts, holds, cancels or prints it. */
+export function isCart(order: Pick<Order, 'source' | 'submitted_at'>): boolean {
+  return order.source === 'storefront' && order.submitted_at == null
+}
+
 export function addMode(order: Pick<Order, 'status' | 'on_hold'>): AddMode | null {
   if (OPEN_FOR_EDITS.has(order.status)) return 'open'
   if (TAKES_ITEMS.has(order.status) && !order.on_hold) return 'after_acceptance'

@@ -382,3 +382,50 @@ async def test_an_item_gone_since_fires_nothing(
     client = _Client()
     event = OrderItemChanged(order_id="o1", item_id="i1", status="draft")
     assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
+
+
+def new_cart(jobs: JobProjection) -> None:
+    """A storefront visitor's cart (#5282): no customer, no number, not submitted."""
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO orders (id, currency, created_by, source)"
+            " VALUES ('cart', 'USD', '{}', 'storefront')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('ci', 'cart', 0, 1, 'Bracket', 'custom')"
+        )
+
+
+@pg
+async def test_a_carts_order_event_fires_no_trigger(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    # #5282: a visitor must never start the owner's flows.
+    await on(triggers, {"kind": "order.changed"})
+    await on(triggers, {"kind": "order_item.changed"})
+    new_cart(jobs)
+    client = _Client()
+    for event in (
+        OrderChanged(order_id="cart", status="draft", cart=True),
+        OrderItemChanged(order_id="cart", item_id="ci", status="draft", cart=True),
+    ):
+        assert trigger_event(event) is None
+        assert await fire_event(client, "library", triggers, event) == []  # type: ignore[arg-type]
+    assert client.started == []
+
+
+@pg
+async def test_a_submitted_orders_event_still_fires(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    order_trigger = await on(triggers, {"kind": "order.changed"})
+    item_trigger = await on(triggers, {"kind": "order_item.changed"})
+    new_order(jobs, item=True)
+    client = _Client()
+    for event in (
+        OrderChanged(order_id="o1", status="draft"),
+        OrderItemChanged(order_id="o1", item_id="i1", status="draft"),
+    ):
+        assert len(await fire_event(client, "library", triggers, event)) == 1  # type: ignore[arg-type]
+    assert [args[0] for _, args in client.started] == [order_trigger, item_trigger]

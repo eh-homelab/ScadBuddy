@@ -27,6 +27,12 @@ import { useAsync } from '../lib/useAsync'
 const PAGE = 50
 const STATUSES: OrderStatus[] = ['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']
 const ANY = 'any'
+/** #5282: where an order was made. A storefront order is a cart until it is submitted. */
+const SOURCES = [
+  { value: 'back_office', label: 'Back office' },
+  { value: 'storefront', label: 'Storefront' },
+]
+const UNSUBMITTED = 'unsubmitted'
 
 /**
  * #5327 (job cost spec §6.2): the margin as a percent, the money in the tooltip; `≈` when a
@@ -164,11 +170,17 @@ export function OrdersPage() {
       header: 'Order',
       cell: (order) => (
         <Link to={`/orders/${order.id}`} className="font-medium text-foreground underline-offset-4 hover:underline">
-          {order.number}
+          {order.number ?? 'Cart'}
         </Link>
       ),
     },
-    { key: 'customer', header: 'Customer', className: 'break-words', cell: (order) => names.get(order.customer_id) ?? order.customer_id },
+    {
+      key: 'customer',
+      header: 'Customer',
+      className: 'break-words',
+      // #5282: a storefront cart has no customer until it is submitted.
+      cell: (order) => (order.customer_id ? (names.get(order.customer_id) ?? order.customer_id) : <span className="text-muted-foreground">Visitor</span>),
+    },
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
     { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
     { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? formatDueDate(order.due_at) : '') },
@@ -235,6 +247,20 @@ export function OrdersPage() {
               chips: [{ value: LOSS_OR_THIN, label: 'Loss or thin' }],
               selected: query.margin ? [query.margin] : [],
               onChange: ([margin]) => onChange({ ...query, margin: margin ?? '' }),
+            },
+            {
+              key: 'source',
+              label: 'Source',
+              chips: SOURCES,
+              selected: query.source ? [query.source] : [],
+              onChange: ([source]) => onChange({ ...query, source: source ?? '' }),
+            },
+            {
+              key: 'unsubmitted',
+              label: 'Carts',
+              chips: [{ value: UNSUBMITTED, label: 'Unsubmitted carts' }],
+              selected: query.unsubmitted ? [UNSUBMITTED] : [],
+              onChange: ([on]) => onChange({ ...query, unsubmitted: on === UNSUBMITTED }),
             },
           ]}
           filtered={isOrdersFiltered(query)}

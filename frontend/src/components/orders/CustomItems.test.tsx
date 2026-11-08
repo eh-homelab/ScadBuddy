@@ -206,7 +206,7 @@ describe('custom line items', () => {
   })
 
   it('marks a custom item that needs no printing done', async () => {
-    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id })
+    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id! })
     const item = await api.addOrderItem(order.id, { kind: 'custom', title: 'Design work', quantity: 2, unit_price_minor: 1000 })
     await api.acceptOrder(order.id)
     const { user } = render(order.id)
@@ -218,7 +218,7 @@ describe('custom line items', () => {
   })
 
   it('marks done by accepting the attempt already recorded, never a second one', async () => {
-    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id })
+    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id! })
     const item = await api.addOrderItem(order.id, { kind: 'custom', title: 'Design work', quantity: 1, unit_price_minor: 1000 })
     await api.acceptOrder(order.id)
     const open = await api.recordFulfilment(order.id, item.id, { quantity: 1, outcome: 'succeeded' })
@@ -232,7 +232,7 @@ describe('custom line items', () => {
   })
 
   it('leaves a partial attempt recorded by hand for its own Accept', async () => {
-    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id })
+    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id! })
     const item = await api.addOrderItem(order.id, { kind: 'custom', title: 'Design work', quantity: 3, unit_price_minor: 1000 })
     await api.acceptOrder(order.id)
     const partial = await api.recordFulfilment(order.id, item.id, { quantity: 1, outcome: 'partial' })

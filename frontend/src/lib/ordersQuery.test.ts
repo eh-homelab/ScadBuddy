@@ -27,4 +27,13 @@ describe('ordersQuery (#4249)', () => {
     const api = ordersApiParams(q)
     expect([api.get('product'), api.get('accepted_from'), api.get('accepted_to'), api.get('currency')]).toEqual(['model:demo', '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z', 'USD'])
   })
+  it('keeps source and unsubmitted in the URL (#5282)', () => {
+    const q = parseOrdersQuery(new URLSearchParams('?source=storefront&unsubmitted=1'))
+    expect(q).toMatchObject({ source: 'storefront', unsubmitted: true })
+    expect(toOrdersParams(q).toString()).toBe('source=storefront&unsubmitted=1')
+    expect(ordersApiParams(q).toString()).toBe('source=storefront&unsubmitted=true')
+    expect(toOrdersParams({ ...DEFAULT_ORDERS_QUERY, source: 'back_office', unsubmitted: false }).toString()).toBe('source=back_office')
+    expect(isOrdersFiltered({ ...DEFAULT_ORDERS_QUERY, unsubmitted: true })).toBe(true)
+    expect(parseOrdersQuery(new URLSearchParams('unsubmitted=0')).unsubmitted).toBe(false)
+  })
 })

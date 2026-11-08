@@ -1031,6 +1031,12 @@ export const settingsDefaults = {
   pricing_markup_percent: '0',
   pricing_rounding: 'to_minor_unit',
   rough_estimate_factor: '1.15',
+  // #5282 — the public storefront's limits and switch.
+  storefront_renders_per_minute: 3,
+  storefront_renders_per_day: 30,
+  storefront_render_concurrency: 2,
+  storefront_draft_ttl_days: 30,
+  storefront_requests_enabled: false,
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
   // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,

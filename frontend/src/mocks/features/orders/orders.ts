@@ -40,7 +40,7 @@ import { archiveCopies, pastPrint } from './pastPrints'
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'cursor', 'limit'])
 const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
 /** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
 export const SCAN_PAGE_SIZE = 100
@@ -768,10 +768,16 @@ export const handlers = [
     const acceptedTo = sp.get('accepted_to')
     const currency = sp.get('currency')
     if (currency !== null && !/^[A-Z]{3}$/.test(currency)) return fieldProblem(request, 'currency', 'String should match pattern')
+    // #5282: the storefront's unsubmitted carts only with `unsubmitted=true`.
+    const source = sp.get('source')
+    if (source !== null && source !== 'back_office' && source !== 'storefront') return fieldProblem(request, 'source', "Input should be 'back_office' or 'storefront'")
+    const unsubmitted = sp.get('unsubmitted') === 'true'
     const product = sp.get('product')
     if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
+      .filter((o) => (o.source === 'storefront' && o.submitted_at == null) === unsubmitted)
+      .filter((o) => !source || o.source === source)
       .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
@@ -783,7 +789,7 @@ export const handlers = [
       .filter((o) => {
         if (!q) return true
         const owner = state.customers.find((c) => c.id === o.customer_id)
-        return o.number.toLowerCase().includes(q) || o.notes.toLowerCase().includes(q) || (owner?.display_name ?? '').toLowerCase().includes(q) || (owner?.company ?? '').toLowerCase().includes(q)
+        return (o.number ?? '').toLowerCase().includes(q) || o.notes.toLowerCase().includes(q) || (owner?.display_name ?? '').toLowerCase().includes(q) || (owner?.company ?? '').toLowerCase().includes(q)
       })
       .filter((o) => !after || o.created_at < after[0] || (o.created_at === after[0] && o.id < after[1]))
     if (margins.length === 0) {
@@ -841,6 +847,9 @@ export const handlers = [
       created_at: at,
       updated_at: at,
       created_by: BROWSER,
+      source: 'back_office',
+      submitted_at: null,
+      storefront_visitor_id: null,
     }
     state.orders.push(order)
     event(order, 'order.created')

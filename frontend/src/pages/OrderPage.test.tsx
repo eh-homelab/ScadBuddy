@@ -7,7 +7,7 @@ import { server } from '../mocks/server'
 import { resetMockState } from '../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { choose } from '../test/select'
-import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -78,6 +78,24 @@ describe('OrderPage (#4249)', () => {
     expect(alert).toHaveTextContent('Name Keychain')
   })
 
+  it('offers no accept, quote, print, hold or cancel on a storefront cart (#5282)', async () => {
+    const cart = seedCart()
+    state.items.push(item('cart-item', cart.id, 'draft'))
+    const { user } = render(cart.id)
+    await screen.findByRole('heading', { name: 'Cart' })
+    expect(screen.getByText(/a storefront visitor/)).toBeInTheDocument()
+    expect(screen.getByTestId('order-cart')).toHaveTextContent(/not submitted/)
+    for (const name of ['Accept order', 'Put on hold', 'Cancel order…', 'Add item', 'Add custom item']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    await user.click(within(screen.getByTestId('order-item-cart-item')).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).queryByRole('region', { name: 'Price' })).toBeNull()
+    expect(within(drawer).queryByLabelText(/Price per unit/)).toBeNull()
+    expect(within(drawer).queryByTestId('print-item')).toBeNull()
+    expect(within(drawer).queryByTestId('test-print-item')).toBeNull()
+  })
+
   it('prices an item from its drawer, accepts the order, and closes it from a shipment', async () => {
     const { user } = render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
@@ -112,7 +130,7 @@ describe('OrderPage (#4249)', () => {
   it('adds an item from the order page while the order is open, and only then (#4251)', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     const { user } = render(order.id)
-    await screen.findByRole('heading', { name: order.number })
+    await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText(/Add one with Add item above/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Add item' }))
     const dialog = await screen.findByRole('dialog', { name: 'Add item' })
@@ -129,7 +147,7 @@ describe('OrderPage (#4249)', () => {
     const row = state.orders.find((o) => o.id === order.id)
     if (row) row.status = 'accepted'
     render(order.id)
-    await screen.findByRole('heading', { name: order.number })
+    await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText('No items yet. Add one with Add item above, or type a custom item below.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add item' })).toBeInTheDocument()
     // The custom row adds on the after-acceptance route, after a confirm.
@@ -141,7 +159,7 @@ describe('OrderPage (#4249)', () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     await api.cancelOrder(order.id)
     render(order.id)
-    await screen.findByRole('heading', { name: order.number })
+    await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText('No items.')).toBeInTheDocument()
     expect(screen.queryByText(/Add one with Add item above/)).not.toBeInTheDocument()
   })

@@ -237,6 +237,11 @@ describe('order tools (#4249)', () => {
     await tool('order_list').execute(row, ctx())
     expect(Object.fromEntries(new URL(url).searchParams)).toEqual(row)
     expect(() => tool('order_list').execute({ product: 'nope' }, ctx())).toThrow()
+
+    // #5282: the storefront's unsubmitted carts, which the list leaves out unless asked.
+    await tool('order_list').execute({ source: 'storefront', unsubmitted: true }, ctx())
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual({ source: 'storefront', unsubmitted: 'true' })
+    expect(() => tool('order_list').execute({ source: 'shop' }, ctx())).toThrow()
   })
 
   it('reads the profit report for a period (#5329)', async () => {

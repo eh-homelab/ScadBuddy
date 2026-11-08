@@ -456,6 +456,14 @@ def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
     return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
 
 
+def check_submitted(order: Order) -> None:
+    """``order_not_submitted`` for a storefront draft (#5282, storefront spec §6.3): the
+    visitor's cart, which nobody quotes, accepts, holds, cancels or prints. A quote is
+    never written or accepted on it, whoever asks; the draft sweep alone removes it."""
+    if order.unsubmitted:
+        raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
+
+
 class Lifecycle:
     def __init__(self, store: OrderStore, bus: EventBus | None, refs: BlobRefs | None = None):
         self.store = store
@@ -516,12 +524,20 @@ class Lifecycle:
             self._release_ended(change.released)
         else:
             self._release(change.released)
-        emit(self.bus, OrderChanged(order_id=change.order.id, status=change.order.status))
+        cart = change.order.unsubmitted
+        emit(
+            self.bus,
+            OrderChanged(order_id=change.order.id, status=change.order.status, cart=cart),
+        )
         for item, attempt in change.items:
             emit(
                 self.bus,
                 OrderItemChanged(
-                    order_id=change.order.id, item_id=item.id, status=item.status, attempt=attempt
+                    order_id=change.order.id,
+                    item_id=item.id,
+                    status=item.status,
+                    attempt=attempt,
+                    cart=cart,
                 ),
             )
 
@@ -533,23 +549,31 @@ class Lifecycle:
                 "order_not_found", f"no order {order_id}", not_found=True
             ) from None
 
+    def _not_a_cart(self, order_id: str) -> None:
+        """:func:`check_submitted` before anything is written (``ensure_revision``'s
+        repair among them), so a refusal on a cart writes nothing. The caller checks
+        again under the order's lock."""
+        found = self.store.order(order_id)
+        if found is not None:
+            check_submitted(found)
+
     def _item_of(self, conn: Conn, order: Order, item_id: str) -> OrderItem:
         item = self.store.item(item_id, conn=conn)
         if item is None or item.order_id != order.id:
             raise LifecycleError(
-                "item_not_found", f"no item {item_id} of order {order.number}", not_found=True
+                "item_not_found", f"no item {item_id} of order {order.label}", not_found=True
             )
         return item
 
     @staticmethod
     def _not_on_hold(order: Order) -> None:
         if order.on_hold:
-            raise LifecycleError("order_on_hold", f"order {order.number} is on hold")
+            raise LifecycleError("order_on_hold", f"order {order.label} is on hold")
 
     @staticmethod
     def _not_ended(order: Order) -> None:
         if order.status in ENDED:
-            raise LifecycleError(f"order_{order.status}", f"order {order.number} is {order.status}")
+            raise LifecycleError(f"order_{order.status}", f"order {order.label} is {order.status}")
 
     def _event(self, conn: Conn, order: Order, by: Actor, kind: str, **detail: Any) -> None:
         self.store.insert_event(conn, order.id, by, kind, detail)
@@ -609,6 +633,31 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def ensure_draft(self, visitor_id: str, by: Actor, *, currency: str) -> Order:
+        """The visitor's storefront cart (#5282), made when it has none, with the
+        `order.created` audit row (``source: storefront``). Two calls at once both
+        insert; the unique index refuses the later one, which then reads the winner."""
+        found = self.store.draft_of(visitor_id)
+        if found is not None:
+            return found
+        try:
+            return self._new_draft(visitor_id, by, currency)
+        except errors.UniqueViolation:
+            winner = self.store.draft_of(visitor_id)
+            if winner is not None:
+                return winner
+        # The sweep took the winner meanwhile: one more insert, and no more.
+        return self._new_draft(visitor_id, by, currency)
+
+    def _new_draft(self, visitor_id: str, by: Actor, currency: str) -> Order:
+        with self.store.transaction() as conn:
+            order = self.store.insert_storefront_draft(
+                conn, visitor_id=visitor_id, currency=currency, created_by=by
+            )
+            self._event(conn, order, by, "order.created", source="storefront")
+        self._told(_Change(order))
+        return order
+
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
         customer's) and charges while `draft` or `quoted`."""
@@ -629,7 +678,7 @@ class Lifecycle:
                 )
                 raise LifecycleError(
                     "order_not_editable",
-                    f"order {order.number} is {order.status}: only its notes and due date"
+                    f"order {order.label} is {order.status}: only its notes and due date"
                     f" may change now{route}",
                 )
             for name in ("shipping_address_id", "billing_address_id"):
@@ -684,13 +733,13 @@ class Lifecycle:
             if order.status in OPEN_FOR_EDITS:
                 raise LifecycleError(
                     "order_not_accepted",
-                    f"order {order.number} is {order.status}, not accepted: change the charges"
+                    f"order {order.label} is {order.status}, not accepted: change the charges"
                     f" with PATCH /orders/{order.id}",
                 )
             if order.status not in TAKES_ITEMS:
                 raise LifecycleError(
                     "order_not_editable",
-                    f"order {order.number} is {order.status}: its charges are final once shipped",
+                    f"order {order.label} is {order.status}: its charges are final once shipped",
                 )
             self._not_on_hold(order)
             before = self.store.charges(order.id, conn=conn)
@@ -724,11 +773,12 @@ class Lifecycle:
         payment that names an open request of this order closes it. Named or not, a
         payment that brings the balance to zero or below closes the open ``balance``
         requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
-        provider's event does."""
+        provider's event does. A cart (#5282) takes no money: ``order_not_submitted``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             if order.status == "cancelled":
-                raise LifecycleError("order_cancelled", f"order {order.number} is cancelled")
+                raise LifecycleError("order_cancelled", f"order {order.label} is cancelled")
             named = None
             if payment_request_id is not None:
                 named = self._open_request(conn, order, payment_request_id)
@@ -780,7 +830,7 @@ class Lifecycle:
         if found is None or found.order_id != order.id:
             raise LifecycleError(
                 "payment_request_not_found",
-                f"no payment request {request_id} of order {order.number}",
+                f"no payment request {request_id} of order {order.label}",
                 not_found=True,
             )
         return found
@@ -804,9 +854,11 @@ class Lifecycle:
     ) -> PaymentRequestView:
         """A request for ``amount_minor`` (the balance now when None), through
         ``provider`` (the default provider when unset and still offered; None collects by
-        hand). A named provider that is not connected is refused as 422 ``provider``."""
+        hand). A named provider that is not connected is refused as 422 ``provider``. A
+        cart (#5282) takes no money: ``order_not_submitted``, before any provider."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             amount = (
                 totals_of(self.store, conn, order.id).balance_minor
@@ -814,7 +866,7 @@ class Lifecycle:
                 else amount_minor
             )
             if amount <= 0:
-                raise LifecycleError("nothing_due", f"order {order.number} has nothing due")
+                raise LifecycleError("nothing_due", f"order {order.label} has nothing due")
             if isinstance(provider, UnsetType):
                 provider = payments.default_provider(conn, self.offered_providers)
             elif provider is not None and not payments.hold_provider(conn, provider):
@@ -1136,7 +1188,7 @@ class Lifecycle:
             if entry is None:
                 raise LifecycleError(
                     "time_entry_not_found",
-                    f"no time entry {entry_id} of order {order.number}",
+                    f"no time entry {entry_id} of order {order.label}",
                     not_found=True,
                 )
             self._event(
@@ -1183,7 +1235,7 @@ class Lifecycle:
             if entry is None:
                 raise LifecycleError(
                     "cost_entry_not_found",
-                    f"no cost entry {entry_id} of order {order.number}",
+                    f"no cost entry {entry_id} of order {order.label}",
                     not_found=True,
                 )
             self._event(
@@ -1208,6 +1260,7 @@ class Lifecycle:
     def _set_hold(self, order_id: str, by: Actor, on_hold: bool) -> Order:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             if order.on_hold != on_hold:
                 order = self.store.update_order_fields(conn, order.id, on_hold=on_hold)
@@ -1220,20 +1273,21 @@ class Lifecycle:
         copied (Ruling 11); `accepted_at` is stamped."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             if order.status not in OPEN_FOR_EDITS:
                 raise LifecycleError(
-                    "order_not_acceptable", f"order {order.number} is {order.status}"
+                    "order_not_acceptable", f"order {order.label} is {order.status}"
                 )
             self._not_on_hold(order)
             items = self.store.items(order.id, conn=conn)
             open_items = [item for item in items if item.status != "cancelled"]
             if not open_items:
-                raise LifecycleError("no_open_items", f"order {order.number} has no open items")
+                raise LifecycleError("no_open_items", f"order {order.label} has no open items")
             unquoted = [item.id for item in open_items if item.status != "approved"]
             if unquoted:
                 raise LifecycleError(
                     "items_not_quoted",
-                    f"{len(unquoted)} item(s) of order {order.number} have no accepted quote",
+                    f"{len(unquoted)} item(s) of order {order.label} have no accepted quote",
                     items=unquoted,
                 )
             snapshots: dict[str, AddressSnapshot | None] = {}
@@ -1262,9 +1316,10 @@ class Lifecycle:
         (Ruling 14)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             if order.status in ("shipped", *ENDED):
                 raise LifecycleError(
-                    "order_not_cancellable", f"order {order.number} is {order.status}"
+                    "order_not_cancellable", f"order {order.label} is {order.status}"
                 )
             change = _Change(order)
             every = self.store.items(order.id, conn=conn)
@@ -1311,7 +1366,7 @@ class Lifecycle:
             if order.status not in DERIVED or unsettled or unshipped or not fulfilled:
                 raise LifecycleError(
                     "order_not_closable",
-                    f"order {order.number} cannot close: {len(unsettled)} item(s) still open,"
+                    f"order {order.label} cannot close: {len(unsettled)} item(s) still open,"
                     f" {len(unshipped)} fulfilled item(s) not shipped"
                     + ("" if fulfilled else ", nothing fulfilled"),
                     items=[*unsettled, *unshipped],
@@ -1358,7 +1413,7 @@ class Lifecycle:
             reason = "it has no cancel audit row"
         fallback: OrderStatus = "accepted" if order.accepted_at is not None else "draft"
         # #4725: so an order that reopened with none of its items back can be explained.
-        logger.warning("order %s reopens as %s with no items: %s", order.number, fallback, reason)
+        logger.warning("order %s reopens as %s with no items: %s", order.label, fallback, reason)
         return fallback, []
 
     def reopen_order(self, order_id: str, by: Actor) -> Order:
@@ -1376,7 +1431,7 @@ class Lifecycle:
             if order.status not in ENDED:
                 raise LifecycleError(
                     "order_not_ended",
-                    f"order {order.number} is {order.status}: only a closed or cancelled"
+                    f"order {order.label} is {order.status}: only a closed or cancelled"
                     " order reopens",
                 )
             restored: list[tuple[OrderItem, int | None]] = []
@@ -1464,7 +1519,7 @@ class Lifecycle:
             if not priced and order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
                 raise LifecycleError(
                     "item_not_priced",
-                    f"item {item_id} has no accepted quote, and order {order.number} is"
+                    f"item {item_id} has no accepted quote, and order {order.label} is"
                     f" {order.status}: a shipped order takes back a priced item only",
                     items=[item.id],
                 )
@@ -1481,7 +1536,7 @@ class Lifecycle:
         if order.status not in OPEN_FOR_EDITS:
             raise LifecycleError(
                 "item_locked",
-                f"order {order.number} is {order.status}: {what} is pinned once accepted",
+                f"order {order.label} is {order.status}: {what} is pinned once accepted",
             )
 
     def _open_for_item(self, conn: Conn, order: Order, item: OrderItem, what: str) -> None:
@@ -1490,7 +1545,7 @@ class Lifecycle:
         if not item_open(order, self.store.quotes(item.id, conn=conn)):
             raise LifecycleError(
                 "item_locked",
-                f"order {order.number} is {order.status}: {what} is pinned once accepted",
+                f"order {order.label} is {order.status}: {what} is pinned once accepted",
                 items=[item.id],
             )
 
@@ -1507,7 +1562,7 @@ class Lifecycle:
             )
             raise LifecycleError(
                 "item_locked",
-                f"order {order.number} is {order.status}: {what} is pinned once accepted{route}",
+                f"order {order.label} is {order.status}: {what} is pinned once accepted{route}",
                 items=[item.id],
             )
 
@@ -1520,7 +1575,7 @@ class Lifecycle:
             if order.status in TAKES_ITEMS:
                 raise LifecycleError(
                     "item_locked",
-                    f"order {order.number} is {order.status}: the list of items is pinned once"
+                    f"order {order.label} is {order.status}: the list of items is pinned once"
                     f" accepted; add an item with POST /orders/{order.id}/items/after-acceptance",
                 )
             self._open_for_items(order, "the list of items")
@@ -1528,13 +1583,13 @@ class Lifecycle:
         if order.status in OPEN_FOR_EDITS:
             raise LifecycleError(
                 "order_not_accepted",
-                f"order {order.number} is {order.status}, not accepted: add the item with"
+                f"order {order.label} is {order.status}, not accepted: add the item with"
                 f" POST /orders/{order.id}/items",
             )
         if order.status not in TAKES_ITEMS:
             raise LifecycleError(
                 "item_locked",
-                f"order {order.number} is {order.status}: it takes no new item once shipped",
+                f"order {order.label} is {order.status}: it takes no new item once shipped",
             )
         self._not_on_hold(order)
 
@@ -1780,15 +1835,14 @@ class Lifecycle:
         if order.status in OPEN_FOR_EDITS:
             raise LifecycleError(
                 "order_not_accepted",
-                f"order {order.number} is {order.status}, not accepted: revise the item with"
+                f"order {order.label} is {order.status}, not accepted: revise the item with"
                 f" POST /orders/{order.id}/items/{item.id}/revisions",
                 items=[item.id],
             )
         if order.status not in TAKES_ITEMS:
             raise LifecycleError(
                 "item_locked",
-                f"order {order.number} is {order.status}: its items' designs are final once"
-                " shipped",
+                f"order {order.label} is {order.status}: its items' designs are final once shipped",
                 items=[item.id],
             )
         self._not_on_hold(order)
@@ -2067,7 +2121,9 @@ class Lifecycle:
         accept: bool,
     ) -> OrderItem:
         """A custom item's typed price as a `manual` quote at its quantity now, on the
-        audit line: accepted and the item `approved`, or else the item `quoted`."""
+        audit line: accepted and the item `approved`, or else the item `quoted`. Never
+        on a cart (#5282): a quote is never written there."""
+        check_submitted(order)
         line = QuoteLine(
             kind="manual",
             label="Custom item",
@@ -2233,6 +2289,8 @@ class Lifecycle:
             elif repins:
                 # A design change alone: an item revised after acceptance takes it (#5350).
                 self._open_for_requote(conn, order, item, "an item's reference and filaments")
+            if price is not None:
+                check_submitted(order)
             if price is not None and accept:
                 self._not_on_hold(order)
             if design and designed is None:
@@ -2400,9 +2458,11 @@ class Lifecycle:
         """A typed price (Ruling 1): one `manual` line, cost = price, quantity the
         item's now; the item is `quoted` (unless already approved on another quote). A
         custom item's price is its own field (#4954): ``item_custom``."""
+        self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")
@@ -2447,10 +2507,13 @@ class Lifecycle:
         """An `archive` quote (#4777, order operations spec §3.2): ``plates`` read from a
         past print's archives, priced at the book in force, with no sliced file. As a
         manual quote: the order open for the item's price, the item not settled, not
-        custom, with a design; it names the item's current revision."""
+        custom, with a design; it names the item's current revision. Never on a cart
+        (#5282, ``order_not_submitted``)."""
+        self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")
@@ -2528,10 +2591,13 @@ class Lifecycle:
         answered with this quote too, so it never needs them (#5448). The quote's holds
         are taken again in its own transaction, so a row never commits without them,
         whatever another attempt dropped before it. A library file item's quote (#5544)
-        names no revision (``revision_id`` None): the item has none."""
+        names no revision (``revision_id`` None): the item has none. Never on a cart
+        (#5282, ``order_not_submitted``)."""
+        self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             if quote_id is not None:
                 recorded = self.store.quote(quote_id, conn=conn)
                 if recorded is not None and recorded.order_item_id == item_id:
@@ -2590,10 +2656,13 @@ class Lifecycle:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every
         item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
         `design_first` item the quote's revision must be accepted first
-        (`revision_not_accepted`); a custom item has neither."""
+        (`revision_not_accepted`); a custom item has neither. Never on a cart (#5282,
+        ``order_not_submitted``)."""
+        self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")
@@ -2777,7 +2846,7 @@ class Lifecycle:
         self._not_ended(order)
         if order.status not in DERIVED:
             raise LifecycleError(
-                "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
+                "order_not_accepted", f"order {order.label} is {order.status}, not accepted"
             )
         self._not_on_hold(order)
 
@@ -3222,9 +3291,11 @@ class Lifecycle:
         item is settled (``item_not_open``), has no design (``item_custom``,
         ``item_has_no_design``) or ``revision_id`` is not its current design
         (``revision_not_found``, ``revision_not_newest``): the item prints the output of
-        its current design, whatever its status, on an order accepted or not."""
+        its current design, whatever its status, on an order accepted or not. Never on a
+        cart (#5282, ``order_not_submitted``)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             existing = self.store.print_claim(request_id, conn=conn)
             if existing is not None:
                 purpose = "production" if revision_id is None else "test"
@@ -3666,7 +3737,7 @@ class Lifecycle:
         wrong = [line.order_item_id for line in lines if line.order_item_id not in items]
         if wrong:
             raise LifecycleError(
-                "item_not_found", f"not items of order {order.number}", items=wrong, not_found=True
+                "item_not_found", f"not items of order {order.label}", items=wrong, not_found=True
             )
         unmade = [
             line.order_item_id for line in lines if items[line.order_item_id].status != "fulfilled"
@@ -3700,7 +3771,7 @@ class Lifecycle:
             self._not_ended(order)
             if order.status not in DERIVED:
                 raise LifecycleError(
-                    "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
+                    "order_not_accepted", f"order {order.label} is {order.status}, not accepted"
                 )
             self._not_on_hold(order)
             self._shippable(conn, order, body.items)
@@ -3734,7 +3805,7 @@ class Lifecycle:
             if shipment is None or shipment.order_id != order.id:
                 raise LifecycleError(
                     "shipment_not_found",
-                    f"no shipment {shipment_id} of order {order.number}",
+                    f"no shipment {shipment_id} of order {order.label}",
                     shipments=[shipment_id],
                     not_found=True,
                 )
@@ -3776,7 +3847,7 @@ class Lifecycle:
         if found is None or found[0].order_id != order.id:
             raise LifecycleError(
                 "attachment_not_found",
-                f"no attachment {attachment_id} of order {order.number}",
+                f"no attachment {attachment_id} of order {order.label}",
                 not_found=True,
             )
         return found[0]

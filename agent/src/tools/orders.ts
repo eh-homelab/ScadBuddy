@@ -421,7 +421,9 @@ export const orderTools: Tool[] = [
       'call reads a limited number of orders, so a page can be short or empty while `next_cursor` remains: follow ' +
       'the cursor until it is null before you say no order matches. `product`, `accepted_from` (inclusive), ' +
       '`accepted_to` (exclusive) and `currency` list the orders behind an orders_profit_report row: pass its ' +
-      '`product`, its `period_from` and `period_to`, and its `currency`.',
+      '`product`, its `period_from` and `period_to`, and its `currency`. `source` is where an order was made ' +
+      '(`back_office` or `storefront`). The storefront\'s unsubmitted carts are left out; `unsubmitted: true` lists ' +
+      'only them. A cart has no `number` and no `customer_id` (both null) until it is submitted.',
     input: z.object({
       status: z.enum(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']).optional(),
       customer_id: customerId.optional(),
@@ -439,6 +441,8 @@ export const orderTools: Tool[] = [
         .optional()
         .describe('`model:<slug>`, `sku:<sku>` or `custom`, as a profit report row names it'),
       margin_state: z.array(z.enum(['loss', 'thin', 'unknown', 'ok'])).min(1).max(4).optional(),
+      source: z.enum(['back_office', 'storefront']).optional(),
+      unsubmitted: z.boolean().optional(),
       cursor: z.string().max(400).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     }),
