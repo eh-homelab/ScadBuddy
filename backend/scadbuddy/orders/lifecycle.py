@@ -599,6 +599,13 @@ class Lifecycle:
                 ),
             )
 
+    def told(self, order_id: str, items: Sequence[OrderItem] = ()) -> None:
+        """Tell the bus of a transition that ran in the caller's transaction (``conn``),
+        once that has committed: the order as it reads now, and ``items``."""
+        order = self.store.order(order_id)
+        if order is not None:
+            self._told(_Change(order, [(item, None) for item in items]))
+
     def _lock(self, conn: Conn, order_id: str) -> Order:
         try:
             return self.store.lock_order(conn, order_id)
@@ -632,6 +639,16 @@ class Lifecycle:
     def _not_ended(order: Order) -> None:
         if order.status in ENDED:
             raise LifecycleError(f"order_{order.status}", f"order {order.label} is {order.status}")
+
+    @staticmethod
+    def _visitors_cart(order: Order, visitor_id: str | None) -> None:
+        """For a visitor's write (#5282): `order_not_found` unless ``order`` is the
+        unsubmitted cart of the visitor row ``visitor_id``, so another visitor's cart, or
+        one submitted meanwhile, reads as no order. None checks nothing."""
+        if visitor_id is None:
+            return
+        if order.storefront_visitor_id != visitor_id or not order.unsubmitted:
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
 
     def _event(self, conn: Conn, order: Order, by: Actor, kind: str, **detail: Any) -> None:
         self.store.insert_event(conn, order.id, by, kind, detail)
@@ -2651,10 +2668,12 @@ class Lifecycle:
         entries: Sequence[NewItem],
         *,
         after_acceptance: bool = False,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
     ) -> list[OrderItem]:
         """Each entry added as its single add adds it, in order, in one transaction (#4777,
         order operations spec §3.1): a refusal of any adds none. ``after_acceptance`` as
-        `add_item`'s, for every entry."""
+        `add_item`'s, for every entry. ``cart_of`` and ``conn`` as `delete_item`'s."""
         for entry in entries:
             if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept:
                 raise LifecycleError(
@@ -2662,18 +2681,18 @@ class Lifecycle:
                     "accept: an item added after acceptance needs its quote accepted on its own",
                     unprocessable=True,
                 )
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
+        with self.store.transaction(conn) as tx:
+            order = self._lock(tx, order_id)
+            self._visitors_cart(order, cart_of)
             self._takes_item(order, after_acceptance)
             if any(isinstance(entry, NewCustomItem) and entry.accept for entry in entries):
                 self._not_on_hold(order)
-            items = [
-                self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
-            ]
+            items = [self._insert_new(tx, order, by, entry, after_acceptance) for entry in entries]
             # Once for the whole add, not once per item.
-            self._retax(conn, order, by)
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None) for item in items]))
+            self._retax(tx, order, by)
+            order = self._rederive(tx, order, by)
+        if conn is None:
+            self._told(_Change(order, [(item, None) for item in items]))
         return items
 
     def duplicate_item(
@@ -3121,12 +3140,27 @@ class Lifecycle:
             for slot in slots
         ]
 
-    def delete_item(self, order_id: str, item_id: str, by: Actor) -> None:
+    def delete_item(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        *,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
+    ) -> None:
         """Only a `draft` item with no print attempt, a test print's too, deletes
         (Ruling 6, 10); else `item_not_draft`, and the caller decides whether to cancel
-        it."""
-        with self.store.transaction() as conn:
+        it.
+
+        With ``cart_of`` (a visitor's row id, #5282) the order must be that visitor's
+        unsubmitted cart, checked under the order's lock; any other is `order_not_found`.
+        With ``conn`` the delete runs in the caller's transaction, and the caller tells the
+        bus (`told`) once that commits."""
+        tell = conn is None
+        with self.store.transaction(conn) as conn:
             order = self._lock(conn, order_id)
+            self._visitors_cart(order, cart_of)
             item = self._item_of(conn, order, item_id)
             if self.store.fulfilments(item.id, conn=conn, purpose=None):
                 # A test print's attempt and the sliced file it holds (storefront spec
@@ -3176,7 +3210,8 @@ class Lifecycle:
             self._event(conn, order, by, "item.deleted", item_id=item.id)
             self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
-        self._told(_Change(order))
+        if tell:
+            self._told(_Change(order))
 
     def cancel_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
         """From any open state (§3.5); allowed on hold (Ruling 14)."""

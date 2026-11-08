@@ -2,10 +2,10 @@
 of which forwards to the CRUD client with the verified visitor id and the browser's
 address. `app.py` answers a CRUD refusal.
 
-A render's body goes on as the visitor sent it (at most `MAX_RENDER_BODY` bytes), with
-a new ``Idempotency-Key`` (a UUID 4) per browser request, which the CRUD client keeps
-across its retries (plan point 21). A render's preview is relayed as a stream, never held
-whole, as ``model/gltf-binary``."""
+A render's body, and a draft item's, goes on as the visitor sent it (at most
+`MAX_RENDER_BODY` bytes). Each write gets a new ``Idempotency-Key`` (a UUID 4) per browser
+request, which the CRUD client keeps across its retries (plan point 21). A render's preview
+is relayed as a stream, never held whole, as ``model/gltf-binary``."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.client import CrudStream
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
-from scadbuddy.storefront.wire import JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
-#: The largest render body the edge relays: far past any listing's values.
+#: The largest render or draft item body the edge relays: far past any listing's values.
 MAX_RENDER_BODY: Final = 64 * 1024
 GLB_MEDIA_TYPE: Final = "model/gltf-binary"
 
@@ -86,8 +86,8 @@ def _job(job_id: str) -> str:
     return job_id
 
 
-async def _render_body(request: Request) -> bytes:
-    """The request's body, read up to `MAX_RENDER_BODY` bytes; 413 past it."""
+async def _body(request: Request, slug: str) -> bytes:
+    """The request's body, read up to `MAX_RENDER_BODY` bytes; 413 ``slug`` past it."""
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -95,14 +95,14 @@ async def _render_body(request: Request) -> bytes:
             raise ApiError(
                 413,
                 "This request is too large.",
-                type_=f"{STOREFRONT_PROBLEMS}render_body_invalid",
+                type_=f"{STOREFRONT_PROBLEMS}{slug}",
             )
     return bytes(body)
 
 
 @visitor_router.post("/renders", status_code=status.HTTP_202_ACCEPTED)
 async def render(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    body = await _render_body(request)
+    body = await _body(request, "render_body_invalid")
     key = str(uuid.uuid4())
     return await crud.render(body, key=key, visitor_id=visitor_id, client=client)
 
@@ -115,6 +115,26 @@ async def render_status(job_id: str, crud: Crud, visitor_id: Visitor, client: Cl
 @visitor_router.get("/renders/{job_id}/estimate")
 async def render_estimate(job_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     return await crud.render_estimate(_job(job_id), visitor_id=visitor_id, client=client)
+
+
+@visitor_router.get("/draft")
+async def draft(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    return await crud.draft(visitor_id=visitor_id, client=client)
+
+
+@visitor_router.post("/draft/items")
+async def add_item(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    body = await _body(request, "draft_body_invalid")
+    key = str(uuid.uuid4())
+    return await crud.add_item(body, key=key, visitor_id=visitor_id, client=client)
+
+
+@visitor_router.delete("/draft/items/{item_id}")
+async def remove_item(item_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    if ITEM_ID.fullmatch(item_id) is None:
+        raise ApiError(404, "There is no such item.", type_=f"{STOREFRONT_PROBLEMS}item_not_found")
+    key = str(uuid.uuid4())
+    return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
 
 
 class _Relayed(StreamingResponse):

@@ -602,3 +602,106 @@ def test_a_dropped_preview_closes_its_stream_at_once(
         assert closed == [True]
 
     asyncio.run(drive())
+
+
+# -- the draft (Task 8) -------------------------------------------------------------------
+
+DRAFT = "/api/v1/internal/crud/storefront/draft"
+ITEM = "6c1f9d0f-5d0c-4d43-9d33-0b6f0f1e6a11"
+VIEW: dict[str, Any] = {
+    "id": "0d0c0b0a-5d0c-4d43-9d33-6c1f9d0f6a11",
+    "currency": "USD",
+    "minor_exponent": 2,
+    "items": [],
+}
+
+
+def test_the_draft_is_forwarded(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
+    route = crud_mock.get(DRAFT).respond(
+        200, content=b"null", headers={**CRUD, "Content-Type": "application/json"}
+    )
+    r = edge.get("/api/store/v1/draft")
+    assert r.status_code == 200 and r.json() is None
+    assert len(route.calls.last.request.headers[VISITOR_HEADER]) == 43
+
+
+def test_an_item_is_forwarded_as_sent_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{DRAFT}/items").respond(200, json=VIEW, headers=CRUD)
+    raw = '{"listing_id": "x", "values": {"width": 1' + "0" * 400 + "}}"
+    r = edge.post(
+        "/api/store/v1/draft/items",
+        content=raw,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200 and r.json() == VIEW
+    sent = route.calls.last.request
+    assert sent.content == raw.encode()
+    assert uuid.UUID(sent.headers["idempotency-key"]).version == 4
+
+
+def test_an_item_body_too_large_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{DRAFT}/items")
+    r = edge.post(
+        "/api/store/v1/draft/items",
+        content=b"{" + b" " * (MAX_RENDER_BODY + 1) + b"}",
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+    assert route.call_count == 0
+
+
+def test_an_item_from_another_origin_is_refused_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    add = crud_mock.post(f"{DRAFT}/items")
+    remove = crud_mock.delete(f"{DRAFT}/items/{ITEM}")
+    evil = {"Origin": "https://evil.example"}
+    assert edge.post("/api/store/v1/draft/items", json={}, headers=evil).status_code == 403
+    assert edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers=evil).status_code == 403
+    assert (add.call_count, remove.call_count) == (0, 0)
+
+
+def test_a_removal_is_forwarded_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.delete(f"{DRAFT}/items/{ITEM}").respond(200, json=VIEW, headers=CRUD)
+    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 200 and r.json() == VIEW
+    assert uuid.UUID(route.calls.last.request.headers["idempotency-key"]).version == 4
+
+
+def test_another_visitors_item_passes_through_as_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    missing = {
+        "type": f"{STOREFRONT_PROBLEMS}item_not_found",
+        "title": "Not Found",
+        "status": 404,
+        "detail": "There is no such item.",
+    }
+    crud_mock.delete(f"{DRAFT}/items/{ITEM}").respond(404, json=missing, headers=CRUD)
+    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 404 and r.json()["type"] == missing["type"]
+
+
+@pytest.mark.parametrize("item_id", ["..", "not-an-item", "%2E%2E", "A" * 36])
+def test_an_item_id_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    item_id: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.delete(f"/api/store/v1/draft/items/{item_id}", headers={"Origin": PUBLIC_URL})
+    # ".." leaves the path whole: ``DELETE /draft`` is no route.
+    assert r.status_code == (405 if item_id == ".." else 404)
+    assert len(crud_mock.calls) == before

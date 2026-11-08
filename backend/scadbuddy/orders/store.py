@@ -407,10 +407,16 @@ class OrderStore:
     # -- connections ------------------------------------------------------------------
 
     @contextmanager
-    def transaction(self) -> Iterator[Conn]:
-        """A connection inside one transaction: what a transition writes everything on."""
-        with self._pool.connection() as conn, conn.transaction():
-            yield conn
+    def transaction(self, conn: Conn | None = None) -> Iterator[Conn]:
+        """A connection inside one transaction: what a transition writes everything on.
+        With ``conn``, a savepoint in the caller's transaction on it, which commits only
+        with that transaction."""
+        if conn is not None:
+            with conn.transaction():
+                yield conn
+            return
+        with self._pool.connection() as own, own.transaction():
+            yield own
 
     @contextmanager
     def _write(self, conn: Conn | None) -> Iterator[Conn]:

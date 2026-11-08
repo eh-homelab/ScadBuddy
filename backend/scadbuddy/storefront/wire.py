@@ -9,6 +9,9 @@ from typing import Final
 #: A listing id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``listing_not_found`` before a lookup.
 LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: An order item's id (``gen_random_uuid()::text``). Both sides answer any other 404
+#: ``item_not_found`` before a lookup.
+ITEM_ID: Final = LISTING_ID
 #: A render job's id (``uuid4().hex``). Both sides answer any other 404
 #: ``render_not_found`` before a lookup.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}")

@@ -7,8 +7,8 @@ The edge holds no database: it calls ``/api/v1/internal/crud/storefront/…`` wi
 problem and ``Retry-After``, and any other with a bare 502 (`storefront/app.py`). Each call
 sends the visitor id the edge verified (`VISITOR_HEADER`) and the browser's address
 (`CLIENT_HEADER`); a write also sends its ``Idempotency-Key``, the same on each retry. A
-render's body goes as the visitor sent it, unread; its preview comes back as a stream
-(`CrudStream`), which the edge relays without holding it whole.
+render's body, and a draft item's, goes as the visitor sent it, unread; a render's preview
+comes back as a stream (`CrudStream`), which the edge relays without holding it whole.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -26,7 +26,7 @@ from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here.
-EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders"})
+EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts"})
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 
 
@@ -98,6 +98,24 @@ class StorefrontCrud:
         """``GET …/storefront/renders/{id}/estimate``: the render's rough price."""
         return await self._call(
             "GET", f"/renders/{job_id}/estimate", visitor_id=visitor_id, client=client
+        )
+
+    async def draft(self, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/draft``: the visitor's draft order, or None."""
+        return await self._call("GET", "/draft", visitor_id=visitor_id, client=client)
+
+    async def add_item(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/draft/items``: the visitor's JSON body as it came, unread,
+        and the request's ``Idempotency-Key``."""
+        return await self._call(
+            "POST", "/draft/items", visitor_id=visitor_id, client=client, content=body, key=key
+        )
+
+    async def remove_item(self, item_id: str, *, key: str, visitor_id: str, client: str) -> Any:
+        """``DELETE …/storefront/draft/items/{id}``. ``item_id`` must be an item id
+        (`storefront/routes.py` checks it), so it cannot leave the path."""
+        return await self._call(
+            "DELETE", f"/draft/items/{item_id}", visitor_id=visitor_id, client=client, key=key
         )
 
     async def render_preview(
