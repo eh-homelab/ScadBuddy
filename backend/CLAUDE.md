@@ -675,7 +675,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   null, or the spools; the dialog adds its hint only then), a quote's `native` path taken
   on a printer no longer on the LAN is `requote_needed` naming that
   (`quoted_path_refusal`), and a quote
-  with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The lifecycle drops the quote holders §3.4 releases
+  with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The
+  quote route's body (`ItemSliceQuoteRequest`) also takes `inputs` and `commit`: a design
+  that differs from the item's is made a revision first (`api/orders.py` `_slice_revision`,
+  through `Lifecycle.add_revision`, after acceptance for an accepted item on a
+  `TAKES_ITEMS` order), and the quote is of it (`revision_id` in the operation's request;
+  409 `revision_superseded` once another is current, the record's locked check
+  included; a cart is refused `order_not_submitted` first). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.

@@ -712,3 +712,92 @@ def test_a_two_plate_item_is_quoted_on_both_plates_natively(
         ("setup", 50),
     ]
     assert slicer.calls == 2
+
+
+def _slice(shop: Shop, **extra: Any) -> dict[str, Any]:
+    """A slice quote posted with ``extra`` and followed to its end."""
+    started = shop.post(**extra)
+    assert started.status_code == 202, started.text
+    op: dict[str, Any] = follow_operation(shop.client, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    return op
+
+
+WIDER = {"params": {"width": 14}}
+
+
+def test_a_slice_with_new_inputs_quotes_a_new_revision(bambuddy: TestClient) -> None:
+    """#4673 PR 3 (order operations spec §5.1): new inputs in a slice make a revision
+    first, through the revise path, and the quote is of it. The same inputs again make
+    none: only another print setup under the same revision."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    first = _slice(shop)["result"]
+    [one] = shop.get_item()["revisions"]
+    assert first["revision_id"] == one["id"]
+
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1, 2]
+    two = item["revisions"][-1]
+    assert two["reference"]["inputs"]["params"]["width"] == 14
+    assert item["reference"]["inputs"]["params"]["width"] == 14
+    assert item["current_revision_id"] == two["id"]
+    assert quote["revision_id"] == two["id"]
+
+    again = _slice(shop, inputs=two["reference"]["inputs"])["result"]
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2]
+    assert again["revision_id"] == two["id"]
+
+
+def test_a_resent_slice_with_new_inputs_makes_one_revision(bambuddy: TestClient) -> None:
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    key = "slice-wider"
+    first = shop.post(key, inputs=WIDER)
+    again = shop.post(key, inputs=WIDER)
+    assert first.status_code == again.status_code == 202, again.text
+    assert first.json()["id"] == again.json()["id"]
+    follow_operation(bambuddy, first.json(), timeout=120, poll=0.2)
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2]
+
+
+def test_a_slice_with_new_inputs_after_acceptance_revises_after_acceptance(
+    bambuddy: TestClient,
+) -> None:
+    """On an accepted order the revision is #5350's: the accepted quote stays accepted,
+    and the item is revised after acceptance, so the new quote can be accepted."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert item["revised_after_acceptance"] is True
+    assert quote["revision_id"] == item["current_revision_id"]
+    assert [q["id"] for q in item["quotes"] if q["accepted"]] == [accepted["id"]]
+    events = bambuddy.get(f"/api/v1/orders/{shop.order['id']}/events").json()
+    assert [e["kind"] for e in events].count("revision.added_after_acceptance") == 1
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+
+
+def test_a_slice_with_new_inputs_keeps_the_revise_paths_refusals(bambuddy: TestClient) -> None:
+    """The revise path's refusals apply unchanged (§5.1): on hold, an accepted item takes
+    no new design, so the slice starts nothing. Inputs its template cannot take are 422,
+    as a revision's."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/hold").status_code == 200
+    held = shop.post(inputs=WIDER)
+    assert held.status_code == 409, held.text
+    assert held.json()["type"].endswith("/order_on_hold")
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
+
+    bad = shop.post(commit="0" * 40)
+    assert bad.status_code == 422, bad.text

@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api, ApiError } from '../../api/client'
-import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Revision } from '../../api/types'
+import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Quote, Revision } from '../../api/types'
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
@@ -16,6 +16,35 @@ export const REQUOTE_HINT = "Quote the item again, or ask the assistant to print
 function withHint(cause: unknown): unknown {
   if (!(cause instanceof ApiError) || (cause.problem as { reason?: string }).reason !== 'setup_differs') return cause
   return new ApiError({ ...cause.problem, detail: `${cause.detail.replace(/\.?$/, '.')} ${REQUOTE_HINT}` })
+}
+
+/**
+ * #4673 — the quote's recorded print setup as the dialog's seed (a slice quote's
+ * `choices` and `filament_plan`, order operations spec §5.4), so Print sends what was
+ * quoted. None for a quote that records no setup (manual, archive, or older).
+ */
+function quotedSeed(quote: Quote | undefined): PrintRunRequest | null {
+  const setup = quote?.choices as QuotedSetup | null | undefined
+  if (!quote || !setup?.choices) return null
+  return {
+    printer_id: setup.printer_id ?? undefined,
+    filament_plan: (quote.filament_plan ?? { slots: [] }) as PrintRunRequest['filament_plan'],
+    choices: setup.choices,
+    all_plates: true,
+    ...(setup.prime_tower ? { prime_tower: setup.prime_tower } : {}),
+    ...(setup.supports ? { supports: setup.supports } : {}),
+    ...(setup.print_sequence ? { print_sequence: setup.print_sequence } : {}),
+    ...(quote.part_settings ? { part_settings: quote.part_settings as PartSettingsMap } : {}),
+  } as PrintRunRequest
+}
+
+/** A slice quote's `choices` column (`orders/quote.py` `print_setup`). */
+type QuotedSetup = {
+  printer_id?: number | null
+  choices?: PrintRunRequest['choices'] | null
+  prime_tower?: PrintRunRequest['prime_tower'] | null
+  supports?: PrintRunRequest['supports'] | null
+  print_sequence?: PrintRunRequest['print_sequence'] | null
 }
 
 /** The order states past acceptance, in which an item is made (§3.5). */
@@ -70,6 +99,7 @@ export function ItemPrintDialog({
   // #5627 — the settings the print sends and slices with: the accepted quote's per colour,
   // or for a test print the newest slice quote of that revision (`test_print_check`).
   const quoted = quoteToPrint(item, testRevision?.id)
+  const seed = useMemo(() => quotedSeed(quoted), [quoted])
   if (!source) return null
   return (
     <PrintPicker
@@ -81,6 +111,7 @@ export function ItemPrintDialog({
         orderId: order.id,
         itemId: item.id,
         quoted: (quoted?.part_settings ?? null) as PartSettingsMap | null,
+        seed,
         start: async (body) => {
           try {
             if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)

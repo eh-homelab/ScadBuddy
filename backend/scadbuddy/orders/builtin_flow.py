@@ -54,6 +54,9 @@ NEWER_NOTICE = (
 )
 #: A script's calls a grant can admit (`flows/grants.py` `HostFn`), and `agent(`, which
 #: no rule admits: `queue_print(...)`, `arrange(...)`, `tool("<name>", ...)`.
+#: Every `tool(` call, and those `_CALL` reads: a tool named by a literal.
+_TOOL_CALL = re.compile(r"\btool\(")
+_LITERAL_TOOL = re.compile(r"""\btool\(\s*["'][A-Za-z0-9_]+["']""")
 _CALL = re.compile(r"""\b(queue_print|arrange|agent)\s*\(|\btool\(\s*["']([A-Za-z0-9_]+)["']""")
 
 INPUTS_SCHEMA: dict[str, Any] = {
@@ -338,12 +341,7 @@ async def ensure_builtin_flow(
             return False
         # The check a registration route applies (review of #5682): a build whose script
         # no longer type-checks registers nothing.
-        if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
-            logger.error(
-                "the built-in %s flow does not type-check; not registered",
-                NAME,
-                extra={"problems": len(problems)},
-            )
+        if not await _checked(SCRIPT, "registered"):
             return False
         made = await definitions.register_new(
             NAME,
@@ -380,12 +378,7 @@ async def _upgraded(definitions: FlowDefinitions, newest: FlowCommit) -> bool:
     script = await asyncio.to_thread(definitions.history.script_at, NAME, newest.commit)
     if script == SCRIPT:
         return False
-    if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
-        logger.error(
-            "the built-in %s flow does not type-check; not upgraded",
-            NAME,
-            extra={"problems": len(problems)},
-        )
+    if not await _checked(SCRIPT, "upgraded"):
         return False
     made = await definitions.upgrade_builtin(
         NAME,
@@ -396,6 +389,29 @@ async def _upgraded(definitions: FlowDefinitions, newest: FlowCommit) -> bool:
         message="Update the built-in order-fulfilment flow",
     )
     return made is not None
+
+
+async def _checked(script: str, written: str) -> bool:
+    """Whether ``script`` may be written: it type-checks, and names every tool it calls
+    as a literal, the one form :func:`script_calls` reads (#5732 review), so moving a
+    trigger never misses a call. A refusal is logged; nothing is ``written``."""
+    if unread := len(_TOOL_CALL.findall(script)) - len(_LITERAL_TOOL.findall(script)):
+        logger.error(
+            "the built-in %s flow names a tool other than by a literal; not %s",
+            NAME,
+            written,
+            extra={"calls": unread},
+        )
+        return False
+    if problems := await check_script(script, INPUTS_SCHEMA, stored=True):
+        logger.error(
+            "the built-in %s flow does not type-check; not %s",
+            NAME,
+            written,
+            extra={"problems": len(problems)},
+        )
+        return False
+    return True
 
 
 def script_calls(script: str) -> set[tuple[str, str | None]]:

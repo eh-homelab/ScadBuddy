@@ -361,8 +361,29 @@ const sliceQuote = z
     prime_tower: primeTowerChoice,
     supports: supportsChoice,
     print_sequence: printSequence,
+    // #4673 PR 3: a new design first, through the revise path; the quote is of it.
+    inputs: z
+      .object({})
+      .catchall(z.unknown())
+      .optional()
+      .describe(
+        "The design's inputs (`{params, v}`, as the item's `reference.inputs`), whole. Omit for the item's. When they or " +
+          "`commit` differ from the item's, a revision of them is made first, as order_item_revision_add makes one (or " +
+          'order_item_revision_add_after_acceptance for an accepted item on an accepted order), with its refusals, and ' +
+          'the quote is of it; the same design again makes none',
+      ),
+    commit: z
+      .string()
+      .regex(/^[0-9a-f]{7,40}$/)
+      .optional()
+      .describe("The template commit for the new design (list_versions). Omit for the item's"),
   })
   .strict()
+
+/** #4673 PR 3: the design a slice quote makes first, for its line. */
+function designPhrase({ inputs, commit }: { inputs?: unknown; commit?: string }): string {
+  return (inputs !== undefined ? ' with new inputs' : '') + (commit !== undefined ? ` at commit ${commit.slice(0, 7)}` : '')
+}
 
 /**
  * The quote warning (job cost spec 2026-11-05 §6.3, #5328): the model's real cost per unit
@@ -1288,7 +1309,10 @@ export const orderTools: Tool[] = [
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
-      'item is quoted; order_item_accept_quote pins it. `archive` (#4777): priced from what a past print used, ' +
+      'item is quoted; order_item_accept_quote pins it. With `slice.inputs` or `slice.commit` that differ from the ' +
+      "item's, a revision of that design is made first (refused as order_item_revision_add refuses one) and the " +
+      'quote is of it; a revision made after it refuses the quote 409 `revision_superseded` (slice again). A ' +
+      'storefront cart is refused `order_not_submitted` first. `archive` (#4777): priced from what a past print used, ' +
       'with no re-slice: every plate archive of its print run, grams per slot as the slicer estimated them and the ' +
       "actual seconds, at the price book in force, each slot at `filaments`' filament (written onto the item first). " +
       '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). Refused ' +
@@ -1336,7 +1360,7 @@ export const orderTools: Tool[] = [
     ],
     title: ({ order_id, item_id, slice, archive }) =>
       `${slice ? 'Quote from a slice' : archive ? 'Quote from a past print' : 'Price'} item ${item_id} of order ${order_id}` +
-      (slice ? setupPhrase(slice) : ''),
+      (slice ? designPhrase(slice) + setupPhrase(slice) : ''),
     handler: async ({ order_id, item_id, manual, slice, archive }, ctx) => {
       if ([manual, slice, archive].filter((mode) => mode !== undefined).length !== 1) {
         throw new ToolError(

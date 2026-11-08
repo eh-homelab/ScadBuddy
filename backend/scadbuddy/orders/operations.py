@@ -46,6 +46,7 @@ from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.library.outputs import OutputNotFoundError
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
@@ -486,7 +487,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         if rate is not None:
             policy = policy.model_copy(update={"machine_rate_per_hour": rate})
         slots = await asyncio.to_thread(
-            quote_check, orders.store, policy, request["order_id"], request["item_id"], body
+            lambda: quote_check(
+                orders.store,
+                policy,
+                request["order_id"],
+                request["item_id"],
+                body,
+                expected_revision_id=request.get("revision_id"),
+            )
         )
         await asyncio.to_thread(support_check, orders.store, request["item_id"], body)
         await library_file_stands(request["item_id"])
@@ -532,6 +540,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 SliceQuoteRequest.model_validate(request["request"]),
                 Actor.model_validate(request["by"]),
                 quote_id=operation_quote_id(OPERATION_RUN.get()),
+                expected_revision_id=request.get("revision_id"),
             )
         except QUOTE_RETRYABLE:
             raise
@@ -580,14 +589,15 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))
-        native = await native_run(body)
-        if body.path == "native" and "path" not in sent_keys(sent) and not native:
-            raise quoted_path_refusal(request["item_id"])
+        # Read once for the printer and the route (#5732 review).
+        settings = await asyncio.to_thread(core.settings_store.load)
         if body.printer is not None:
-            settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
                 body.printer, body.printer_id, settings, components.get(PRINTERS).store
             )
+        native = await native_run(body, settings)
+        if body.path == "native" and "path" not in sent_keys(sent) and not native:
+            raise quoted_path_refusal(request["item_id"])
         # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
         # so a refusal writes nothing, and recorded with it so a retry keys its run as
         # the first try did. On the native path the plan is the request's.
@@ -607,10 +617,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 checked["filament_plan"] = plan.model_dump(mode="json")
         return checked
 
-    async def native_run(body: PrintRunRequest) -> bool:
-        """Whether ``body``'s print takes the native path (no Bambuddy). A printer the
-        route refuses is not native here: the run refuses it itself, in its own words."""
-        settings = await asyncio.to_thread(core.settings_store.load)
+    async def native_run(body: PrintRunRequest, settings: StoredSettings) -> bool:
+        """Whether ``body``'s print takes the native path (no Bambuddy), on the stored
+        ``settings`` the check read. A printer the route refuses is not native here: the
+        run refuses it itself, in its own words."""
         if not native_backends(settings):
             return False
         printers = components.get(PRINTERS)

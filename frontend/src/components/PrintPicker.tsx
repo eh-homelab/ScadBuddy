@@ -287,6 +287,12 @@ interface Props {
      * ones would print what was not priced, so Print is held while the dialog's differ.
      */
     quoted?: PartSettingsMap | null
+    /**
+     * #4673 — the accepted quote's print setup, which the dialog opens on as a batch step
+     * opens on its own seed: the printer, spools, nozzles, quality, tower, supports and
+     * sequence. The backend refuses another setup (`requote_needed`).
+     */
+    seed?: PrintRunRequest | null
     start: (body: OrderItemPrintRequest) => Promise<void>
   }
 }
@@ -1327,11 +1333,17 @@ export function PrintPicker({
    * again for it), then, once this file's spools are known, the rest.
    */
   const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
+  // #4673: an item print's quote seeds the dialog as a batch step's own seed does.
+  const itemSeed = itemPrint?.seed ?? null
+  const seeded = useMemo(
+    () => batch ?? (itemSeed ? { seed: itemSeed, seedIsOwn: true, seedSlots: NO_IDS } : undefined),
+    [batch, itemSeed],
+  )
   const { askPrinter, changeNozzles, changeQuality, setPlate, setPartSettings, setSeededParts } = picker
   const restoreProfiles = filamentProfiles.restore
   useEffect(() => {
-    const seed = batch?.seed
-    if (!seed || seeding.current === 'done' || !choices) return
+    const seed = seeded?.seed
+    if (!seeded || !seed || seeding.current === 'done' || !choices) return
     const wanted = seed.printer_id ?? null
     const known = wanted !== null && printers.some((entry) => entry.id === wanted)
     if (seeding.current === 'printer') {
@@ -1346,8 +1358,8 @@ export function PrintPicker({
     if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
     const chosen = seed.filament_plan.slots ?? []
     const mine = slotKeys(filaments)
-    const same = mine.length === batch.seedSlots.length && mine.every((key, at) => key === batch.seedSlots[at])
-    if (!batch.seedIsOwn && !same) return
+    const same = mine.length === seeded.seedSlots.length && mine.every((key, at) => key === seeded.seedSlots[at])
+    if (!seeded.seedIsOwn && !same) return
     const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
     setPlan((current) =>
       current.map((choice) => {
@@ -1365,9 +1377,9 @@ export function PrintPicker({
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
     // A step's own seed is its sequence, Default included; another step's names one only
     // when it has one, and otherwise leaves the subject's remembered one (#4970).
-    if (batch.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
+    if (seeded.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
     else if (seed.print_sequence) setPrintSequence(seed.print_sequence)
-    if (batch.seedIsOwn) {
+    if (seeded.seedIsOwn) {
       // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
       // the step again without them would queue it without the supports, tower or
       // profiles the user chose.
@@ -1381,7 +1393,7 @@ export function PrintPicker({
       }
     }
   }, [
-    batch,
+    seeded,
     choices,
     printers,
     printerId,

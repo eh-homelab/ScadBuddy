@@ -55,6 +55,31 @@ describe('PrintItem', () => {
     await waitFor(() => expect(screen.queryByTestId('print-item')).toBeNull())
   })
 
+  // #4673 — the dialog opens on the accepted quote's print setup, so Print sends what was
+  // quoted (the backend refuses another setup with `requote_needed`).
+  it("opens on the accepted quote's print setup and sends it", async () => {
+    const quoted = { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'draft', process_name: null }
+    for (const quote of state.quotes) {
+      if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
+        Object.assign(quote, {
+          choices: { printer_id: null, printer: null, path: null, choices: quoted, prime_tower: null, supports: null, print_sequence: 'by object' },
+        })
+      }
+    }
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    const body = printed.mock.calls[0]![2]
+    expect(body.choices).toMatchObject({ tier: 'draft' })
+    // The tower, supports and sequence are left out: the backend takes the quote's.
+    expect(body).not.toHaveProperty('print_sequence')
+  })
+
   // #5544 — a library file item prints its file: the dialog opens on the file, not an output.
   it('prints an approved library file item on its file', async () => {
     Object.assign(state.items.find((i) => i.id === ITEM_APPROVED)!, {

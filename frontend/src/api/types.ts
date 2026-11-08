@@ -497,8 +497,9 @@ export type PriceBook = Schemas['PriceBook']
 export type SpoolImport = Schemas['SpoolImport']
 export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
- * colour slot (`colours[].slot`, from 0). */
-export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
+ * colour slot (`colours[].slot`, from 0); with `inputs` or `commit`, a new design first
+ * (#4673). */
+export type SliceQuoteRequest = Schemas['ItemSliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
  * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
  * sends the quote's own, so the body matches the background slice's; the server refuses

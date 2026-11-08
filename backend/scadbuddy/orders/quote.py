@@ -138,6 +138,17 @@ class SliceQuoteRequest(BaseModel):
     print_sequence: PrintSequence | None = None
 
 
+class ItemSliceQuoteRequest(SliceQuoteRequest):
+    """The quote route's body (#4673 PR 3, order operations spec §5.1): a slice quote's,
+    and the design to quote. With ``inputs`` or ``commit`` (each left out is the item's
+    current one) that differ from the item's, the route first makes a revision of them
+    through the revise path, then quotes under it. Not part of the operation's request:
+    the revision is, as ``revision_id``."""
+
+    inputs: dict[str, Any] | None = None
+    commit: str | None = None
+
+
 #: The fields of a slice quote's request that are its print setup (#4673): what the print
 #: sends to slice what was priced. `filaments` prices and `filament_plan` has a column
 #: of its own; `part_settings` has its own since #5571.
@@ -277,8 +288,12 @@ def quote_check(
     order_id: str,
     item_id: str,
     request: SliceQuoteRequest | ArchiveQuoteRequest,
+    *,
+    expected_revision_id: str | None = None,
 ) -> dict[int, str | None]:
-    """Ruling 8's refusals, from the rows: 404 for an unknown order or item, 409
+    """Ruling 8's refusals, from the rows (with ``expected_revision_id``, the revision a
+    slice's new inputs made, 409 ``revision_superseded`` once another is current, #4673):
+    404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
     accepted quote on an order that takes items after acceptance, #5349, or was revised after
     acceptance, #5350), 409 ``item_not_open``
@@ -312,6 +327,8 @@ def quote_check(
             type_=PROBLEMS + "item_not_open",
         )
     check_design(item)
+    if expected_revision_id is not None and item.current_revision_id != expected_revision_id:
+        raise refused(_superseded(item_id))
     known = {slot.slot for slot in item.colours}
     unknown = sorted(set(request.filaments) - known) if item.colours else []
     if unknown:
@@ -332,6 +349,16 @@ def quote_check(
             " names costs 0",
         )
     return slots
+
+
+def _superseded(item_id: str) -> LifecycleError:
+    """409 ``revision_superseded`` (#4673): the slice was made for a revision (its new
+    inputs') that is no longer the item's current one."""
+    return LifecycleError(
+        "revision_superseded",
+        f"item {item_id} has a newer revision than the one this slice was made for: slice it again",
+        items=[item_id],
+    )
 
 
 def support_check(store: OrderStore, item_id: str, request: SliceQuoteRequest) -> None:
@@ -872,10 +899,14 @@ async def quote_run(
     by: Actor,
     *,
     quote_id: str | None = None,
+    expected_revision_id: str | None = None,
 ) -> Quote:
     """The whole run, in the order the module docstring gives. ``quote_id`` is the id
     every attempt of one operation records under (:func:`operation_quote_id`): an
-    attempt that finds it recorded answers with it and does nothing (#5353)."""
+    attempt that finds it recorded answers with it and does nothing (#5353). With
+    ``expected_revision_id`` (#4673) it quotes that revision or, once another is
+    current, nothing (``revision_superseded``): checked when it reads the item, and again
+    by the record under the order's lock (its ``revision_not_newest``, named so here)."""
     lifecycle = run.lifecycle
     store = lifecycle.store
     quote_id = quote_id or uuid.uuid4().hex
@@ -902,6 +933,8 @@ async def quote_run(
     revision_id = item.current_revision_id
     if revision_id is None:
         raise refused(LifecycleError("item_has_no_design", f"item {item_id} has no design yet"))
+    if expected_revision_id is not None and revision_id != expected_revision_id:
+        raise refused(_superseded(item_id))
     schema = await run.schema_of(reference) if run.schema_of is not None else None
     output_id = await ensure_output(
         lifecycle=lifecycle,
@@ -922,18 +955,23 @@ async def quote_run(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
-    return await _priced(
-        run,
-        order,
-        item_id,
-        sliced,
-        scope,
-        by,
-        quote_id,
-        revision_id,
-        part_settings=dumped(request.part_settings),
-        request=request,
-    )
+    try:
+        return await _priced(
+            run,
+            order,
+            item_id,
+            sliced,
+            scope,
+            by,
+            quote_id,
+            revision_id,
+            part_settings=dumped(request.part_settings),
+            request=request,
+        )
+    except ApiError as error:
+        if expected_revision_id is not None and error.type == PROBLEMS + "revision_not_newest":
+            raise refused(_superseded(item_id)) from None
+        raise
 
 
 async def _library_quote(
