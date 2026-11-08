@@ -612,6 +612,28 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   extracted from the Activity components, which wrap them) and `components/orders/`; the
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
+  Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
+  script, inputs `notify` and `settle_hours`), registered by
+  `ensure_builtin_flow` at the component's start only when the name never had a version
+  (`FlowDefinitions.register_new`, `FlowExistsError`), so a person's edit or delete stands;
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
+  settings) switches it. It prints each approved or failed item through `queue_print`
+  with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
+  other) or print choices it cannot read (no output, or one gone) asks a person to fix it and answer `print`, and an unanswered or skipped item
+  is passed over, never the run's end. It never re-quotes: on an accepted order a new
+  quote opens only after a person's revision after acceptance. A print run ends once
+  its plates are queued, so it then reads `order_get` (`sleep` between reads, from
+  `POLL_S` doubling to `POLL_MAX_S`, so a run's history stays bounded: it has no
+  continue-as-new) until no printed item is `queued` or `printing`, for at most the
+  input `settle_hours` (default 48; past it the run ends with a summary and no check);
+  an item a failed print left `queued` anyway counts as printed. Only then does it ask
+  the agent to record the attempts under a grant kept to the order, and with `notify`,
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
+  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  component's start; it reads the versions first (a name with any registers nothing),
+  then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
+  (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
+  build (`flows/reconcile.py` `created_by`).
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
   `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and
   the stored settings `pricing_*` and `rough_estimate_factor` (`live`), behind `GET`/`PUT
@@ -631,7 +653,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
   directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
   before the quote's row exists, reads each plate with `read_sliced`, prices and records
-  it (`Lifecycle.record_slice_quote`). The lifecycle drops the quote holders §3.4 releases
+  it (`Lifecycle.record_slice_quote`). The quote records its print setup (#4673, order operations spec §5): `choices`
+  (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
+  `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
+  `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
+  An item's print takes the tower, supports and sequence it omits from the quote's
+  (`printing.py` `QUOTED_SETUP`, `print_body`'s `setup`); one that differs is `requote_needed`. The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
@@ -728,6 +755,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   /orders/{id}/time-entries` and `…/cost-entries`; agent `order_time_add`, `order_cost_add`
   (write); the order page's `components/orders/OrderCosts.tsx` and `CostEntryForms.tsx`.
   Every attempt counts, test prints (#5280) too (`OrderStore.cost_rows`, every purpose).
+  Job cost phase 5 (#5330): the assistant's spend arrives from the agent service on its own
+  CRUD route, `POST /api/v1/internal/crud/agent/orders/{id}/assistant-cost` (`api/crud_agent.py`,
+  class `crud.agent`, area `order-costs`; only the `agent` credential), a session's USD
+  figure that `Lifecycle.add_assistant_cost` converts at `pricing_usd_rate` (`UsdRate`: 1
+  for a USD order, the rate for the shop's currency, else 409 `currency_unconvertible`; a
+  visitor's unsubmitted cart is 409 `order_not_submitted`; an item gone or not the order's
+  puts the entry on the order) into
+  one `assistant` entry, source `ai_session:<id>`, its note keeping the USD figure; a
+  repeat returns the first entry, and a first report under one minor unit writes nothing
+  (`entry: null`, which the agent keeps to report with more spend). The backend reads no `ai_*` table for it.
   Job cost phase 2 (#5327): `GET /orders` rows (`OrderRow`) carry `margin_minor`,
   `margin_percent`, `margin_state` and `margin_estimated`, and the list takes `margin_state`
   repeated. `costs.py` `order_margins` and the per-order read are one computation
@@ -880,9 +917,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
   captures it from the webhook path and the capture's events record it; each webhook is
   checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
-  cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
-  approval is not captured (a failed mark is logged, not retried, and such a capture, like one
-  made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  cached in memory, never stored; a cancel marks the order's `custom_id` so a later
+  approval is not captured (a failed mark is logged and the housekeeping sweep below tries
+  it again with a backoff: 5 minutes first, the wait doubling, at most a day; until a try
+  lands, a later approval is still captured, and such a capture, like one made before the
+  mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -924,14 +963,36 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
-  most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
+  most 256 KiB, a bad signature 400 with no event or money written, the actor `provider`
   `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
   (`last_webhook_error`: `signature`, `provider_unavailable` or `handler_error`, and
   `last_webhook_error_at`; #5684; a failure to write it is logged, never raised over the
   webhook's own), never a
-  provider's text. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
+  provider's text; the same category stamped within `WEBHOOK_ERROR_QUIET` (60 s) is not
+  written again (one conditional UPDATE), so a flood of unsigned POSTs writes once a
+  minute. The trade-off: a same-category failure skipped inside the window after a
+  success began keeps the older stamp, so that success clears it; the next failure after
+  the clear is written at once. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
   bounded wait, not a failure, and keeps none. The next success clears it only when the
   failure is older than that success's start; both times are the database's
   `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
   clears it; Settings shows it
   (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.
+  A provider's page to close (#5700): `store.set_request_status` is the one place that
+  marks it, setting `payment_requests.close_pending_at` when a request with a
+  `provider_ref` is cancelled, or paid by a payment that is not its own provider's (by
+  hand, or another request's payment that cleared the balance); its own provider's
+  payment clears the mark. After the commit, a cancel, a manual payment and a webhook's
+  payment close the pages they marked (`Payments.cancel_request`, `cancel_order`,
+  `add_payment`, `_handle_webhook`). `Payments._close_page` clears the mark once the
+  provider confirms (`close_confirmed`) and counts a failed try (`close_failed`:
+  `close_attempts`, `close_tried_at`), each only while the request still holds the
+  reference it tried. The `housekeeping_retry_payment_closes` sweep (both Schedules, behind
+  its patch) calls `Payments.retry_closes`: up to `CLOSE_RETRY_BATCH` marked pages whose
+  wait is over (`closes_due`: `CLOSE_RETRY_FIRST_MINUTES` after the mark or the last try,
+  doubled per failed try, at most a day). It never runs the lifecycle again. The order
+  page says "Close not yet confirmed" while the mark stands (`PaymentRequests.tsx`).
+  A page the provider made after its request was cancelled or paid by hand
+  (`Payments.link`'s race) is kept with its `provider_ref`, no `hosted_url`, and the mark
+  (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`), so the sweep
+  retries it like any other.

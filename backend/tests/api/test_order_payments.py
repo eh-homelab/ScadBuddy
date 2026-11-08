@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 from pathlib import Path
@@ -10,7 +11,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
+from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.models import Actor
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.fake import FAKE
 from scadbuddy.payments.models import HostedRequest
 from scadbuddy.payments.provider import ProviderError
@@ -22,6 +27,7 @@ pytestmark = pytest.mark.requires_postgres
 
 FAKE_CONNECT = {"settings": {"account": "a"}, "secrets": {"signing_secret": "s3cret"}}
 PROBLEMS = "https://scadbuddy.dev/problems/orders/"
+BY = Actor(kind="browser")
 
 
 def with_payments(settings: Settings, tmp_path: Path) -> Settings:
@@ -305,6 +311,73 @@ def test_a_failed_page_cancel_leaves_the_request_cancelled(
     assert cancelled.json()["status"] == "cancelled"
     [kept] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
     assert kept["status"] == "cancelled"
+    # #5700: the back office sees that the page is not yet confirmed closed.
+    assert kept["close_pending_at"] is not None
+
+
+def test_a_closed_page_clears_its_mark(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    cancels = _cancels(monkeypatch)
+    connect_fake(client)
+    order = payable_order(client)
+    req = request_payment(client, order["id"])
+    path = f"/api/v1/orders/{order['id']}/payment-requests/{req['id']}/cancel"
+    assert client.post(path).json()["close_pending_at"] is None
+    [closed] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert closed["close_pending_at"] is None
+    assert cancels == [req["provider_ref"]]
+
+
+def _state(client: TestClient) -> Any:
+    app: Any = client.app
+    return getattr(app.state, STATE_ATTR)
+
+
+def _due(client: TestClient, request_id: str) -> None:
+    """The mark's wait, and any try's, is over."""
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET close_pending_at = close_pending_at - interval"
+            " '2 days', close_tried_at = close_tried_at - interval '2 days' WHERE id = %s",
+            (request_id,),
+        )
+
+
+def test_the_sweep_closes_a_page_whose_close_failed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5700: a failed close is tried again by the sweep until the provider confirms;
+    each failed try is counted, and a success clears the mark."""
+    connect_fake(client)
+    order = payable_order(client)
+    req = request_payment(client, order["id"])
+    tries: list[str] = []
+
+    async def down(credential: Any, provider_ref: str) -> None:
+        tries.append(provider_ref)
+        raise ProviderError("down")
+
+    monkeypatch.setattr(FAKE, "cancel_request", down)
+    client.post(f"/api/v1/orders/{order['id']}/payment-requests/{req['id']}/cancel")
+    service = _state(client).components.get(PAYMENTS).service
+    # Not due yet: the failed close after the commit started the wait again.
+    assert asyncio.run(service.retry_closes()) == 0
+    assert tries == [req["provider_ref"]]
+    _due(client, req["id"])
+    assert asyncio.run(service.retry_closes()) == 0
+    assert tries == [req["provider_ref"]] * 2
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        row = conn.execute(
+            "SELECT close_attempts FROM payment_requests WHERE id = %s", (req["id"],)
+        ).fetchone()
+    assert row == {"close_attempts": 2}
+    cancels = _cancels(monkeypatch)
+    monkeypatch.setattr(FAKE, "cancel_request", type(FAKE).cancel_request.__get__(FAKE))
+    _due(client, req["id"])
+    assert asyncio.run(service.retry_closes()) == 1
+    assert cancels == [req["provider_ref"]]
+    [closed] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert closed["close_pending_at"] is None
+    assert asyncio.run(service.retry_closes()) == 0
 
 
 def test_a_reference_another_request_holds_is_a_link_error(
@@ -324,3 +397,39 @@ def test_a_reference_another_request_holds_is_a_link_error(
     second = request_payment(client, order["id"], amount_minor=600)
     assert (second["status"], second["provider_ref"], second["hosted_url"]) == ("open", None, None)
     assert second["link_error"] == "the provider's reference is held by another payment request"
+
+
+def test_a_page_made_after_the_cancel_is_retried_until_closed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5700: the request is cancelled while the provider makes its page. The page's
+    reference is kept on the cancelled request with the mark, so a close that fails
+    there is tried again by the sweep like any other."""
+    connect_fake(client)
+    order = payable_order(client)
+    orders = _state(client).components.get(ORDERS)
+    real = FAKE.create_request
+    made: list[str] = []
+
+    async def cancelled_meanwhile(credential: Any, request: Any, **kwargs: Any) -> HostedRequest:
+        orders.lifecycle.cancel_payment_request(request.order_id, request.id, BY)
+        hosted = await real(credential, request, **kwargs)
+        made.append(hosted.provider_ref)
+        return hosted
+
+    async def down(credential: Any, provider_ref: str) -> None:
+        raise ProviderError("down")
+
+    monkeypatch.setattr(FAKE, "create_request", cancelled_meanwhile)
+    monkeypatch.setattr(FAKE, "cancel_request", down)
+    req = request_payment(client, order["id"])
+    assert (req["status"], req["hosted_url"]) == ("cancelled", None)
+    assert req["close_pending_at"] is not None
+    cancels = _cancels(monkeypatch)
+    monkeypatch.setattr(FAKE, "cancel_request", type(FAKE).cancel_request.__get__(FAKE))
+    _due(client, req["id"])
+    service = _state(client).components.get(PAYMENTS).service
+    assert asyncio.run(service.retry_closes()) == 1
+    assert cancels == made
+    [closed] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert (closed["status"], closed["close_pending_at"]) == ("cancelled", None)

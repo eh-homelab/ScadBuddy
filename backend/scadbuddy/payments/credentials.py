@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
@@ -25,6 +25,9 @@ _ROW = (
     "provider, account_label, settings, is_default, connected_at, last_webhook_at,"
     " last_webhook_error, last_webhook_error_at"
 )
+
+#: How long the same webhook failure category is not stamped again (#5681 review).
+WEBHOOK_ERROR_QUIET = timedelta(seconds=60)
 
 #: Why the last webhook failed (#5684): a fixed category, never a provider's text.
 WebhookError = Literal["signature", "provider_unavailable", "handler_error"]
@@ -219,17 +222,24 @@ class PaymentCredentials:
 
     def set_webhook_error(self, provider: str, error: WebhookError) -> None:
         """Keep why the last webhook failed (#5684), stamped by the database's clock, as
-        ``clear_webhook_error``'s ``since`` (``now``) is."""
+        ``clear_webhook_error``'s ``since`` (``now``) is. The webhook route is public, so
+        the same category stamped within ``WEBHOOK_ERROR_QUIET`` is left as it is: one
+        conditional UPDATE, and a flood of unsigned requests writes once a minute."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = %s,"
-                " last_webhook_error_at = clock_timestamp() WHERE provider = %s",
-                (error, provider),
+                " last_webhook_error_at = clock_timestamp() WHERE provider = %s"
+                " AND (last_webhook_error IS DISTINCT FROM %s"
+                " OR last_webhook_error_at <= clock_timestamp() - %s)",
+                (error, provider, error, WEBHOOK_ERROR_QUIET),
             )
 
     def clear_webhook_error(self, provider: str, *, since: datetime) -> None:
         """Clear the last failure once a webhook that began at ``since`` succeeded; a
-        failure written after it began (a webhook handled at the same time) stands."""
+        failure written after it began (a webhook handled at the same time) stands. One
+        trade-off of ``WEBHOOK_ERROR_QUIET``: a same-category failure skipped inside the
+        quiet window after this success began keeps the older stamp, so it is cleared with
+        it; the next failure of any category after the clear is written at once."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = NULL,"

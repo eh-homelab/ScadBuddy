@@ -458,6 +458,8 @@ export type OrderItemCreate = Defaulted<
 export type OrderItemPatch = Partial<Schemas['ItemPatch']>
 export type ManualQuoteInput = Defaulted<Schemas['ManualQuoteInput'], 'label'>
 export type FulfilmentInput = Defaulted<Schemas['FulfilmentInput'], 'notes' | 'failure_reason' | 'started_at' | 'finished_at'>
+/** #4955 — one line of a bulk fulfil: how many of the item were made. */
+export type FulfilLine = Schemas['FulfilLine']
 export type ShipmentInput = Partial<Schemas['ShipmentInput']>
 /** `PATCH …/shipments/{shipment}`: only what is sent changes. */
 export type ShipmentEdit = Schemas['ShipmentEdit']

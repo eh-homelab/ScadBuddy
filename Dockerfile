@@ -520,7 +520,12 @@ CMD ["scadbuddy-slicer"]
 # is compiled here. The checksums are pinned in this file rather than read off
 # the release, so a replaced asset fails the build instead of shipping; bump all
 # five ARGs together. The two asset ids are each tarball's id in the REST API, the
-# fallback when the release URL fails (#5706).
+# fallback when the release URL fails (#5706). The build calls that API with no token,
+# and an anonymous caller gets 60 requests an hour per IP
+# (https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api);
+# hosted runners share IPs, so in a broad outage the fallback itself can answer 403. A
+# 403 there does not mean the asset id is wrong: the weekly `release-asset-pins` job
+# (link-check.yml) checks the ids.
 #
 # Its own stage, off `base`, so xz-utils (to unpack the .tar.xz) never reaches
 # the runtime, and so `--version` below runs against the same glibc the runtime

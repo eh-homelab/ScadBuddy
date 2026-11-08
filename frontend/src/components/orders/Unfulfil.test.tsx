@@ -45,9 +45,11 @@ describe('Unfulfil', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('is not offered for an item not fulfilled', async () => {
-    render()
+    const { user } = render()
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
-    expect(within(row()).queryByRole('button', { name: 'Row actions' })).not.toBeInTheDocument()
+    await user.click(within(row()).getByRole('button', { name: 'Row actions' }))
+    await screen.findByRole('menuitem', { name: 'Open details' })
+    expect(screen.queryByRole('menuitem', { name: 'Unfulfil…' })).not.toBeInTheDocument()
   })
 
   it("unfulfils from the row menu after the confirm, and the order leaves ready", async () => {

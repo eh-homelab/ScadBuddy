@@ -165,6 +165,36 @@ def test_the_failure_is_stamped_by_the_database_clock(
     assert stamp is not None and stamp.year < 2100
 
 
+def _stamp(creds: PaymentCredentials) -> datetime | None:
+    return creds.rows()[0].last_webhook_error_at
+
+
+def test_the_same_failure_within_a_minute_writes_nothing(rows: OrderStore, pool: PgPool) -> None:
+    """#5681 review: the public route takes unsigned POSTs. The same category stamped in
+    the last 60 seconds is left as it is, so a flood writes once a minute; another
+    category, or one older than a minute, is written."""
+    creds = PaymentCredentials(rows, KEK)
+    _connect(creds)
+    creds.set_webhook_error("fake", "signature")
+    first = _stamp(creds)
+    creds.set_webhook_error("fake", "signature")
+    assert _stamp(creds) == first
+    creds.set_webhook_error("fake", "handler_error")
+    row = creds.rows()[0]
+    assert row.last_webhook_error == "handler_error"
+    assert row.last_webhook_error_at is not None and first is not None
+    assert row.last_webhook_error_at > first
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE payment_credentials SET last_webhook_error_at ="
+            " last_webhook_error_at - interval '61 seconds'"
+        )
+    aged = _stamp(creds)
+    creds.set_webhook_error("fake", "handler_error")
+    stamp = _stamp(creds)
+    assert aged is not None and stamp is not None and stamp > aged
+
+
 def test_disconnect_is_refused_while_a_request_is_open(rows: OrderStore) -> None:
     creds = PaymentCredentials(rows, KEK)
     _connect(creds)

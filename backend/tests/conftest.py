@@ -573,6 +573,9 @@ def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: st
         # Off, so no test renders a preview behind its back; `test_previews`
         # turns them on with a stub render.
         preview_renders=False,
+        # Off, so no test's flow list holds a flow it did not register;
+        # `tests/flows/test_order_fulfilment_flow.py` registers it itself.
+        orders_builtin_flow=False,
     )
 
 
