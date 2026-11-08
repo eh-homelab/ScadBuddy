@@ -4,7 +4,7 @@ import { DEFAULT_ORDERS_QUERY } from '../../../lib/ordersQuery'
 import { MAZE_SLUG } from '../../fixtures'
 import { resetMockState } from '../../handlers'
 import { MAX_SCAN_PAGES, SCAN_PAGE_SIZE } from './orders'
-import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, state } from './state'
+import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, seedCart, state } from './state'
 
 // The mock answers the lifecycle's refusals as the backend does (orders/lifecycle.py,
 // api/orders.py): 409 problems typed `orders/<slug>` naming the ids in the way, so the
@@ -363,5 +363,60 @@ describe('orders mock (#4249)', () => {
     await api.archiveCustomer(CUSTOMER_ADA)
     expect((await api.customers()).map((c) => c.display_name)).toEqual(['Bob Builder'])
     expect((await api.customers({ includeArchived: true })).length).toBe(2)
+  })
+})
+
+// #4955 — the items card's routes, as `api/orders.py` answers them: a duplicate, and a bulk fulfil.
+describe('orders mock · duplicate and bulk fulfil (#4955)', () => {
+  beforeEach(() => resetMockState())
+
+  it('duplicates an item with its design and no quote, and refuses past quoted without after_acceptance', async () => {
+    const original = state.items.find((i) => i.id === ITEM_DRAFT)!
+    const copy = await api.duplicateOrderItem(ORDER_DRAFT, ITEM_DRAFT)
+    expect(copy.id).not.toBe(ITEM_DRAFT)
+    expect([copy.kind, copy.title, copy.quantity, copy.reference, copy.status]).toEqual([original.kind, original.title, original.quantity, original.reference, 'draft'])
+    expect(state.quotes.filter((q) => q.order_item_id === copy.id)).toEqual([])
+    expect(state.events.at(-1)).toMatchObject({ kind: 'item.duplicated', detail: { item_id: copy.id, from_item_id: ITEM_DRAFT } })
+    const locked = await failure(api.duplicateOrderItem(ORDER_ACCEPTED, ITEM_APPROVED))
+    expect(locked?.problem.type).toBe(`${PROBLEMS}item_locked`)
+    const after = await api.duplicateOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { after_acceptance: true })
+    expect(after.status).toBe('draft')
+    expect((await failure(api.duplicateOrderItem(ORDER_DRAFT, 'f'.repeat(32))))?.problem.status).toBe(404)
+  })
+
+  it("keeps a custom item's price on its copy, accepted only before acceptance", async () => {
+    const custom = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Box', quantity: 2, unit_price_minor: 300 })
+    const copy = await api.duplicateOrderItem(ORDER_DRAFT, custom.id)
+    expect(state.quotes.filter((q) => q.order_item_id === copy.id).map((q) => [q.unit_price_minor, q.accepted])).toEqual([[300, true]])
+  })
+
+  it('fulfils several items in one go, and writes nothing when one is refused', async () => {
+    const order = state.orders.find((o) => o.id === ORDER_ACCEPTED)!
+    const second = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'custom', title: 'Box', quantity: 3, unit_price_minor: 300 })
+    // Not approved yet (its price waits for the customer): nothing is written.
+    const before = state.fulfilments.length
+    const refused = await failure(
+      api.fulfilOrderItems(ORDER_ACCEPTED, [
+        { item_id: ITEM_APPROVED, quantity: 2 },
+        { item_id: second.id, quantity: 1 },
+      ]),
+    )
+    expect(refused?.problem.type).toBe(`${PROBLEMS}item_not_approved`)
+    expect(refused?.problem['items']).toEqual([second.id])
+    expect(state.fulfilments).toHaveLength(before)
+    const made = await api.fulfilOrderItems(ORDER_ACCEPTED, [{ item_id: ITEM_APPROVED, quantity: 2 }])
+    expect(made.map((f) => [f.order_item_id, f.quantity, f.outcome, f.accepted_at !== null])).toEqual([[ITEM_APPROVED, 2, 'succeeded', true]])
+    expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('fulfilled')
+    expect(order.status).not.toBe('accepted')
+    expect((await failure(api.fulfilOrderItems(ORDER_ACCEPTED, [])))?.problem.status).toBe(422)
+    const twice = await failure(api.fulfilOrderItems(ORDER_ACCEPTED, [{ item_id: second.id, quantity: 1 }, { item_id: second.id, quantity: 1 }]))
+    expect(twice?.problem.status).toBe(422)
+  })
+
+  it("refuses both on a visitor's cart (#5282)", async () => {
+    const cart = seedCart()
+    const item = await api.addOrderItem(cart.id, { kind: 'request', title: 'Tag', quantity: 1 })
+    expect((await failure(api.duplicateOrderItem(cart.id, item.id)))?.problem.type).toBe(`${PROBLEMS}order_not_submitted`)
+    expect((await failure(api.fulfilOrderItems(cart.id, [{ item_id: item.id, quantity: 1 }])))?.problem.type).toBe(`${PROBLEMS}order_not_submitted`)
   })
 })

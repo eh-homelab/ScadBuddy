@@ -1,0 +1,70 @@
+{
+  "payment": {
+    "amount_money": {
+      "amount": 700,
+      "currency": "USD"
+    },
+    "application_details": {
+      "application_id": "sq0ids-Pw67AZAlLVB7hsRmwlJPuA",
+      "square_product": "VIRTUAL_TERMINAL"
+    },
+    "approved_money": {
+      "amount": 700,
+      "currency": "USD"
+    },
+    "card_details": {
+      "auth_result_code": "2Nkw7q",
+      "avs_status": "AVS_ACCEPTED",
+      "card": {
+        "bin": "411111",
+        "card_brand": "VISA",
+        "card_type": "DEBIT",
+        "exp_month": 11,
+        "exp_year": 2022,
+        "fingerprint": "sq-1-Hxim77tbdcbGejOejnoAklBVJed2YFLTmirfl8Q5XZzObTc8qY_U8RkwzoNL8dCEcQ",
+        "last_4": "1111",
+        "prepaid_type": "NOT_PREPAID"
+      },
+      "card_payment_timeline": {
+        "authorized_at": "2021-10-13T19:34:33.680Z",
+        "captured_at": "2021-10-13T19:34:34.340Z"
+      },
+      "cvv_status": "CVV_ACCEPTED",
+      "entry_method": "KEYED",
+      "statement_description": "SQ *EXAMPLE TEST GOSQ.C",
+      "status": "CAPTURED"
+    },
+    "created_at": "2021-10-13T19:34:33.524Z",
+    "delay_action": "CANCEL",
+    "delay_duration": "PT168H",
+    "delayed_until": "2021-10-20T19:34:33.524Z",
+    "id": "hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+    "location_id": "L88917AVBK2S5",
+    "note": "Order ORD-2026-7 (ScadBuddy request req-1)",
+    "order_id": "o4b7saqp4HzhNttf5AJxC0Srjd4F",
+    "processing_fee": [
+      {
+        "amount_money": {
+          "amount": 50,
+          "currency": "USD"
+        },
+        "effective_at": "2026-11-08T17:10:02.000Z",
+        "type": "INITIAL"
+      }
+    ],
+    "receipt_number": "bP9m",
+    "receipt_url": "https://squareup.com/receipt/preview/hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+    "source_type": "CARD",
+    "status": "COMPLETED",
+    "total_money": {
+      "amount": 700,
+      "currency": "USD"
+    },
+    "updated_at": "2021-10-13T19:34:34.339Z",
+    "version_token": "56pRkL3slrzet2iQrTp9n0bdJVYTB9YEWdTNjQfZOPV6o",
+    "refunded_money": {
+      "amount": 400,
+      "currency": "USD"
+    }
+  }
+}

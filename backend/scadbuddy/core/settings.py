@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_PREVIEW_RENDERS: render a model with no thumbnail and no output at
     # its default parameters, in the background, and show that as its thumbnail.
     preview_renders: bool = True
+    # SCADBUDDY_ORDERS_BUILTIN_FLOW: register the built-in `order-fulfilment` flow at
+    # start when its name never had a version (orders spec §7.2, #4252).
+    orders_builtin_flow: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
@@ -189,9 +192,10 @@ class Settings(BaseSettings):
     pricing_rounding: Literal["to_minor_unit", "to_major"] = "to_minor_unit"
     # Job cost (spec 2026-11-05 §4.3, §4.4, §5, #5326), decimal strings in the shop's
     # `orders_currency`: the labour rate per hour a time entry copies when it is written
-    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which will
-    # convert the assistant's spend once it is recorded on a job (#5327 to #5330; nothing
-    # reads it yet; `SCADBUDDY_PRICING_USD_RATE`, more than 0), and the margin percent
+    # (`SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`), one USD in the shop's currency, which
+    # converts the assistant's spend (in USD) into a job's cost for an order in the shop's
+    # currency (#5330, `orders/lifecycle.py` `UsdRate`; `SCADBUDDY_PRICING_USD_RATE`, more
+    # than 0), and the margin percent
     # below which a job is thin (`SCADBUDDY_ORDERS_THIN_MARGIN_PERCENT`).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
@@ -746,6 +750,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "service_bootstrap_dir": (
             "The callers' bootstrap secrets the API checks (#5494). Set in Settings, anyone"
             " who could write it could mint a service credential."
+        ),
+        "orders_builtin_flow": (
+            "Whether the API registers the built-in order-fulfilment flow at its start"
+            " (#4252); the deployment's choice, read once, and nothing a running server"
+            " can undo."
         ),
         "service_account_namespace": (
             "Whose ServiceAccounts may exchange for a service credential (#5494): the"

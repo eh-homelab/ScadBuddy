@@ -80,6 +80,7 @@ from scadbuddy.payments.provider import (
     ProviderError,
     ProviderField,
     ProviderUnavailableError,
+    Verified,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,10 @@ TIMEOUT: Final = httpx.Timeout(20.0)
 #: A token is fetched again this long before PayPal says it expires.
 TOKEN_MARGIN_SECONDS: Final = 60
 #: The ``custom_id`` a cancelled request's order carries: ScadBuddy will not capture a
-#: later approval of it. The mark is set once, after the cancel commits, and a failed PATCH
-#: is logged, not retried: that order stays unmarked, and a later approval of it is
-#: captured. Such a capture, and one completed or under way before the mark, is recorded as
-#: a payment on the cancelled request.
+#: later approval of it. The mark is set after the cancel commits. A failed PATCH is
+#: logged and tried again by the housekeeping sweep, with a backoff (#5700); until it
+#: lands, a later approval of the order is captured. Such a capture, and one completed or
+#: under way before the mark, is recorded as a payment on the cancelled request.
 CANCELLED: Final = "scadbuddy-cancelled"
 #: Currencies PayPal takes in whole units only.
 NO_DECIMALS: Final = frozenset({"HUF", "JPY", "TWD"})
@@ -306,7 +307,7 @@ class PayPalProvider:
 
     # -- the seam ---------------------------------------------------------------------
 
-    async def verify(self, credential: Credential) -> str:
+    async def verify(self, credential: Credential) -> Verified:
         environment = credential.settings.get("environment", "")
         self._base(credential)
         if not credential.settings.get("client_id"):
@@ -335,7 +336,8 @@ class PayPalProvider:
                 raise ProviderError(
                     f"the PayPal webhook {webhook_id} does not send {', '.join(missing)}"
                 )
-        return f"PayPal app {token.app_id} ({environment})"
+        # An app takes many currencies: none to compare.
+        return Verified(account_label=f"PayPal app {token.app_id} ({environment})")
 
     async def create_request(
         self,
@@ -394,9 +396,9 @@ class PayPalProvider:
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
         """Mark the order so ScadBuddy will not capture a later approval of it. An order
         already completed, voided or gone is no error. A failure here leaves the order
-        unmarked (the service logs it and does not retry), so a later approval is still
-        captured; that capture, and one completed or under way before the mark, is recorded
-        as a payment on the cancelled request."""
+        unmarked until the housekeeping sweep's next try lands (#5700), so a later approval
+        is still captured meanwhile; that capture, and one completed or under way before the
+        mark, is recorded as a payment on the cancelled request."""
         path = f"/v2/checkout/orders/{_path_id(provider_ref)}"
         patch = [
             {

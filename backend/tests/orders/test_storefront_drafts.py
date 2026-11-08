@@ -9,6 +9,7 @@ import hashlib
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 import psycopg
@@ -23,6 +24,7 @@ from scadbuddy.orders.lifecycle import (
     ManualQuoteInput,
     NewCustomItem,
     NewModelItem,
+    UsdRate,
 )
 from scadbuddy.orders.models import Order, OrderFilter
 from scadbuddy.orders.printing import print_check
@@ -276,6 +278,15 @@ ACTS: dict[str, Callable[[Shop, Order], object]] = {
     ),
     "cancel": lambda shop, order: shop.lifecycle.cancel_order(order.id, BY),
     "hold": lambda shop, order: shop.lifecycle.hold(order.id, BY),
+    # The assistant's spend (#5330) writes money onto an order too.
+    "assistant_cost": lambda shop, order: shop.lifecycle.add_assistant_cost(
+        order.id,
+        session_id="0b0e3c55-6f1e-4a39-9d0e-8a1c2b3d4e5f",
+        order_item_id=None,
+        cost_usd=Decimal("1"),
+        usd_rate=UsdRate(Decimal("1"), "USD"),
+        by=BY,
+    ),
 }
 
 

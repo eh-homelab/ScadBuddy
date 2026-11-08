@@ -119,6 +119,8 @@ export const FLOW_TERMINAL: ReadonlySet<FlowRunStatus> = new Set(['succeeded', '
 /** Who registered a flow or started a run (`created_by`, `started_by`), as a phrase. */
 export function actorText(actor: Record<string, unknown>): string {
   if (actor['kind'] === 'browser') return 'you, in the browser'
+  // The build's own flows (#4252: the built-in `order-fulfilment`).
+  if (actor['kind'] === 'builtin') return 'ScadBuddy (built in)'
   if (actor['kind'] !== 'agent') return 'someone else'
   const session = actor['session']
   return typeof session === 'string' && session ? `an assistant (session ${session})` : 'an assistant'

@@ -21,6 +21,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
     "print": ["settings", "runs", "operations", "events", "printer-ensure"],
     "storefront": [],
+    "agent": ["order-costs"],
 }
 
 

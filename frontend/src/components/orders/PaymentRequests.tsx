@@ -44,7 +44,11 @@ export function PaymentRequests({
 }) {
   const providers = useAsync(() => api.paymentProviders(), []).data
   const connected = (providers ?? []).filter((p) => p.connected)
-  const [form, setForm] = useState<{ amount: string; kind: 'deposit' | 'balance'; provider: string } | null>(null)
+  // `provider` stays null until the person picks one; till then the form uses the default
+  // connected provider, read when it renders and submits, so a form opened before the
+  // providers load does not go out by hand (#5729).
+  const [form, setForm] = useState<{ amount: string; kind: 'deposit' | 'balance'; provider: string | null } | null>(null)
+  const provider = form?.provider ?? connected.find((p) => p.is_default)?.id ?? NONE
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState<{ id: string; ok: boolean } | null>(null)
@@ -73,8 +77,8 @@ export function PaymentRequests({
       return
     }
     // With a provider connected the person chooses one, or by hand; with none the request is by hand.
-    const provider = connected.length > 0 ? { provider: form.provider === NONE ? null : form.provider } : {}
-    void act(() => api.requestPayment(order.id, { kind: form.kind, ...(minor === undefined ? {} : { amount_minor: minor }), ...provider })).then((ok) => {
+    const chosen = connected.length > 0 ? { provider: provider === NONE ? null : provider } : {}
+    void act(() => api.requestPayment(order.id, { kind: form.kind, ...(minor === undefined ? {} : { amount_minor: minor }), ...chosen })).then((ok) => {
       if (ok) setForm(null)
     })
   }
@@ -92,7 +96,7 @@ export function PaymentRequests({
             variant="outline"
             onClick={() => {
               setError(null)
-              setForm({ amount: toMajor(Math.max(balanceMinor, 0), order.minor_exponent), kind: 'balance', provider: connected.find((p) => p.is_default)?.id ?? NONE })
+              setForm({ amount: toMajor(Math.max(balanceMinor, 0), order.minor_exponent), kind: 'balance', provider: null })
             }}
           >
             Request payment
@@ -125,7 +129,7 @@ export function PaymentRequests({
               </SelectContent>
             </Select>
           </div>
-          {connected.length > 0 && <ProviderSelect connected={connected} value={form.provider} onChange={(provider) => setForm({ ...form, provider })} />}
+          {connected.length > 0 && <ProviderSelect connected={connected} value={provider} onChange={(provider) => setForm({ ...form, provider })} />}
           <Button type="submit" size="sm" disabled={busy}>
             Request
           </Button>
@@ -161,6 +165,12 @@ export function PaymentRequests({
                 <span className="sb-num">{money(r.amount_minor)}</span>
               </div>
               {r.status === 'pending' && <span className="text-xs text-muted-foreground">The bank payment is on its way</span>}
+              {/* #5700: the provider's page may still take money until the provider confirms the close; once the sweep gives up (a provider not connected), the shop closes it there. */}
+              {r.close_pending_at && r.close_abandoned_at ? (
+                <span className="text-xs text-warn">{`Could not close; close it at ${label(r.provider)}`}</span>
+              ) : (
+                r.close_pending_at && <span className="text-xs text-warn">{`Close not yet confirmed by ${label(r.provider)}; ScadBuddy tries again`}</span>
+              )}
               {r.status === 'open' && (
                 <div className="flex flex-wrap items-center gap-2">
                   {r.hosted_url ? (

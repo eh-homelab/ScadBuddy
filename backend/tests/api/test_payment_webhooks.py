@@ -3,9 +3,10 @@ public reaches. A bad signature records nothing; a replayed event records one pa
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,14 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.credentials import PaymentCredentials
 from scadbuddy.payments.fake import FAKE, signed_event
 from scadbuddy.payments.provider import ProviderUnavailableError
+from scadbuddy.payments.service import Payments
 from tests.api.test_auth_enforce import ENABLED, HEADER, PUBLIC, _app, _sign_in
 from tests.api.test_order_payments import (
     connect_fake,
@@ -267,24 +271,19 @@ def test_a_provider_that_does_not_answer_is_provider_unavailable(
     assert _webhook_error(client) == ("provider_unavailable", True)
 
 
-def test_a_success_clears_the_failure_whatever_this_process_clock_says(
+def test_a_success_takes_its_start_from_the_credentials_clock(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The success's start is the database's time too: a replica whose clock runs behind
-    still clears a failure written before it began."""
+    """The success's start is ``PaymentCredentials.now`` (the database's clock, which
+    ``test_credentials.py`` pins), never this process's: a start read there as before the
+    failure leaves the failure standing."""
     _, req = linked_request(client)
     body, headers = signed_event("wrong", paid(req))
     assert client.post(HOOK, content=body, headers=headers).status_code == 400
-
-    class Behind(datetime):
-        @classmethod
-        def now(cls, tz: tzinfo | None = None) -> Behind:
-            return cls(1999, 1, 1, tzinfo=UTC)
-
-    monkeypatch.setattr("scadbuddy.payments.service.datetime", Behind)
+    monkeypatch.setattr(PaymentCredentials, "now", lambda self: datetime(1999, 1, 1, tzinfo=UTC))
     body, headers = signed_event("s3cret", paid(req))
     assert client.post(HOOK, content=body, headers=headers).status_code == 200
-    assert _webhook_error(client) == (None, False)
+    assert _webhook_error(client) == ("signature", True)
 
 
 def test_a_failure_to_keep_the_category_keeps_the_original_answer(
@@ -366,3 +365,94 @@ def test_the_webhook_needs_no_session_in_enforce(enforced: TestClient) -> None:
     assert answer.json() == {"outcome": "unmatched"}
     # Every other payments route still wants a person.
     assert enforced.get("/api/v1/payments/providers").status_code == 401
+
+
+def test_a_provider_payment_that_clears_the_balance_closes_the_balance_page(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5700 review N3: the open balance request a provider's payment settles is closed
+    after the commit, as a cancel or a manual payment closes its pages."""
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    assert client.post(HOOK, content=body, headers=headers).json() == {"outcome": "recorded"}
+    assert FAKE.cancelled == [balance["provider_ref"]]
+    path = f"/api/v1/orders/{order['id']}/payment-requests"
+    found = {r["id"]: r for r in client.get(path).json()}
+    assert found[balance["id"]]["status"] == "paid"
+    assert found[balance["id"]]["close_pending_at"] is None
+    assert found[deposit["id"]]["close_pending_at"] is None
+
+
+def test_the_webhook_answers_before_it_closes_the_pages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5718 review: the closes are handed to ``after``, which the route runs once the
+    answer is sent, so a slow provider never delays the webhook's reply."""
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    app: Any = client.app
+    service: Payments = getattr(app.state, STATE_ATTR).components.get(PAYMENTS).service
+    later: list[Callable[[], Awaitable[object]]] = []
+
+    async def receive() -> str:
+        return await service.handle_webhook("fake", headers, body, after=later.append)
+
+    async def run(job: Callable[[], Awaitable[object]]) -> None:
+        await job()
+
+    assert asyncio.run(receive()) == "recorded"
+    assert FAKE.cancelled == []
+    for job in later:
+        asyncio.run(run(job))
+    assert FAKE.cancelled == [balance["provider_ref"]]
+
+
+def test_the_webhook_route_answers_before_the_close_runs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5728 review: through the route itself, the whole answer is sent before the
+    provider is asked to close the page."""
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    seen: list[str] = []
+
+    async def cancel(credential: Any, provider_ref: str) -> None:
+        seen.append(f"close {provider_ref}")
+
+    monkeypatch.setattr(FAKE, "cancel_request", cancel)
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": HOOK, "raw_path": HOOK.encode(), "root_path": "",
+        "query_string": b"", "server": ("testserver", 80), "client": ("testclient", 50000),
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json"),
+                    *((k.lower().encode(), v.encode()) for k, v in headers.items())],
+    }  # fmt: skip
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            await asyncio.Event().wait()
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            seen.append(f"status {message['status']}")
+        elif message["type"] == "http.response.body" and not message.get("more_body"):
+            seen.append("answered")
+
+    assert client.portal is not None
+    client.portal.call(client.app, scope, receive, send)
+    assert seen == ["status 200", "answered", f"close {balance['provider_ref']}"]

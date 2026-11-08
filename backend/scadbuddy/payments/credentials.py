@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments.provider import Credential
-from scadbuddy.payments.store import has_open_requests
+from scadbuddy.payments.store import has_open_requests, resume_closes
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,9 @@ _ROW = (
     "provider, account_label, settings, is_default, connected_at, last_webhook_at,"
     " last_webhook_error, last_webhook_error_at"
 )
+
+#: How long the same webhook failure category is not stamped again (#5681 review).
+WEBHOOK_ERROR_QUIET = timedelta(seconds=60)
 
 #: Why the last webhook failed (#5684): a fixed category, never a provider's text.
 WebhookError = Literal["signature", "provider_unavailable", "handler_error"]
@@ -95,7 +98,8 @@ class PaymentCredentials:
         secrets: Mapping[str, str],
         account_label: str,
     ) -> ProviderRow:
-        """Upsert. The first row connected becomes the default."""
+        """Upsert. The first row connected becomes the default. The provider's pages the
+        sweep could not close start their tries over (`resume_closes`)."""
         if self._kek is None:
             raise KekMissingError()
         plaintext = json.dumps(dict(secrets), sort_keys=True)
@@ -129,6 +133,7 @@ class PaymentCredentials:
                     f" RETURNING {_ROW}",
                     (row_id, provider, *values),
                 ).fetchone()
+            resume_closes(conn, provider)
         assert row is not None
         return ProviderRow.model_validate(row)
 
@@ -219,17 +224,24 @@ class PaymentCredentials:
 
     def set_webhook_error(self, provider: str, error: WebhookError) -> None:
         """Keep why the last webhook failed (#5684), stamped by the database's clock, as
-        ``clear_webhook_error``'s ``since`` (``now``) is."""
+        ``clear_webhook_error``'s ``since`` (``now``) is. The webhook route is public, so
+        the same category stamped within ``WEBHOOK_ERROR_QUIET`` is left as it is: one
+        conditional UPDATE, and a flood of unsigned requests writes once a minute."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = %s,"
-                " last_webhook_error_at = clock_timestamp() WHERE provider = %s",
-                (error, provider),
+                " last_webhook_error_at = clock_timestamp() WHERE provider = %s"
+                " AND (last_webhook_error IS DISTINCT FROM %s"
+                " OR last_webhook_error_at <= clock_timestamp() - %s)",
+                (error, provider, error, WEBHOOK_ERROR_QUIET),
             )
 
     def clear_webhook_error(self, provider: str, *, since: datetime) -> None:
         """Clear the last failure once a webhook that began at ``since`` succeeded; a
-        failure written after it began (a webhook handled at the same time) stands."""
+        failure written after it began (a webhook handled at the same time) stands. One
+        trade-off of ``WEBHOOK_ERROR_QUIET``: a same-category failure skipped inside the
+        quiet window after this success began keeps the older stamp, so it is cleared with
+        it; the next failure of any category after the clear is written at once."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = NULL,"

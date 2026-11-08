@@ -157,6 +157,13 @@ on shutdown.
   are missing or stale, which after the first pass is none. `false` deletes it; a
   Schedule paused in the Temporal UI stays paused across restarts. Its id ends in the
   library queue's name, like the housekeeping ones);
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` (default `true`: at start the API registers the
+  built-in `order-fulfilment` flow as version 1 when no flow of that name ever had a
+  version; a person's edit or delete stands, and nothing runs until a person makes its
+  trigger and approves its grant; `false` registers nothing; read from the environment
+  only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
+  are the request's, each print is refused and the flow asks a person to print the item
+  from the order's page);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -488,8 +495,8 @@ The front door (Pomerium and the LAN gateway) stays in front of every route but 
 payment provider must reach `POST /api/v1/payments/webhooks/<provider>` from the
 internet, so route only the path prefix `/api/v1/payments/webhooks/` from the public
 host to the API Service, and no other path. That route takes no session: the
-provider's signature is its credential, a bad signature is a `400` that records
-nothing, and a body above 256 KiB is a `413`. Enter the webhook URL
+provider's signature is its credential, a bad signature is a `400` that records no
+event or money, and a body above 256 KiB is a `413`. Enter the webhook URL
 `https://<public host>/api/v1/payments/webhooks/<provider>` in the provider's own
 dashboard, where its webhooks are set up. Connecting a provider
 (`PUT /api/v1/payments/providers/<provider>`, by a person signed in) needs
@@ -537,13 +544,45 @@ call before ScadBuddy reads it
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. PayPal has no call
 that voids an order. A cancel therefore marks the order so that ScadBuddy will not
-capture a later approval of it. The mark is set once, right after the cancel. When
-PayPal cannot be reached then, the failure is logged and the order stays unmarked, so a
-later approval is captured. That capture, and one that completed or was already under
+capture a later approval of it. The mark is set right after the cancel. When PayPal
+cannot be reached then, the failure is logged and the housekeeping sweep tries the mark
+again with a backoff: 5 minutes first, the wait doubling after each failed try, at most a
+day. Until a try lands, a later approval is still captured. That capture, and one that completed or was already under
 way before the cancel, is recorded as a payment on the cancelled request: refund it in
 PayPal if it is not wanted. ScadBuddy captures only orders it made (a request id in
 `custom_id`), but use a REST app of its own all the same. A chargeback or reversal
 (`PAYMENT.CAPTURE.REVERSED`) is not tracked: the request stays paid.
+
+#### Square (#5666)
+
+In the Square Developer Console, open the application, choose Sandbox or Production, and
+add a webhook subscription with the notification URL
+`https://<public host>/api/v1/payments/webhooks/square` and the events `payment.created`,
+`payment.updated`, `refund.created` and `refund.updated`
+([webhooks](https://developer.squareup.com/docs/webhooks/overview)). Then, in
+Settings → Payments, connect Square with the environment (`sandbox` or `production`), the
+location ID that takes the payments, the notification URL exactly as the subscription
+has it, the access token and the subscription's signature key. Square signs each webhook
+over that URL and the body, so a URL that differs by one character refuses every webhook
+([validate notifications](https://developer.squareup.com/docs/webhooks/step3validate)).
+The access token needs `ORDERS_READ`, `ORDERS_WRITE`, `PAYMENTS_READ`, `PAYMENTS_WRITE`
+and `MERCHANT_PROFILE_READ`
+([permissions](https://developer.squareup.com/docs/oauth-api/square-permissions)).
+ScadBuddy checks that the location is active and that it takes payments in the shop's
+order currency ([Location](https://developer.squareup.com/reference/square/objects/Location)):
+a location in another currency is refused. The page then shows
+"Connected as Square location … (sandbox)" or "(production)". Each payment request is a
+Square payment link for the request's amount, named for the order, with the request in
+its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).
+A completed payment is recorded on the request, tip included; a bank (ACH) payment shows
+as `pending` until it completes, and as `failed` when it does not. A declined card leaves
+the request open: the customer can try again on the same link. The Square fee comes from the
+payment's processing fee, which Square may add in a later `payment.updated`, and is
+recorded on the order's costs once. Each refund is recorded once, for its own amount,
+when Square says it completed; one that is then rejected or fails gets a payment that
+cancels it. A cancelled request's payment link is deleted, which cancels its Square
+order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
+Cash needs no provider: record it as a manual payment.
 
 ### Authentication on the deployment (#4975)
 

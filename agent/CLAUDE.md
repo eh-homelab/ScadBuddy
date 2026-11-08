@@ -28,6 +28,28 @@ for a 15-minute credential, renews it at half-life and after a 401, and falls ba
 on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed one from
 `service_credentials_agent`, as before (#5494).
 
+The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
+assistant's spend on an order. A session's successful `order_item_revision_add` (or
+`_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
+`OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
+(`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
+turn) reports the session's `cost_usd` since its last report, split equally between its
+orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s
+for the turn's reports in all, one report per session at a time across replicas, by an
+advisory lock on a `database.locks` connection, never the stores' pool, and none while every
+lock connection is out; `sweep` at start and hourly reports what a session's last turn left,
+20 sessions at most, the ones tried longest ago, `tried_at`, first; a share under one minor
+unit is closed out with nothing carried once its session is over: `done`, `failed`, or `idle`
+with no session activity, `updated_at`, for an hour, `IDLE_OVER_AFTER`; if it works again,
+that spend folds into its next turn's share, split equally across the orders that turn revises). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
+route's own 400 or 422 (a path or body it cannot take), 404 (the order gone: an item gone
+falls back to the order) or 409 (a currency no rate reaches, a visitor's unsubmitted cart) drops
+that order's report, its share in no entry. Anything else (401 or 403 while there
+is no live credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the
+share it sent (`attempted_usd`), sent again as it was at the next turn's end, so a lost
+answer loses no spend; an answer with no entry (under one minor unit) or the deadline keeps
+it too.
+
 ## Commands
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):

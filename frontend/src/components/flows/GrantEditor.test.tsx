@@ -7,20 +7,14 @@ import { useGlobalAgentTools } from '../../agent/global'
 import type { FlowGrantSpec } from '../../api/types'
 import { renderPage } from '../../test/utils'
 import { grantProblems } from '../../lib/grants'
-import { readFileSync } from 'node:fs'
 import { GrantEditor, MAX_ORDERS, ORDER_ID } from './GrantEditor'
+import { readSpec } from '../../test/spec'
 
 /** The `orders` list's bounds as the backend exports them (`flows/grants.py` `OrderIds`). */
 function specOrders(): { pattern: string; maxItems: number } {
-  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch (cause) {
-    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
-  }
+  const { json, path } = readSpec()
   type Orders = { anyOf?: { type?: string; maxItems?: number; items?: { pattern?: string } }[] }
-  const spec = JSON.parse(text) as {
+  const spec = json as {
     components?: { schemas?: Record<string, { properties?: { orders?: Orders } }> }
   }
   const array = spec.components?.schemas?.GrantRule?.properties?.orders?.anyOf?.find((o) => o.type === 'array')

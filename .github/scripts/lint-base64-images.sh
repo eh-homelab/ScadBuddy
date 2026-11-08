@@ -41,6 +41,7 @@ backend/scadbuddy/storefront/visitors.py	return base64.urlsafe_b64encode\(digest
 backend/scadbuddy/auth/login_state.py	return base64.urlsafe_b64encode\(digest\)	the login's PKCE S256 code challenge, base64url by RFC 7636 §4.2, not an image
 backend/scadbuddy/auth/login_state.py	return base64.urlsafe_b64encode\(sealed\)	the sealed login cookie (state, nonce, PKCE verifier) as base64url, not an image
 agent/src/plugins/oauth.ts	headers.authorization = .Basic 	RFC 6749 §2.3.1 client_secret_basic: an OAuth client id and secret, not an image
+backend/scadbuddy/payments/square.py	return base64.b64encode\(digest.digest\(\)\)	Square's webhook signature: the HMAC-SHA256 digest as base64, as Square sends it (#5666), not an image
 EOF
 )
 

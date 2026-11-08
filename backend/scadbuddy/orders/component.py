@@ -15,6 +15,8 @@ is needed to light it up.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -25,7 +27,10 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.flows.component import FLOWS
+from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.orders.archives import mirror_run
+from scadbuddy.orders.builtin_flow import ensure_builtin_flow
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.machine_rate import MachineRates, MachineRateStore
@@ -44,10 +49,13 @@ class OrdersComponent:
         core: Core,
         pool: ConnectionPool[Connection[DictRow]],
         components: Components | None = None,
+        flows: FlowDefinitions | None = None,
     ) -> None:
         self.core = core
         #: Read when a machine rate needs the printer registry (#4625).
         self._components = components
+        #: Where the built-in `order-fulfilment` flow is registered at start (#4252).
+        self.flows = flows
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
@@ -114,11 +122,22 @@ ORDERS: Key[OrdersComponent] = Key("orders")
 
 
 def _build(core: Core, components: Components) -> OrdersComponent:
-    return OrdersComponent(core, components.get(ROWS).pool, components)
+    # Flows is built first, so it runs first: its repository is ready when this one
+    # starts.
+    return OrdersComponent(
+        core, components.get(ROWS).pool, components, components.get(FLOWS).definitions
+    )
 
 
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
+    # §7.2: the built-in flow, once, when its name never had a version. Beside the start,
+    # so a slow flows repository delays nothing (review of #5682).
+    registering: asyncio.Task[bool] | None = None
+    if orders.flows is not None and orders.core.settings.orders_builtin_flow:
+        registering = asyncio.create_task(
+            ensure_builtin_flow(orders.flows), name="register built-in flow"
+        )
     # The print path's follow (#4719): an item follows the print its attempt started.
     # §8.2: a settled print's attempt copies its Bambuddy archives.
     remove = listen_for_prints(
@@ -129,6 +148,10 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if registering is not None:
+            registering.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await registering
         await remove()
 
 

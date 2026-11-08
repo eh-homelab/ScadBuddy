@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { composeNotice } from '../src/tools/orders.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -136,6 +137,57 @@ describe('order tools (#4249)', () => {
       { method: 'ARCHIVE', body: null },
     ])
     await expect(tool('customer_upsert').execute({ archive: true }, ctx())).rejects.toThrow('customer_id')
+  })
+
+  it('composes a message to the customer and sends nothing (#4252 §7.3)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({
+          order: { number: 'ORD-2026-7', currency: 'USD', minor_exponent: 2, customer_id: CUSTOMER },
+          totals: { total_minor: 4250 },
+        }),
+      ),
+      http.get(`${BACKEND}/api/v1/customers/${CUSTOMER}`, () =>
+        HttpResponse.json({
+          display_name: 'Ada',
+          contacts: [
+            { kind: 'email', value: 'ada@example.com', primary: true },
+            { kind: 'phone', value: '555-0100', primary: false },
+          ],
+        }),
+      ),
+    )
+    expect(tool('order_notify_customer').risk).toBe('read')
+    const result = await tool('order_notify_customer').execute(
+      { order_id: ORDER, template: 'accepted', note: 'Thanks!' },
+      ctx(),
+    )
+    expect(firstText(result)).toEqual({
+      template: 'accepted',
+      to: [{ kind: 'email', value: 'ada@example.com' }],
+      subject: 'Order ORD-2026-7 accepted',
+      text: 'Hello Ada,\n\nWe have accepted order ORD-2026-7 (42.50 USD) and will start on it.\n\nThanks!',
+      sent: false,
+    })
+  })
+
+  it('writes the total from its integer, never through a float (review of #5682)', () => {
+    const order = (minor_exponent: number) => ({ number: 'ORD-1', currency: 'X', minor_exponent })
+    const text = (total_minor: number, exponent: number) =>
+      composeNotice('accepted', { order: order(exponent), totals: { total_minor } }, { display_name: 'Ada', contacts: [] })
+        .text
+    // 9007199254740001 / 100 is 90071992547400.02 as a float.
+    expect(text(9007199254740001, 2)).toContain('(90071992547400.01 X)')
+    expect(text(5, 3)).toContain('(0.005 X)')
+    expect(text(-250, 2)).toContain('(-2.50 X)')
+    expect(text(1200, 0)).toContain('(1200 X)')
+  })
+
+  it('says when a customer has no contacts to send a notice to (review of #5682)', () => {
+    const detail = { order: { number: 'ORD-1', currency: 'USD', minor_exponent: 2 }, totals: { total_minor: 100 } }
+    const notice = composeNotice('ready', detail, { display_name: 'Ada', contacts: [] })
+    expect(notice.to).toEqual([])
+    expect(notice.warning).toBe('Ada has no contacts to send it to.')
   })
 
   it('reads an order’s real cost (#4251 §6.4)', async () => {
@@ -760,6 +812,24 @@ describe('pricing tools (#4250)', () => {
     const part_settings = { '2': { top_shell_layers: 8 } }
     await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, part_settings } }, ctx())
     expect(body).toMatchObject({ part_settings })
+    // #4673: the quote slices with the tower, supports and sequence its print will use.
+    const setup = {
+      prime_tower: { enabled: true, no_sparse_layers: true },
+      supports: { enabled: true, type: 'tree', threshold_angle: 40 },
+      print_sequence: 'by object',
+    }
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, ...setup } }, ctx())
+    expect(body).toMatchObject(setup)
+    const input = z.object(tool('order_item_quote').shape)
+    const args = { order_id: ORDER, item_id: ITEM }
+    expect(input.safeParse({ ...args, slice: { ...SLICE, ...setup } }).success).toBe(true)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, print_sequence: 'by plate' } }).success).toBe(false)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, supports: { enabled: true, threshold_angle: 91 } } }).success).toBe(false)
+    // The call's line names them (#5720 review).
+    const title = tool('order_item_quote').title?.({ ...args, slice: { ...SLICE, ...setup } } as never)
+    expect(title).toContain('with tree supports at 40°')
+    expect(title).toContain('with a prime tower (no sparse layers)')
+    expect(title).toContain('by object')
   })
 
   it('answers a slice quote still running past the follow window', async () => {
@@ -811,6 +881,19 @@ describe('pricing tools (#4250)', () => {
     expect(
       tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, part_settings } as never),
     ).toContain("slot 1's parts at wall_loops 4")
+    // #4673: omitted, the quote's tower, supports and sequence print; sent, the backend
+    // compares them with the quote's, and the approval line names them.
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog }, ctx())
+    expect(body).not.toHaveProperty('prime_tower')
+    expect(body).not.toHaveProperty('supports')
+    expect(body).not.toHaveProperty('print_sequence')
+    const setup = { prime_tower: { enabled: false }, supports: { enabled: false }, print_sequence: 'by object' }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, ...setup }, ctx())
+    expect(body).toMatchObject(setup)
+    const line = tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, ...setup } as never)
+    expect(line).toContain('without supports')
+    expect(line).toContain('without a prime tower')
+    expect(line).toContain('by object')
   })
 
   it("prints an item through Bambuddy's queue with its calibrations and timelapse (#5352)", async () => {

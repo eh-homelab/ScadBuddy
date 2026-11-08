@@ -6,8 +6,9 @@ created when the print is dispatched, and the queue item it came from gets its i
 (``queue_item.archive_id``; verified live on 1.2.5.6, see the print-history plan §1).
 ScadBuddy stores only the link, never the archive: Bambuddy stays the source of truth.
 
-Every row is keyed by the print's subject (`subject.PrintSubject`): an output, or a
-Bambuddy library file (#976). The two kinds share both tables (#1750).
+Each row of ``print_sends`` and ``print_links`` is keyed by the print's subject
+(`subject.PrintSubject`): an output, or a Bambuddy library file (#976). The two kinds
+share both tables (#1750).
 
 - ``print_sends``: each queue item a run queued, written by its source's ``record()``
   as each plate is queued (`print_source.record_sends`).
@@ -19,8 +20,15 @@ Bambuddy library file (#976). The two kinds share both tables (#1750).
   sends are linked once their item names an archive (`linking.link_library_prints`).
   An archive two subjects name is the output's.
 
-Both are created by ``*_print_subjects.sql``, from ``output_bambuddy_prints`` and
-``library_bambuddy_prints``, which ``*_drop_legacy_print_links.sql`` (#1772) drops.
+``print_sends`` and ``print_links`` are created by ``*_print_subjects.sql``, from
+``output_bambuddy_prints`` and ``library_bambuddy_prints``, which
+``*_drop_legacy_print_links.sql`` (#1772) drops.
+
+``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
+the archive, has no subject column, and is created by
+``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
+hash whose file the start uploaded (`print_history._run_by_file`). A LAN start has no queue
+item, so no send names it.
 """
 
 from __future__ import annotations
@@ -74,6 +82,16 @@ class PrintSend(BaseModel):
     run_id: str | None = None
     #: When it was recorded; set by the database.
     first_seen: datetime | None = None
+
+
+class LanArchiveLink(BaseModel):
+    """The LAN start an archive became (#5661): the run that started it, the name it
+    started under (`LanStarted.subtask_name`) and its plate."""
+
+    archive_id: int
+    run_id: str
+    subtask_name: str
+    plate_id: int | None = None
 
 
 class PendingLibraryPrint(BaseModel):
@@ -215,6 +233,14 @@ class PrintLinkStore:
         run the follow settles on its own."""
         return await asyncio.to_thread(self._sends_for, subject, run_id)
 
+    async def lan_start(self, archive_id: int) -> LanArchiveLink | None:
+        """The LAN start ``archive_id`` became (#5661), or ``None`` when none is recorded."""
+        return await asyncio.to_thread(self._lan_start, archive_id)
+
+    async def record_lan_start(self, link: LanArchiveLink) -> None:
+        """Record the LAN start an archive became. The first record is kept."""
+        await asyncio.to_thread(self._record_lan_start, link)
+
     async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
         """The library files' queue items whose archive is not known yet and that are
         not gone, newest first, at most ``limit``. An item recorded more than
@@ -301,6 +327,11 @@ class PrintLinkStore:
                     " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
                     (sorted({row["archive_id"] for row in unlinked}),),
                 )
+                conn.execute(
+                    "DELETE FROM lan_print_archives AS a WHERE a.archive_id = ANY(%s) AND NOT"
+                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
+                    (sorted({row["archive_id"] for row in unlinked}),),
+                )
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:
@@ -344,6 +375,23 @@ class PrintLinkStore:
                 (queue_item_id,),
             ).fetchone()
         return None if row is None else PrintSend.model_validate(dict(row))
+
+    def _lan_start(self, archive_id: int) -> LanArchiveLink | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT archive_id, run_id, subtask_name, plate_id FROM lan_print_archives"
+                " WHERE archive_id = %s",
+                (archive_id,),
+            ).fetchone()
+        return None if row is None else LanArchiveLink.model_validate(dict(row))
+
+    def _record_lan_start(self, link: LanArchiveLink) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+                " VALUES (%s, %s, %s, %s) ON CONFLICT (archive_id) DO NOTHING",
+                (link.archive_id, link.run_id, link.subtask_name, link.plate_id),
+            )
 
     def _pending_library(self, limit: int, max_age: timedelta) -> list[PendingLibraryPrint]:
         with self._pool.connection() as conn:

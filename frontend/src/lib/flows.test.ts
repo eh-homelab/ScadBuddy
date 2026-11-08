@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hopUntilText, markdownText } from './flows'
+import { actorText, hopUntilText, markdownText } from './flows'
 
 // #2482 — when a hop ends: the time alone today, with the date on any other day.
 describe('hopUntilText', () => {
@@ -28,3 +28,11 @@ describe('markdownText (#3186)', () => {
   })
 })
 
+
+// #4252 — the built-in flow's author is the build, never "someone else".
+describe('actorText', () => {
+  it('names a built-in author', () => {
+    expect(actorText({ kind: 'builtin', name: 'order-fulfilment' })).toBe('ScadBuddy (built in)')
+    expect(actorText({ kind: 'other' })).toBe('someone else')
+  })
+})

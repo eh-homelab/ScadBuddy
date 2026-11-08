@@ -43,6 +43,14 @@ class PaymentRequestView(PaymentRequest):
     link_error: str | None
     payment_id: str | None
     created_by: Actor
+    #: #5700: the request was closed here (a cancel, or a payment that is not the page's
+    #: own) and the provider has not yet confirmed that its page is closed. The
+    #: housekeeping sweep tries again until it does.
+    close_pending_at: datetime | None = None
+    #: The sweep stopped trying: the first try, at or after the
+    #: `payments.store.CLOSE_GIVE_UP_ATTEMPTS`th, that found the provider not connected.
+    #: Close the page at the provider.
+    close_abandoned_at: datetime | None = None
 
 
 class ProviderEvent(BaseModel):

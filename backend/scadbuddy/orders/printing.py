@@ -54,11 +54,12 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
 
 from fastapi import status
 
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.events import (
     BusResync,
@@ -157,6 +158,7 @@ async def print_check(
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
     library: LibraryFiles | None = None,
     part_settings: dict[str, dict[str, Any]] | None = None,
+    setup: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
     unknown order or item; 409 ``order_not_submitted`` for a storefront cart (#5282),
@@ -175,7 +177,9 @@ async def print_check(
     is then ``library_file_id`` in place of ``output_id``. ``part_settings`` are the
     request's settings per slot (#5571, ``part_settings.dumped``): sent and not the
     quote's, they are ``requote_needed``; what the run needs then carries the quote's
-    ``part_settings``, which a request that sends none prints with."""
+    ``part_settings``, which a request that sends none prints with. ``setup`` is the
+    tower, supports and sequence the request sent (#4673, :func:`sent_setup`), checked
+    against the quote's as ``part_settings`` are (:func:`_same_setup`)."""
     order, item = await _order_and_item(store, order_id, item_id)
     if order.status in ENDED:
         raise _refused(f"order_{order.status}", f"order {order.label} is {order.status}")
@@ -203,6 +207,7 @@ async def print_check(
     if quote is None:
         raise requote(item, "it has no accepted quote")
     _same_part_settings(item, quote, part_settings)
+    _same_setup(item, quote, setup or {})
     if reference is None:
         return await _library_stands(library, blobs, item, quote, copies)
     return await _stands(outputs, blobs, item, reference, quote, copies, schema_of)
@@ -219,6 +224,7 @@ async def test_print_check(
     *,
     by: Actor,
     part_settings: dict[str, dict[str, Any]] | None = None,
+    setup: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A test print's refusals (storefront spec §4.4), writing nothing: one copy of the
     item's output, on an order accepted or not and an item in any open state. 404 for an
@@ -275,6 +281,7 @@ async def test_print_check(
     if not quotes:
         raise requote(item, "it has no slice quote of its current revision")
     _same_part_settings(item, quotes[-1], part_settings)
+    _same_setup(item, quotes[-1], setup or {})
     return await _stands(outputs, blobs, item, reference, quotes[-1], 1, schema_of)
 
 
@@ -289,6 +296,44 @@ def _same_part_settings(
             item,
             "its print sends part_settings the quote was not sliced with: quote with them,"
             " or send none to print with the quote's",
+        )
+
+
+#: The print setup a print takes from its quote when it sends none (#4673, order
+#: operations spec §5.1): `PrintRunRequest`'s fields of the same names.
+QUOTED_SETUP = ("prime_tower", "supports", "print_sequence")
+
+
+def sent_setup(request: Mapping[str, Any]) -> dict[str, Any]:
+    """The :data:`QUOTED_SETUP` an item print's request sent (its operation's
+    ``request``, dumped with ``exclude_unset``), in ``PrintRunRequest``'s JSON shapes, as
+    the quote records them (``quote.print_setup``)."""
+    body = PrintRunRequest.model_validate(request)
+    sent = {key for key in QUOTED_SETUP if key in request}
+    return body.model_dump(mode="json", include=sent) if sent else {}
+
+
+def quoted_setup(quote: Quote) -> dict[str, Any] | None:
+    """The quote's :data:`QUOTED_SETUP` (#4673), which a print that sends none prints
+    with; None for a quote that records none (manual, archive, or recorded before)."""
+    if quote.choices is None:
+        return None
+    return {key: quote.choices.get(key) for key in QUOTED_SETUP}
+
+
+def _same_setup(item: OrderItem, quote: Quote, asked: Mapping[str, Any]) -> None:
+    """``requote_needed`` when a print sends a tower, supports or sequence (#4673) that
+    ``quote`` was not sliced with: it would print what was not priced. One not sent is
+    the quote's own; a quote that records none checks nothing."""
+    recorded = quoted_setup(quote)
+    if recorded is None:
+        return
+    differs = [key for key in QUOTED_SETUP if key in asked and asked[key] != recorded[key]]
+    if differs:
+        raise requote(
+            item,
+            f"its print sends {', '.join(differs)} the quote was not sliced with: quote with"
+            " them, or send none to print with the quote's",
         )
 
 
@@ -354,6 +399,7 @@ async def _stands(
         "sliced_sha256": quote.sliced_sha256,
         "sliced_blob_key": quote.sliced_blob_key,
         "part_settings": quote.part_settings,
+        "setup": quoted_setup(quote),
     }
 
 
@@ -380,6 +426,7 @@ async def _library_stands(
         "sliced_sha256": quote.sliced_sha256,
         "sliced_blob_key": quote.sliced_blob_key,
         "part_settings": quote.part_settings,
+        "setup": quoted_setup(quote),
     }
 
 
