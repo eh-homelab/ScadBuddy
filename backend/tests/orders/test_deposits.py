@@ -335,3 +335,13 @@ def test_a_refund_after_acceptance_brings_the_rule_back_until_waived(shop: Shop)
     )
     shop.lifecycle.waive_deposit(order.id, BY, "refunded a part by mistake")
     _test_print(shop, order, item, rev, "trial")
+
+
+def test_the_same_deposit_after_a_waiver_lifts_the_waiver(shop: Shop) -> None:
+    order, item, rev = requested(shop)
+    shop.lifecycle.set_deposit(order.id, BY, 2000)
+    shop.lifecycle.waive_deposit(order.id, BY, "regular customer")
+    order = shop.lifecycle.set_deposit(order.id, BY, 2000)
+    assert order.deposit_waived_reason is None
+    error = _slug(lambda: shop.lifecycle.send_revision(order.id, item.id, rev.id, BY))
+    assert error.slug == "deposit_unpaid"

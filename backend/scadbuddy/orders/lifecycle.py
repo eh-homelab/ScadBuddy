@@ -967,8 +967,8 @@ class Lifecycle:
         self, conn: Conn, order: Order, by: Actor, amount: Money | None, **audit: Any
     ) -> Order | None:
         """Cancels the open deposit requests, sets the deposit, clears its waiver, and asks
-        for what of it is not paid yet, on the default provider. The same deposit whose
-        open request already asks for the rest (or none, with nothing due) writes
+        for what of it is not paid yet, on the default provider. The same deposit, not
+        waived, whose open request already asks for the rest (or none, with nothing due) writes
         nothing and is None, so the caller tells no one."""
         due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
         asking = [
@@ -976,8 +976,10 @@ class Lifecycle:
             for found in payments.requests_for_order(conn, order.id)
             if found.kind == "deposit" and found.status == "open"
         ]
-        if amount == order.deposit_minor and [r.amount_minor for r in asking] == (
-            [due] if due > 0 else []
+        if (
+            amount == order.deposit_minor
+            and order.deposit_waived_reason is None
+            and [r.amount_minor for r in asking] == ([due] if due > 0 else [])
         ):
             return None
         for found in asking:
