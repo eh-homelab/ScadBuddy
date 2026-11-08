@@ -1481,8 +1481,10 @@ class Lifecycle:
                         hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
                         link_error=error,
                         close_pending=late_ref is not None,
-                        # #4960: the storefront pay page's token, with the link it is in.
-                        pay_token_hash=None if hosted is None else pay_token_hash,
+                        # #4960: a new link writes its pay token, or none, so a
+                        # link without one ends the old pay page.
+                        new_link=hosted is not None,
+                        pay_token_hash=pay_token_hash,
                     )
             except errors.UniqueViolation:
                 # ``payment_requests_ref``: the provider answered with another request's

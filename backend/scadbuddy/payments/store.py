@@ -208,17 +208,20 @@ def set_request_link(
     hosted_url: str | None,
     link_error: str | None,
     close_pending: bool = False,
+    new_link: bool = False,
     pay_token_hash: str | None = None,
 ) -> PaymentRequestView:
     """``close_pending`` (#5700): the page was made after the request closed, so it is
-    kept only as a page to close, marked as `set_request_status` marks one.
-    ``pay_token_hash`` (#4960) is written when given; a link without one keeps any it had."""
+    kept only as a page to close, marked as `set_request_status` marks one. A ``new_link``
+    writes ``pay_token_hash`` (#4960) as given, so a link with no token drops the old one
+    and its pay page; any other write keeps the token it had."""
     row = conn.execute(
         "UPDATE payment_requests SET provider_ref = %s, hosted_url = %s, link_error = %s,"
         " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END,"
-        " pay_token_hash = COALESCE(%s, pay_token_hash)"
+        " pay_token_hash = CASE WHEN %s THEN %s ELSE pay_token_hash END"
         f" WHERE id = %s RETURNING {_VIEW}",
-        (provider_ref, hosted_url, link_error, close_pending, pay_token_hash, request_id),
+        (provider_ref, hosted_url, link_error, close_pending, new_link, pay_token_hash,
+         request_id),
     ).fetchone()
     assert row is not None
     return PaymentRequestView.model_validate(row)

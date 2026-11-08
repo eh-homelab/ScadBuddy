@@ -164,6 +164,38 @@ def test_a_cancel_through_the_lifecycle_drops_the_token(shop: PayShop) -> None:
     assert checkout(shop, token) is None
 
 
+def test_a_relink_without_a_token_drops_the_old_one(shop: PayShop) -> None:
+    """Venmo turned off, then the request linked again: PayPal's own link, and the old
+    pay page is dead."""
+    _, req, token = tokened(shop)
+    shop.lifecycle.set_request_link(
+        req.id,
+        hosted=HostedRequest.model_validate(
+            {"provider_ref": PAYPAL_ORDER, "hosted_url": PAYER_ACTION}
+        ),
+        error=None,
+    )
+    assert stored_hash(shop, req.id) is None
+    assert checkout(shop, token) is None
+
+
+def test_a_failed_relink_keeps_the_token(shop: PayShop) -> None:
+    _, req, token = tokened(shop)
+    shop.lifecycle.set_request_link(req.id, hosted=None, error="PayPal did not answer")
+    assert stored_hash(shop, req.id) == token_hash(token)
+    assert checkout(shop, token) is not None
+
+
+def test_the_toggle_off_kills_every_pay_link_at_once(shop: PayShop) -> None:
+    _, _, token = tokened(shop)
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            'UPDATE payment_credentials SET settings = settings || \'{"venmo": "off"}\''
+            " WHERE provider = 'paypal'"
+        )
+    assert checkout(shop, token) is None
+
+
 def test_a_request_of_another_provider_reads_nothing(shop: PayShop) -> None:
     _, req, token = tokened(shop)
     with shop.rows.transaction() as conn:
