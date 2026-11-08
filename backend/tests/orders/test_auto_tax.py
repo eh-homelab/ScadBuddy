@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from scadbuddy.orders.lifecycle import ManualQuoteInput, OrderEdit
 from scadbuddy.orders.models import ChargeInput, Order
 from scadbuddy.orders.money import OrderRules, ShippingOption, tax_minor
+from scadbuddy.orders.pricing import Priced
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.totals import totals_of
 from scadbuddy.store.refs import BlobRefs
@@ -157,6 +158,21 @@ def _set_shipping_option(shop: RulesShop) -> tuple[Order, Callable[[], object]]:
     return order, lambda: shop.lifecycle.set_shipping_option(order.id, BY, "post")
 
 
+def _duplicate_item(shop: RulesShop) -> tuple[Order, Callable[[], object]]:
+    order = _quoted(shop)
+    box = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Box", quantity=1, unit_price_minor=500
+    )
+    return order, lambda: shop.lifecycle.duplicate_item(order.id, box.id, BY)
+
+
+def _record_archive_quote(shop: RulesShop) -> tuple[Order, Callable[[], object]]:
+    order = _quoted(shop)
+    second = shop.item(order)
+    priced = Priced(lines=[], unit_cost_minor=0, unit_price_minor=2000, total_minor=2000)
+    return order, lambda: shop.lifecycle.record_archive_quote(order.id, second.id, priced, [], BY)
+
+
 TRANSITIONS: dict[str, Callable[[RulesShop], tuple[Order, Callable[[], object]]]] = {
     "add_custom_item": _add_custom_item,
     "cancel_item": _cancel_item,
@@ -168,6 +184,8 @@ TRANSITIONS: dict[str, Callable[[RulesShop], tuple[Order, Callable[[], object]]]
     "add_revision": _add_revision,
     "reopen_order": _reopen_order,
     "set_shipping_option": _set_shipping_option,
+    "duplicate_item": _duplicate_item,
+    "record_archive_quote": _record_archive_quote,
 }
 
 

@@ -46,7 +46,7 @@ from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, price
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments import store as payments_store
-from scadbuddy.payments.models import PaymentRequestView
+from scadbuddy.payments.models import PaymentRequestStatus, PaymentRequestView
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 
@@ -163,6 +163,12 @@ def requests_for(shop: Shop, order: Order) -> list[PaymentRequestView]:
     """The order's payment requests, oldest first."""
     with shop.rows.transaction() as conn:
         return payments_store.requests_for_order(conn, order.id)
+
+
+def set_request_status(shop: Shop, request_id: str, status: PaymentRequestStatus) -> None:
+    """A request moved as a provider's event moves it (`pending`, `failed`, ...)."""
+    with shop.rows.transaction() as conn:
+        payments_store.set_request_status(conn, request_id, status)
 
 
 @pytest.fixture

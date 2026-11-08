@@ -12,6 +12,7 @@ from scadbuddy.orders.lifecycle import LifecycleError, OrderEdit
 from scadbuddy.orders.models import ChargeInput, Order
 from scadbuddy.orders.money import OrderRules, ShippingOption
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, RulesShop
@@ -104,3 +105,12 @@ def test_options_close_with_the_charges_after_quoted(shop: RulesShop) -> None:
     assert refused.value.slug == "order_not_editable"
     assert f"PUT /orders/{order.id}/charges/after-acceptance" in str(refused.value)
     assert charges(shop, order) == [("shipping", "Post", 500, "post")]
+
+
+def test_a_refusal_on_a_cart_names_the_cart(shop: RulesShop, pool: PgPool) -> None:
+    visitor = VisitorStore(pool).ensure("v" * 43)
+    cart = shop.lifecycle.ensure_draft(visitor.id, visitor_actor(visitor), currency="USD")
+    with pytest.raises(LifecycleError) as e:
+        shop.lifecycle.set_shipping_option(cart.id, BY, "post")
+    assert e.value.slug == "shipping_address_required"
+    assert str(e.value).startswith(f"order cart {cart.id} has no shipping address")

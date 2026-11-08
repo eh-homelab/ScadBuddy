@@ -830,7 +830,7 @@ class Lifecycle:
                 )
                 raise LifecycleError(
                     "order_not_editable",
-                    f"order {order.number} is {order.status}: its shipping option is"
+                    f"order {order.label} is {order.status}: its shipping option is"
                     f" set while draft or quoted{route}",
                 )
             rules = self.rules()
@@ -850,7 +850,7 @@ class Lifecycle:
                 if option.ships and order.shipping_address_id is None:
                     raise LifecycleError(
                         "shipping_address_required",
-                        f"order {order.number} has no shipping address: {option.label} ships"
+                        f"order {order.label} has no shipping address: {option.label} ships"
                         " it; set the address first, or choose an option that does not ship",
                     )
                 charges.append(
@@ -1027,33 +1027,43 @@ class Lifecycle:
     # commit, as it does for an order's cancel (`Payments.cancel_order`).
 
     def _deposit_editable(self, order: Order) -> None:
+        check_submitted(order)
         self._not_ended(order)
         if order.status not in OPEN_FOR_EDITS:
             raise LifecycleError(
                 "order_not_editable",
-                f"order {order.number} is {order.status}: its deposit is set while draft or quoted",
+                f"order {order.label} is {order.status}: its deposit is set while draft or quoted",
             )
 
     def _set_deposit(
         self, conn: Conn, order: Order, by: Actor, amount: Money | None, **audit: Any
     ) -> Order | None:
-        """Cancels the open deposit requests, sets the deposit, clears its waiver, and asks
-        for what of it is not paid yet, on the default provider. The same deposit, not
-        waived, whose open request already asks for the rest (or none, with nothing due) writes
-        nothing and is None, so the caller tells no one."""
-        due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
-        asking = [
+        """Cancels the open and failed deposit requests, sets the deposit, clears its
+        waiver, and asks for what of it is not paid yet, on the default provider. A pending
+        deposit request refuses it (`payment_in_flight`). The same deposit, not waived, whose
+        open request already asks for the rest (or none, with nothing due) and no failed one
+        writes nothing and is None, so the caller tells no one."""
+        deposits = [
             found
             for found in payments.requests_for_order(conn, order.id)
-            if found.kind == "deposit" and found.status == "open"
+            if found.kind == "deposit"
         ]
+        if any(found.status == "pending" for found in deposits):
+            raise LifecycleError(
+                "payment_in_flight",
+                f"order {order.label}'s deposit payment is in flight; wait until it settles",
+            )
+        due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
+        asking = [found for found in deposits if found.status == "open"]
+        failed = [found for found in deposits if found.status == "failed"]
         if (
             amount == order.deposit_minor
             and order.deposit_waived_reason is None
+            and not failed
             and [r.amount_minor for r in asking] == ([due] if due > 0 else [])
         ):
             return None
-        for found in asking:
+        for found in asking + failed:
             payments.set_request_status(conn, found.id, "cancelled")
             self._event(conn, order, by, "payment_request.cancelled", request_id=found.id)
         updated = self.store.set_deposit_fields(
@@ -1129,6 +1139,7 @@ class Lifecycle:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             if order.deposit_minor is None or order.deposit_waived_reason == reason:
                 return order
@@ -1145,7 +1156,7 @@ class Lifecycle:
         if paid < order.deposit_minor:
             raise LifecycleError(
                 "deposit_unpaid",
-                f"order {order.number}'s deposit is not paid: {paid} of"
+                f"order {order.label}'s deposit is not paid: {paid} of"
                 f" {order.deposit_minor} received; record the payment or proceed without it",
             )
 
@@ -1171,16 +1182,22 @@ class Lifecycle:
     def _open_balance(self, conn: Conn, order: Order, by: Actor) -> None:
         """At acceptance, when the order has a deposit or a payment request that is not
         cancelled, leaves one open request asking for what is not paid yet. A lone open
-        `balance` request that already asks for it is kept. Otherwise every open request
-        is cancelled and a `balance` request for the rest opens on the default provider."""
+        `balance` request that already asks for it is kept. Otherwise every open or failed
+        request is cancelled and a `balance` request for the rest opens on the default
+        provider."""
         found = payments.requests_for_order(conn, order.id)
         if order.deposit_minor is None and all(r.status == "cancelled" for r in found):
             return
         due = totals_of(self.store, conn, order.id).balance_minor
-        open_now = [r for r in found if r.status == "open"]
-        if len(open_now) == 1 and open_now[0].kind == "balance" and open_now[0].amount_minor == due:
+        live = [r for r in found if r.status in ("open", "failed")]
+        if (
+            len(live) == 1
+            and live[0].status == "open"
+            and live[0].kind == "balance"
+            and live[0].amount_minor == due
+        ):
             return
-        for request in open_now:
+        for request in live:
             payments.set_request_status(conn, request.id, "cancelled")
             self._event(conn, order, by, "payment_request.cancelled", request_id=request.id)
         if due <= 0:
@@ -1222,7 +1239,7 @@ class Lifecycle:
         if balance > 0:
             raise LifecycleError(
                 "balance_unpaid",
-                f"order {order.number}'s balance is not paid: {balance} due;"
+                f"order {order.label}'s balance is not paid: {balance} due;"
                 " record the payment or ship without full payment",
             )
 
@@ -1236,10 +1253,11 @@ class Lifecycle:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             if order.status not in DERIVED:
                 raise LifecycleError(
-                    "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
+                    "order_not_accepted", f"order {order.label} is {order.status}, not accepted"
                 )
             if order.balance_waived_reason == reason or not self._balance_due(conn, order):
                 return order
@@ -1621,6 +1639,13 @@ class Lifecycle:
                     "order_not_acceptable", f"order {order.label} is {order.status}"
                 )
             self._not_on_hold(order)
+            if any(
+                found.status == "pending" for found in payments.requests_for_order(conn, order.id)
+            ):
+                raise LifecycleError(
+                    "payment_in_flight",
+                    f"order {order.label} has a payment in flight; wait until it settles",
+                )
             items = self.store.items(order.id, conn=conn)
             open_items = [item for item in items if item.status != "cancelled"]
             if not open_items:
@@ -2416,6 +2441,7 @@ class Lifecycle:
                 )
             copy = self._insert_new(conn, order, by, entry, after_acceptance)
             self._event(conn, order, by, "item.duplicated", item_id=copy.id, from_item_id=item.id)
+            self._retax(conn, order)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(copy, None)]))
         return copy

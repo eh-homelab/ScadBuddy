@@ -20,7 +20,7 @@ from scadbuddy.orders.models import Order, OrderItem, ShipmentItem
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop, requests_for, resolved
+from tests.orders.test_lifecycle import BY, Shop, requests_for, resolved, set_request_status
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -298,3 +298,38 @@ def test_moving_quantity_between_items_is_held_by_the_balance(shop: Shop) -> Non
         _slug(lambda: shop.lifecycle.update_shipment(order.id, shipment.id, moved, BY))
         == "balance_unpaid"
     )
+
+
+def test_a_pending_request_holds_the_acceptance(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    req = shop.lifecycle.open_payment_request(order.id, BY, amount_minor=200, provider=None)
+    set_request_status(shop, req.id, "pending")
+    before, told = shop.kinds(order), len(shop.events)
+    with pytest.raises(LifecycleError) as e:
+        shop.lifecycle.accept_order(order.id, BY)
+    assert (e.value.slug, e.value.unprocessable, e.value.not_found) == (
+        "payment_in_flight",
+        False,
+        False,
+    )
+    assert shop.get(order).status == "quoted"
+    assert shop.kinds(order) == before and len(shop.events) == told
+
+
+def test_a_failed_request_is_cancelled_at_accept(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    req = shop.lifecycle.open_payment_request(order.id, BY, provider=None)
+    set_request_status(shop, req.id, "failed")
+    order = shop.lifecycle.accept_order(order.id, BY)
+    assert [(r.kind, r.amount_minor, r.status) for r in requests_for(shop, order)] == [
+        ("balance", 1000, "cancelled"),
+        ("balance", 1000, "open"),
+    ]
+    cancels = [
+        e.detail for e in shop.rows.events(order.id) if e.kind == "payment_request.cancelled"
+    ]
+    assert cancels == [{"request_id": req.id}]

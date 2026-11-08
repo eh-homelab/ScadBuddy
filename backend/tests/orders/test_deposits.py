@@ -14,9 +14,18 @@ from scadbuddy.orders.models import Order, OrderItem, Revision
 from scadbuddy.orders.money import DepositRule, OrderRules
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, RulesShop, Shop, connect, requests_for, resolved
+from tests.orders.test_lifecycle import (
+    BY,
+    RulesShop,
+    Shop,
+    connect,
+    requests_for,
+    resolved,
+    set_request_status,
+)
 from tests.orders.test_revisions import attach_render
 
 pytestmark = pytest.mark.requires_postgres
@@ -357,3 +366,66 @@ def test_the_same_deposit_after_a_waiver_lifts_the_waiver(shop: Shop) -> None:
     assert order.deposit_waived_reason is None
     error = _slug(lambda: shop.lifecycle.send_revision(order.id, item.id, rev.id, BY))
     assert error.slug == "deposit_unpaid"
+
+
+def _cart(shop: Shop, pool: PgPool) -> Order:
+    visitor = VisitorStore(pool).ensure("v" * 43)
+    return shop.lifecycle.ensure_draft(visitor.id, visitor_actor(visitor), currency="USD")
+
+
+CART_ACTS: dict[str, Callable[[Shop, Order], object]] = {
+    "set_deposit": lambda shop, cart: shop.lifecycle.set_deposit(cart.id, BY, 2000),
+    "apply_deposit_policy": lambda shop, cart: shop.lifecycle.apply_deposit_policy(cart.id, BY),
+    "waive_deposit": lambda shop, cart: shop.lifecycle.waive_deposit(cart.id, BY, "why"),
+    "waive_balance": lambda shop, cart: shop.lifecycle.waive_balance(cart.id, BY, "why"),
+}
+
+
+@pytest.mark.parametrize("act", list(CART_ACTS))
+def test_a_cart_takes_no_deposit_or_waiver(shop: Shop, pool: PgPool, act: str) -> None:
+    cart = _cart(shop, pool)
+    before, told = _writes(shop, cart), len(shop.events)
+    assert _slug(lambda: CART_ACTS[act](shop, cart)).slug == "order_not_submitted"
+    assert _writes(shop, cart) == before and len(shop.events) == told
+    after = shop.get(cart)
+    assert (after.deposit_minor, after.deposit_waived_reason, after.balance_waived_reason) == (
+        None,
+        None,
+        None,
+    )
+
+
+DEPOSIT_ACTS: dict[str, Callable[[Shop, Order], object]] = {
+    "set_deposit": lambda shop, order: shop.lifecycle.set_deposit(order.id, BY, 3000),
+    "apply_deposit_policy": lambda shop, order: shop.lifecycle.apply_deposit_policy(order.id, BY),
+}
+
+
+@pytest.mark.parametrize("act", list(DEPOSIT_ACTS))
+def test_a_pending_deposit_request_holds_the_deposit(shop: Shop, act: str) -> None:
+    order = shop.lifecycle.set_deposit(shop.order().id, BY, 2000)
+    [req] = requests_for(shop, order)
+    set_request_status(shop, req.id, "pending")
+    before, told = _writes(shop, order), len(shop.events)
+    error = _slug(lambda: DEPOSIT_ACTS[act](shop, order))
+    assert (error.slug, error.unprocessable, error.not_found) == ("payment_in_flight", False, False)
+    assert _writes(shop, order) == before and len(shop.events) == told
+
+
+def test_a_failed_deposit_request_is_cancelled_and_replaced(shop: Shop) -> None:
+    order = shop.lifecycle.set_deposit(shop.order().id, BY, 2000)
+    [req] = requests_for(shop, order)
+    set_request_status(shop, req.id, "failed")
+    shop.lifecycle.set_deposit(order.id, BY, 2000)
+    assert [(r.kind, r.amount_minor, r.status) for r in requests_for(shop, order)] == [
+        ("deposit", 2000, "cancelled"),
+        ("deposit", 2000, "open"),
+    ]
+
+
+def test_a_payment_leaves_a_failed_deposit_request_failed(shop: Shop) -> None:
+    order = shop.lifecycle.set_deposit(shop.order().id, BY, 2000)
+    [req] = requests_for(shop, order)
+    set_request_status(shop, req.id, "failed")
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=2000, method="cash")
+    assert [r.status for r in requests_for(shop, order)] == ["failed"]
