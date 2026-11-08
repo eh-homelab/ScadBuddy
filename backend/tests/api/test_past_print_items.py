@@ -3,16 +3,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import orders as api_orders
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.orders.component import ORDERS, OrdersComponent
-from scadbuddy.orders.models import FilamentInput
+from scadbuddy.orders.models import FilamentInput, LibraryFileRef
 from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.reference import TemplateDeletedError
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.print_library.component import PrintLibrary
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_send import make_output
@@ -83,6 +86,25 @@ def test_an_archive_of_a_deleted_templates_output_falls_through_to_the_copy(
     refused = add(client, order["id"], archive_id=81)
     assert refused.status_code == 409, refused.text
     assert refused.json()["type"] == PROBLEMS + "archive_copy_not_native"
+    # With the native library serving, the item is a library file item of the copy.
+    copy = LibraryFileRef(id=5_000_000_001, filename="bracket.gcode.3mf", library="native")
+
+    async def serving(self: PrintLibrary) -> SimpleNamespace:
+        return SimpleNamespace(spool=None)
+
+    async def copied(*args: object, **kwargs: object) -> LibraryFileRef:
+        return copy
+
+    monkeypatch.setattr(PrintLibrary, "serving_native", serving)
+    monkeypatch.setattr(api_orders, "copied_file", copied)
+    added = add(client, order["id"], archive_id=81)
+    assert added.status_code == 201, added.text
+    item = added.json()
+    assert (item["kind"], item["library_file"]["id"], item["origin_archive_ids"]) == (
+        "library_file",
+        copy.id,
+        [81],
+    )
 
 
 def test_an_archive_is_the_items_only_source(client: TestClient) -> None:
