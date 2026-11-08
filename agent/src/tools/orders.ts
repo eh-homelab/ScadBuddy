@@ -1373,11 +1373,12 @@ export const orderTools: Tool[] = [
     label: 'Duplicate a line item',
     description:
       "Duplicate a line item (#4955): a new item with the item's kind, current design (template reference, colours and " +
-      'output, or library file), past print archives, quantity, title, notes and SKU. No quote is copied: price the copy ' +
+      'output, or library file), past print archives, quantity, title, notes, SKU and the parts one unit uses. No quote is copied: price the copy ' +
       "with order_item_quote. A custom item's price is its own, so the copy keeps it. On an accepted, in-production or " +
       'ready order set `after_acceptance`: the copy then changes what the customer gets, as ' +
       'order_item_add_after_acceptance does. Refused as an add is: `item_locked` (past `quoted` without ' +
-      '`after_acceptance`), `order_not_accepted`, `order_on_hold`. Outward, as an add after acceptance is.',
+      '`after_acceptance`), `order_not_accepted`, `order_on_hold`, `order_not_submitted` (a storefront visitor cart), and ' +
+      '`template_deleted` for a model item whose template was deleted since. Outward, as an add after acceptance is.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,

@@ -5,11 +5,33 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.orders.problems import PROBLEMS
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
+from tests.api.test_versions import SLUG, upload
+from tests.support.operations import press
+
+
+@pytest.mark.requires_git
+def test_an_item_of_a_deleted_template_is_not_duplicated(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    commit = client.get(f"/api/v1/models/{SLUG}").json()["version"]
+    added = client.post(
+        f"/api/v1/orders/{order['id']}/items",
+        json={"slug": SLUG, "commit": commit, "inputs": {}, "quantity": 1},
+    )
+    assert added.status_code == 201, added.text
+    deleted = client.delete(f"/api/v1/models/{SLUG}", headers=press())
+    assert deleted.status_code in (200, 202, 204), deleted.text
+    copied = client.post(
+        f"/api/v1/orders/{order['id']}/items/{added.json()['id']}/duplicate", json={}
+    )
+    assert copied.status_code == 409, copied.text
+    assert copied.json()["type"] == PROBLEMS + "template_deleted"
 
 
 def custom(client: TestClient, order_id: str, title: str, quantity: int) -> dict[str, Any]:

@@ -2031,9 +2031,12 @@ class Lifecycle:
         item's price is its own field (#4954), so the copy takes its unit price (the
         accepted quote's, else the newest), accepted unless added after acceptance. A
         library file item's slots come from its first quote, as the original's did. The
-        audit line says ``item.duplicated`` after the add's own row."""
+        copy uses the parts the original uses per unit, set by hand or by its model's rule.
+        Refused on a visitor's cart (``order_not_submitted``, #5282). The audit line says
+        ``item.duplicated`` after the add's own row."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._takes_item(order, after_acceptance)
             item = self._item_of(conn, order, item_id)
             common: dict[str, Any] = {
@@ -2075,6 +2078,20 @@ class Lifecycle:
                     **common,
                 )
             copy = self._insert_new(conn, order, by, entry, after_acceptance)
+            parts = [
+                ItemPart(part_id=row.part_id, per_unit=row.per_unit)
+                for row in self.parts.item_parts([item.id], conn=conn)[item.id]
+            ]
+            given = [
+                ItemPart(part_id=row.part_id, per_unit=row.per_unit)
+                for row in self.parts.item_parts([copy.id], conn=conn)[copy.id]
+            ]
+            if parts != given:
+                # The original's parts, which a hand edit may have changed from the rule's.
+                self.parts.set_item_parts(conn, copy.id, parts)
+                self._event(
+                    conn, order, by, "item.parts_set", item_id=copy.id, parts=_parts_detail(parts)
+                )
             self._event(conn, order, by, "item.duplicated", item_id=copy.id, from_item_id=item.id)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(copy, None)]))
@@ -3020,6 +3037,7 @@ class Lifecycle:
             )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._producing(order)
             items = [self._item_of(conn, order, line.item_id) for line in lines]
             for item in items:
