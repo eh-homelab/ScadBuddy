@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, tzinfo
 
 import pytest
 
@@ -129,6 +130,39 @@ def test_touch_webhook_stamps_the_row(rows: OrderStore) -> None:
     assert creds.rows()[0].last_webhook_at is None
     creds.touch_webhook("fake")
     assert creds.rows()[0].last_webhook_at is not None
+
+
+def test_a_success_clears_only_a_failure_older_than_its_start(rows: OrderStore) -> None:
+    """#5684: two webhooks at once. A success that began before a failure was written
+    leaves it standing; one that began after clears it. Both times are the database's."""
+    creds = PaymentCredentials(rows, KEK)
+    _connect(creds)
+    began = creds.now()
+    creds.set_webhook_error("fake", "signature")
+    creds.clear_webhook_error("fake", since=began)
+    assert creds.rows()[0].last_webhook_error == "signature"
+    creds.clear_webhook_error("fake", since=creds.now())
+    row = creds.rows()[0]
+    assert (row.last_webhook_error, row.last_webhook_error_at) == (None, None)
+
+
+def test_the_failure_is_stamped_by_the_database_clock(
+    rows: OrderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replica whose own clock runs ahead cannot stamp a failure in the future, where
+    no later success could clear it."""
+
+    class Ahead(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Ahead:
+            return cls(2100, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr("scadbuddy.payments.credentials.datetime", Ahead)
+    creds = PaymentCredentials(rows, KEK)
+    _connect(creds)
+    creds.set_webhook_error("fake", "signature")
+    stamp = creds.rows()[0].last_webhook_error_at
+    assert stamp is not None and stamp.year < 2100
 
 
 def test_disconnect_is_refused_while_a_request_is_open(rows: OrderStore) -> None:

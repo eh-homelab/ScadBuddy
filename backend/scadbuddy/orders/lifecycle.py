@@ -1400,12 +1400,19 @@ class Lifecycle:
             return "recorded", None
         if event.kind == "fee":
             return self._late_fee(conn, order, found, provider, event, by)
+        if event.kind == "refund_failed":
+            return self._reverse_refund(conn, order, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
             return "currency_mismatch", None
         if event.kind == "refunded" and event.amount_minor is None:
             # No amount: a guess at a full refund could be wrong, so nothing is written.
+            return "ignored", None
+        if event.kind == "refunded" and payments.reversed_by_failure(
+            conn, provider, event.event_id
+        ):
+            # #5681: the refund's own failure was told first, so the money never left.
             return "ignored", None
         if event.kind == "paid" and self._paid_by(conn, order, found, provider):
             # A hosted page is paid once: this is the same money told again.
@@ -1440,6 +1447,51 @@ class Lifecycle:
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return "recorded", payment
+
+    def _reverse_refund(
+        self, conn: Conn, order: Order, provider: str, event: ProviderEvent, by: Actor
+    ) -> tuple[EventOutcome, Payment | None]:
+        """#5681: a refund that failed or was cancelled. When the refund was recorded, a
+        positive payment cancels its negative one, with its amount, provider, request and
+        reference taken from the refund's own row (in the order's currency), never from the
+        event, so the customer's page can pair them. A refund closes no request, so this
+        opens or closes none, and the balance follows from the payments sum. A refund not
+        told yet (it never succeeded, or its event comes later: the provider does not keep
+        order) is kept at once as ``ignored``: no payment, no retry and no order change
+        told, since nothing on the order moved. The event's row names the refund
+        (``payment_events.reverses``), so the refund told after it writes nothing
+        (``_apply_event``). A refund told without money (no amount) is ignored too."""
+        if event.reverses is None:
+            return "ignored", None
+        told, refund_id = payments.told_event(conn, provider, event.reverses)
+        if not told:
+            return "ignored", None
+        refund = next(
+            (p for p in self.store.payments(order.id, conn=conn) if p.id == refund_id), None
+        )
+        if refund is None or refund.amount_minor >= 0:
+            return "ignored", None
+        payment = self.store.insert_payment(
+            conn,
+            order.id,
+            amount_minor=-refund.amount_minor,
+            method=provider,
+            reference=refund.reference,
+            received_at=None,
+            notes="",
+            provider=refund.provider,
+            payment_request_id=refund.payment_request_id,
+        )
+        self._event(
+            conn,
+            order,
+            by,
+            "payment.added",
+            payment_id=payment.id,
+            payment_request_id=refund.payment_request_id,
+            provider=provider,
+        )
         return "recorded", payment
 
     def _write_fee(
@@ -2411,9 +2463,12 @@ class Lifecycle:
         item's price is its own field (#4954), so the copy takes its unit price (the
         accepted quote's, else the newest), accepted unless added after acceptance. A
         library file item's slots come from its first quote, as the original's did. The
-        audit line says ``item.duplicated`` after the add's own row."""
+        copy uses the parts the original uses per unit, set by hand or by its model's rule.
+        Refused on a visitor's cart (``order_not_submitted``, #5282). The audit line says
+        ``item.duplicated`` after the add's own row."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._takes_item(order, after_acceptance)
             item = self._item_of(conn, order, item_id)
             common: dict[str, Any] = {
@@ -2455,6 +2510,20 @@ class Lifecycle:
                     **common,
                 )
             copy = self._insert_new(conn, order, by, entry, after_acceptance)
+            parts = [
+                ItemPart(part_id=row.part_id, per_unit=row.per_unit)
+                for row in self.parts.item_parts([item.id], conn=conn)[item.id]
+            ]
+            given = [
+                ItemPart(part_id=row.part_id, per_unit=row.per_unit)
+                for row in self.parts.item_parts([copy.id], conn=conn)[copy.id]
+            ]
+            if parts != given:
+                # The original's parts, which a hand edit may have changed from the rule's.
+                self.parts.set_item_parts(conn, copy.id, parts)
+                self._event(
+                    conn, order, by, "item.parts_set", item_id=copy.id, parts=_parts_detail(parts)
+                )
             self._event(conn, order, by, "item.duplicated", item_id=copy.id, from_item_id=item.id)
             self._retax(conn, order)
             order = self._rederive(conn, order, by)
@@ -3407,6 +3476,7 @@ class Lifecycle:
             )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._producing(order)
             items = [self._item_of(conn, order, line.item_id) for line in lines]
             for item in items:

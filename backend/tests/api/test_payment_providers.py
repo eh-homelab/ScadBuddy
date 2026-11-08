@@ -54,6 +54,17 @@ def test_stripe_is_offered_with_its_two_secrets(client: TestClient) -> None:
     ]
 
 
+def test_paypal_is_offered_with_its_environment_and_one_secret(client: TestClient) -> None:
+    [paypal] = [s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "paypal"]
+    assert (paypal["label"], paypal["connected"]) == ("PayPal", False)
+    assert [(f["name"], f["secret"]) for f in paypal["fields"]] == [
+        ("environment", False),
+        ("client_id", False),
+        ("webhook_id", False),
+        ("client_secret", True),
+    ]
+
+
 def test_the_page_never_sees_a_secret(client: TestClient) -> None:
     before = fake_status(client)
     assert (before["id"], before["connected"], before["is_default"]) == ("fake", False, False)

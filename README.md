@@ -502,9 +502,12 @@ In the Stripe Dashboard, add a webhook endpoint with the URL
 `https://<public host>/api/v1/payments/webhooks/stripe` and these events:
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, `checkout.session.expired`, `refund.created`,
-`refund.updated` and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks),
+`refund.updated`, `refund.failed` and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks),
 [refund events](https://docs.stripe.com/refunds#refund-events)). Each refund is recorded
-once, for its own amount, when Stripe says it succeeded. Then, in
+once, for its own amount, when Stripe says it succeeded. A recorded refund that then fails
+or is cancelled ([failed refunds](https://docs.stripe.com/refunds#failed-refunds)) gets a
+payment that cancels it, so the balance owed goes back up; one that fails before it
+succeeded writes nothing. Then, in
 Settings → Payments, connect Stripe with a secret key (`sk_…`) or a restricted key
 (`rk_…`) and the endpoint's signing secret (`whsec_…`). A restricted key needs write
 access to Checkout Sessions and read access to PaymentIntents and balance transactions
@@ -514,6 +517,33 @@ methods the account has turned on, so card, and US bank account (ACH) when it is
 bank payment shows as `pending` until Stripe says it settled, and as `failed` when it
 did not. The Stripe fee is recorded on the order's costs once Stripe's balance
 transaction gives it.
+
+#### PayPal (#4959)
+
+In the PayPal Developer Dashboard, open the REST app (sandbox or live) and add a webhook
+with the URL `https://<public host>/api/v1/payments/webhooks/paypal` and these events:
+`CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.PENDING`,
+`PAYMENT.CAPTURE.DECLINED` and `PAYMENT.CAPTURE.REFUNDED`
+([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)). Then, in
+Settings → Payments, connect PayPal with the environment (`sandbox` or `live`), the app's
+client ID and secret, and the webhook's ID. ScadBuddy checks the credentials and that the
+webhook sends those events. The page then shows "Connected as PayPal app … (sandbox)" or
+"(live)". Each payment request is a PayPal order for the request's amount. The customer
+pays with a PayPal balance or a card on PayPal's page. When the customer approves the
+payment, ScadBuddy captures it. PayPal then says whether the capture completed, is
+pending, or was declined. Every webhook is checked with PayPal's verify-webhook-signature
+call before ScadBuddy reads it
+([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
+The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
+is recorded once, for its own amount, when PayPal says it completed. PayPal has no call
+that voids an order. A cancel therefore marks the order so that ScadBuddy will not
+capture a later approval of it. The mark is set once, right after the cancel. When
+PayPal cannot be reached then, the failure is logged and the order stays unmarked, so a
+later approval is captured. That capture, and one that completed or was already under
+way before the cancel, is recorded as a payment on the cancelled request: refund it in
+PayPal if it is not wanted. ScadBuddy captures only orders it made (a request id in
+`custom_id`), but use a REST app of its own all the same. A chargeback or reversal
+(`PAYMENT.CAPTURE.REVERSED`) is not tracked: the request stays paid.
 
 ### Authentication on the deployment (#4975)
 

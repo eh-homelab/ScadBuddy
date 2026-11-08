@@ -889,12 +889,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `orders/pastPrints.ts`, `orders.ts` `addArchiveItem` and `priceBook.ts`.
   The items card's writes (#4955, §4.2): `POST …/items/{item}/duplicate`
   (`Lifecycle.duplicate_item`, body `{after_acceptance}`: the item's kind, current design,
-  past print archives, quantity, title, notes and SKU, added as `add_items` adds one; no
-  quote copied but a custom item's own price; audit `item.duplicated`) and `POST
+  past print archives, quantity, title, notes, SKU and per-unit parts, added as `add_items`
+  adds one; no quote copied but a custom item's own price; 409 `template_deleted` for a
+  model item whose template is gone, checked by the route; audit `item.duplicated`) and `POST
   /orders/{id}/fulfil` (`Lifecycle.fulfil_items`, `FulfilLine`s: per item an attempt by hand
   of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
   `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
-  `failed`, or named twice, refuses all).
+  `failed`, or named twice, refuses all). Both refuse a visitor's cart (`order_not_submitted`).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
@@ -912,6 +913,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
   `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
   own code, no SDK; the facts it rests on, each with its Stripe link, are its docstring),
+  `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
+  captures it from the webhook path and the capture's events record it; each webhook is
+  checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
+  cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
+  approval is not captured (a failed mark is logged, not retried, and such a capture, like one
+  made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -939,7 +946,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   younger than `FEE_RETRY_WINDOW` (24 hours); after that it is recorded as `ignored`. A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
-  manual payment, and a disconnect is refused while one is pending. `parse_webhook` is
+  manual payment, and a disconnect is refused while one is pending. A `refund_failed`
+  event (#5681; Stripe sends it for every `failed` or `canceled` Refund) names the
+  refund's event id (`ProviderEvent.reverses`, kept on its `payment_events` row). When
+  that refund was recorded, it writes a positive payment that cancels the refund's row,
+  with the amount, provider, request and reference of that row, never the event's
+  (`Lifecycle._reverse_refund`). When the refund was not told yet, the failure is kept
+  at once as `ignored` (no payment, no retry, no `OrderChanged`), and the refund told after it is
+  `ignored` (`payments.reversed_by_failure`), so the two cancel out in either order. A
+  refund told without money is `ignored`; no request's status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`, and the deposit, waiver and shipping-option routes of
@@ -947,4 +962,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
   most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
-  `payment:<id>`). No route, log, problem or audit row carries a secret.
+  `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
+  (`last_webhook_error`: `signature`, `provider_unavailable` or `handler_error`, and
+  `last_webhook_error_at`; #5684; a failure to write it is logged, never raised over the
+  webhook's own), never a
+  provider's text. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
+  bounded wait, not a failure, and keeps none. The next success clears it only when the
+  failure is older than that success's start; both times are the database's
+  `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
+  clears it; Settings shows it
+  (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.

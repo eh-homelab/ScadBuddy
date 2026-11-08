@@ -25,6 +25,7 @@ from scadbuddy.payments.credentials import (
     KekMissingError,
     PaymentCredentials,
     ProviderNotConnectedError,
+    WebhookError,
 )
 from scadbuddy.payments.models import (
     EventOutcome,
@@ -82,6 +83,15 @@ class FieldError(ValueError):
         self.loc = loc
 
 
+def _webhook_error(failed: Exception) -> WebhookError:
+    """The fixed category Settings shows for a failed webhook; never its text."""
+    if isinstance(failed, BadSignatureError):
+        return "signature"
+    if isinstance(failed, ProviderUnavailableError):
+        return "provider_unavailable"
+    return "handler_error"
+
+
 class ProviderStatus(BaseModel):
     id: str
     label: str
@@ -92,6 +102,9 @@ class ProviderStatus(BaseModel):
     is_default: bool
     connected_at: datetime | None
     last_webhook_at: datetime | None
+    #: Why the last webhook failed, cleared by the next that succeeds (#5684).
+    last_webhook_error: WebhookError | None
+    last_webhook_error_at: datetime | None
 
 
 class ProviderConnect(BaseModel):
@@ -297,17 +310,44 @@ class Payments:
         """Check the signature, then record the event. ``BadSignatureError`` leaves
         before anything is written; ``ProviderError`` is a signed body it cannot read;
         ``ProviderUnavailableError`` is a provider call the reading needed that failed,
-        and also leaves before anything is written."""
+        and also leaves before anything is written. An event that came before one it
+        depends on (``EventTooEarlyError``, a late fee within ``FEE_RETRY_WINDOW``) writes
+        nothing and answers the same 503, so the provider sends it again; that bounded wait
+        is not a failure, so it keeps no category. Every other failure but an unknown
+        provider keeps its category on the credential row, and the next success clears it
+        (#5684). The success's start is the database's clock (``PaymentCredentials.now``),
+        as the failure's stamp is.
+        """
+        began = await asyncio.to_thread(self._credentials.now)
+        try:
+            outcome = await self._handle_webhook(provider, headers, body)
+        except ProviderNotFoundError:
+            raise
+        except EventTooEarlyError as early:
+            raise ProviderUnavailableError(str(early)) from None
+        except Exception as failed:
+            await self._note_webhook_error(provider, _webhook_error(failed))
+            raise
+        await asyncio.to_thread(self._credentials.clear_webhook_error, provider, since=began)
+        return outcome
+
+    async def _note_webhook_error(self, provider: str, error: WebhookError) -> None:
+        """Keep the category; a failure to keep it is logged, never raised over the
+        webhook's own failure, so the route still answers for that one."""
+        try:
+            await asyncio.to_thread(self._credentials.set_webhook_error, provider, error)
+        except Exception:
+            logger.exception("could not keep the webhook failure of %s (%s)", provider, error)
+
+    async def _handle_webhook(
+        self, provider: str, headers: Mapping[str, str], body: bytes
+    ) -> EventOutcome:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
-        try:
-            outcome = await asyncio.to_thread(
-                self._orders.lifecycle.record_provider_event, provider, event
-            )
-        except EventTooEarlyError as early:
-            # Nothing was written: a 503 makes the provider send the event again.
-            raise ProviderUnavailableError(str(early)) from None
+        outcome = await asyncio.to_thread(
+            self._orders.lifecycle.record_provider_event, provider, event
+        )
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
         return outcome
 
@@ -376,6 +416,8 @@ class Payments:
                     is_default=row is not None and row.is_default,
                     connected_at=None if row is None else row.connected_at,
                     last_webhook_at=None if row is None else row.last_webhook_at,
+                    last_webhook_error=None if row is None else row.last_webhook_error,
+                    last_webhook_error_at=None if row is None else row.last_webhook_error_at,
                 )
             )
         return found

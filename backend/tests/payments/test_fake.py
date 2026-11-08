@@ -82,3 +82,14 @@ async def test_the_fake_sends_the_slow_money_kinds(kind: str) -> None:
     """#4958: dev runs drive a pending, a failed and a late fee through the fake."""
     body, headers = signed_event("s3cret", {"id": "e9", "type": kind, "provider_ref": "fake_r1"})
     assert (await FAKE.parse_webhook(CRED, headers, body)).kind == kind
+
+
+async def test_the_fake_sends_a_failed_refund() -> None:
+    """#5681: dev runs reverse a refund through the fake."""
+    body, headers = signed_event(
+        "s3cret",
+        {"id": "e10", "type": "refund_failed", "provider_ref": "fake_r1", "currency": "USD",
+         "reverses": "e8"},
+    )  # fmt: skip
+    event = await FAKE.parse_webhook(CRED, headers, body)
+    assert (event.kind, event.reverses) == ("refund_failed", "e8")

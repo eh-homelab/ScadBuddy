@@ -1,0 +1,33 @@
+{
+  "id": "0NH55953DH663215D",
+  "url": "https://shop.example/api/v1/payments/webhooks/paypal",
+  "event_types": [
+    {
+      "name": "CHECKOUT.ORDER.APPROVED",
+      "description": "A buyer approved a checkout order"
+    },
+    {
+      "name": "PAYMENT.CAPTURE.COMPLETED",
+      "description": "A payment capture completes."
+    },
+    {
+      "name": "PAYMENT.CAPTURE.PENDING",
+      "description": "The state of a payment capture changes to pending."
+    },
+    {
+      "name": "PAYMENT.CAPTURE.DECLINED",
+      "description": "A payment capture is declined."
+    },
+    {
+      "name": "PAYMENT.CAPTURE.REFUNDED",
+      "description": "A merchant refunds a payment capture."
+    }
+  ],
+  "links": [
+    {
+      "href": "https://api-m.sandbox.paypal.com/v1/notifications/webhooks/0NH55953DH663215D",
+      "rel": "self",
+      "method": "GET"
+    }
+  ]
+}
