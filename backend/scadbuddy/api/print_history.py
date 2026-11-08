@@ -552,16 +552,19 @@ async def _lan_run(
     name is the one the run uploaded, and it names the start. The link is recorded only
     when exactly one start of one run of the link's own subject has that name: never a
     guess. The recorded link is kept when the archive is deleted later."""
+    subject = PrintSubject.parse(link.subject).run_subject
     recorded = await links.lan_start(link.archive_id)
     if recorded is not None:
-        return await runs.get(recorded.run_id)
+        run = await runs.get(recorded.run_id)
+        # The archive can belong to another subject since the record was made: that
+        # subject's print is not this run's.
+        return run if run is not None and run.output_id == subject else None
     if archive is None or archive.filename is None:
         return None
     named = _LAN_FILE.fullmatch(archive.filename)
     if named is None:
         return None
     subtask = named["subtask"]
-    subject = PrintSubject.parse(link.subject).run_subject
     found = [
         (run, start)
         for run in await runs.lan_started(subject, [subtask])
@@ -572,14 +575,20 @@ async def _lan_run(
     if len(found) != 1:
         return None
     run, start = found[0]
-    await links.record_lan_start(
-        LanArchiveLink(
-            archive_id=link.archive_id,
-            run_id=run.id,
-            subtask_name=subtask,
-            plate_id=start.plate_id,
+    try:
+        await links.record_lan_start(
+            LanArchiveLink(
+                archive_id=link.archive_id,
+                run_id=run.id,
+                subtask_name=subtask,
+                plate_id=start.plate_id,
+            )
         )
-    )
+    except psycopg.Error:
+        # The run is found exactly; only the record is lost, and the next read tries again.
+        logger.warning(
+            "could not record a LAN print's start", extra={"archive_id": link.archive_id}
+        )
     return run
 
 

@@ -6,8 +6,9 @@ created when the print is dispatched, and the queue item it came from gets its i
 (``queue_item.archive_id``; verified live on 1.2.5.6, see the print-history plan §1).
 ScadBuddy stores only the link, never the archive: Bambuddy stays the source of truth.
 
-Every row is keyed by the print's subject (`subject.PrintSubject`): an output, or a
-Bambuddy library file (#976). The two kinds share both tables (#1750).
+Each row of ``print_sends`` and ``print_links`` is keyed by the print's subject
+(`subject.PrintSubject`): an output, or a Bambuddy library file (#976). The two kinds
+share both tables (#1750).
 
 - ``print_sends``: each queue item a run queued, written by its source's ``record()``
   as each plate is queued (`print_source.record_sends`).
@@ -18,12 +19,16 @@ Bambuddy library file (#976). The two kinds share both tables (#1750).
   (`linking.link_subject_by_hash`, a library file's since #1755). A library file's
   sends are linked once their item names an archive (`linking.link_library_prints`).
   An archive two subjects name is the output's.
-- ``lan_print_archives``: the LAN start each archive became (#5661), written by the API
-  as it reads a link found by hash whose file the start uploaded
-  (`print_history._part_settings`). A LAN start has no queue item, so no send names it.
 
-Both are created by ``*_print_subjects.sql``, from ``output_bambuddy_prints`` and
-``library_bambuddy_prints``, which ``*_drop_legacy_print_links.sql`` (#1772) drops.
+``print_sends`` and ``print_links`` are created by ``*_print_subjects.sql``, from
+``output_bambuddy_prints`` and ``library_bambuddy_prints``, which
+``*_drop_legacy_print_links.sql`` (#1772) drops.
+
+``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
+the archive, has no subject column, and is created by
+``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
+hash whose file the start uploaded (`print_history._lan_run`). A LAN start has no queue
+item, so no send names it.
 """
 
 from __future__ import annotations
