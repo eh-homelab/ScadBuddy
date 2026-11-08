@@ -318,17 +318,17 @@ async def test_a_many_colour_model_renders_in_a_fraction_of_the_sequential_time(
 ) -> None:
     model, work = _model(tmp_path)
     fake.delay = 0.1
-    sequential = fake.delay * len(MANY_COLOURS)
 
-    started = time.monotonic()
     result = await render_solids(
         model, CustomizerSchema(), {}, MANY_COLOURS, work, config=Config(solid_concurrency=4)
     )
-    elapsed = time.monotonic() - started
 
     assert list(result.meshes) == MANY_COLOURS
-    # Seven rounds of four is 0.7 s; one at a time, as before #282, it was 2.8 s.
-    assert elapsed < sequential / 2
+    # Four at a time makes seven rounds of 0.1 s, not 28 one at a time as before #282.
+    # #5688: the overlap is checked by the peak number running at once, not by a ratio
+    # of wall times, which a loaded runner stretched past half the sequential time.
+    assert fake.peak == 4
+    assert sorted(fake.started) == sorted(MANY_COLOURS)
 
 
 def _fake_openscad(tmp_path: Path, body: str) -> str:
