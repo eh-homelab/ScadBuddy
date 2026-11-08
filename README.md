@@ -157,6 +157,13 @@ on shutdown.
   are missing or stale, which after the first pass is none. `false` deletes it; a
   Schedule paused in the Temporal UI stays paused across restarts. Its id ends in the
   library queue's name, like the housekeeping ones);
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` (default `true`: at start the API registers the
+  built-in `order-fulfilment` flow as version 1 when no flow of that name ever had a
+  version; a person's edit or delete stands, and nothing runs until a person makes its
+  trigger and approves its grant; `false` registers nothing; read from the environment
+  only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
+  are the request's, each print is refused and the flow asks a person to print the item
+  from the order's page);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -502,9 +509,12 @@ In the Stripe Dashboard, add a webhook endpoint with the URL
 `https://<public host>/api/v1/payments/webhooks/stripe` and these events:
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, `checkout.session.expired`, `refund.created`,
-`refund.updated` and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks),
+`refund.updated`, `refund.failed` and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks),
 [refund events](https://docs.stripe.com/refunds#refund-events)). Each refund is recorded
-once, for its own amount, when Stripe says it succeeded. Then, in
+once, for its own amount, when Stripe says it succeeded. A recorded refund that then fails
+or is cancelled ([failed refunds](https://docs.stripe.com/refunds#failed-refunds)) gets a
+payment that cancels it, so the balance owed goes back up; one that fails before it
+succeeded writes nothing. Then, in
 Settings → Payments, connect Stripe with a secret key (`sk_…`) or a restricted key
 (`rk_…`) and the endpoint's signing secret (`whsec_…`). A restricted key needs write
 access to Checkout Sessions and read access to PaymentIntents and balance transactions

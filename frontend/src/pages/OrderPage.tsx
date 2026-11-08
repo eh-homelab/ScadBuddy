@@ -6,6 +6,7 @@ import { RevisionsPanel } from '../components/orders/RevisionsPanel'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { addMode, isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from '../components/orders/afterAcceptance'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
+import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
@@ -14,7 +15,7 @@ import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
-import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
+import { itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
 import { itemPrice, parseUnitPrice, UNIT_PRICE_HINT, unitPrice } from '../components/orders/price'
 import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
@@ -26,6 +27,7 @@ import { ShipmentForm } from '../components/orders/ShipmentForm'
 import { UnfulfilDialog } from '../components/orders/Unfulfil'
 import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from '../components/orders/unfulfilRules'
 import { useSliceQuotes } from '../components/orders/useSliceQuotes'
+import type { ItemSection } from '../components/orders/itemActions'
 import { RecordDrawer } from '../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -117,6 +119,9 @@ export function OrderPage() {
     row.scrollIntoView?.({ block: 'center' })
   }, [loaded, openItem])
   const [adding, setAdding] = useState(false)
+  // #4955 — the drawer section a row's ⋯ action opened an item at, scrolled to once. Kept
+  // with the item's id, so it never reaches another item's drawer.
+  const [section, setSection] = useState<{ item: string; at: ItemSection } | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
@@ -219,17 +224,6 @@ export function OrderPage() {
                 Accept order
               </Button>
             )}
-            {adds && (
-              <Button variant="outline" disabled={busy} onClick={() => setAdding(true)}>
-                Add item
-              </Button>
-            )}
-            {adds && (
-              // #4954 — the entry row under the items takes it (#5541: after acceptance too).
-              <Button variant="outline" disabled={busy} onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
-                Add custom item
-              </Button>
-            )}
             {order.status === 'shipped' && (
               <Button disabled={busy} onClick={() => void act(() => api.closeOrder(order.id))}>
                 Close order
@@ -281,18 +275,29 @@ export function OrderPage() {
         <OrderItemsTable
           orderId={order.id}
           orderStatus={order.status}
+          order={order}
           items={items}
           attachments={attachments}
           currency={order.currency}
           exponent={order.minor_exponent}
-          onOpen={(item) => setOpenItem(item.id)}
+          onOpen={(item) => {
+            setSection(null)
+            setOpenItem(item.id)
+          }}
           onChanged={reload}
           addTo={adds && { mode: adds, number: order.number ?? 'Cart' }}
           selected={current?.id ?? null}
           quoting={slices.runs}
-          onHold={order.on_hold}
           shipments={shipments}
           unfulfilAllowed={unfulfilAllowed}
+          onAdd={() => setAdding(true)}
+          onSection={(item, at) => {
+            setSection({ item: item.id, at })
+            setOpenItem(item.id)
+          }}
+          busy={busy}
+          onAct={(action) => void act(action)}
+          costs={costs.data?.order_id === order.id ? costs.data : undefined}
         />
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -361,26 +366,10 @@ export function OrderPage() {
 
           <Card size="sm">
             <CardContent className="flex flex-col gap-3">
-              <h2 className="text-sm font-medium">Money</h2>
+              {/* #4955 step 4 — the summary: subtotal, each charge, total, paid and balance. */}
+              <h2 className="text-sm font-medium">Summary</h2>
               <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
-              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
-                <dt className="text-muted-foreground">Items</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>
-                {(totals.pending_minor ?? 0) !== 0 && (
-                  <>
-                    <dt className="pl-3 text-xs text-muted-foreground">of which not accepted</dt>
-                    <dd className="sb-num text-right text-xs text-muted-foreground">{formatMoney(totals.pending_minor ?? 0, order.currency, order.minor_exponent)}</dd>
-                  </>
-                )}
-                <dt className="text-muted-foreground">Charges</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.charges_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="font-medium">Total</dt>
-                <dd className="sb-num text-right font-medium">{formatMoney(totals.total_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="text-muted-foreground">Paid</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.paid_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="text-muted-foreground">{(totals.pending_minor ?? 0) !== 0 ? 'Balance due (provisional)' : 'Balance due'}</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.balance_minor, order.currency, order.minor_exponent)}</dd>
-              </dl>
+              <OrderSummary currency={order.currency} exponent={order.minor_exponent} totals={totals} charges={charges} />
               {(totals.unpriced_items ?? []).length > 0 && (
                 <p className="text-xs text-warn" data-testid="order-unpriced">
                   Not in the total, with no price yet: {(totals.unpriced_items ?? []).map((id) => titles.get(id) ?? id).join(', ')}
@@ -518,7 +507,11 @@ export function OrderPage() {
           parts={orderParts.data?.order_id === order.id ? (orderParts.data.items.find((i) => i.item_id === current.id)?.parts ?? []) : undefined}
           slices={slices}
           unfulfilAllowed={unfulfilAllowed}
-          onClose={() => setOpenItem(null)}
+          section={section?.item === current.id ? section.at : null}
+          onClose={() => {
+            setSection(null)
+            setOpenItem(null)
+          }}
           onChanged={reload}
         />
       )}
@@ -532,6 +525,7 @@ function ItemDrawer({
   parts,
   slices,
   unfulfilAllowed,
+  section = null,
   onClose,
   onChanged,
 }: {
@@ -542,6 +536,8 @@ function ItemDrawer({
   slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'dismiss'>
   /** #4953 — `orders_allow_unfulfil`. */
   unfulfilAllowed: boolean
+  /** #4955 — the section a row's ⋯ action opened the drawer at: scrolled into view. */
+  section?: ItemSection | null
   onClose: () => void
   onChanged: () => void
 }) {
@@ -568,6 +564,14 @@ function ItemDrawer({
   const [notes, setNotes] = useState(item.notes)
   const [typedPrice, setTypedPrice] = useState(unitText)
   const [printing, setPrinting] = useState(item.requires_printing)
+  // The chosen section's wrapper, set when it attaches (the drawer's content mounts in a portal,
+  // after this component's own effects run), and scrolled to; another section's attaches in its
+  // place, so a second ⋯ section for this item scrolls again.
+  const [target, setTarget] = useState<HTMLDivElement | null>(null)
+  const sectionRef = (name: ItemSection) => (name === section ? setTarget : undefined)
+  useEffect(() => {
+    target?.scrollIntoView?.({ block: 'start' })
+  }, [target])
   useEffect(() => {
     setQuantity(String(item.quantity))
     setTitle(item.title)
@@ -759,16 +763,27 @@ function ItemDrawer({
       </dl>
       <RevisionsPanel order={order} item={item} attachments={detail.attachments.filter((a) => a.item_id === item.id)} onChanged={onChanged} />
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
-      {isCart(order) ? null : custom ? (
+      {/* A visitor's cart (#5282) has no price or print section, so no menu action opens one. */}
+      {!isCart(order) && (
+      <div id="item-section-quote" data-testid="item-section-quote" ref={sectionRef('quote')}>
+      {custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}
+      </div>
+      )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
-      {!isCart(order) && <PrintItem order={order} item={item} onChanged={onChanged} />}
+      {!isCart(order) && (
+        <div id="item-section-print" data-testid="item-section-print" ref={sectionRef('print')}>
+          <PrintItem order={order} item={item} onChanged={onChanged} />
+        </div>
+      )}
+      <div id="item-section-fulfil" data-testid="item-section-fulfil" ref={sectionRef('fulfil')}>
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={production} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
+      </div>
       <OrderAttachments
         orderId={order.id}
         itemId={item.id}

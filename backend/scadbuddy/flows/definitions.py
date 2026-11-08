@@ -28,7 +28,12 @@ from scadbuddy.flows.models import (
     FlowVersion,
 )
 from scadbuddy.flows.reconcile import created_by, reconcile, reconcile_locked
-from scadbuddy.flows.repository import DetailsNotSavedError, FlowHistory, FlowNotPresentError
+from scadbuddy.flows.repository import (
+    DetailsNotSavedError,
+    FlowExistsError,
+    FlowHistory,
+    FlowNotPresentError,
+)
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 
@@ -117,6 +122,37 @@ class FlowDefinitions:
             display_name=display_name,
             description=description,
         )
+
+    async def register_new(
+        self,
+        name: str,
+        script: str,
+        author: dict[str, Any],
+        *,
+        inputs_schema: dict[str, Any] | None,
+        message: str,
+        display_name: str,
+        description: str,
+    ) -> Definition | None:
+        """Version 1 of ``name`` (a built-in flow, #4252), or None when the name has
+        any version already, a deleted flow's too: a shop's edit or delete stands, and two
+        replicas starting at once register it once."""
+        try:
+            return await asyncio.to_thread(
+                self._write,
+                name,
+                author,
+                None,
+                script,
+                None,
+                inputs_schema,
+                message=message,
+                display_name=display_name,
+                description=description,
+                only_new=True,
+            )
+        except FlowExistsError:
+            return None
 
     async def restore(
         self,
@@ -256,8 +292,12 @@ class FlowDefinitions:
         body: str | None = None,
         display_name: str | None = None,
         description: str | None = None,
+        only_new: bool = False,
     ) -> Definition:
         self._require()
+        # A built-in's authorship goes in its commit too, so git, reconcile and the row
+        # agree (review of #5682).
+        builtin = author.get("name") if author.get("kind") == "builtin" else None
         version_id = str(uuid.uuid4())
         rows: list[Any] = []
 
@@ -289,6 +329,8 @@ class FlowDefinitions:
                 body=body,
                 display_name=display_name,
                 description=description,
+                only_new=only_new,
+                builtin=builtin if isinstance(builtin, str) else None,
             )
         except DetailsNotSavedError as error:
             # The version is committed and indexed: answer it, never fail it (#3186).
@@ -418,7 +460,7 @@ class FlowDefinitions:
                 version=commit.version,
                 message=commit.message,
                 body=commit.body,
-                created_by=created_by(commit.agent),
+                created_by=created_by(commit.agent, commit.builtin),
                 created_at=commit.date,
                 current=index == 0,
             )

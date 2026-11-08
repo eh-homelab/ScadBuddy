@@ -19,7 +19,15 @@ PaymentRequestStatus = Literal["open", "pending", "paid", "expired", "cancelled"
 #: provider with ``capture_request`` sends it, and the service captures only while the
 #: request is open or failed.
 ProviderEventKind = Literal[
-    "paid", "pending", "failed", "refunded", "expired", "fee", "approved", "other"
+    "paid",
+    "pending",
+    "failed",
+    "refunded",
+    "refund_failed",
+    "expired",
+    "fee",
+    "approved",
+    "other",
 ]
 #: ``capture_request``'s answer: the money is captured (or was already), or the provider
 #: declined the customer's method, so the request reads ``failed``.
@@ -65,6 +73,8 @@ class ProviderEvent(BaseModel):
     #: When the provider made the event (#4958): how long a ``fee`` that arrived
     #: before its payment is sent back for a retry (``Lifecycle._late_fee``).
     created_at: datetime | None = None
+    #: A ``refund_failed`` event's: the event id of the refund it reverses (#5681).
+    reverses: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class HostedRequest(BaseModel):

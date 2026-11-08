@@ -28,7 +28,7 @@ from scadbuddy.payments.provider import (
 
 SIGNATURE_HEADER: Final = "x-fake-signature"
 _KINDS: Final[frozenset[str]] = frozenset(
-    {"paid", "pending", "failed", "refunded", "expired", "fee", "approved"}
+    {"paid", "pending", "failed", "refunded", "refund_failed", "expired", "fee", "approved"}
 )
 
 
@@ -100,6 +100,7 @@ class FakeProvider:
                 currency=data.get("currency"),
                 fee_minor=data.get("fee_minor"),
                 created_at=data.get("created_at"),
+                reverses=data.get("reverses"),
             )
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError):
             raise ProviderError("the event body is malformed") from None

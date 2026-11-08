@@ -2,7 +2,8 @@
 # (#1926, from #259). Weekly and on demand only, never on a PR, so an external
 # site going down never blocks a merge; it is not a required check. A failure
 # opens (or leaves open) one issue. Fix the link, or exclude it in the args
-# below with a comment saying why.
+# below with a comment saying why. The `release-asset-pins` job, on the same
+# schedule, checks the second URLs the release downloads fall back to (#5706).
 name: Link check
 
 on:
@@ -70,3 +71,34 @@ jobs:
           fi
           gh issue create --title "$title" --label documentation --body \
             "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, a \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason."
+
+  # The release downloads fall back to a REST API asset URL (#5706), pinned by asset id
+  # beside each version and sha256, or for the amd64 Temporal CLI to temporal.download.
+  # The fallback runs only in an outage, so an id a bump left behind, or an archive path
+  # that moved, would show up only then: this fetches each one weekly and checks its
+  # sha256.
+  release-asset-pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Check the pinned release asset ids
+        id: pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-asset-pins.sh .
+      - name: Open an issue
+        if: failure() && steps.pins.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Release asset pins: a fallback URL no longer serves its sha256"
+          if gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number' | grep -q .; then
+            echo "already open"; exit 0
+          fi
+          gh issue create --title "$title" --body \
+            "The weekly check (\`.github/scripts/release-asset-pins.sh\`, from \`link-check.yml\`) found a fallback URL that does not serve its pinned sha256: $RUN_URL. For a REST API asset, set the asset id beside that version in the Dockerfile or ci.yml (\`gh api repos/<owner>/<repo>/releases/tags/<tag>\` lists them). For temporal.download, find where Temporal now serves the archive."

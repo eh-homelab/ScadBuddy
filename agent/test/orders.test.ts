@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { composeNotice } from '../src/tools/orders.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -136,6 +137,45 @@ describe('order tools (#4249)', () => {
       { method: 'ARCHIVE', body: null },
     ])
     await expect(tool('customer_upsert').execute({ archive: true }, ctx())).rejects.toThrow('customer_id')
+  })
+
+  it('composes a message to the customer and sends nothing (#4252 §7.3)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () =>
+        HttpResponse.json({
+          order: { number: 'ORD-2026-7', currency: 'USD', minor_exponent: 2, customer_id: CUSTOMER },
+          totals: { total_minor: 4250 },
+        }),
+      ),
+      http.get(`${BACKEND}/api/v1/customers/${CUSTOMER}`, () =>
+        HttpResponse.json({
+          display_name: 'Ada',
+          contacts: [
+            { kind: 'email', value: 'ada@example.com', primary: true },
+            { kind: 'phone', value: '555-0100', primary: false },
+          ],
+        }),
+      ),
+    )
+    expect(tool('order_notify_customer').risk).toBe('read')
+    const result = await tool('order_notify_customer').execute(
+      { order_id: ORDER, template: 'accepted', note: 'Thanks!' },
+      ctx(),
+    )
+    expect(firstText(result)).toEqual({
+      template: 'accepted',
+      to: [{ kind: 'email', value: 'ada@example.com' }],
+      subject: 'Order ORD-2026-7 accepted',
+      text: 'Hello Ada,\n\nWe have accepted order ORD-2026-7 (42.50 USD) and will start on it.\n\nThanks!',
+      sent: false,
+    })
+  })
+
+  it('says when a customer has no contacts to send a notice to (review of #5682)', () => {
+    const detail = { order: { number: 'ORD-1', currency: 'USD', minor_exponent: 2 }, totals: { total_minor: 100 } }
+    const notice = composeNotice('ready', detail, { display_name: 'Ada', contacts: [] })
+    expect(notice.to).toEqual([])
+    expect(notice.warning).toBe('Ada has no contacts to send it to.')
   })
 
   it('reads an order’s real cost (#4251 §6.4)', async () => {

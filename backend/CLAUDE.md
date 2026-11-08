@@ -83,8 +83,9 @@ running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `P
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
 That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
-(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`), in `ci.yml`'s two "Install the
-Temporal CLI" steps; move all three together.
+(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`, with the arm64 digest and its REST
+API asset id `TEMPORAL_CLI_ASSET_ARM64`, the arm64 fallback's URL, #5706), in `ci.yml`'s
+two "Install the Temporal CLI" steps; move all three together.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -611,6 +612,28 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   extracted from the Activity components, which wrap them) and `components/orders/`; the
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
+  Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
+  script, inputs `notify` and `settle_hours`), registered by
+  `ensure_builtin_flow` at the component's start only when the name never had a version
+  (`FlowDefinitions.register_new`, `FlowExistsError`), so a person's edit or delete stands;
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
+  settings) switches it. It prints each approved or failed item through `queue_print`
+  with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
+  other) or print choices it cannot read (no output, or one gone) asks a person to fix it and answer `print`, and an unanswered or skipped item
+  is passed over, never the run's end. It never re-quotes: on an accepted order a new
+  quote opens only after a person's revision after acceptance. A print run ends once
+  its plates are queued, so it then reads `order_get` (`sleep` between reads, from
+  `POLL_S` doubling to `POLL_MAX_S`, so a run's history stays bounded: it has no
+  continue-as-new) until no printed item is `queued` or `printing`, for at most the
+  input `settle_hours` (default 48; past it the run ends with a summary and no check);
+  an item a failed print left `queued` anyway counts as printed. Only then does it ask
+  the agent to record the attempts under a grant kept to the order, and with `notify`,
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
+  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  component's start; it reads the versions first (a name with any registers nothing),
+  then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
+  (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
+  build (`flows/reconcile.py` `created_by`).
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
   `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and
   the stored settings `pricing_*` and `rough_estimate_factor` (`live`), behind `GET`/`PUT
@@ -915,11 +938,30 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. A cancel (of the
-  request or its order) ends a `failed` request as well as an open one. `parse_webhook` is
+  request or its order) ends a `failed` request as well as an open one. A `refund_failed`
+  event (#5681; Stripe sends it for every `failed` or `canceled` Refund) names the
+  refund's event id (`ProviderEvent.reverses`, kept on its `payment_events` row). When
+  that refund was recorded, it writes a positive payment that cancels the refund's row,
+  with the amount, provider, request and reference of that row, never the event's
+  (`Lifecycle._reverse_refund`). When the refund was not told yet, the failure is kept
+  at once as `ignored` (no payment, no retry, no `OrderChanged`), and the refund told after it is
+  `ignored` (`payments.reversed_by_failure`), so the two cancel out in either order. A
+  refund told without money is `ignored`; no request's status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
-  most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
-  `payment:<id>`). No route, log, problem or audit row carries a secret.
+  most 256 KiB, a bad signature 400 with no event or money written, the actor `provider`
+  `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
+  (`last_webhook_error`: `signature`, `provider_unavailable` or `handler_error`, and
+  `last_webhook_error_at`; #5684; a failure to write it is logged, never raised over the
+  webhook's own), never a
+  provider's text; the same category stamped within `WEBHOOK_ERROR_QUIET` (60 s) is not
+  written again (one conditional UPDATE), so a flood of unsigned POSTs writes once a
+  minute. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
+  bounded wait, not a failure, and keeps none. The next success clears it only when the
+  failure is older than that success's start; both times are the database's
+  `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
+  clears it; Settings shows it
+  (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.

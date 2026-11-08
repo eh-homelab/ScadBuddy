@@ -241,3 +241,120 @@ def test_two_fee_events_at_once_write_one_fee(shop: PayShop) -> None:
         w.join(timeout=10)
     assert sorted(outcomes) == ["ignored", "recorded"]
     assert len(shop.rows.cost_entries(order.id)) == 1
+
+
+# -- a refund that failed (#5681) ----------------------------------------------------------
+
+REFUND = ProviderEvent(
+    event_id="refund:re_1", kind="refunded", provider_ref="fake_r", amount_minor=200,
+    currency="USD",
+)  # fmt: skip
+REFUND_FAILED = ProviderEvent(
+    event_id="refund-failed:re_1", kind="refund_failed", provider_ref="fake_r",
+    currency="USD", reverses="refund:re_1", created_at=datetime.now(UTC),
+)  # fmt: skip
+
+
+def _refunded(shop: PayShop) -> tuple[Order, PaymentRequestView]:
+    order, req = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    assert shop.lifecycle.record_provider_event("fake", REFUND) == "recorded"
+    return order, req
+
+
+def test_a_failed_refund_writes_a_payment_that_cancels_it(shop: PayShop) -> None:
+    order, req = _refunded(shop)
+    before = shop.rows_request(req.id)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "recorded"
+    pays = [p for p in shop.rows.payments(order.id) if p.provider]
+    assert [p.amount_minor for p in pays] == [700, -200, 200]
+    refund, reversal = pays[1], pays[2]
+    assert (reversal.provider, reversal.payment_request_id, reversal.reference) == (
+        refund.provider, refund.payment_request_id, refund.reference,
+    )  # fmt: skip
+    after = shop.rows_request(req.id)
+    assert (after.status, after.payment_id, after.paid_at) == (
+        before.status, before.payment_id, before.paid_at,
+    )  # fmt: skip
+    # The manual 300, the provider's 700, its refund and the reversal.
+    assert shop.kinds(order).count("payment.added") == 4
+
+
+def test_a_failed_refund_told_again_is_replayed(shop: PayShop) -> None:
+    order, _ = _refunded(shop)
+    shop.lifecycle.record_provider_event("fake", REFUND_FAILED)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "replayed"
+    assert _provider_payments(shop, order) == [700, -200, 200]
+
+
+def test_a_failure_before_its_refund_is_recorded_at_once_and_the_late_refund_writes_nothing(
+    shop: PayShop,
+) -> None:
+    """Stripe does not keep event order, and a refund that never succeeded fails too. The
+    failure is kept at once (``ignored``: no payment, no retry, no order change told); a
+    succeeded snapshot of the same refund told after it writes nothing, so the two cancel
+    out."""
+    order, _ = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    told = len(shop.events)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
+    assert len(shop.events) == told
+    assert _provider_payments(shop, order) == [700]
+    assert shop.lifecycle.record_provider_event("fake", REFUND) == "ignored"
+    assert _provider_payments(shop, order) == [700]
+    assert _outcomes(shop) == ["recorded", "ignored", "ignored"]
+
+
+def test_a_failure_for_a_refund_never_told_needs_no_time_or_open_request(
+    shop: PayShop,
+) -> None:
+    """No window: an old event, one with no time, or one on an ended request is recorded
+    at once, never refused for a retry."""
+    order, req = shop.linked()
+    shop.lifecycle.cancel_payment_request(order.id, req.id, BY)
+    old = REFUND_FAILED.model_copy(update={"created_at": None})
+    assert shop.lifecycle.record_provider_event("fake", old) == "ignored"
+    assert _provider_payments(shop, order) == []
+
+
+def test_a_failed_refund_of_a_refund_told_but_not_recorded_is_ignored(shop: PayShop) -> None:
+    """The refund's event came and wrote no money (no amount): nothing to reverse."""
+    order, _ = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    bare = REFUND.model_copy(update={"amount_minor": None})
+    assert shop.lifecycle.record_provider_event("fake", bare) == "ignored"
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
+    assert _provider_payments(shop, order) == [700]
+
+
+def test_a_failed_refund_takes_its_amount_and_currency_from_the_refund(
+    shop: PayShop,
+) -> None:
+    """The refund's own row decides: an event that names another currency, or an amount,
+    still reverses exactly the refund."""
+    order, _ = _refunded(shop)
+    other = REFUND_FAILED.model_copy(update={"currency": "EUR", "amount_minor": 999})
+    assert shop.lifecycle.record_provider_event("fake", other) == "recorded"
+    assert _provider_payments(shop, order) == [700, -200, 200]
+
+
+def test_a_refund_and_its_failure_at_once_cancel_out(shop: PayShop) -> None:
+    """The two events serialize on the order's lock: whichever runs second sees the
+    first's committed row, so the order nets no refund in either order."""
+    order, _ = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    start = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def send(event: ProviderEvent) -> None:
+        start.wait()
+        outcomes.append(shop.lifecycle.record_provider_event("fake", event))
+
+    workers = [threading.Thread(target=send, args=(e,)) for e in (REFUND, REFUND_FAILED)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=10)
+    assert len(outcomes) == 2
+    assert sum(_provider_payments(shop, order)) == 700
+    assert _provider_payments(shop, order) in ([700], [700, -200, 200])
