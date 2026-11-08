@@ -1022,3 +1022,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and the mark (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`),
   so the sweep retries it like any other. A late page whose reference another request
   holds names that request's live page: it is not kept, not marked and not closed.
+  The shop's bank account through Plaid (#4961) sits beside the seam, not in it: Plaid
+  opens no payment request, so it is not in `registry.py` and not a `payment_credentials`
+  row. `payments/plaid.py` (the stateless Plaid calls: link token, public-token exchange,
+  `/accounts/get` of the chosen account, `/item/remove`; keys in the `PLAID-CLIENT-ID` and
+  `PLAID-SECRET` headers; the facts, each with its Plaid link, are its docstring),
+  `payments/bank.py` (`BankLinks`, `PaymentsComponent.bank`: one `bank_links` row, the keys
+  and the access token sealed under AAD `bank_links:<id>`, and in the clear only Plaid's
+  ids and the account's name, type and mask; Plaid is called outside every transaction, and
+  a link that lost a race or chose an account that is not checking or savings removes its
+  Item at Plaid; new keys are refused while linked, `bank_linked`; an unlink Plaid refuses
+  keeps the token), routes `api/bank_link.py` (`/payments/bank`; every write in
+  `PERSON_ENDPOINTS`), frontend `components/settings/BankAccount.tsx` and
+  `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
+  allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.
+  Tests replay `tests/payments/plaid_payloads/` (Plaid's sandbox examples) through respx.

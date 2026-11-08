@@ -17,5 +17,8 @@ it("PAGE_CSP's script-src hash is index.html's inline script", () => {
   expect(inline).toHaveLength(1)
   const hash = createHash('sha256').update(inline[0]!, 'utf8').digest('base64')
   const scriptSrc = /script-src ([^;]*);/.exec(csp)?.[1]
-  expect(scriptSrc, `put 'sha256-${hash}' in page-csp.txt and PAGE_CSP`).toBe(`'self' 'sha256-${hash}'`)
+  // Beside it, only Plaid Link's one script (#4961, Settings → Payments).
+  expect(scriptSrc, `put 'sha256-${hash}' in page-csp.txt and PAGE_CSP`).toBe(
+    `'self' 'sha256-${hash}' https://cdn.plaid.com/link/v2/stable/link-initialize.js`,
+  )
 })

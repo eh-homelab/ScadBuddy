@@ -584,6 +584,23 @@ cancels it. A cancelled request's payment link is deleted, which cancels its Squ
 order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
 Cash needs no provider: record it as a manual payment.
 
+#### Bank account through Plaid (#4961)
+
+Plaid is not a payment provider: it takes no payment. It links the shop's checking or
+savings account so ScadBuddy can read its deposits. In the Plaid Dashboard, get the
+client ID and the Sandbox or Production secret
+([quickstart](https://plaid.com/docs/quickstart/)). In Settings → Payments, under
+"Bank account (Plaid)", save them with their environment; Plaid checks them before they
+are kept, sealed under the key file. Then "Link a bank account" opens Plaid Link, where
+the shop picks one checking or savings account
+([Link](https://plaid.com/docs/link/web/)). ScadBuddy keeps the access token sealed, and
+the account's name, type and mask (its last 2-4 characters) only, never an account or
+routing number. "Unlink" removes the Item at Plaid
+([`/item/remove`](https://plaid.com/docs/api/items/#itemremove)) and drops the token; the
+keys stay until "Forget keys". The page's Content-Security-Policy allows Link's one
+script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
+bank Stripe pays out to: set it in the Stripe Dashboard.
+
 ### Authentication on the deployment (#4975)
 
 What signing in is and what each `SCADBUDDY_AUTH_MODE` does is under "Signing in"
