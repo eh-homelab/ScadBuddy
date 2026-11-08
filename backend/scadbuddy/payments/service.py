@@ -364,6 +364,107 @@ class Payments:
                 )
         return confirmed
 
+    async def settle_captures(self) -> int:
+        """#4959, the housekeeping sweep: settle each pending capture whose wait is over
+        (`payments.captures_due`): an approval moved the request to ``pending`` and the
+        capture's outcome was never told (no answer to the capture, then PayPal stopped
+        sending the approval). With no lock held, the provider reads the order:
+
+        - a capture made is recorded as its event through ``record_provider_event``, the
+          webhook's own path, so a ``paid`` one settles the balance and deposit requests
+          and their pages close after the commit; a ``pending`` one is left to the
+          capture's own event, as a bank debit is, and is not read again;
+        - an order approved with no capture is captured again, keyed on the approval,
+          once the order lock says the order still takes money (`Lifecycle.recapture_key`;
+          an order that does not marks the request ``failed``); a refused or declined
+          capture marks it ``failed``, and one made is read on the next pass;
+        - a voided or unknown order with no capture marks it ``failed``;
+        - an outcome that cannot be told yet is read again after the backoff, and after
+          `payments.CAPTURE_GIVE_UP_ATTEMPTS` such reads the request is marked ``failed``
+          (``capture_unsettled``), so it never blocks its order's cancel for good.
+
+        Returns how many requests it settled."""
+        readers = {pid: a for pid, a in self._registry.items() if hasattr(a, "read_capture")}
+
+        def due() -> list[PaymentRequestView]:
+            with self._orders.store.transaction() as conn:
+                return payments.captures_due(conn, readers)
+
+        settled = 0
+        for request in await asyncio.to_thread(due):
+            assert request.provider is not None and request.provider_ref is not None
+            adapter = cast(CapturingProvider, readers[request.provider])
+            if await self._settle_capture(adapter, request.provider, request):
+                settled += 1
+        return settled
+
+    async def _settle_capture(
+        self, adapter: CapturingProvider, provider: str, request: PaymentRequestView
+    ) -> bool:
+        assert request.provider_ref is not None
+        lifecycle = self._orders.lifecycle
+        try:
+            _, credential = await asyncio.to_thread(self._connected, provider)
+        except (ProviderNotFoundError, KekMissingError, CredentialUnreadableError) as failed:
+            logger.warning("the capture of payment request %s was not read: %s", request.id, failed)
+            return await self._unsettled(provider, request)
+        read = await adapter.read_capture(credential, request.provider_ref)
+        if isinstance(read, ProviderEvent):
+            before = await asyncio.to_thread(self._marked, request.order_id)
+            outcome = await asyncio.to_thread(lifecycle.record_provider_event, provider, read)
+            logger.info("payment request %s capture read as %s: %s", request.id, read.kind, outcome)
+            if read.kind == "pending":
+                await asyncio.to_thread(self._stop_reading, request.id)
+            now = await asyncio.to_thread(self._requests, request.order_id)
+            await self._close_pages(
+                r for r in now if r.close_pending_at is not None and r.id not in before
+            )
+            return True
+        if read == "gone":
+            logger.info("payment request %s: its order holds no capture and is gone", request.id)
+            await asyncio.to_thread(lifecycle.capture_failed, provider, request.id)
+            return True
+        if read == "uncaptured":
+            key = await asyncio.to_thread(lifecycle.recapture_key, provider, request.id)
+            if key is None:
+                return True
+            try:
+                captured = await adapter.capture_request(credential, request.provider_ref, key)
+            except ProviderUnavailableError:
+                return await self._unsettled(provider, request)
+            except ProviderError as refused:
+                logger.warning("payment request %s was not captured: %s", request.id, refused)
+                await asyncio.to_thread(lifecycle.capture_failed, provider, request.id)
+                return True
+            if captured == "declined":
+                await asyncio.to_thread(lifecycle.capture_failed, provider, request.id)
+                return True
+            # Captured: the capture's own event, or the next read, records the money.
+            await asyncio.to_thread(self._count_read, request.id)
+            return False
+        return await self._unsettled(provider, request)
+
+    async def _unsettled(self, provider: str, request: PaymentRequestView) -> bool:
+        """One more read that could not tell; past the last, the request is ``failed``."""
+        reads = await asyncio.to_thread(self._count_read, request.id)
+        if reads < payments.CAPTURE_GIVE_UP_ATTEMPTS:
+            return False
+        logger.warning("payment request %s: its capture was never told; marked failed", request.id)
+        await asyncio.to_thread(
+            partial(self._orders.lifecycle.capture_failed, reason="capture_unsettled"),
+            provider,
+            request.id,
+        )
+        return True
+
+    def _count_read(self, request_id: str) -> int:
+        with self._orders.store.transaction() as conn:
+            return payments.capture_unsettled(conn, request_id)
+
+    def _stop_reading(self, request_id: str) -> None:
+        with self._orders.store.transaction() as conn:
+            payments.capture_settled(conn, request_id)
+
     def _reapprovable(self, provider: str) -> bool:
         adapter = self._registry.get(provider)
         return adapter is not None and hasattr(adapter, "capture_request")

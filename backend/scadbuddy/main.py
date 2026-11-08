@@ -189,6 +189,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_SLICES_SWEEP,
     NATIVE_COPIES_SWEEP,
     NATIVE_SLICES_SWEEP,
+    PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_SYNC_SWEEP,
@@ -714,6 +715,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def retry_payment_closes() -> None:
         await _heartbeating(_retry_payment_closes_logged(state))
 
+    @activity.defn(name=PAYMENT_CAPTURES_SWEEP)
+    async def settle_payment_captures() -> None:
+        await _heartbeating(_settle_payment_captures_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -739,6 +744,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         push_git_remote,
         sweep_auth_sessions,
         retry_payment_closes,
+        settle_payment_captures,
     ]
 
 
@@ -1207,6 +1213,18 @@ async def _retry_payment_closes_logged(state: AppState) -> None:
         raise
     if closed:
         logger.info("closed payment pages", extra={"count": closed})
+
+
+async def _settle_payment_captures_logged(state: AppState) -> None:
+    """#4959: settle each pending capture whose outcome was never told."""
+    payments = state.components.get(PAYMENTS)
+    try:
+        settled = await payments.service.settle_captures()
+    except Exception:
+        logger.exception("could not settle the pending payment captures")
+        raise
+    if settled:
+        logger.info("settled pending payment captures", extra={"count": settled})
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:
