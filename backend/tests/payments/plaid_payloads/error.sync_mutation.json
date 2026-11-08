@@ -1,0 +1,9 @@
+{
+  "display_message": null,
+  "documentation_url": "https://plaid.com/docs/errors/transactions/#transactions_sync_mutation_during_pagination",
+  "error_code": "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+  "error_message": "Underlying transaction data changed since last page was fetched. Please restart pagination from last update.",
+  "error_type": "TRANSACTIONS_ERROR",
+  "request_id": "2Z1fDq9eEZMy0Yp",
+  "suggested_action": null
+}

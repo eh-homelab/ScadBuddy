@@ -637,7 +637,12 @@ Dashboard), "Unlink" drops the link here only, keeps the keys, and says to remov
 in the Plaid Dashboard. When the keys are sealed under another key file, "Unlink" cannot
 reseal them, so it forgets the keys too: remove the Item in the Plaid Dashboard, then save
 the keys again. Without `SCADBUDDY_SECRET_KEY_FILE`,
-"Unlink" is refused and the link stays, since the file may be mounted again. The page's Content-Security-Policy allows Link's one
+"Unlink" is refused and the link stays, since the file may be mounted again. With the sweeps on, each housekeeping
+run reads the account's new posted deposits
+([`/transactions/sync`](https://plaid.com/docs/api/products/transactions/#transactionssync))
+and suggests the orders each may pay: one whose number (`ORD-2026-12`) is in the deposit's
+text, or one whose balance equals the deposit. A suggestion records nothing. The bank's
+text is kept with every run of five or more digits masked. The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 
