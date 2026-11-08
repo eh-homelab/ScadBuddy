@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any
 
 import httpx
@@ -549,3 +549,56 @@ def test_a_preview_refusal_passes_through(edge: TestClient, crud_mock: respx.Rou
     crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").respond(404, json=missing, headers=CRUD)
     r = edge.get(f"/api/store/v1/renders/{JOB}/preview.glb")
     assert r.status_code == 404 and r.json()["type"] == missing["type"]
+
+
+def test_a_dropped_preview_closes_its_stream_at_once(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review Minor 6: a browser that goes mid-stream (here, a send that fails) closes the
+    CRUD side's stream before the request ends, not when the garbage collector runs."""
+    closed: list[bool] = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for chunk in (b"glTF", b"x" * 1000):
+                yield chunk
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").mock(
+        return_value=httpx.Response(
+            200, headers={**CRUD, "Content-Type": "model/gltf-binary"}, stream=Body()
+        )
+    )
+    app = create_app(load())
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "https",
+        "path": f"/api/store/v1/renders/{JOB}/preview.glb",
+        "raw_path": f"/api/store/v1/renders/{JOB}/preview.glb".encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"testserver")],
+        "client": CLIENT,
+        "server": ("testserver", 443),
+    }
+
+    async def receive() -> dict[str, Any]:
+        await asyncio.sleep(3600)
+        return {"type": "http.disconnect"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        if message["type"] == "http.response.body" and message.get("body"):
+            raise OSError("the browser went away")
+
+    async def drive() -> None:
+        with pytest.raises(OSError):
+            await app(scope, receive, send)
+        assert closed == [True]
+
+    asyncio.run(drive())

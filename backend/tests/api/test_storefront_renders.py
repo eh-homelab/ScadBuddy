@@ -6,6 +6,7 @@ rough estimate answer only the visitor who asked for that render."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -384,7 +385,11 @@ def test_a_value_the_listing_does_not_allow_is_422(
     assert (problem["name"], problem["reason"]) == (name, reason)
 
 
-@pytest.mark.parametrize("body", ["[]", '{"listing_id": 1}', "not json"])
+@pytest.mark.parametrize(
+    "body",
+    ["[]", '{"listing_id": 1}', "not json", "[" * 60000],
+    ids=["array", "wrong-type", "not-json", "deep"],
+)
 def test_a_body_that_is_not_a_render_is_422(
     crud: CrudCaller, listing: dict[str, Any], body: str
 ) -> None:
@@ -414,7 +419,7 @@ def test_a_full_queue_is_429_and_costs_nothing(
     async def full(*_args: Any, **_kwargs: Any) -> Job:
         raise QueueFullError(9, retry_after=7)
 
-    monkeypatch.setattr(_state(crud.api).render, "submit", full)
+    monkeypatch.setattr(_state(crud.api).render, "submit_answer", full)
     r = crud.post("/renders", json=render_body(listing, {"width": 70}), key=uuid.uuid4().hex)
     assert r.status_code == 429, r.text
     assert r.headers["retry-after"] == "7"
@@ -478,12 +483,12 @@ def test_a_submit_that_never_started_costs_no_render(
     """A render that never started is not charged, and the same key sent again is a new
     try: the ledger holds no reply naming the deleted row."""
     render = _state(crud.api).render
-    real = render.submit
+    real = render.submit_answer
 
     async def fails(*_args: Any, **_kwargs: Any) -> Job:
         raise failure()
 
-    monkeypatch.setattr(render, "submit", fails)
+    monkeypatch.setattr(render, "submit_answer", fails)
     body = render_body(listing, {"width": 71})
     r = crud.post("/renders", json=body, key="k-failed")
     assert r.status_code == 503, r.text
@@ -491,7 +496,7 @@ def test_a_submit_that_never_started_costs_no_render(
     assert "down" not in r.text
     assert counted_rows(crud, TOKEN_A) == 0 and counted_rows(crud, TOKEN_A, counted=False) == 0
     assert ledger_rows(crud, "k-failed") == 0
-    monkeypatch.setattr(render, "submit", real)
+    monkeypatch.setattr(render, "submit_answer", real)
     again = crud.post("/renders", json=body, key="k-failed")
     assert again.status_code == 202, again.text
     assert counted_rows(crud, TOKEN_A) == 1
@@ -516,18 +521,18 @@ def test_a_submit_that_may_have_started_keeps_its_row(
     """The job may exist: the counted row and the saved reply stay, so the same key sent
     again joins the job and is counted once."""
     render = _state(crud.api).render
-    real = render.submit
+    real = render.submit_answer
 
     async def fails(*_args: Any, **_kwargs: Any) -> Job:
         raise failure()
 
-    monkeypatch.setattr(render, "submit", fails)
+    monkeypatch.setattr(render, "submit_answer", fails)
     body = render_body(listing, {"width": 72})
     r = crud.post("/renders", json=body, key="k-maybe")
     assert r.status_code == 503, r.text
     assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_unavailable"
     assert counted_rows(crud, TOKEN_A) == 1 and ledger_rows(crud, "k-maybe") == 1
-    monkeypatch.setattr(render, "submit", real)
+    monkeypatch.setattr(render, "submit_answer", real)
     again = crud.post("/renders", json=body, key="k-maybe")
     assert again.status_code == 202, again.text
     assert counted_rows(crud, TOKEN_A) == 1
@@ -584,13 +589,29 @@ def test_a_failed_analysis_is_not_tried_again(
     assert record is not None and record["parts"] is None and record["error"] == "unreadable"
 
 
+def timeout_of(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """The render timeout the storefront reads, as a live settings change sets it."""
+    real = renders_module._runtime
+
+    def runtime(state: Any) -> Settings:
+        return real(state).model_copy(update={"render_timeout": seconds})
+
+    monkeypatch.setattr(renders_module, "_runtime", runtime)
+
+
+def one_worker(monkeypatch: pytest.MonkeyPatch, busy_for: float) -> ThreadPoolExecutor:
+    """The analyses' threads as one, kept busy for ``busy_for`` seconds by other work."""
+    pool = ThreadPoolExecutor(1)
+    pool.submit(time.sleep, busy_for)
+    monkeypatch.setattr(renders_module, "_executor", lambda: pool)
+    return pool
+
+
 def test_an_analysis_past_the_timeout_is_recorded(
     crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job = render_until_done(crud, TOKEN_A, listing, {"width": 63})
-    state = _state(crud.api)
-    quick = state.settings.model_copy(update={"render_timeout": 0.3})
-    monkeypatch.setattr(state, "settings", quick)
+    timeout_of(monkeypatch, 0.3)
     counted = Counted(delay=1.5)
     monkeypatch.setattr(renders_module, "part_volumes", counted)
     for _ in range(2):
@@ -600,3 +621,128 @@ def test_an_analysis_past_the_timeout_is_recorded(
     assert counted.calls == 1
     record = parts_record(crud, job["id"])
     assert record is not None and record["error"] == "timeout"
+
+
+def test_a_shared_guess_that_starts_a_new_run_is_counted(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open job settled between the read and the submit: the submit started a run of
+    its own, so the row that was free is counted (review Important 1)."""
+    monkeypatch.setattr(renders_module, "_shared", lambda *_args: True)
+    job = a_render(crud, TOKEN_A, listing, {"width": 73})
+    assert counted_rows(crud, TOKEN_A) == 1 and counted_rows(crud, TOKEN_A, counted=False) == 0
+    wait_done(crud, TOKEN_A, job["id"])
+
+
+def test_a_counted_guess_that_joins_a_job_costs_nothing(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finished render of the key answered: a reused render costs nothing."""
+    done = render_until_done(crud, TOKEN_A, listing, {"width": 74})
+    monkeypatch.setattr(renders_module, "_shared", lambda *_args: False)
+    jb = a_render(crud, TOKEN_B, listing, {"width": 74})
+    assert jb["id"] == done["id"]
+    assert counted_rows(crud, TOKEN_B) == 0 and counted_rows(crud, TOKEN_B, counted=False) == 1
+
+
+def test_a_negative_colour_slot_is_refused(crud: CrudCaller, listing: dict[str, Any]) -> None:
+    r = crud.post(
+        "/renders",
+        json=render_body(listing, {"width": 40}, {"-1": listing["colours"][0]}),
+        key=uuid.uuid4().hex,
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_body_invalid"
+
+
+def test_a_full_queue_leaves_no_reply_to_replay(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review Minor 3: the row and its reply go together, as a start that never ran."""
+
+    async def full(*_args: Any, **_kwargs: Any) -> Any:
+        raise QueueFullError(9, retry_after=7)
+
+    monkeypatch.setattr(_state(crud.api).render, "submit_answer", full)
+    r = crud.post("/renders", json=render_body(listing, {"width": 75}), key="k-full")
+    assert r.status_code == 429, r.text
+    assert ledger_rows(crud, "k-full") == 0
+    assert counted_rows(crud, TOKEN_A) == 0 and counted_rows(crud, TOKEN_A, counted=False) == 0
+
+
+def test_a_cancelled_lead_leaves_the_work_to_finish(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review Important 2: the work owns the flight. A request that leaves (a dropped
+    connection) neither ends the analysis nor makes the next request start another."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 64})
+    state = _state(crud.api)
+    found = state.render.store.read(job["id"])
+    counted = Counted(delay=1.0)
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+
+    async def lead() -> None:
+        await asyncio.wait_for(renders_module._parts(state, found), 0.2)
+
+    assert crud.api.portal is not None
+    with pytest.raises(TimeoutError):
+        crud.api.portal.call(lead)
+    r = crud.get(f"/renders/{job['id']}/estimate")
+    assert r.status_code == 200, r.text
+    assert counted.calls == 1
+    record = parts_record(crud, job["id"])
+    assert record is not None and record["parts"] is not None
+
+
+def test_time_in_the_queue_is_not_a_timeout(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review Important 4: an analysis gets its own render timeout once it starts."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 65})
+    timeout_of(monkeypatch, 2.0)
+    counted = Counted(delay=1.0)
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    pool = one_worker(monkeypatch, busy_for=1.5)
+    try:
+        r = crud.get(f"/renders/{job['id']}/estimate")
+        assert r.status_code == 200, r.text
+        record = parts_record(crud, job["id"])
+        assert record is not None and record["error"] is None
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_an_analysis_that_never_starts_is_withdrawn(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queue wait past the limit: "not ready yet", nothing recorded, and a later request
+    analyses it."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 66})
+    timeout_of(monkeypatch, 0.5)
+    counted = Counted()
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    shared = renders_module._executor
+    pool = one_worker(monkeypatch, busy_for=1.5)
+    try:
+        r = crud.get(f"/renders/{job['id']}/estimate")
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"] == "The price is not ready yet. Try again in a moment."
+        assert counted.calls == 0 and parts_record(crud, job["id"]) is None
+    finally:
+        pool.shutdown(wait=True)
+    monkeypatch.setattr(renders_module, "_executor", shared)
+    assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
+    assert counted.calls == 1
+
+
+def test_a_full_analysis_queue_is_not_ready(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 67})
+    counted = Counted()
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    monkeypatch.setattr(renders_module, "ANALYSIS_QUEUE", 0)
+    r = crud.get(f"/renders/{job['id']}/estimate")
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == "The price is not ready yet. Try again in a moment."
+    assert counted.calls == 0 and parts_record(crud, job["id"]) is None

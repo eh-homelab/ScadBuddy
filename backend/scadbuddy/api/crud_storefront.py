@@ -144,7 +144,8 @@ async def _render_body(request: Request) -> RenderBody:
     try:
         raw: Any = json.loads(await request.body())
         return RenderBody.model_validate(raw)
-    except (ValueError, ValidationError):
+    except (ValueError, RecursionError, ValidationError):
+        # A body nested past the parser's depth is a `RecursionError`.
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "render_body_invalid",

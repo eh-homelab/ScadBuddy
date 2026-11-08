@@ -369,3 +369,36 @@ def test_undo_waits_for_the_keys_lock(
         assert undone.is_alive() and _ledgered(conn, "held")
     undone.join(5)
     assert not undone.is_alive() and not _ledgered(conn, "held")
+
+
+def test_two_admits_at_once_pass_the_concurrency_limit_once(
+    limits: RenderLimits, pg_pool: PgPool, visitors: list[str]
+) -> None:
+    """Review Minor 8: two real transactions at once; the shop-wide lock lets one in."""
+    one = SETTINGS.model_copy(update={"storefront_render_concurrency": 1})
+    start = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def admit(n: int) -> None:
+        with pg_pool.connection() as own:
+            start.wait()
+            try:
+                limits.admit(
+                    own,
+                    visitors[n],
+                    f"198.51.100.{n}",
+                    listing_id="l",
+                    render_key=f"k{n}",
+                    settings=one,
+                    now=T0,
+                )
+                outcomes.append("admitted")
+            except RenderLimited as refused:
+                outcomes.append(refused.limit)
+
+    threads = [threading.Thread(target=admit, args=(n,)) for n in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert sorted(outcomes) == ["admitted", "concurrency"]

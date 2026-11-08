@@ -14,6 +14,12 @@ address counts as its /64, as the edge's request limit counts it. A visitor with
 addresses or cookies still meets the shop-wide concurrency limit, which is the hard bound
 on the render work visitors can cause.
 
+A counted row with no job yet counts as open for ``render_timeout``. That includes the
+row of a start that failed but may have made a job (`renders.py` `never_started`), so a
+Temporal outage can hold the concurrency limit full for up to ``render_timeout`` after
+it ends. This fails closed on purpose; the operator sees it as visitors' 429
+``render_limited`` with limit ``concurrency``.
+
 A row names its job once the submit answers (`attach`); a visitor reads only the jobs its
 rows name (`owns`).
 """
@@ -228,16 +234,19 @@ class RenderLimits:
         if moved != 1:
             raise LookupError(f"no storefront render row {row_id}")
 
-    def uncount(self, row_id: int) -> None:
-        """The row's render never ran (the queue was full): it counts against no limit."""
+    def set_counted(self, row_id: int, counted: bool) -> None:
+        """Whether the row counts, as its submit answered: a run of its own counts, even
+        when `free` guessed a shared one; a joined or reused job does not (`start_render`)."""
         with self._pool.connection() as conn:
-            conn.execute("UPDATE storefront_renders SET counted = false WHERE id = %s", (row_id,))
+            conn.execute(
+                "UPDATE storefront_renders SET counted = %s WHERE id = %s", (counted, row_id)
+            )
 
     def undo(self, row_id: int, key: str) -> None:
-        """A render whose submit never started: its row, and the reply recorded for the
-        edge's ``key`` while that reply still names the row, in one transaction under the
-        key's lock (`crud/idempotency.py` `idempotent`), so the same key sent again
-        admits a new row rather than replaying this one."""
+        """A render whose submit never started (or a full queue refused): its row, and
+        the reply recorded for the edge's ``key`` while that reply still names the row,
+        in one transaction under the key's lock (`crud/idempotency.py` `idempotent`),
+        so the same key sent again admits a new row rather than replaying this one."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",

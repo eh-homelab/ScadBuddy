@@ -201,6 +201,10 @@ class PublicListings(BaseModel):
 # -- a visitor's renders (Task 7) ------------------------------------------------------
 
 
+#: A colour slot of a render: an index into its colours, never negative.
+ColourSlotIndex = Annotated[int, Field(ge=0)]
+
+
 class RenderBody(BaseModel):
     """``POST …/storefront/renders``: the visitor's values for the listing as it read it.
     The CRUD side checks every value against the listing (`inputs.py` `listing_values`),
@@ -213,7 +217,7 @@ class RenderBody(BaseModel):
     listing_updated_at: datetime
     values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
     #: The listing filament the visitor chose for each colour slot of the render.
-    colours: dict[int, str] = Field(default_factory=dict, max_length=64)
+    colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
 
 
 class StoreRender(BaseModel):

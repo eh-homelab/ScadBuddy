@@ -10,12 +10,12 @@ whole, as ``model/gltf-binary``."""
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
 from typing import Annotated, Any, Final
 
+import anyio
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import StreamingResponse
-from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
@@ -117,12 +117,21 @@ async def render_estimate(job_id: str, crud: Crud, visitor_id: Visitor, client: 
     return await crud.render_estimate(_job(job_id), visitor_id=visitor_id, client=client)
 
 
-async def _relay(stream: CrudStream) -> AsyncIterator[bytes]:
-    try:
-        async for chunk in stream.response.aiter_bytes():
-            yield chunk
-    finally:
-        await stream.aclose()
+class _Relayed(StreamingResponse):
+    """The CRUD side's stream, sent on as it comes, and closed when the send ends: done,
+    failed or cancelled (a browser that went away), never left to the garbage
+    collector."""
+
+    def __init__(self, stream: CrudStream, *, headers: dict[str, str]) -> None:
+        super().__init__(stream.response.aiter_bytes(), media_type=GLB_MEDIA_TYPE, headers=headers)
+        self._stream = stream
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self._stream.aclose()
 
 
 @visitor_router.get("/renders/{job_id}/preview.glb")
@@ -139,10 +148,4 @@ async def render_preview(
     headers = {}
     if "content-length" in stream.response.headers:
         headers["Content-Length"] = stream.response.headers["content-length"]
-    # The background close covers a response never sent; `_relay` closes it once read.
-    return StreamingResponse(
-        _relay(stream),
-        media_type=GLB_MEDIA_TYPE,
-        headers=headers,
-        background=BackgroundTask(stream.aclose),
-    )
+    return _Relayed(stream, headers=headers)

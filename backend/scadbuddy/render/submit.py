@@ -225,7 +225,38 @@ class RenderService:
         accept_within: timedelta | None = None,
         reuse_finished: bool = False,
     ) -> Job:
-        """Start the job's execution, or join the open one rendering the same content,
+        """`submit_answer`'s job."""
+        job, _ = await self.submit_answer(
+            slug,
+            params,
+            model_version=model_version,
+            supersedes=supersedes,
+            inputs=inputs,
+            whole_inputs=whole_inputs,
+            request_id=request_id,
+            accept_within=accept_within,
+            reuse_finished=reuse_finished,
+        )
+        return job
+
+    async def submit_answer(
+        self,
+        slug: str,
+        params: Mapping[str, ParamValue],
+        *,
+        model_version: str | None = None,
+        supersedes: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
+        whole_inputs: bool = False,
+        request_id: str | None = None,
+        accept_within: timedelta | None = None,
+        reuse_finished: bool = False,
+    ) -> tuple[Job, bool]:
+        """The job, and whether the submit joined an open run or reused a finished job
+        (``coalesced``) rather than start a run of its own (the storefront counts only
+        a run of its own, #5282).
+
+        Start the job's execution, or join the open one rendering the same content,
         and answer the row its first activity wrote. With ``reuse_finished``, a finished
         job of the same content whose result is still held answers instead
         (`JobProjection.reuse_done`, #4870): for a caller that needs only the job's
@@ -270,7 +301,7 @@ class RenderService:
                     and (link := link_to(job.traceparent)) is not None
                 ):
                     current.add_link(link.context)
-                return job
+                return job, coalesced
         raise refusal
 
     async def _submit(

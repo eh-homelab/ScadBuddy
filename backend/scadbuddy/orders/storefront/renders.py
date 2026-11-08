@@ -2,14 +2,16 @@
 
 `start_render` checks the visitor's values against the listing, never trusting the edge,
 and renders through `RenderService` with ``reuse_finished``, so visitors who choose the
-same values share one render. A render that joins an open job of the same key, or reuses
-a finished one, is `RenderLimits.free`; any other is `RenderLimits.admit`, counted against
-the visitor's and the client's limits. Both run inside `idempotent_write` keyed by the
-edge's ``Idempotency-Key``, so a request the edge sends again after a lost answer is
-counted once (plan point 21). A start that fails before any job can exist
-(`never_started`) drops the counted row and its recorded reply (`RenderLimits.undo`): a
-render that never started costs nothing. A start that may have made a job keeps both, so
-the same key sent again joins that job.
+same values share one render. A render that looks shared (an open job of the same key, or
+a finished one still held) is `RenderLimits.free`; any other is `RenderLimits.admit`,
+counted against the visitor's and the client's limits. Both run inside `idempotent_write`
+keyed by the edge's ``Idempotency-Key``, so a request the edge sends again after a lost
+answer is counted once (plan point 21). That look takes no lock, so the submit's answer
+decides at the end: a run of its own is counted, a joined or reused job is not. A start
+that fails before any job can exist (`never_started`), or that a full queue refuses,
+drops the row and its recorded reply (`RenderLimits.undo`): a render that never started
+costs nothing. A start that may have made a job keeps both, so the same key sent again
+joins that job.
 
 A visitor reads a render only when one of its own rows names it (`RenderLimits.owns`):
 any other job id, a guessed one among them, is 404 ``render_not_found``. `store_render`
@@ -18,9 +20,11 @@ shows a render with a fixed text in place of its error, never the log.
 `render_estimate` is the rough price of a done render (plan point 4): its part volumes,
 analysed once per job into ``storefront_job_parts`` (plan point 5), each at the listing
 filament the visitor chose for its colour. The analyses run on `ANALYSIS_WORKERS` threads
-shared by the process, one per job at a time (`_flights`): a second request for a job
-awaits the first's. A 3MF that cannot be analysed, or not within ``render_timeout``, is
-recorded as such and never analysed again.
+shared by the process, at most `ANALYSIS_QUEUE` held at once, one per job (`_flights`):
+every request for a job awaits the same work, which records its own outcome, so a request
+that leaves starts nothing again. A 3MF that cannot be analysed, or that runs past
+``render_timeout`` from its start, is recorded as such and never analysed again; one that
+waits in the queue past it is withdrawn ("not ready yet") and analysed on a later request.
 """
 
 from __future__ import annotations
@@ -29,7 +33,8 @@ import asyncio
 import logging
 import threading
 from collections.abc import Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -39,6 +44,7 @@ from pydantic import TypeAdapter
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import Settings
 from scadbuddy.crud.idempotency import Replay, idempotent_write
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, rough_estimate
@@ -119,6 +125,12 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
 
 
+def _runtime(state: AppState) -> Settings:
+    """The stored settings as they are now, which the limits and the estimate's timeout
+    both read. Blocking: call it in a thread."""
+    return state.settings_store.snapshot().runtime
+
+
 def never_started(error: Exception) -> bool:
     """Whether a submit that raised ``error`` cannot have started a job: a snapshot not
     there or still storing, a full store, a run that answered it could not start
@@ -154,7 +166,9 @@ async def start_render(
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
     ``name`` and ``reason``), 429 ``render_limited`` (with ``limit``), 429
     ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start; one
-    that `never_started` costs nothing), each with ``Retry-After``."""
+    that `never_started` costs nothing), each with ``Retry-After``. The edge's client
+    sends a 503 again with the same key for its budget, so a visitor sees the edge's own
+    503 when the start keeps failing."""
     orders = _orders(state)
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
@@ -178,7 +192,7 @@ async def start_render(
     reference = resolved.reference
     assert listing.snapshot is not None
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
-    runtime = await asyncio.to_thread(lambda: state.settings_store.snapshot().runtime)
+    runtime = await asyncio.to_thread(_runtime, state)
     limits = _limits(state)
     asked = {
         "visitor": visitor.id,
@@ -226,9 +240,10 @@ async def start_render(
             retry_after=error.retry_after,
         ) from None
     row: int = recorded.body["row"]
+    counted: bool = recorded.body["counted"]
     params = reference.inputs.get("params", {})
     try:
-        job = await state.render.submit(
+        job, coalesced = await state.render.submit_answer(
             reference.slug,
             params if isinstance(params, dict) else {},
             model_version=reference.commit,
@@ -238,8 +253,8 @@ async def start_render(
             reuse_finished=True,
         )
     except QueueFullError as error:
-        # The render never ran: it counts against nothing.
-        await asyncio.to_thread(limits.uncount, row)
+        # The render never ran: its row and its reply go, so it counts against nothing.
+        await asyncio.to_thread(limits.undo, row, key)
         raise problem(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "render_queue_full",
@@ -261,6 +276,11 @@ async def start_render(
             "The shop could not start this render. Try again in a moment.",
             headers={"Retry-After": str(UNAVAILABLE_RETRY)},
         ) from None
+    if counted == coalesced:
+        # `_shared` read the jobs before the submit, with no lock. The submit decides:
+        # a run of its own counts (the open job settled in between), and a joined or
+        # reused job costs nothing (one opened in between).
+        await asyncio.to_thread(limits.set_counted, row, not coalesced)
     await asyncio.to_thread(limits.attach, row, job.id)
     return store_render(job)
 
@@ -295,28 +315,29 @@ async def owned_job(state: AppState, visitor_id: str, job_id: str) -> tuple[Owne
 @dataclass(frozen=True)
 class _Analysis:
     """A job's analysis: its parts, or why there are none. ``error`` is ``unreadable``
-    or ``timeout`` (both recorded, never tried again), or ``busy`` (the analysis never
-    started within the timeout; not recorded)."""
+    or ``timeout`` (both recorded, never tried again), or ``busy`` (not recorded: the
+    queue was full, or the analysis did not start within the render timeout)."""
 
     parts: list[EstimatedPart] | None = None
     error: str | None = None
 
 
-class _InterruptedError(Exception):
-    """The request leading an analysis ended before it: its followers answer 422."""
-
-
+BUSY: Final = _Analysis(error="busy")
 #: The most analyses one process runs at once: every estimate shares these threads.
 ANALYSIS_WORKERS: Final = 2
+#: The most analyses one process holds, queued or running; past it, "not ready yet".
+ANALYSIS_QUEUE = 8
 _analyses: ThreadPoolExecutor | None = None
-#: The analysis in flight for each job id: a second request awaits the first's.
+#: Each job's analysis while its work is queued or running: its outcome, which every
+#: request for the job awaits. The work owns it, not a request (`_begin`).
 _flights: dict[str, Future[_Analysis]] = {}
-_flights_lock = threading.Lock()
+_held = 0
+_lock = threading.Lock()
 
 
 def _executor() -> ThreadPoolExecutor:
     global _analyses
-    with _flights_lock:
+    with _lock:
         if _analyses is None:
             _analyses = ThreadPoolExecutor(ANALYSIS_WORKERS, thread_name_prefix="estimate")
         return _analyses
@@ -350,70 +371,97 @@ def _record(state: AppState, job_id: str, analysis: _Analysis) -> _Analysis:
     return stood
 
 
-async def _analyse(state: AppState, job: Job) -> _Analysis:
-    """The job's part volumes on the shared threads (`ANALYSIS_WORKERS`), under
-    ``render_timeout``. A failure or a timeout is recorded; an analysis still queued at
-    the timeout is withdrawn and not recorded (``busy``)."""
-    stood = await asyncio.to_thread(_recorded, state, job.id)
-    if stood is not None:
-        return stood
+def _settle(outcome: Future[_Analysis], analysis: _Analysis) -> None:
+    """The flight's outcome, once: a later one (the work after its timeout) is dropped."""
+    with suppress(InvalidStateError):
+        outcome.set_result(analysis)
+
+
+def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
+    """The job's analysis in flight: the one already there, else a new one on the shared
+    threads, else `BUSY` when `ANALYSIS_QUEUE` analyses are held. The work records its
+    own outcome and ends its flight, whatever the requests do. One not started within
+    ``timeout`` is withdrawn (`BUSY`, not recorded); one that runs past ``timeout`` from
+    its start is recorded ``timeout``."""
+    global _held
     result = job.result
     assert result is not None
-    await materialize_result(state.store.blobs, result)
-    started = threading.Event()
+    with _lock:
+        flying = _flights.get(job.id)
+        if flying is not None:
+            return flying
+        if _held >= ANALYSIS_QUEUE:
+            full: Future[_Analysis] = Future()
+            full.set_result(BUSY)
+            return full
+        outcome: Future[_Analysis] = Future()
+        _flights[job.id] = outcome
+        _held += 1
     model = state.paths.root / result.model_3mf
     plates = max(len(result.plates), 1)
 
-    def work() -> list[EstimatedPart]:
-        started.set()
-        return part_volumes(model, plates, result.warnings)
-
-    running = _executor().submit(work)
-    try:
-        parts = await asyncio.wait_for(
-            asyncio.shield(asyncio.wrap_future(running)), timeout=state.settings.render_timeout
-        )
-    except TimeoutError:
-        if not started.is_set() and running.cancel():
-            return _Analysis(error="busy")
+    def timed_out() -> None:
+        try:
+            _settle(outcome, _record(state, job.id, _Analysis(error="timeout")))
+        except Exception:
+            logger.warning("a render's analysis timeout could not be recorded", exc_info=True)
+            _settle(outcome, BUSY)
         logger.warning("a render's 3MF took past the render timeout to analyse")
-        analysis = _Analysis(error="timeout")
-    except Exception:
-        logger.warning("a render's 3MF could not be analysed", exc_info=True)
-        analysis = _Analysis(error="unreadable")
-    else:
-        analysis = _Analysis(parts=parts)
-    return await asyncio.to_thread(_record, state, job.id, analysis)
+
+    def work() -> list[EstimatedPart]:
+        withdraw.cancel()
+        watchdog = threading.Timer(timeout, timed_out)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            return part_volumes(model, plates, result.warnings)
+        finally:
+            watchdog.cancel()
+
+    def withdrawn() -> None:
+        running.cancel()
+
+    def settled(done: Future[list[EstimatedPart]]) -> None:
+        global _held
+        analysis = BUSY
+        try:
+            if not done.cancelled():
+                error = done.exception()
+                if error is None:
+                    analysis = _record(state, job.id, _Analysis(parts=done.result()))
+                else:
+                    logger.warning("a render's 3MF could not be analysed", exc_info=error)
+                    analysis = _record(state, job.id, _Analysis(error="unreadable"))
+        except Exception:
+            logger.warning("a render's analysis could not be recorded", exc_info=True)
+        finally:
+            with _lock:
+                if _flights.get(job.id) is outcome:
+                    del _flights[job.id]
+                _held -= 1
+            _settle(outcome, analysis)
+
+    withdraw = threading.Timer(timeout, withdrawn)
+    withdraw.daemon = True
+    running = _executor().submit(work)
+    running.add_done_callback(settled)
+    withdraw.start()
+    return outcome
 
 
 async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
-    """The job's part volumes: recorded, else analysed once per job (`_flights`)."""
+    """The job's part volumes: recorded, else analysed once per job (`_begin`)."""
     analysis = await asyncio.to_thread(_recorded, state, job.id)
     if analysis is None:
-        with _flights_lock:
-            flight = _flights.get(job.id)
-            lead = flight is None
-            if flight is None:
-                flight = _flights[job.id] = Future()
-        if lead:
-            try:
-                analysis = await _analyse(state, job)
-                flight.set_result(analysis)
-            except BaseException as error:
-                flight.set_exception(_InterruptedError())
-                if isinstance(error, Exception):
-                    logger.warning("a render's estimate failed", exc_info=True)
-                    analysis = _Analysis(error="busy")
-                else:
-                    raise
-            finally:
-                with _flights_lock:
-                    _flights.pop(job.id, None)
-        else:
-            try:
-                analysis = await asyncio.wrap_future(flight)
-            except _InterruptedError:
-                analysis = _Analysis(error="busy")
+        with _lock:
+            outcome = _flights.get(job.id)
+        if outcome is None:
+            assert job.result is not None
+            await materialize_result(state.store.blobs, job.result)
+            runtime = await asyncio.to_thread(_runtime, state)
+            outcome = _begin(state, job, runtime.render_timeout)
+        # Shielded: a request that leaves never cancels the flight others await.
+        analysis = await asyncio.shield(asyncio.wrap_future(outcome))
     if analysis.parts is not None:
         return analysis.parts
     if analysis.error == "busy":
@@ -434,7 +482,7 @@ def _filament_for(
     offered = [filaments[f] for f in listing.colours if f in filaments]
     chosen: dict[str, Filament] = {}
     for slot, filament_id in sorted(colours.items()):
-        if slot < len(render_colours) and filament_id in listing.colours:
+        if 0 <= slot < len(render_colours) and filament_id in listing.colours:
             record = filaments.get(filament_id)
             if record is not None:
                 chosen.setdefault(render_colours[slot].casefold(), record)
