@@ -385,6 +385,20 @@ describe('order tools (#4249)', () => {
     }
   })
 
+  it('sends a charge read back with its id and auto mark (#5281)', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/orders/${ORDER}`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: ORDER })
+      }),
+    )
+    const charges = [{ id: 'c1', kind: 'tax', label: 'Tax 10%', amount_minor: 100, auto: true, shipping_option_id: null }]
+    await tool('order_update').execute({ order_id: ORDER, charges }, ctx())
+    expect(sent).toEqual({ charges })
+    expect(tool('order_update').description).toContain('takes another label')
+  })
+
   it('names the deposit and balance refusals and side effects (#5281)', () => {
     expect(tool('order_accept').description).toMatch(/balance.*request/)
     expect(tool('order_accept').description).toContain('payment_in_flight')

@@ -256,12 +256,16 @@ async def waive_balance(order_id: str, body: WaiveBody, orders: OrdersDep) -> Or
         " (`shipping_address_required`); a pickup does not."
     ),
 )
-async def set_shipping_option(order_id: str, body: ShippingOptionBody, orders: OrdersDep) -> Order:
+async def set_shipping_option(
+    order_id: str, body: ShippingOptionBody, orders: OrdersDep, service: PaymentsDep
+) -> Order:
     check_path(order_id)
     by = current_actor()
     try:
-        return await asyncio.to_thread(
+        order = await asyncio.to_thread(
             orders.lifecycle.set_shipping_option, order_id, by, body.option_id
         )
     except LifecycleError as error:
         raise refused(error) from None
+    await service.service.link_pending(order_id)
+    return order

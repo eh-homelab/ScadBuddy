@@ -787,9 +787,10 @@ class Lifecycle:
 
     def _typed(self, conn: Conn, order: Order, charges: Sequence[ChargeInput]) -> list[ChargeInput]:
         """The charges a replace writes: ``charges`` less the auto tax row sent back as it
-        was read (``auto``, its ``id``, or a `tax` charge with its label and amount), which
-        the order keeps and ``_retax`` recomputes. Any other `tax` charge is typed and
-        replaces the auto row."""
+        was read (``auto``, its ``id``, or a `tax` charge with its label, whatever its
+        amount: a read from before the items changed is stale), which the order keeps and
+        ``_retax`` recomputes. A `tax` charge with another label is typed and replaces the
+        auto row."""
         auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
 
         def is_auto(charge: ChargeInput) -> bool:
@@ -797,11 +798,7 @@ class Lifecycle:
                 return True
             if auto is None:
                 return False
-            return charge.id == auto.id or (
-                charge.kind == "tax"
-                and charge.label == auto.label
-                and charge.amount_minor == auto.amount_minor
-            )
+            return charge.id == auto.id or (charge.kind == "tax" and charge.label == auto.label)
 
         return [charge for charge in charges if not is_auto(charge)]
 
@@ -1930,7 +1927,11 @@ class Lifecycle:
         `reopen_item` brings one back (an item with no accepted quote too, as `draft` or
         `quoted`: an order cancelled from `accepted`, `in_production` or `ready` takes
         such an item, #5349); then its status follows from its rows. Either way `closed_at`
-        and `cancelled_at` are cleared and the quotes' sliced files are held again."""
+        and `cancelled_at` are cleared and the quotes' sliced files are held again. A
+        cancelled order back in `accepted`, `in_production` or `ready` that had asked for
+        money (a deposit, or any request: its cancel ended them all) gets one open `balance`
+        request for what is not paid (#5281, ``_open_balance``), even when the shop had
+        cancelled the balance request before; the route links it after the commit."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if order.status not in ENDED:

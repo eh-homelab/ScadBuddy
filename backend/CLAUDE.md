@@ -696,16 +696,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
-  request, and it cancels nothing). The routes that can open one that way (reopen, the
-  charges after acceptance, an item's edit, a quote's acceptance, a duplicate) link it
-  after the commit (`api/orders.py` `_run_linked`). A request's cancel takes an optional
+  request, and it cancels nothing). Every route whose lifecycle call reaches `_retax`
+  links such a request after the commit (`api/orders.py` `_run_linked`, and
+  `link_pending` in the archive quote and shipping-option routes): adding items, an
+  item's edit, delete, cancel and reopen, a revision and its answer, a manual or archive
+  quote and its acceptance, a duplicate, the charges, and the order's reopen. The slice
+  quote's run (an operation) does not: a request it opens is linked by the next linked
+  call or `POST …/payment-requests/{id}/link`. A request's cancel takes an optional
   `reason` (1 to 500 characters), kept on its `payment_request.cancelled` audit row:
   cancelling the balance request lifts `balance_unpaid`, so the reason says why. The tax
   row is `orders_tax_percent` of the items plus, with `orders_tax_shipping`, the shipping
   charges, rounded half up; a typed `tax` charge removes it (gap 6). A charges replace
   (`PATCH` and `…/charges/after-acceptance`) writes the typed charges only: the auto row
-  sent back as read (`auto`, its `id`, or a `tax` charge with its label and amount) is
-  dropped and kept (`Lifecycle._typed`), and a charge's `shipping_option_id` is kept when
+  sent back as read (`auto`, its `id`, or a `tax` charge with its label, whatever the
+  amount) is dropped and the auto row is kept and recomputed (`Lifecycle._typed`); a
+  typed tax takes another label, and a charge's `shipping_option_id` is kept when
   sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null

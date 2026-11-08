@@ -89,7 +89,8 @@ const address = z
   .strict()
 const AUTO_TAX =
   'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
-  'and recomputes it; sent back as read it is kept as it is. Any other `tax` charge is a typed tax and replaces it.'
+  'and recomputes it. Sent back as read (with its `id` and `auto`, or a `tax` charge with its label, whatever the ' +
+  'amount) it stays the auto row and is recomputed. A typed tax takes another label; it replaces the auto row.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
@@ -101,6 +102,8 @@ const charge = z
       .nullable()
       .optional()
       .describe('A shipping charge chosen from a shipping option (#5281): send it back as read to keep the link'),
+    id: ID.nullable().optional().describe('The charge id as order_get read it; it marks the auto tax row'),
+    auto: z.boolean().nullable().optional().describe('As order_get read it: true marks the auto tax row, kept and recomputed'),
   })
   .strict()
 const reference = z

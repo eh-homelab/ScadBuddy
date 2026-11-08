@@ -495,3 +495,37 @@ def test_the_rules_read_only_their_own_settings(
     )
     assert [r.amount_minor for r in rules.deposit_policy] == [400]
     assert [o.id for o in rules.shipping_options] == ["pickup", "post"]
+
+
+def test_a_stale_auto_row_sent_back_stays_auto(client: TestClient) -> None:
+    """Re-review N1: the auto row read before the items changed still has its label."""
+    client.put("/api/v1/settings", json={"orders_tax_percent": "10"})
+    order, item = quoted(client)
+    stale = [
+        {k: c[k] for k in ("kind", "label", "amount_minor")}
+        for c in detail(client, order["id"])["charges"]
+    ]
+    assert stale == [{"kind": "tax", "label": "Tax 10%", "amount_minor": 100}]
+    grown = client.patch(f"/api/v1/orders/{order['id']}/items/{item['id']}", json={"quantity": 3})
+    assert grown.status_code == 200, grown.text
+    patched = client.patch(f"/api/v1/orders/{order['id']}", json={"charges": stale})
+    assert patched.status_code == 200, patched.text
+    assert _tax(client, order["id"]) == [(300, True)]
+
+
+def test_an_item_added_after_acceptance_links_the_new_balance_request(
+    client: TestClient,
+) -> None:
+    """Re-review N2: a total grown past a deposit that paid it whole opens the balance
+    request, and the route links it."""
+    connect_fake(client)
+    order, _ = quoted(client)
+    put_deposit(client, order["id"], 1000)
+    pay(client, order["id"], 1000)
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    assert [r["kind"] for r in detail(client, order["id"])["payment_requests"]] == ["deposit"]
+    added = client.post(f"/api/v1/orders/{order['id']}/items/after-acceptance", json=CUSTOM)
+    assert added.status_code == 201, added.text
+    last = detail(client, order["id"])["payment_requests"][-1]
+    assert (last["kind"], last["amount_minor"], last["status"]) == ("balance", 1000, "open")
+    assert last["hosted_url"]
