@@ -7,9 +7,12 @@ import {
   partSettings,
   partSettingsPhrase,
   presetRef,
+  primeTowerChoice,
   printOptionFields,
   printPath,
+  printSequence,
   slotChoice,
+  supportsChoice,
   tier,
 } from './print.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -317,6 +320,10 @@ const sliceQuote = z
     path: printPath,
     // #5571: recorded with the quote; order_item_print prints with them when it sends none.
     part_settings: partSettings,
+    // #4673: print_output's own, sliced with and recorded as the quote's print setup.
+    prime_tower: primeTowerChoice,
+    supports: supportsChoice,
+    print_sequence: printSequence,
   })
   .strict()
 
@@ -1129,7 +1136,9 @@ export const orderTools: Tool[] = [
     description:
       'Quote a line item, in one of three modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
       'it is now). `slice`: render the item if it has no matching output, slice every plate with the print ' +
-      "dialog's own choices (printer, a spool per slot, nozzles and quality, as print_output takes them) and price " +
+      "dialog's own choices (printer, a spool per slot, nozzles and quality, prime tower, supports and print " +
+      'sequence, as print_output takes them; the quote records them as its print setup, `choices` and ' +
+      '`filament_plan`, which order_get lists) and price ' +
       "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
       "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
       'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +

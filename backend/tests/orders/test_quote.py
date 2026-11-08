@@ -30,6 +30,7 @@ from scadbuddy.orders.models import (
     Quote,
     Reference,
 )
+from scadbuddy.orders.operations import preview_request
 from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.quote import (
     QuoteError,
@@ -583,6 +584,98 @@ async def test_the_run_writes_the_filaments_first(shop: Shop, tmp_path: Path) ->
     assert shop.holders() == {quote.id}
     assert isinstance(run.slicer, FakeSlicer)
     assert run.slicer.subjects == [f"order_item:{shop.item.id}"]
+
+
+#: The print setup a quote records beyond the dialog's choices (#4673, order operations
+#: spec §5.1): `PrintRunRequest`'s own tower, supports and sequence.
+SETUP: dict[str, Any] = {
+    "prime_tower": {"enabled": True, "no_sparse_layers": True},
+    "supports": {"enabled": False},
+    "print_sequence": "by object",
+}
+
+
+def test_a_slice_quote_takes_the_tower_supports_and_sequence() -> None:
+    """#4673: in `PrintRunRequest`'s own shapes, so a bad value is refused as the print
+    refuses it."""
+    request = SliceQuoteRequest.model_validate({**DIALOG, **SETUP})
+    assert request.prime_tower is not None and request.prime_tower.no_sparse_layers is True
+    assert request.supports is not None and request.supports.enabled is False
+    assert request.print_sequence == "by object"
+    for bad in (
+        {"print_sequence": "by plate"},
+        {"supports": {"enabled": True, "threshold_angle": 91}},
+        {"prime_tower": {"no_sparse_layers": True}},
+    ):
+        with pytest.raises(ValueError):
+            SliceQuoteRequest.model_validate({**DIALOG, **bad})
+
+
+def test_the_quotes_slice_takes_the_tower_supports_and_sequence() -> None:
+    """#4673: the background slice's run request (`PreviewSlicer`) carries all three, so
+    the quote slices what the print will."""
+    request = SliceQuoteRequest.model_validate({**DIALOG, **SETUP})
+    body = preview_request(request)
+    assert body.prime_tower == request.prime_tower
+    assert body.supports == request.supports
+    assert body.print_sequence == "by object"
+    assert preview_request(SliceQuoteRequest.model_validate(DIALOG)).supports is None
+
+
+async def test_the_quote_records_its_whole_print_setup(shop: Shop, tmp_path: Path) -> None:
+    """#4673 (spec §5.1): the quote keeps the printer, path, choices, tower, supports,
+    sequence and spools it sliced with, so `order_get` shows them and the print can
+    send them."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    request = SliceQuoteRequest.model_validate(
+        {
+            **DIALOG,
+            **SETUP,
+            "printer": "11111111-1111-1111-1111-111111111111",
+            "path": "native",
+            "filaments": {"0": shop.pla, "1": shop.petg},
+        }
+    )
+    quote = await quote_run(run, shop.order.id, shop.item.id, request, BY)
+    stored = shop.rows.quote(quote.id)
+    assert stored is not None
+    for recorded in (quote, stored):
+        assert recorded.choices == {
+            "printer_id": 1,
+            "printer": "11111111-1111-1111-1111-111111111111",
+            "path": "native",
+            "choices": request.choices.model_dump(mode="json"),
+            "prime_tower": {"enabled": True, "no_sparse_layers": True},
+            "supports": {
+                "enabled": False,
+                "type": None,
+                "threshold_angle": None,
+                "on_build_plate_only": None,
+            },
+            "print_sequence": "by object",
+        }
+        assert recorded.filament_plan == request.filament_plan.model_dump(mode="json")
+
+
+async def test_a_quote_sliced_without_a_setup_records_none_of_it(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#4673: the three left out are recorded as left out (the template's), and a manual
+    quote, which sliced nothing, records no setup."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    assert quote.choices is not None
+    assert (
+        quote.choices["prime_tower"],
+        quote.choices["supports"],
+        quote.choices["print_sequence"],
+    ) == (None, None, None)
+    manual = shop.lifecycle.record_manual_quote(
+        shop.order.id, shop.item.id, ManualQuoteInput(unit_price_minor=500), BY
+    )
+    assert (manual.choices, manual.filament_plan) == (None, None)
 
 
 async def test_the_runs_new_filaments_are_a_revision_the_quote_names(

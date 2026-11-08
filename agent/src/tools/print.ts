@@ -397,6 +397,49 @@ function seedPlan(
   })
 }
 
+/** #907, #1899, #3628 — the print sequence, supports and prime tower a print takes; also a slice quote's (#4673). */
+export const printSequence = z
+  .enum(['by layer', 'by object'])
+  .optional()
+  .describe("'by object' finishes each object before the next starts; omit for the template's own")
+
+export const supportsChoice = z
+  .object({
+    enabled: z
+      .boolean()
+      .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
+    type: z.enum(['tree', 'normal']).optional().describe("'tree' or 'normal'; omit for the template's, else tree"),
+    threshold_angle: z
+      .number()
+      .int()
+      .min(0)
+      .max(90)
+      .optional()
+      .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
+    on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
+  })
+  .optional()
+  .describe(
+    'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
+      "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
+  )
+
+export const primeTowerChoice = z
+  .object({
+    enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
+    no_sparse_layers: z
+      .boolean()
+      .optional()
+      .describe(
+        "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
+      ),
+  })
+  .optional()
+  .describe(
+    "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
+      'else the process (on whenever a plate uses more than one filament).',
+  )
+
 const PRINT_OUTPUT_INPUT = withSource({
   printer_id: z.number().int().optional(),
   printer: registryPrinter
@@ -426,10 +469,7 @@ const PRINT_OUTPUT_INPUT = withSource({
   folder_id: z.number().int().optional().describe('A library folder of no project, in place of a project'),
   options: printOptions,
   path: printPath,
-  print_sequence: z
-    .enum(['by layer', 'by object'])
-    .optional()
-    .describe("'by object' finishes each object before the next starts; omit for the template's own"),
+  print_sequence: printSequence,
   filament_profiles: z
     .array(z.string().max(64))
     .max(8)
@@ -439,41 +479,8 @@ const PRINT_OUTPUT_INPUT = withSource({
         "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
         "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
     ),
-  supports: z
-    .object({
-      enabled: z
-        .boolean()
-        .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
-      type: z.enum(['tree', 'normal']).optional().describe("'tree' or 'normal'; omit for the template's, else tree"),
-      threshold_angle: z
-        .number()
-        .int()
-        .min(0)
-        .max(90)
-        .optional()
-        .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
-      on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
-    })
-    .optional()
-    .describe(
-      'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
-        "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
-    ),
-  prime_tower: z
-    .object({
-      enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
-      no_sparse_layers: z
-        .boolean()
-        .optional()
-        .describe(
-          "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
-        ),
-    })
-    .optional()
-    .describe(
-      "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
-        'else the process (on whenever a plate uses more than one filament).',
-    ),
+  supports: supportsChoice,
+  prime_tower: primeTowerChoice,
   part_settings: partSettings,
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))

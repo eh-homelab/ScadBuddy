@@ -800,6 +800,19 @@ describe('pricing tools (#4250)', () => {
     const part_settings = { '2': { top_shell_layers: 8 } }
     await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, part_settings } }, ctx())
     expect(body).toMatchObject({ part_settings })
+    // #4673: the quote slices with the tower, supports and sequence its print will use.
+    const setup = {
+      prime_tower: { enabled: true, no_sparse_layers: true },
+      supports: { enabled: true, type: 'tree', threshold_angle: 40 },
+      print_sequence: 'by object',
+    }
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, ...setup } }, ctx())
+    expect(body).toMatchObject(setup)
+    const input = z.object(tool('order_item_quote').shape)
+    const args = { order_id: ORDER, item_id: ITEM }
+    expect(input.safeParse({ ...args, slice: { ...SLICE, ...setup } }).success).toBe(true)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, print_sequence: 'by plate' } }).success).toBe(false)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, supports: { enabled: true, threshold_angle: 91 } } }).success).toBe(false)
   })
 
   it('answers a slice quote still running past the follow window', async () => {

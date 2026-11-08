@@ -141,6 +141,23 @@ def _too_big(plate_id: int) -> ApiError:
     )
 
 
+def preview_request(request: SliceQuoteRequest) -> PrintRunRequest:
+    """The print run's request a quote's background slice prepares (Ruling 2): the
+    dialog's choices, the route, the settings per slot (#5571) and the tower, supports
+    and sequence (#4673), so the quote slices what the print will."""
+    return PrintRunRequest(
+        printer=request.printer,
+        printer_id=request.printer_id,
+        filament_plan=request.filament_plan,
+        choices=request.choices,
+        path=request.path,
+        part_settings=request.part_settings,
+        prime_tower=request.prime_tower,
+        supports=request.supports,
+        print_sequence=request.print_sequence,
+    )
+
+
 class PreviewSlicer:
     """``orders/quote.py``'s ``Slicer`` over the dialog's background slice: Bambuddy's,
     or the native slicer's on ``slicer_backend`` native, as ``start_preview`` picks."""
@@ -171,14 +188,7 @@ class PreviewSlicer:
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
-        body = PrintRunRequest(
-            printer=request.printer,
-            printer_id=request.printer_id,
-            filament_plan=request.filament_plan,
-            choices=request.choices,
-            path=request.path,
-            part_settings=request.part_settings,
-        )
+        body = preview_request(request)
         registry = self.components.get(PRINTERS)
         # The run's own decision (plan 2026-10-18 D2), as the dialog's background slice
         # makes it (`slice_route`): a quote for a printer a run reaches over the LAN

@@ -163,7 +163,7 @@ _REVISION = (
 _QUOTE = (
     "id, order_item_id, created_at, source, accepted, sliced_sha256, sliced_blob_key, plates,"
     " lines, unit_cost_minor, unit_price_minor, quantity, total_minor, created_by, revision_id,"
-    " part_settings"
+    " part_settings, choices, filament_plan"
 )
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
@@ -1372,16 +1372,19 @@ class OrderStore:
         quote_id: str | None = None,
         revision_id: str | None = None,
         part_settings: dict[str, dict[str, Any]] | None = None,
+        choices: dict[str, Any] | None = None,
+        filament_plan: dict[str, Any] | None = None,
     ) -> Quote:
         """``quote_id`` when the caller made it first: a slice quote's ref is taken
         under it before the row exists (#4250 Ruling 3). ``part_settings`` are a slice
-        quote's settings per slot (#5571), as ``part_settings.dumped`` gives them."""
+        quote's settings per slot (#5571), as ``part_settings.dumped`` gives them;
+        ``choices`` and ``filament_plan`` its print setup (#4673, ``quote.print_setup``)."""
         row = conn.execute(
             "INSERT INTO order_item_quotes (id, order_item_id, source, sliced_sha256,"
             " sliced_blob_key, plates, lines, unit_cost_minor, unit_price_minor, quantity,"
-            " total_minor, created_by, revision_id, part_settings)"
+            " total_minor, created_by, revision_id, part_settings, choices, filament_plan)"
             " VALUES (COALESCE(%s, gen_random_uuid()::text),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
             (
                 quote_id,
                 item_id,
@@ -1397,6 +1400,8 @@ class OrderStore:
                 Jsonb(created_by.model_dump(mode="json")),
                 revision_id,
                 None if part_settings is None else Jsonb(part_settings),
+                None if choices is None else Jsonb(choices),
+                None if filament_plan is None else Jsonb(filament_plan),
             ),
         ).fetchone()
         assert row is not None
