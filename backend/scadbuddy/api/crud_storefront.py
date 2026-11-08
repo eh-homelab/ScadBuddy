@@ -12,8 +12,9 @@ reaches these routes (`crud_router`), so no other caller can send either header 
 Area ``listings``: ``GET …/listings`` and ``GET …/listings/{id}``, the published listings
 as the public site shows them (`orders/storefront/listings.py` `public_listing`), with
 each media file as a presigned GET of an hour. An unpublished or unknown listing is 404
-``…/storefront/listing_not_found``; any store but S3 is 409
-``…/storefront/storefront_needs_s3``.
+``…/storefront/listing_not_found``; any store but S3 is 503
+``…/storefront/storefront_needs_s3`` with reason ``not_configured`` and a text a visitor
+may read (the edge shows it).
 """
 
 from __future__ import annotations

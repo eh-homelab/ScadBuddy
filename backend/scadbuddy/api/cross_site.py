@@ -63,10 +63,14 @@ class CrossSiteGate:
         public_url: Callable[[], str | None],
         allowed_origins: Callable[[], Sequence[str]],
         refused: str = REFUSED,
+        loopback: bool = True,
     ) -> None:
         self.app = app
         #: The refusal's ``detail``: the storefront edge (#5282) shows a visitor its own.
         self.refused = refused
+        #: Whether a loopback ``Origin`` passes. The API takes one (a LAN install opened
+        #: at localhost); the storefront edge does not, unless it is served there.
+        self.loopback = loopback
         # Callables: the public URL is a stored setting that can change while running.
         self.public_url = public_url
         self.allowed_origins = allowed_origins
@@ -79,12 +83,12 @@ class CrossSiteGate:
         origin = headers.get("origin")
         allowed = self.allowed_origins()
         # The stored public URL is read only when the cheap answer is no.
-        if origin_allowed(origin, None, allowed):
+        if origin_allowed(origin, None, allowed, loopback=self.loopback):
             await self.app(scope, receive, send)
             return
         public_url = await asyncio.to_thread(self.public_url)
         unconfigured = not public_url and not allowed
-        if origin_allowed(origin, public_url, allowed) or (
+        if origin_allowed(origin, public_url, allowed, loopback=self.loopback) or (
             unconfigured and _same_host(origin, scope, headers)
         ):
             await self.app(scope, receive, send)

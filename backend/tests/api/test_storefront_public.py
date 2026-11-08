@@ -5,7 +5,9 @@ reference a listing builds from its snapshot, pinned to the back office's."""
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -17,6 +19,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import resolve_reference
+from scadbuddy.orders.storefront import listings as listings_module
 from scadbuddy.orders.storefront.inputs import listing_reference, listing_values
 from scadbuddy.orders.storefront.wire import Listing
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
@@ -59,6 +62,28 @@ class CrudCaller:
     def get(self, path: str, *, token: str = TOKEN_A) -> Any:
         headers = {**self.headers, VISITOR_HEADER: token, CLIENT_HEADER: "203.0.113.1"}
         return self.api.get(CRUD + path, headers=headers)
+
+
+class _Heard(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def heard() -> Iterator[list[logging.LogRecord]]:
+    """What `listings.py` logs at WARNING or above, heard on its own logger: the app's
+    start replaces the root handlers that ``caplog`` hangs on."""
+    logger = logging.getLogger(listings_module.__name__)
+    handler = _Heard()
+    logger.addHandler(handler)
+    try:
+        yield handler.records
+    finally:
+        logger.removeHandler(handler)
 
 
 @pytest.fixture
@@ -187,7 +212,12 @@ def test_the_crud_side_lists_the_area(crud: CrudCaller) -> None:
     assert "listings" in crud.get("/areas").json()["areas"]
 
 
-def test_the_crud_side_refuses_a_store_that_is_not_s3(settings: Settings) -> None:
+def test_the_crud_side_refuses_a_store_that_is_not_s3(
+    settings: Settings, heard: list[logging.LogRecord]
+) -> None:
+    """The operator's fault, not the visitor's: 503 with a plain text, and the operator's
+    text in the log at most once a minute."""
+    listings_module._needs_s3_warned = None
     with TestClient(create_app(settings)) as local:
         model = local.post(
             "/api/v1/models", json={"name": "Demo", "source": SOURCE}, headers=press()
@@ -198,8 +228,13 @@ def test_the_crud_side_refuses_a_store_that_is_not_s3(settings: Settings) -> Non
         caller = CrudCaller(local)
         for path in ("/listings", f"/listings/{made['id']}"):
             refused = caller.get(path)
-            assert refused.status_code == 409, refused.text
-            assert refused.json()["type"] == STOREFRONT_PROBLEMS + "storefront_needs_s3"
+            assert refused.status_code == 503, refused.text
+            problem = refused.json()
+            assert problem["type"] == STOREFRONT_PROBLEMS + "storefront_needs_s3"
+            assert problem["detail"] == "The shop is not available right now."
+            assert problem["reason"] == "not_configured"
+    warned = [r for r in heard if "store_backend" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
 
 
 def test_the_reference_matches_the_back_offices(
@@ -232,3 +267,21 @@ def test_the_reference_matches_the_back_offices(
     )
     assert ours.reference == theirs.reference
     assert ours.reference.inputs["params"]["width"] == 40
+
+
+def test_a_lost_medium_is_left_out_and_logged(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    published: dict[str, Any],
+    heard: list[logging.LogRecord],
+) -> None:
+    key = published["media"][0]["blob_key"]
+    with _state(client).projection.pool.connection() as conn:
+        conn.execute("DELETE FROM store_blobs WHERE key = %s", (key,))
+    r = crud.get(f"/listings/{published['id']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["media"] == []
+    [record] = heard
+    assert record.levelno == logging.WARNING
+    assert (record.listing_id, record.blob_key) == (published["id"], key)  # type: ignore[attr-defined]
+    assert "Signature" not in record.getMessage() and "http" not in record.getMessage()

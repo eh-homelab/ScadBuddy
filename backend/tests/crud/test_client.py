@@ -27,6 +27,7 @@ from scadbuddy.crud.client import (
     activity_key,
     wait_for_areas,
 )
+from scadbuddy.crud.wire import NOT_CONFIGURED
 from tests.crud.crud_support import FakeClock
 
 HEADER = {"X-ScadBuddy-Crud": "1"}
@@ -190,6 +191,17 @@ async def test_a_persistent_5xx_stops_at_the_deadline() -> None:
         await client.request("GET", PATH)
     assert 0.2 <= time.monotonic() - started < 1.0
     assert 2 <= len(script.requests) <= 25
+
+
+async def test_a_5xx_for_a_setting_is_refused_at_once() -> None:
+    """A 503 the operator's setting causes (`NOT_CONFIGURED`) does not retry: no retry
+    within the budget could fix it, and the caller answers it at once."""
+    script = Script(problem(503, reason=NOT_CONFIGURED), ok())
+    client, _ = make(script, budget=5.0)
+    with pytest.raises(CrudRefusedError) as refused:
+        await client.request("GET", PATH)
+    assert refused.value.status == 503
+    assert len(script.requests) == 1
 
 
 class PortServer:

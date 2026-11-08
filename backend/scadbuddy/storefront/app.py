@@ -3,8 +3,12 @@
 Every request passes three middlewares, outermost first: `RequestLimit` (the per-client
 request limit, spec §5.8), `CrossSiteGate` (a write whose ``Origin`` is not the page's,
 ``SCADBUDDY_STOREFRONT_PUBLIC_URL``, is 403 before any CRUD call; plan point 16) and
-`VisitorCookie` (the visitor id, spec §5.2). As in the API, the gate passes a write with
-no ``Origin`` (not a browser page) and one from a loopback origin.
+`VisitorCookie` (the visitor id, spec §5.2). The gate refuses a write from a loopback
+origin, unless the public URL is loopback itself (local development). It passes a write
+with no ``Origin``: a browser sends ``Origin`` on every cross-site POST, and it does not
+send the ``SameSite=Lax`` visitor cookie on one, so a page elsewhere cannot write as a
+visitor. A request with no ``Origin`` is not a browser page (curl), and it has no
+visitor but the one it makes up itself.
 
 Its lifespan waits until the CRUD service serves every area the edge calls
 (`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait, and the edge then
@@ -29,6 +33,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from scadbuddy.api.cross_site import CrossSiteGate
+from scadbuddy.core.origins import is_loopback
 from scadbuddy.core.problems import (
     PROBLEM_MEDIA_TYPE,
     install_problem_handlers,
@@ -139,6 +144,9 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
         public_url=lambda: settings.storefront_public_url,
         allowed_origins=lambda: (),
         refused=CROSS_SITE_REFUSED,
+        # A page on the visitor's own machine is not the shop's, unless the shop is
+        # served there (local development).
+        loopback=is_loopback(settings.storefront_public_url),
     )
     app.add_middleware(RequestLimit, prefix=STOREFRONT_PREFIX, trusted=app.state.trusted_proxies)
     return app

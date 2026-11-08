@@ -10,7 +10,8 @@ module imports no database code (`crud/wire.py`, `auth/service_auth.py`).
   route still missing after ``unavailable_budget`` seconds is `CrudUnavailableError`. A
   5xx and a transport failure retry within the same budget.
 - A 4xx with the header is `CrudRefusedError`, carrying the problem and any
-  ``Retry-After``, except a stale
+  ``Retry-After``, and so is a 5xx with reason ``not_configured`` (`NOT_CONFIGURED`: an
+  operator's setting, which no retry fixes), except a stale
   credential: a 401 (the credential died or none could be had) and a 403 ``out_of_scope``
   (its scopes are stale; `refresh` drops it, and only when the request carried one). A new
   worker can hold a credential from an old API pod for a moment, `ExchangeReader` holds
@@ -47,7 +48,13 @@ from temporalio import activity
 
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.crud.wire import CRUD_HEADER, DATABASE_UNAVAILABLE, PREFIX, CrudCaller
+from scadbuddy.crud.wire import (
+    CRUD_HEADER,
+    DATABASE_UNAVAILABLE,
+    NOT_CONFIGURED,
+    PREFIX,
+    CrudCaller,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +173,7 @@ class _Call:
         if status < 400:
             self.observe("ok", started)
             return "done"
-        if status >= 500:
+        if status >= 500 and _problem(response).get("reason") != NOT_CONFIGURED:
             self.last = f"{status} from the API"
             database = _problem(response).get("reason") == DATABASE_UNAVAILABLE
             self.failure = "database_unavailable" if database else "unavailable"

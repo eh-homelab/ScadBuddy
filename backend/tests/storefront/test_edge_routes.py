@@ -204,3 +204,48 @@ def test_a_quiet_client_is_forgotten() -> None:
     clock.now += WINDOW + 1
     limit.note("198.51.100.2", write=False)
     assert limit.clients() == {"198.51.100.2"}
+
+
+UNAVAILABLE = {
+    "type": f"{STOREFRONT_PROBLEMS}storefront_needs_s3",
+    "title": "Service Unavailable",
+    "status": 503,
+    "detail": "The shop is not available right now.",
+    "reason": "not_configured",
+}
+
+
+def test_a_shop_not_set_up_reads_plainly_and_at_once(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["listings"].respond(503, json=UNAVAILABLE, headers=CRUD)
+    r = edge.get("/api/store/v1/listings")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "The shop is not available right now."
+    assert "store_backend" not in r.text
+    # Not retried for the CRUD client's budget: a setting does not fix itself.
+    assert crud_mock["listings"].call_count == 1
+
+
+@pytest.mark.parametrize("origin", ["http://localhost:5173", "http://127.0.0.1", "http://[::1]:80"])
+def test_a_write_from_a_loopback_origin_is_refused(edge: TestClient, origin: str) -> None:
+    r = edge.post("/api/store/v1/renders", json={}, headers={"Origin": origin})
+    assert r.status_code == 403
+
+
+def test_a_write_with_no_origin_passes_the_gate(edge: TestClient) -> None:
+    assert edge.post("/api/store/v1/renders", json={}).status_code != 403
+
+
+def test_a_loopback_shop_takes_loopback_writes(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    app = create_app(load(storefront_public_url="https://localhost:8083"))
+    with TestClient(app, base_url="https://testserver", client=CLIENT) as client:
+        for origin in ("https://localhost:8083", "http://127.0.0.1:5173"):
+            r = client.post("/api/store/v1/renders", json={}, headers={"Origin": origin})
+            assert r.status_code != 403
+        r = client.post("/api/store/v1/renders", json={}, headers={"Origin": PUBLIC_URL})
+        assert r.status_code == 403

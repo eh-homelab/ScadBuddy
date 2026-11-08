@@ -12,5 +12,8 @@ CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}
 #: The reason of the 503 a CRUD route answers on a `psycopg.OperationalError`.
 DATABASE_UNAVAILABLE = "database-unavailable"
+#: The reason of a 5xx an operator's setting causes (the storefront's store is not S3):
+#: no retry fixes it, so a client answers it at once (`client.py`).
+NOT_CONFIGURED = "not_configured"
 #: Each caller's CRUD routes are under ``/api/v1`` plus ``PREFIX/<caller>``.
 PREFIX = "/internal/crud"

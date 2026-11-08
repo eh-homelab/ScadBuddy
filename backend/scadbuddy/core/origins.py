@@ -27,15 +27,26 @@ def normalised_origin(value: str) -> str | None:
     return f"{parts.scheme}://{host}" + (f":{port}" if port and port != default else "")
 
 
+def is_loopback(origin: str | None) -> bool:
+    normalised = None if origin is None else normalised_origin(origin)
+    return normalised is not None and urlsplit(normalised).hostname in LOOPBACK_HOSTS
+
+
 def origin_allowed(
-    origin: str | None, public_url: str | None, allowed_origins: Iterable[str] = ()
+    origin: str | None,
+    public_url: str | None,
+    allowed_origins: Iterable[str] = (),
+    *,
+    loopback: bool = True,
 ) -> bool:
+    """Whether a request from ``origin`` may pass: none (not a browser page), the public
+    URL's, one of ``allowed_origins``, or, with ``loopback``, a loopback origin."""
     if origin is None:
         return True
     normalised = normalised_origin(origin)
     if normalised is None:
         return False
-    if urlsplit(normalised).hostname in LOOPBACK_HOSTS:
+    if loopback and is_loopback(normalised):
         return True
     candidates = [public_url, *allowed_origins]
     return any(
