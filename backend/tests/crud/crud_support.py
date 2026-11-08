@@ -441,8 +441,8 @@ def print_crud_app(
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
     through ``operations`` of ``kinds``, printer rows through ``printers``, and the queue
-    item a reprint queued through ``links``, and the uploads and slices on
-    ``store``'s pool."""
+    item a reprint queued through ``links``, and the uploads, slices,
+    background slices and project records on ``store``'s pool."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
@@ -522,7 +522,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = ["settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads"]
+    areas = ["settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads", "previews"]
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

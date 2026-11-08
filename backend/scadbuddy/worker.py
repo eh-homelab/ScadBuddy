@@ -1248,8 +1248,8 @@ async def _given(library: RemoteLibrary) -> RemoteLibrary | None:
 def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> PrintWorkerDeps:
     """The print worker's stores, over the API's database and its internal routes. The
     Bambuddy settings, key included, are read through the API's CRUD route on every use,
-    and the runs, outcomes, operations, events, uploads and slices go through its CRUD
-    routes (#5298).
+    and the runs, outcomes, operations, events, uploads, slices, background slices and
+    project records go through its CRUD routes (#5298).
     ``crud``, the client of those routes, defaults to one with the worker's credential."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
@@ -1275,8 +1275,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # #5298: no LISTEN and no event log of its own. Its events go to the API (Q5), and
     # its runs, outcomes and operations are written there with theirs (D7).
     events = RemoteEvents(crud, metrics=metrics)
-    # Its uploads, slices and slice starts through the API (#5298 Task 25); the pool
-    # holds only the copy lock until the copy lease (Task 27).
+    # Its uploads, slices, slice starts, background slices and project records through
+    # the API (#5298 Tasks 25, 26); the pool holds only the copy lock until the copy
+    # lease (Task 27).
     uploads = RemoteUploadStore(crud, pool)
 
     @contextlib.asynccontextmanager
@@ -1448,7 +1449,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
 
 #: The CRUD areas the print worker calls (`api/crud_areas.py` `CRUD_AREAS`).
 PRINT_CRUD_AREAS = frozenset(
-    {"settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads"}
+    {"settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads", "previews"}
 )
 
 

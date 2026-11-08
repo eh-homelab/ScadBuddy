@@ -37,6 +37,13 @@ key the caller names, a touch, a hash and a forget set or delete by key. A slice
 a plain insert, so it takes an ``Idempotency-Key`` and runs with its ledger row
 (`crud/idempotency.py`): a resend after a lost answer records one start.
 
+The print dialog's background slices (Q16), the projects' printers, the projects
+created without their folder yet and the destinations' last touches (Q18) are the same
+store's. A background slice's record is a plain insert and its claim answers whether the
+sweep took it first, so both take an ``Idempotency-Key``: a resend after a lost answer
+records one slice, and a claim it won answers true again, though the slice was retired
+since. Every other write sets or deletes by key.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -75,7 +82,14 @@ from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
+from scadbuddy.bambuddy.uploads import (
+    BambuddyUploadStore,
+    DestinationKind,
+    LibraryCopy,
+    PreviewSlice,
+    ProjectTarget,
+    SlicedCopy,
+)
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
@@ -577,3 +591,142 @@ async def record_slice_start(
             conn, body.library_file_id, body.job_id
         ),
     )
+
+
+# -- background slices, project targets, folderless projects, touches (Q16, Q18) ----
+
+
+class PreviewSliced(BaseModel):
+    sliced_file_id: int
+    name: str | None = None
+
+
+class Claimed(BaseModel):
+    #: False when the sweep took the slice first.
+    claimed: bool
+
+
+class Folderless(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class Touch(BaseModel):
+    kind: DestinationKind
+    target_id: int
+
+
+PREVIEW_ROUTE = "POST /previews"
+CLAIM_ROUTE = "POST /previews/{row_id}/claim"
+
+
+@router.post("/previews", name="crud_print_record_preview", status_code=status.HTTP_204_NO_CONTENT)
+async def record_preview(
+    body: PreviewSlice, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A plain insert: once per ``Idempotency-Key``, so a resend records one slice."""
+    key = required_key(idempotency_key)
+    await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        PREVIEW_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: BambuddyUploadStore.record_preview_in(conn, body),
+    )
+
+
+@router.get("/previews", name="crud_print_previews_for")
+async def previews_for(
+    library_file_id: int, preset_key: str, uploads: UploadsDep
+) -> list[PreviewSlice]:
+    return await uploads.previews_for(library_file_id, preset_key)
+
+
+@router.get("/previews/find", name="crud_print_find_preview")
+async def find_preview(job_id: int, subject: str, uploads: UploadsDep) -> PreviewSlice | None:
+    return await uploads.preview(job_id, subject)
+
+
+@router.put(
+    "/previews/{row_id}/sliced",
+    name="crud_print_preview_sliced",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def preview_sliced(row_id: int, body: PreviewSliced, uploads: UploadsDep) -> None:
+    await uploads.preview_sliced(row_id, body.sliced_file_id, body.name)
+
+
+@router.post(
+    "/previews/{row_id}/retire",
+    name="crud_print_retire_preview",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def retire_preview(row_id: int, uploads: UploadsDep) -> None:
+    await uploads.retire_preview(row_id)
+
+
+@router.post("/previews/{row_id}/claim", name="crud_print_claim_preview")
+async def claim_preview(
+    row_id: int, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> Claimed:
+    """Once per ``Idempotency-Key``: a claim won answers true to its resend, though the
+    slice was retired since, so the run queues the file it holds."""
+    key = required_key(idempotency_key)
+    answer = await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        CLAIM_ROUTE,
+        {"row_id": row_id},
+        lambda conn: {"claimed": BambuddyUploadStore.claim_preview_in(conn, row_id)},
+    )
+    return Claimed.model_validate(answer)
+
+
+@router.get("/project-targets/{project_id}", name="crud_print_project_target")
+async def project_target(project_id: int, uploads: UploadsDep) -> ProjectTarget | None:
+    return await uploads.project_target(project_id)
+
+
+@router.put(
+    "/project-targets/{project_id}",
+    name="crud_print_remember_project_target",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remember_project_target(
+    project_id: int, body: ProjectTarget, uploads: UploadsDep
+) -> None:
+    await uploads.remember_project_target(project_id, body)
+
+
+@router.get("/folderless", name="crud_print_folderless")
+async def folderless(name: str, uploads: UploadsDep, parent_id: int | None = None) -> list[int]:
+    return await uploads.folderless(name, parent_id)
+
+
+@router.put(
+    "/folderless/{project_id}",
+    name="crud_print_remember_folderless",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remember_folderless(project_id: int, body: Folderless, uploads: UploadsDep) -> None:
+    await uploads.remember_folderless(project_id, body.name, body.parent_id)
+
+
+@router.delete(
+    "/folderless/{project_id}",
+    name="crud_print_forget_folderless",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_folderless(project_id: int, uploads: UploadsDep) -> None:
+    await uploads.forget_folderless(project_id)
+
+
+@router.post(
+    "/destination-touches",
+    name="crud_print_touch_destination",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def touch_destination(body: Touch, uploads: UploadsDep) -> None:
+    await uploads.touch_destination(body.kind, body.target_id)

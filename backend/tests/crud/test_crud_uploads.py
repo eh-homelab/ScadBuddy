@@ -1,7 +1,10 @@
-"""The print worker's uploads, slices and slice starts through its CRUD routes (#5298
-Task 25, inventory Q15, Q17): `RemoteUploadStore` answers as `BambuddyUploadStore` does,
-every natural write sent twice leaves what one left, a slice start is recorded once per
-``Idempotency-Key``, and the methods only the API calls are refused on the worker."""
+"""The print worker's uploads, slices, slice starts (#5298 Task 25, inventory Q15, Q17),
+background slices, project targets, folderless projects and destination touches (Task
+26, Q16, Q18) through its CRUD routes: `RemoteUploadStore` answers as
+`BambuddyUploadStore` does, every natural write sent twice leaves what one left, a slice
+start and a background slice are recorded once per ``Idempotency-Key``, a claim won
+answers true again to its resend, and the methods only the API calls are refused on the
+worker."""
 
 from __future__ import annotations
 
@@ -11,8 +14,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
+from scadbuddy.bambuddy.uploads import (
+    BambuddyUploadStore,
+    LibraryCopy,
+    PreviewSlice,
+    ProjectTarget,
+    SlicedCopy,
+)
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.idempotency import KEY_PROBLEM, KEY_REQUIRED_PROBLEM
@@ -27,30 +37,8 @@ pytestmark = pytest.mark.requires_postgres
 
 OUTPUT = "a" * 32
 OTHER = "b" * 32
-#: The methods the print worker still runs on its pool until #5298 Task 26 (Q16, Q18),
-#: and the copy lock until Task 27 (Q19).
-STILL_SQL = {
-    "copy_lock",
-    "record_preview",
-    "preview",
-    "previews_for",
-    "preview_sliced",
-    "retire_preview",
-    "claim_preview",
-    "previews_to_sweep",
-    "take_preview",
-    "forget_preview",
-    "project_target",
-    "remember_project_target",
-    "project_targets",
-    "forget_project_target",
-    "forget_all_project_targets",
-    "folderless",
-    "remember_folderless",
-    "forget_folderless",
-    "touch_destination",
-    "destination_touches",
-}
+#: What the print worker still runs on its pool: the copy lock, until #5298 Task 27 (Q19).
+STILL_SQL = {"copy_lock"}
 
 
 def copy(
@@ -227,8 +215,142 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
             ("PUT", f"{BASE}/slices/1/hash"),
             ("POST", f"{BASE}/slices/1/gone"),
             ("POST", f"{BASE}/slice-starts"),
+            ("POST", f"{BASE}/previews"),
+            ("GET", f"{BASE}/previews/find?job_id=1&subject=x"),
+            ("POST", f"{BASE}/previews/1/claim"),
+            ("POST", f"{BASE}/previews/1/retire"),
+            ("PUT", f"{BASE}/project-targets/1"),
+            ("GET", f"{BASE}/folderless?name=x"),
+            ("DELETE", f"{BASE}/folderless/1"),
+            ("POST", f"{BASE}/destination-touches"),
         ):
             with pytest.raises(CrudRefusedError) as refused:
                 client.request(method, path, json={})
             assert refused.value.status == 403, path
             assert refused.value.problem["reason"] == "wrong_caller", path
+
+
+def preview(job_id: int, subject: str = OUTPUT, library_file_id: int = 11) -> PreviewSlice:
+    return PreviewSlice(
+        job_id=job_id,
+        subject=subject,
+        library_file_id=library_file_id,
+        preset_key="p",
+        plate_id=1,
+        job_created="2026-11-07T10:00:00",
+    )
+
+
+async def test_background_slices_answer_as_the_sql_store(
+    remote: RemoteUploadStore, sql: BambuddyUploadStore
+) -> None:
+    await remote.record_preview(preview(5))
+    await remote.record_preview(preview(6))
+    await remote.record_preview(preview(7, subject=OTHER, library_file_id=12))
+    found = await remote.preview(5, OUTPUT)
+    assert found is not None and found == await sql.preview(5, OUTPUT)
+    assert found.id is not None and found.job_created == "2026-11-07T10:00:00"
+    assert await remote.preview(5, OTHER) is None
+    assert await remote.previews_for(11, "p") == await sql.previews_for(11, "p")
+    assert [row.job_id for row in await remote.previews_for(11, "p")] == [6, 5]
+    for _ in range(2):
+        await remote.preview_sliced(found.id, 31, "plate.gcode.3mf")
+    sliced = await remote.preview(5, OUTPUT)
+    assert sliced is not None and (sliced.sliced_file_id, sliced.sliced_name) == (
+        31,
+        "plate.gcode.3mf",
+    )
+    assert await remote.claim_preview(found.id)
+    claimed = await sql.preview(5, OUTPUT)
+    assert claimed is not None and claimed.printed
+    for _ in range(2):
+        await remote.retire_preview(found.id)
+    assert await remote.preview(5, OUTPUT) is None
+    assert [row.job_id for row in await remote.previews_for(11, "p")] == [6]
+
+
+async def test_a_background_slice_is_recorded_once_per_key(
+    crud: CrudClient, store: SettingsStore
+) -> None:
+    body = preview(5).model_dump(mode="json")
+    for _ in range(2):
+        await crud.request("POST", f"{BASE}/previews", json=body, idempotency_key="p1")
+    assert len(_rows(store, "print_preview_slices")) == 1
+    with pytest.raises(CrudRefusedError) as keyless:
+        await crud.request("POST", f"{BASE}/previews", json=body)
+    assert keyless.value.status == 428
+    assert len(_rows(store, "print_preview_slices")) == 1
+
+
+async def test_a_claim_retried_with_its_key_answers_true_once_won(
+    remote: RemoteUploadStore,
+    crud: CrudClient,
+    sql: BambuddyUploadStore,
+    store: SettingsStore,
+) -> None:
+    """A lost answer must not turn a won claim into a lost one: the slice retired after
+    the claim, its resend under the same key still answers true."""
+    await sql.record_preview(preview(5))
+    row = await sql.preview(5, OUTPUT)
+    assert row is not None and row.id is not None
+    url = f"{BASE}/previews/{row.id}/claim"
+    first = await crud.request("POST", url, idempotency_key="c1")
+    assert first.json() == {"claimed": True}
+    await sql.retire_preview(row.id)
+    again = await crud.request("POST", url, idempotency_key="c1")
+    assert again.json() == {"claimed": True}
+    # A new claim is new: the sweep has the slice now.
+    other = await crud.request("POST", url, idempotency_key="c2")
+    assert other.json() == {"claimed": False}
+    with pytest.raises(CrudRefusedError) as keyless:
+        await crud.request("POST", url)
+    assert keyless.value.status == 428
+
+
+async def test_a_retried_activity_claims_under_the_same_key(
+    crud: CrudClient, sql: BambuddyUploadStore, store: SettingsStore
+) -> None:
+    """Inside an activity a claim's key is the activity's (`WriteKeys`): its retry, on
+    a fresh store, answers what the attempt that lost its answer won."""
+    await sql.record_preview(preview(5))
+    await sql.record_preview(preview(6))
+    first, second = (await sql.previews_for(11, "p"))[::-1]
+    assert first.id is not None and second.id is not None
+
+    async def claim(row_id: int) -> bool:
+        return await RemoteUploadStore(crud, store.pool).claim_preview(row_id)
+
+    assert await ActivityEnvironment().run(claim, first.id)
+    await sql.retire_preview(first.id)
+    assert await ActivityEnvironment().run(claim, first.id)
+    # The retry claims another slice under that ordinal: a claim of its own.
+    assert await ActivityEnvironment().run(claim, second.id)
+    claimed = await sql.preview(6, OUTPUT)
+    assert claimed is not None and claimed.printed
+
+
+async def test_project_records_answer_as_the_sql_store(
+    remote: RemoteUploadStore, sql: BambuddyUploadStore, store: SettingsStore
+) -> None:
+    target = ProjectTarget(printer_id=3, nozzle_diameter="0.4", nozzle_plan={"left": "0.4"})
+    assert await remote.project_target(8) is None
+    for _ in range(2):
+        await remote.remember_project_target(8, target)
+    assert await remote.project_target(8) == await sql.project_target(8) == target
+    assert len(_rows(store, "project_print_targets")) == 1
+
+    for _ in range(2):
+        await remote.remember_folderless(41, "Keychains", None)
+        await remote.remember_folderless(42, "Keychains", 7)
+        await remote.remember_folderless(43, "Keychains", None)
+    assert await remote.folderless("Keychains", None) == await sql.folderless("Keychains", None)
+    assert set(await remote.folderless("Keychains", None)) == {41, 43}
+    assert await remote.folderless("Keychains", 7) == [42]
+    for _ in range(2):
+        await remote.forget_folderless(41)
+    assert await remote.folderless("Keychains", None) == [43]
+
+    for _ in range(2):
+        await remote.touch_destination("project", 8)
+        await remote.touch_destination("folder", 8)
+    assert set(await sql.destination_touches()) == {("project", 8), ("folder", 8)}
