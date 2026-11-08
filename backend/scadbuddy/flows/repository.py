@@ -151,6 +151,11 @@ class FlowNotPresentError(RevisionNotFoundError):
     """The flow has versions but is not in the tree: it is deleted (#2485)."""
 
 
+class FlowExistsError(GitError):
+    """A registration only for a new name found the name with versions already (#4252):
+    a deleted flow keeps its history, so it counts."""
+
+
 class DetailsNotSavedError(GitError):
     """A registration's version was committed and indexed, but its details commit
     failed (#3186): ``flow.json`` is as it was. Never retry the registration for it, which
@@ -242,6 +247,7 @@ class FlowHistory(GitRepo):
         body: str | None = None,
         display_name: str | None = None,
         description: str | None = None,
+        only_new: bool = False,
     ) -> tuple[str, int]:
         """One new version of ``name``: ``script`` with its ``inputs`` schema (none when
         None), or the script and schema at the commit ``restore``. Under the write lock:
@@ -249,10 +255,13 @@ class FlowHistory(GitRepo):
         ``index(commit, version)``, then, when ``display_name`` or ``description`` changes
         the flow's details, their own commit (#3186). The version's commit and number;
         :class:`DetailsNotSavedError` (naming them) when the version was saved but its
-        details commit failed."""
+        details commit failed. With ``only_new``, :class:`FlowExistsError` when ``name``
+        has any version, deleted or not, checked under the same lock (#4252)."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
+            if only_new and self.versions(name):
+                raise FlowExistsError(f"{name!r} has versions")
             found = self.register_locked(
                 name,
                 version_id,

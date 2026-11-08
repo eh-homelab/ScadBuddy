@@ -25,7 +25,10 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.flows.component import FLOWS
+from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.orders.archives import mirror_run
+from scadbuddy.orders.builtin_flow import ensure_builtin_flow
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
@@ -37,8 +40,15 @@ from scadbuddy.store.refs import BlobRefs
 
 
 class OrdersComponent:
-    def __init__(self, core: Core, pool: ConnectionPool[Connection[DictRow]]) -> None:
+    def __init__(
+        self,
+        core: Core,
+        pool: ConnectionPool[Connection[DictRow]],
+        flows: FlowDefinitions | None = None,
+    ) -> None:
         self.core = core
+        #: Where the built-in `order-fulfilment` flow is registered at start (#4252).
+        self.flows = flows
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
@@ -87,11 +97,16 @@ ORDERS: Key[OrdersComponent] = Key("orders")
 
 
 def _build(core: Core, components: Components) -> OrdersComponent:
-    return OrdersComponent(core, components.get(ROWS).pool)
+    # Flows is built first, so it runs first: its repository is ready when this one
+    # starts.
+    return OrdersComponent(core, components.get(ROWS).pool, components.get(FLOWS).definitions)
 
 
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
+    # §7.2: the built-in flow, once, when its name never had a version.
+    if orders.flows is not None and orders.core.settings.orders_builtin_flow:
+        await ensure_builtin_flow(orders.flows)
     # The print path's follow (#4719): an item follows the print its attempt started.
     # §8.2: a settled print's attempt copies its Bambuddy archives.
     remove = listen_for_prints(
