@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { FlowRun } from '../../api/types'
@@ -65,6 +65,10 @@ function OrderRun({ run, onChanged }: { run: FlowRun; onChanged: () => void }) {
   const waiting = run.waiting_on.length > 0
   const view = useAsync(() => (waiting ? api.getFlowRun(run.id) : Promise.resolve(null)), [run.id, waiting], [flowRunTopic(run.id)])
   const [notice, setNotice] = useState<string>()
+  // A refused decision's notice goes once the run waits on nothing (review of #5668).
+  useEffect(() => {
+    if (!waiting) setNotice(undefined)
+  }, [waiting])
 
   async function respond(send: () => Promise<unknown>) {
     setNotice(undefined)

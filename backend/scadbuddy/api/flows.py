@@ -290,8 +290,9 @@ class GrantView(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
-    #: The grant of the run this run was started from, which it inherits approved
-    #: (#4252): its calls run without asking only while that one is in force too.
+    #: The grant of the run this run was started from, which it was seeded from (#4252),
+    #: approved by inheritance or requested: its calls run without asking only while
+    #: that one is in force too.
     parent_grant_id: str | None = None
     #: Approved, not revoked and not expired, and so is every grant it inherits from and
     #: the standing grant it was seeded from (`FlowStore.grant_in_force`): calls inside
@@ -350,17 +351,17 @@ def may_inherit(
     return flow_run == parent.id and parent.status not in TERMINAL
 
 
-async def _parent_run(flows: Flows) -> Run | None:
+async def _parent_run(flows: Flows, caller: Caller) -> Run | None:
     """The run a start comes from (#4252, orders spec §7.2): the flow run the call names
-    (``X-ScadBuddy-Flow-Run``), which must have been started by the call's author. None
-    for a start that is no run's. A name that is no such run is refused (409), never taken
-    as no parent: it would start the run with no link. Whether its grant passes on
-    approved is `may_inherit`'s."""
+    (``X-ScadBuddy-Flow-Run``), which must be a run whose calls are made as the call's
+    author (`runs_as`). None for a start that is no run's. A name that is no such run is
+    refused (409), never taken as no parent: it would start the run with no link. Whether
+    its grant passes on approved is `may_inherit`'s."""
     author = current_author()
     if author is None or author.flow_run is None:
         return None
     parent = await flows.store.get_run(author.flow_run)
-    if parent is None or not await _runs_as(flows, parent.started_by, author.principal):
+    if parent is None or not runs_as(caller, parent.started_by, author.principal, author.session):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             "The calling flow run is not a run started by this principal.",
@@ -368,26 +369,30 @@ async def _parent_run(flows: Flows) -> Run | None:
     return parent
 
 
-async def _runs_as(flows: Flows, started_by: dict[str, Any], principal: str | None) -> bool:
-    """Whether a run's calls are made as `principal`, as the agent derives it from the
-    run's `started_by` (agent `temporal/flowRuns.ts` `startedBy`, review of #5668): the
-    browser's signed-in person, else `browser`; an agent's starter session's owner now,
-    archived or handed off (`session_owner`), else, with no such session, its own
-    principal."""
+def runs_as(
+    caller: Caller, started_by: dict[str, Any], principal: str | None, session: str | None = None
+) -> bool:
+    """Whether a run's calls are made as `principal` (review of #5668). The agent's own
+    credential vouches for it: the agent sets the flow-run header only on a call from that
+    run's own activity, made as the owner it reads for the run (agent
+    `temporal/flowRuns.ts` `startedBy`, a starter session's owner now, handed off or
+    archived), so the API reads no `ai_sessions` row for it (#5295). Any other caller
+    must be the principal the run records: the browser's signed-in person (else
+    `browser`), or the agent principal or session that started it. (A flow run's own
+    calls carry no session header, agent `toolActivities.ts` `flowCaller`, so a session
+    match alone would not cover a handed-off run.)"""
     if principal is None:
         return False
+    if isinstance(caller, Service) and caller.caller == "agent":
+        return True
     by = started_by.get("principal")
     if started_by.get("kind") == "browser":
         return author_principal(by if isinstance(by, str) else "browser") == principal
     if started_by.get("kind") != "agent" or not isinstance(by, str):
         return False
-    session = started_by.get("session")
-    if isinstance(session, str):
-        # Its owner now, archived or handed off (as the agent reads it); its own
-        # principal only when the session row is gone.
-        owner = await flows.store.session_owner(session)
-        if owner is not None:
-            return author_principal(owner) == principal
+    started_in = started_by.get("session")
+    if session is not None and isinstance(started_in, str) and session == started_in:
+        return True
     return principal in (by, author_principal(by))
 
 
@@ -718,11 +723,14 @@ async def start_flow_run(
     options = body or RunCreate()
     if (
         options.order_id is not None
+        and not await flows.store.is_linked(run_id)
         and (await asyncio.to_thread(orders.store.order, options.order_id)) is None
     ):
-        # A typo would link the run to an order no page shows (review of #5668).
+        # A typo would link the run to an order no page shows (review of #5668). A repeat
+        # of a start that already linked its run is not asked again: the order may have
+        # gone since, and the repeat answers the run the first start made.
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"No order {options.order_id!r}.")
-    parent = await _parent_run(flows)
+    parent = await _parent_run(flows, caller)
     try:
         # Off the event loop: its patterns may take PATTERNS_BUDGET_S, and every other
         # request would wait that long behind them (#3417).

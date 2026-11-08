@@ -175,8 +175,8 @@ class Grant(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
-    #: The grant of the run this run was started from, which it inherits (#4252): in
-    #: force only while that one is.
+    #: The grant of the run this run was started from, which it was seeded from (#4252),
+    #: approved or requested: in force only while that one is.
     parent_grant_id: str | None = None
 
     def in_force(self, now: datetime) -> bool:

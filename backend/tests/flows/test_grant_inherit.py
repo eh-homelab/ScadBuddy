@@ -9,8 +9,8 @@ from typing import Any, cast
 
 import pytest
 
-from scadbuddy.api.flows import may_inherit
-from scadbuddy.auth.models import Service
+from scadbuddy.api.flows import may_inherit, runs_as
+from scadbuddy.auth.models import ANONYMOUS, Service
 from scadbuddy.auth.run_tokens import mint_run_token
 from scadbuddy.auth.service_credentials import SCOPES
 from scadbuddy.flows.grants import CallFacts, GrantSpec, Inside, Outside, inherited, match_grant
@@ -81,7 +81,10 @@ async def test_a_run_records_the_run_it_was_started_from_and_its_order(
 ) -> None:
     parent = await run_row(store)
     child_id = str(uuid.uuid4())
+    assert not await store.is_linked(child_id)
     await store.link_run(child_id, parent_run_id=parent, order_id="o1")
+    # A repeat of this start skips the order check (review of #5668).
+    assert await store.is_linked(child_id)
     # A repeated start keeps the first record.
     await store.link_run(child_id, parent_run_id=None, order_id="o2")
     child = await run_row(store, run_id=child_id)
@@ -236,7 +239,7 @@ async def test_no_grant_is_inherited_from_a_parent_without_one_in_force(
 @pg
 async def test_a_grant_not_passed_on_is_only_requested(store: FlowStore) -> None:
     """A caller `may_inherit` refuses (security review of #4252): the parent's rules,
-    narrowed, as an ordinary request a person decides, tied to nothing."""
+    narrowed, as an ordinary request a person decides, naming the parent's grant."""
     parent = await run_row(store)
     await store.insert_grant(
         parent,
@@ -248,7 +251,9 @@ async def test_a_grant_not_passed_on_is_only_requested(store: FlowStore) -> None
     grant = await store.inherit_grant(child, parent, "o1", requested_by={}, approved=False)
     assert grant is not None and grant.status == "requested"
     assert (grant.approved_by, grant.approved_at, grant.expires_at) == (None, None, None)
-    assert grant.parent_grant_id is None and grant.spec.rules[0].orders == ["o1"]
+    granted = await store.get_grant(parent)
+    assert granted is not None and grant.parent_grant_id == granted.id
+    assert grant.spec.rules[0].orders == ["o1"]
     assert isinstance(await match(store, child, "o1"), Outside)
 
 
@@ -295,3 +300,24 @@ def test_a_closed_parent_never_passes_its_grant_on() -> None:
     token = mint_run_token(KEY, PARENT)
     for status in ("succeeded", "failed", "terminated"):
         assert not may_inherit(PROJECTS, token, KEY, PARENT, parent(status))
+
+
+def test_a_run_s_calls_are_vouched_for_by_the_agent_or_match_its_recorded_principal() -> None:
+    """Review of #5668: the API reads no `ai_sessions` row to check a parent (#5295). The
+    agent's credential vouches for a call from a run whose session was handed off and
+    archived (the agent makes it as the owner now); any other caller must be the
+    principal the run records."""
+    agent = Service("agent", frozenset({"api"}))
+    started = {"kind": "agent", "principal": "token:t1", "session": str(uuid.uuid4())}
+    assert runs_as(agent, started, "token:new-owner")
+    assert not runs_as(agent, started, None)
+    assert runs_as(ANONYMOUS, started, "token:t1")
+    assert not runs_as(ANONYMOUS, started, "token:new-owner")
+    assert not runs_as(PROJECTS, started, "token:new-owner")
+    # The session that started it, under its owner now.
+    assert runs_as(ANONYMOUS, started, "token:new-owner", started["session"])
+    assert not runs_as(ANONYMOUS, started, "token:new-owner", str(uuid.uuid4()))
+    browser = {"kind": "browser", "principal": "user:a"}
+    assert runs_as(ANONYMOUS, browser, "user:a")
+    assert not runs_as(ANONYMOUS, browser, "user:b")
+    assert runs_as(ANONYMOUS, {"kind": "browser"}, "browser")

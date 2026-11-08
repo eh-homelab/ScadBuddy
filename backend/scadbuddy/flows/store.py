@@ -280,6 +280,10 @@ class FlowStore:
             return
         await asyncio.to_thread(self._link_run, run_id, parent_run_id, order_id)
 
+    async def is_linked(self, run_id: str) -> bool:
+        """Whether a start already recorded run `run_id`'s links (`link_run`)."""
+        return await asyncio.to_thread(self._is_linked, run_id)
+
     async def insert_run(self, record: FlowRecord) -> Run:
         """The run's row; the existing one when a retried activity inserts it again,
         announced only when inserted."""
@@ -390,23 +394,6 @@ class FlowStore:
         """A parent's narrowed input for the call, its hash, and who proposed it."""
         return await asyncio.to_thread(self._get_proposal, request_id)
 
-    async def session_owner(self, session: str) -> str | None:
-        """The assistant session's owner now, archived or not, as the agent reads it for a
-        run's `started_by` (agent `temporal/flowRuns.ts` `startedBy`); None when there is
-        no such session. A read of `ai_sessions` from the API, as `parent_tiers` makes,
-        until #5299's CRUD route replaces both."""
-        return await asyncio.to_thread(self._session_owner, session)
-
-    def _session_owner(self, session: str) -> str | None:
-        with self._pool.connection() as conn:
-            try:
-                row = conn.execute(
-                    "SELECT owner_id FROM ai_sessions WHERE id::text = %s", (session,)
-                ).fetchone()
-            except psycopg.errors.UndefinedTable:
-                return None  # no agent service has migrated this database
-        return None if row is None else str(row["owner_id"])
-
     async def grant_in_force(self, grant: Grant) -> bool:
         """Whether calls inside `grant` run without asking now: it is in force, and so is
         every grant it inherits from and the standing grant it was seeded from
@@ -462,7 +449,9 @@ class FlowStore:
         orders spec §7.2): `grants.inherited` of the parent's grant. `approved` (the caller
         checked `api/flows.py` `may_inherit`), it is approved as the parent's was, expires
         with it, and is in force only while it is; else it is only `requested`, an ordinary
-        request a person decides. None when the parent has no grant in force; the existing
+        request a person decides. Either way it names the parent's (`parent_grant_id`): a
+        requested one a person approves is in force only while the parent's is too. None
+        when the parent has no grant in force; the existing
         one when the run has one already."""
         return await asyncio.to_thread(
             self._inherit_grant, run_id, parent_run_id, order_id, requested_by, approved
@@ -584,7 +573,7 @@ class FlowStore:
                     f"parent-run:{parent_run_id}" if approved else None,
                     approved,
                     parent.expires_at if approved else None,
-                    parent.id if approved else None,
+                    parent.id,
                 ),
             ).fetchone()
             if row is None:
@@ -1115,6 +1104,13 @@ class FlowStore:
                 " VALUES (%s, %s, %s) ON CONFLICT (run_id) DO NOTHING",
                 (run_id, parent_run_id, order_id),
             )
+
+    def _is_linked(self, run_id: str) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM workflow_run_links WHERE run_id = %s", (run_id,)
+            ).fetchone()
+        return row is not None
 
     def _insert_run(self, record: FlowRecord) -> Run:
         with self._pool.connection() as conn, conn.transaction():

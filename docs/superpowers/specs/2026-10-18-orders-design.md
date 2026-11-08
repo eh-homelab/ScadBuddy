@@ -1025,7 +1025,8 @@ What this relies on, and what the design adds for it:
 
   As built (#4252): the link is its own table, `workflow_run_links` (a run's parent and
   its order; a trigger's run for an order records the order too), and an inherited
-  grant names its parent's (`flow_grants.parent_grant_id`). The child's grant is
+  or requested child grant names its parent's (`flow_grants.parent_grant_id`), so a
+  requested one a person approves is in force only while the parent's is. The child's grant is
   approved by inheritance only when the projects worker itself starts it: the caller
   holds the `projects` credential, a valid run token whose run id is the
   `X-ScadBuddy-Flow-Run` header, and the parent run is still open (`api/flows.py`
