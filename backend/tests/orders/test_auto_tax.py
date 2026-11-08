@@ -13,28 +13,19 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.orders.lifecycle import Lifecycle, ManualQuoteInput, OrderEdit
+from scadbuddy.orders.lifecycle import ManualQuoteInput, OrderEdit
 from scadbuddy.orders.models import ChargeInput, Order
 from scadbuddy.orders.money import OrderRules, ShippingOption, tax_minor
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.totals import totals_of
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop
+from tests.orders.test_lifecycle import BY, RulesShop, Shop
 
 pytestmark = pytest.mark.requires_postgres
 
 TEN = OrderRules("USD", Decimal("10"), False, (), ())
 POST = ShippingOption(id="post", label="Post", amount_minor=500, ships=True)
-
-
-class RulesShop(Shop):
-    """A shop whose lifecycle reads ``self.now`` as the shop's money rules."""
-
-    def __init__(self, rows: OrderStore, refs: BlobRefs, rules: OrderRules) -> None:
-        super().__init__(rows, refs)
-        self.now = rules
-        self.lifecycle = Lifecycle(rows, self.bus, refs, rules=lambda: self.now)
 
 
 @pytest.fixture
@@ -283,3 +274,33 @@ def test_a_charge_body_cannot_set_auto() -> None:
         OrderEdit.model_validate(
             {"charges": [{"kind": "tax", "label": "x", "amount_minor": 1, "auto": True}]}
         )
+
+
+def test_reopening_an_item_on_a_shipped_order_retaxes_after_the_rederive(
+    shop: RulesShop,
+) -> None:
+    order = _quoted(shop)
+    [first] = shop.rows.items(order.id)
+    second = shop.quoted(order, shop.item(order), price=2000)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    shop.lifecycle.cancel_item(order.id, second.id, BY)
+    assert tax(shop, order) == [(101, True)]
+    shop.fulfilled(order, first)
+    shop.shipped(order, shop.get_item(first))
+    assert shop.get(order).status == "shipped"
+
+    shop.lifecycle.reopen_item(order.id, second.id, BY)
+
+    assert shop.get(order).status != "shipped"
+    assert subtotal(shop, order) == 3005
+    assert tax(shop, order) == [(tax_minor(3005, Decimal("10")), True)]
+
+
+@pytest.mark.parametrize(
+    ("percent", "label"),
+    [(Decimal("7.50"), "Tax 7.5%"), (Decimal("10"), "Tax 10%"), (Decimal("1E+1"), "Tax 10%")],
+)
+def test_the_tax_label_is_a_plain_percent(shop: RulesShop, percent: Decimal, label: str) -> None:
+    shop.now = replace(TEN, tax_percent=percent)
+    order = _quoted(shop)
+    assert [c.label for c in shop.rows.charges(order.id) if c.auto] == [label]

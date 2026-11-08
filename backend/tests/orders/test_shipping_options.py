@@ -14,8 +14,7 @@ from scadbuddy.orders.money import OrderRules, ShippingOption
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_auto_tax import RulesShop
-from tests.orders.test_lifecycle import BY
+from tests.orders.test_lifecycle import BY, RulesShop
 
 pytestmark = pytest.mark.requires_postgres
 

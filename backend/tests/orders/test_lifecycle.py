@@ -41,6 +41,7 @@ from scadbuddy.orders.models import (
     Shipment,
     ShipmentItem,
 )
+from scadbuddy.orders.money import OrderRules
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, price
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
@@ -135,6 +136,15 @@ class Shop:
 
     def kinds(self, order: Order) -> list[str]:
         return [e.kind for e in self.rows.events(order.id)]
+
+
+class RulesShop(Shop):
+    """A shop whose lifecycle reads ``self.now`` as the shop's money rules (#5281)."""
+
+    def __init__(self, rows: OrderStore, refs: BlobRefs, rules: OrderRules) -> None:
+        super().__init__(rows, refs)
+        self.now = rules
+        self.lifecycle = Lifecycle(rows, self.bus, refs, rules=lambda: self.now)
 
 
 @pytest.fixture

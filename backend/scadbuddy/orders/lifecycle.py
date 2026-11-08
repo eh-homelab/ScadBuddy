@@ -444,6 +444,11 @@ def _settle_open(items: Sequence[OrderItem]) -> OrderStatus:
     return "quoted" if open_items and all(i.status == "approved" for i in open_items) else "draft"
 
 
+def _plain(percent: Decimal) -> str:
+    """A percent as a label shows it: no trailing zeros, no exponent (7.50 is 7.5)."""
+    return format(percent.normalize(), "f")
+
+
 def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
     return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
 
@@ -577,7 +582,8 @@ class Lifecycle:
         the shipping charges with ``orders_tax_shipping``, rounded half up. None at 0
         percent, at an amount of 0, or while a typed `tax` charge stands. A shipped or
         ended order's row stays as it was. Each transition that changes the items, their
-        quotes or the charges calls it once, before it rederives; ``rules`` is the
+        quotes or the charges calls it once, before it rederives (`reopen_item` after,
+        since its rederive can leave `shipped`); ``rules`` is the
         transition's one read of them, when it has one."""
         if order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
             return
@@ -591,7 +597,7 @@ class Lifecycle:
         self.store.set_auto_tax(
             conn,
             order.id,
-            label=f"Tax {rules.tax_percent}%",
+            label=f"Tax {_plain(rules.tax_percent)}%",
             amount_minor=amount or None,
         )
 
@@ -1491,8 +1497,10 @@ class Lifecycle:
                 )
             item = self.store.update_item(conn, item.id, status=status)
             self._event(conn, order, by, "item.reopened", item_id=item.id, to=status)
-            self._retax(conn, order)
+            # After the rederive: an item reopened on a `shipped` order moves it back to
+            # one `_retax` writes for, which the locked row is not.
             order = self._rederive(conn, order, by)
+            self._retax(conn, order)
             self._hold(conn, self._standing(conn, item.id))
         self._told(_Change(order, [(item, None)]))
         return item
