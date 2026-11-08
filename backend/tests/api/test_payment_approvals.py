@@ -466,3 +466,48 @@ def test_a_manual_payment_that_clears_the_balance_closes_a_failed_balance_reques
     assert cancels == [req["provider_ref"]]
     assert post(client, approved(req)).json() == {"outcome": "ignored"}
     assert captures == []
+
+
+def test_a_manual_payment_that_reaches_the_deposit_closes_a_failed_deposit_request(
+    client: TestClient, captures: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Else the customer approving the failed deposit page again would pay the deposit
+    twice. The request is paid and its page is marked to close; the close here is
+    refused, so the mark stays for the sweep."""
+    tried: list[str] = []
+
+    async def refuse(credential: Credential, provider_ref: str) -> None:
+        tried.append(provider_ref)
+        raise ProviderError("down")
+
+    monkeypatch.setattr(FAKE, "cancel_request", refuse)
+    connect_fake(client)
+    order_id = payable_order(client)["id"]
+    put = client.put(f"/api/v1/orders/{order_id}/deposit", json={"amount_minor": 300})
+    assert put.status_code == 200, put.text
+    [req] = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()
+    assert req["kind"] == "deposit"
+    fail_it(client, req)
+    paid = client.post(
+        f"/api/v1/orders/{order_id}/payments", json={"amount_minor": 300, "method": "cash"}
+    )
+    assert paid.status_code == 201, paid.text
+    [found] = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()
+    assert found["status"] == "paid"
+    assert found["close_pending_at"] is not None
+    assert tried == [req["provider_ref"]]
+    assert post(client, approved(req)).json() == {"outcome": "ignored"}
+    assert captures == []
+
+
+def test_a_capture_failure_on_a_request_no_longer_pending_tells_no_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing changed, so no order change is published."""
+    order_id, req = linked(client)
+    told: list[Any] = []
+    found = lifecycle(client)
+    monkeypatch.setattr(found, "_told", told.append)
+    found.capture_failed("fake", req["id"])
+    assert told == []
+    assert status_of(client, order_id, req["id"]) == "open"

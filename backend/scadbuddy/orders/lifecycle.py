@@ -1280,14 +1280,15 @@ class Lifecycle:
             )
 
     def _close_deposit(self, conn: Conn, order: Order, payment: Payment) -> None:
-        """Once the payments reach the deposit, ``payment`` closes the open deposit
-        requests (status `open` only)."""
+        """Once the payments reach the deposit, ``payment`` closes the open and failed
+        deposit requests (#4959: a customer can approve a failed one's page again, which
+        would charge twice)."""
         if order.deposit_minor is None:
             return
         if totals_of(self.store, conn, order.id).paid_minor < order.deposit_minor:
             return
         for found in payments.requests_for_order(conn, order.id):
-            if found.kind == "deposit" and found.status == "open":
+            if found.kind == "deposit" and found.status in CAPTURABLE:
                 payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
 
     # -- the balance (#5281, storefront spec §9) ------------------------------------------
@@ -1549,9 +1550,10 @@ class Lifecycle:
                 return
             order = self._lock(conn, found.order_id)
             found = payments.request(conn, request_id) or found
-            if found.status == "pending":
-                payments.set_request_status(conn, found.id, "failed")
-                self._event(conn, order, by, "payment_request.failed", request_id=found.id)
+            if found.status != "pending":
+                return
+            payments.set_request_status(conn, found.id, "failed")
+            self._event(conn, order, by, "payment_request.failed", request_id=found.id)
         self._told(_Change(order))
 
     def _provider_payment(

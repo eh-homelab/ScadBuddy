@@ -751,7 +751,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
   the address while such an option stays (`_no_option_ships`, the same slug). A payment
-  that reaches the deposit pays the open `deposit` requests, a provider's as a manual one
+  that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
+  page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
