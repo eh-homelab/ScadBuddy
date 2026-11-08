@@ -257,6 +257,34 @@ def test_a_retried_render_is_counted_once(crud: CrudCaller, listing: dict[str, A
     assert again["id"] == first["id"] and counted_rows(crud, TOKEN_A) == 1
 
 
+def test_a_render_retried_after_it_finished_stays_counted(
+    crud: CrudCaller, listing: dict[str, Any]
+) -> None:
+    """Review of #5758, Blocking 1: a finished job answers a second submit as reused, but
+    a replayed key keeps the row as its first answer left it."""
+    first = a_render(crud, TOKEN_A, listing, {"width": 43}, key="k-done")
+    wait_done(crud, TOKEN_A, first["id"])
+    again = a_render(crud, TOKEN_A, listing, {"width": 43}, key="k-done")
+    assert again["id"] == first["id"]
+    assert counted_rows(crud, TOKEN_A) == 1 and counted_rows(crud, TOKEN_A, counted=False) == 0
+
+
+def test_a_shared_guess_retried_is_not_counted_again(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #5758, Blocking 1: a free row that became a run of its own was counted
+    once; the same key sent again at the limit neither counts it again nor withdraws it."""
+    for w in (30, 31):
+        a_render(crud, TOKEN_A, listing, {"width": w})
+    monkeypatch.setattr(renders_module, "_shared", lambda *_args: True)
+    first = a_render(crud, TOKEN_A, listing, {"width": 44}, key="k-own")
+    assert counted_rows(crud, TOKEN_A) == 3
+    again = a_render(crud, TOKEN_A, listing, {"width": 44}, key="k-own")
+    assert again["id"] == first["id"]
+    assert counted_rows(crud, TOKEN_A) == 3 and counted_rows(crud, TOKEN_A, counted=False) == 0
+    assert wait_done(crud, TOKEN_A, first["id"])["status"] == "done"
+
+
 def test_over_the_limit_is_429_with_retry_after(crud: CrudCaller, listing: dict[str, Any]) -> None:
     for w in (30, 31, 32):
         a_render(crud, TOKEN_A, listing, {"width": w})
@@ -291,8 +319,20 @@ def test_the_estimate_is_a_price_without_machine_time(
     r = crud.get(f"/renders/{job['id']}/estimate")
     assert r.status_code == 200, r.text
     est = r.json()
-    assert est["estimate"] is True and est["price_minor"] > est["filament_minor"] > 0
-    assert "machine_time" not in [line["kind"] for line in est["lines"]]
+    assert est["estimate"] is True and est["price_minor"] > 0
+    assert float(est["grams"]) > 0 and est["parts"]
+    # Review of #5758, Blocking 2: a visitor never reads the price book's cost price,
+    # markup or rates, only the price.
+    assert set(est) == {
+        "estimate",
+        "price_minor",
+        "currency",
+        "minor_exponent",
+        "grams",
+        "parts",
+        "unknown_parts",
+    }
+    assert "per kg" not in r.text and "Markup" not in r.text and "filament_minor" not in r.text
     # Analysed once, for every visitor of the render.
     with _state(crud.api).projection.pool.connection() as conn:
         rows = conn.execute(

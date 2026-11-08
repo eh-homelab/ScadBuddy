@@ -155,6 +155,15 @@ async def _withdraw_limited(
     await asyncio.to_thread(limits.undo, row, key)
 
 
+def _unavailable_render() -> ApiError:
+    return problem(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "render_unavailable",
+        "The shop could not start this render. Try again in a moment.",
+        headers={"Retry-After": str(UNAVAILABLE_RETRY)},
+    )
+
+
 def _runtime(state: AppState) -> Settings:
     """The stored settings as they are now, which the limits and the estimate's timeout
     both read. Blocking: call it in a thread."""
@@ -198,7 +207,9 @@ async def start_render(
     ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start; one
     that `never_started` costs nothing), each with ``Retry-After``. The edge's client
     sends a 503 again with the same key for its budget, so a visitor sees the edge's own
-    503 when the start keeps failing."""
+    503 when the start keeps failing. A key seen before replays its row as its first
+    answer left it: the row's job when it names one, else the submit joined again, with
+    no count, no withdrawal and no undo."""
     orders = _orders(state)
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
@@ -230,7 +241,11 @@ async def start_render(
         **body.model_dump(mode="json"),
     }
 
+    fresh = False
+
     def write(conn: Any) -> Replay:
+        nonlocal fresh
+        fresh = True
         if _shared(state, conn, reference.render_key):
             row = limits.free(
                 conn,
@@ -264,6 +279,14 @@ async def start_render(
         raise _limited(error) from None
     row: int = recorded.body["row"]
     counted: bool = recorded.body["counted"]
+    if not fresh:
+        # A replayed key changes nothing: a second submit cannot tell how the first went
+        # (a finished job answers "reused", Temporal repeats a run's first answer), so the
+        # row keeps what its first answer left it, and a job it names is the answer.
+        named = await asyncio.to_thread(limits.job_of, row)
+        if named is not None:
+            with suppress(JobNotFoundError):
+                return store_render(await asyncio.to_thread(state.render.store.read, named))
     params = reference.inputs.get("params", {})
     try:
         job, coalesced = await state.render.submit_answer(
@@ -276,6 +299,8 @@ async def start_render(
             reuse_finished=True,
         )
     except QueueFullError as error:
+        if not fresh:
+            raise _unavailable_render() from None
         # The render never ran: its row and its reply go, so it counts against nothing.
         await asyncio.to_thread(limits.undo, row, key)
         raise problem(
@@ -287,18 +312,17 @@ async def start_render(
         ) from None
     except Exception as error:
         logger.warning("a visitor's render was not started", exc_info=True)
-        if never_started(error):
+        if fresh and never_started(error):
             # No job can exist: the visitor is not charged, and the same key sent
             # again (the edge's client retries a 5xx) admits a new row.
             await asyncio.to_thread(limits.undo, row, key)
         # Else the job may exist: the row and its reply stay, so the same key sent again
         # replays the row and joins the job, counted once.
-        raise problem(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "render_unavailable",
-            "The shop could not start this render. Try again in a moment.",
-            headers={"Retry-After": str(UNAVAILABLE_RETRY)},
-        ) from None
+        raise _unavailable_render() from None
+    if not fresh:
+        # The first answer was lost before `attach`: join its job, as recorded.
+        await asyncio.to_thread(limits.attach, row, job.id)
+        return store_render(job)
     # `_shared` read the jobs before the submit, with no lock. The submit decides.
     if counted and coalesced:
         # A job opened in between: joined or reused, it costs nothing.
@@ -414,7 +438,15 @@ def _begin(state: AppState, job: Job, timeout: float) -> Future[_Analysis]:
     Blocking: call it in a thread. The work records its
     own outcome and ends its flight, whatever the requests do. One not started within
     ``timeout`` is withdrawn (`BUSY`, not recorded); one that runs past ``timeout`` from
-    its start is recorded ``timeout``."""
+    its start is recorded ``timeout``.
+
+    The bound after a timeout: Python cannot stop a thread, so the timed-out work keeps
+    its thread and its `_held` place until `part_volumes` returns. A 3MF that never
+    finishes analysing holds them for the life of the process; `ANALYSIS_WORKERS` such
+    3MFs hold every thread, and then every new analysis is withdrawn as `BUSY` ("not
+    ready yet") until one ends. Estimates only: renders and the recorded estimates are
+    not affected, and each such job is recorded ``timeout``, so it is never started
+    again."""
     global _held
     result = job.result
     assert result is not None
@@ -567,7 +599,7 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
             policy,
             currency=currency,
             factor=factor,
-        )
+        ).public()
     except (KeyError, ValueError):
         logger.warning("a render could not be priced", exc_info=True)
         raise _unavailable(
