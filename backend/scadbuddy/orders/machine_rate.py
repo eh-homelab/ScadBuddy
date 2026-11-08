@@ -448,12 +448,16 @@ class MachineRateStore:
             gone = conn.execute("DELETE FROM printer_cost_profiles WHERE printer = %s", (key,))
             return gone.rowcount > 0
 
-    def remember_intervals(self, printer: str, tasks: Sequence[MaintenanceTask]) -> None:
+    def remember_intervals(
+        self, printer: str, bambuddy_printer_id: int, tasks: Sequence[MaintenanceTask]
+    ) -> None:
         """Bambuddy's intervals kept on the printer's task rows of the same name, for
         when it does not answer. Only a counted task's: a calendar task's interval is
         days, not print-hours. Every other row's interval is cleared (a task disabled,
         made a calendar one or gone from Bambuddy since), so the stored rate counts what
-        this read counted."""
+        this read counted. ``bambuddy_printer_id`` is the Bambuddy printer the tasks were
+        read from: once the printer no longer links it (unlinked, or linked to another
+        since the read began), nothing is kept."""
         key = printer_uuid(printer)
         if key is None:
             return
@@ -469,6 +473,12 @@ class MachineRateStore:
             conn.execute(
                 "SELECT 1 FROM printer_cost_profiles WHERE printer = %s FOR UPDATE", (key,)
             )
+            # Held while it writes, so an unlink waits for it, or it sees the unlink.
+            linked = conn.execute(
+                "SELECT bambuddy_printer_id FROM printers WHERE id = %s FOR SHARE", (key,)
+            ).fetchone()
+            if linked is None or linked["bambuddy_printer_id"] != bambuddy_printer_id:
+                return
             for name, hours in counted.items():
                 conn.execute(
                     "UPDATE printer_maintenance_costs SET interval_hours = %s,"
@@ -548,7 +558,9 @@ class MachineRates:
                     )
                 else:
                     intervals = "bambuddy"
-                    await asyncio.to_thread(self.store.remember_intervals, row.id, tasks)
+                    await asyncio.to_thread(
+                        self.store.remember_intervals, row.id, row.bambuddy_printer_id, tasks
+                    )
         return compute(
             stored.profile,
             stored.wear,

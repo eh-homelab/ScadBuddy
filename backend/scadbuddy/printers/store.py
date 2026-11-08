@@ -531,6 +531,7 @@ class PrinterStore:
         Bambuddy is read again."""
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
+            was = self._one(conn, "id", printer_id)
             row = self._update(
                 conn,
                 printer_id,
@@ -538,11 +539,12 @@ class PrinterStore:
                 " bambuddy_printer_id = NULL",
                 (),
             )
-            conn.execute(
-                "UPDATE printer_maintenance_costs SET interval_read_at = NULL"
-                " WHERE printer = %s AND interval_read_at IS NOT NULL",
-                (printer_uuid(row.id),),
-            )
+            if was is not None and was.bambuddy_printer_id is not None:
+                conn.execute(
+                    "UPDATE printer_maintenance_costs SET interval_read_at = NULL"
+                    " WHERE printer = %s AND interval_read_at IS NOT NULL",
+                    (printer_uuid(row.id),),
+                )
             return row
 
     def link_lan(
