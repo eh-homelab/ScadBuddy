@@ -71,6 +71,7 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
+    FulfilLine,
     FulfilmentInput,
     LabourRate,
     LifecycleError,
@@ -386,6 +387,8 @@ class ItemCreate(ReferenceBody):
 
 #: How many items `POST /orders/{id}/items/batch` adds at most (#4777).
 MAX_BATCH_ITEMS = 50
+#: The problem a reference to a deleted template is (Ruling 6).
+TEMPLATE_DELETED = PROBLEMS + "template_deleted"
 
 
 class ItemBatch(BaseModel):
@@ -1378,7 +1381,7 @@ async def _resolved(
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"template {error.slug!r} was deleted; restore it before ordering it",
-            type_=PROBLEMS + "template_deleted",
+            type_=TEMPLATE_DELETED,
             slug=error.slug,
         ) from None
 
@@ -1782,7 +1785,7 @@ async def _archive_item(
             # An output gone since (422), or kept while its template is deleted (409
             # `template_deleted`), falls through: the archive's file is still Bambuddy's.
             if error.status != status.HTTP_422_UNPROCESSABLE_CONTENT and error.type != (
-                PROBLEMS + "template_deleted"
+                TEMPLATE_DELETED
             ):
                 raise
         else:
@@ -2314,6 +2317,42 @@ async def test_print_item(
     return operation_answer(result, Fulfilment)
 
 
+class DuplicateBody(BaseModel):
+    """A line item's duplicate (#4955)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: On an accepted, in-production or ready order (#5349): the copy is added after
+    #: acceptance, as `POST /orders/{id}/items/after-acceptance` adds one.
+    after_acceptance: bool = False
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/duplicate",
+    response_model=OrderItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Duplicate a line item",
+    description=(
+        "#4955 (order operations spec 2026-11-07 §4.2): a new item with the item's kind, "
+        "current design (reference, colours and output, or library file), past print "
+        "archives, quantity, title, notes and SKU. No quote is copied, except a custom "
+        "item's price, which is its own field (#4954). Refused as an add is: 409 "
+        "`item_locked` past `quoted` without `after_acceptance`, `order_not_accepted` "
+        "with it before acceptance, `order_on_hold`; 404 for an item not the order's."
+    ),
+)
+async def duplicate_item(
+    order_id: str, item_id: str, body: DuplicateBody, orders: OrdersDep
+) -> OrderItem:
+    check_path(order_id, item_id)
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.duplicate_item(
+            order_id, item_id, by, after_acceptance=body.after_acceptance
+        )
+    )
+
+
 # -- fulfilment attempts (§6.1 by hand) ------------------------------------------------------
 
 
@@ -2457,6 +2496,35 @@ async def accept_fulfilment(
     return await _run(
         lambda: orders.lifecycle.accept_fulfilment(order_id, item_id, fulfilment_id, by)
     )
+
+
+class FulfilBody(BaseModel):
+    """A bulk fulfil (#4955): how many of each item were made."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[FulfilLine] = Field(min_length=1, max_length=MAX_BATCH_ITEMS)
+
+
+@router.post(
+    "/{order_id}/fulfil",
+    response_model=list[Fulfilment],
+    status_code=status.HTTP_201_CREATED,
+    summary="Fulfil several line items at once",
+    description=(
+        "#4955 (order operations spec 2026-11-07 §4.2): for each item, an attempt by hand "
+        "of `quantity` that `succeeded`, recorded and accepted, in one transaction; an item "
+        "is fulfilled once its accepted attempts reach its quantity. A refusal of any item "
+        "writes nothing: 409 `order_not_accepted`, `order_on_hold`, `item_not_open` (settled) "
+        "or `item_not_approved` (not `approved` or `failed`; a printed item's print attempt "
+        "is accepted on its own), naming the item in `items`; 422 `items` for an item named "
+        "twice; 404 for an item not the order's. The attempts, in the body's order."
+    ),
+)
+async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> list[Fulfilment]:
+    check_path(order_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.fulfil_items(order_id, body.items, by))
 
 
 @router.post(
