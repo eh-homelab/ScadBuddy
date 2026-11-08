@@ -1,9 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
+import { keychainSchema, versionIds } from '../mocks/fixtures'
 import { FILAMENT_PLA } from '../mocks/features/orders/state'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -236,5 +237,106 @@ describe('StorefrontPage (#5282)', () => {
     await user.click(screen.getByRole('button', { name: 'Publish' }))
     await waitFor(() => expect(seen).toContain(`POST /api/v1/storefront/listings/${listing.id}/publish`))
     expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
+  })
+
+  it('shows the listings again after a refused order', async () => {
+    const user = userEvent.setup()
+    await seed('First')
+    await seed('Second')
+    server.use(
+      http.put('/api/v1/storefront/listings/order', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_changed', title: 'Conflict', status: 409, detail: 'the order must name every listing once; load the listings again' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<StorefrontPage />)
+    await screen.findByRole('button', { name: 'Edit Second' })
+    // Another tab adds a listing.
+    await seed('Third')
+    await user.click(screen.getByRole('button', { name: 'Move Second up' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('load the listings again')
+    await waitFor(() =>
+      expect(screen.getAllByTestId('storefront-listing').map((row) => within(row).getByRole('button', { name: /^Edit / }).getAttribute('aria-label'))).toEqual([
+        'Edit First',
+        'Edit Second',
+        'Edit Third',
+      ]),
+    )
+  })
+
+  it('drops the parameters a newly chosen version does not have', async () => {
+    const user = userEvent.setup()
+    const older = versionIds.edited
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', ({ params }) =>
+        params['commit'] === older
+          ? HttpResponse.json({ ...keychainSchema, parameters: (keychainSchema.parameters ?? []).filter((p) => p.name !== 'text_size' && p.name !== 'padding') })
+          : undefined,
+      ),
+    )
+    await api.createStorefrontListing({
+      slug: KEYCHAIN,
+      commit: versionIds.raised,
+      title: 'Tag',
+      params: { text_size: { kind: 'number', min: 6, max: 20, step: null } },
+      fixed: { padding: 6, corner_radius: 4 },
+    })
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'Edit Tag' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Version' }))
+    await user.click(await screen.findByRole('option', { name: /Update name-keychain metadata/ }))
+    await waitFor(() => expect(screen.queryByRole('group', { name: /Text size/ })).toBeNull())
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(async () => expect((await api.storefrontListings())[0]?.commit).toBe(older))
+    const [saved] = await api.storefrontListings()
+    expect(saved?.params).toEqual({})
+    expect(saved?.fixed).toEqual({ corner_radius: 4 })
+  })
+
+  it('takes no drag while an order is being saved', async () => {
+    const user = userEvent.setup()
+    await seed('First')
+    await seed('Second')
+    await seed('Third')
+    const seen = recordRequests()
+    const release = hold('put', '/api/v1/storefront/listings/order')
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'Move Second up' }))
+    const rows = screen.getAllByTestId('storefront-listing')
+    fireEvent.dragStart(rows[2]!)
+    fireEvent.drop(rows[0]!)
+    release()
+    await waitFor(async () => expect((await api.storefrontListings()).map((l) => l.title)).toEqual(['Second', 'First', 'Third']))
+    expect(seen.filter((r) => r === 'PUT /api/v1/storefront/listings/order')).toHaveLength(1)
+  })
+
+  it('shows a refused publish only on its own listing, and leaves another free', async () => {
+    const user = userEvent.setup()
+    await seed('First')
+    await seed('Second')
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('/api/v1/storefront/listings/:id/publish', async () => {
+        await gate
+        return HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'refused for First' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    renderPage(<StorefrontPage />)
+    await user.click(await screen.findByRole('button', { name: 'Edit First' }))
+    await user.click(await screen.findByRole('button', { name: 'Publish' }))
+    await user.click(screen.getByRole('button', { name: 'Edit Second' }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Second'))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
