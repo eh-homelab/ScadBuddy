@@ -907,7 +907,7 @@ export const handlers = [
       if ('due_at' in body) order.due_at = body.due_at ?? null
       if (body.charges) {
         state.charges = state.charges.filter((c) => c.order_id !== order.id)
-        body.charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
+        body.charges.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position, auto: false }))
         event(order, 'charges.replaced', { count: body.charges.length })
       }
       order.updated_at = now()
@@ -940,7 +940,7 @@ export const handlers = [
       const line = (c: { kind: string; label: string; amount_minor: number }) => ({ kind: c.kind, label: c.label, amount_minor: c.amount_minor })
       const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
       state.charges = state.charges.filter((c) => c.order_id !== order.id)
-      parsed.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position }))
+      parsed.forEach((c, position) => state.charges.push({ id: newId('h'), order_id: order.id, kind: c.kind, label: c.label, amount_minor: c.amount_minor, position, auto: false }))
       event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after: parsed.map(line) })
       order.updated_at = now()
       return HttpResponse.json(order)
