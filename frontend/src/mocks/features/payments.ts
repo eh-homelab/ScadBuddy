@@ -14,6 +14,8 @@ const PROBLEMS = 'https://scadbuddy.dev/problems/payments/'
 const FAKE = {
   id: 'fake',
   label: 'Fake',
+  // The backend's fake captures an approval, as PayPal does (`Payments._reapprovable`).
+  reapprovable: true,
   fields: [
     { name: 'account', label: 'Account', secret: false },
     { name: 'signing_secret', label: 'Signing secret', secret: true },
@@ -73,8 +75,9 @@ export const handlers = [
   http.delete('/api/v1/payments/providers/:id', ({ request, params }) => {
     const id = String(params.id)
     if (!state.providers.some((p) => p.id === id)) return unknown(request, id)
-    // A pending request (#4958) still needs the provider's webhook secret, as `has_open_requests` says.
-    if (state.paymentRequests.some((r) => r.provider === id && (r.status === 'open' || r.status === 'pending'))) {
+    // A pending request (#4958) still needs the provider's webhook secret, and a failed one's page can
+    // still be approved (#4959), as `has_open_requests` says.
+    if (state.paymentRequests.some((r) => r.provider === id && ['open', 'pending', 'failed'].includes(r.status))) {
       return problem(request, 409, `payment provider ${id} has open payment requests`, PROBLEMS + 'provider_has_open_requests')
     }
     state.providers = state.providers.filter((p) => p.id !== id)
@@ -105,8 +108,8 @@ export const FAKE_FEE_MINOR = 30
 
 /**
  * A provider's event on a request, as `Lifecycle._apply_event` records it: `paid` writes a
- * payment and the request's `paid`, closes the open balance requests once the balance is
- * clear and writes the provider's fee entry; `refunded` writes a negative payment and
+ * payment and the request's `paid`, closes the open and failed balance requests once the
+ * balance is clear and writes the provider's fee entry; `refunded` writes a negative payment and
  * closes nothing; `expired` ends an open request. `pending` makes an open request pending
  * and `failed` ends an open or pending one (#4958); neither writes money. It is recorded on
  * a cancelled order too.

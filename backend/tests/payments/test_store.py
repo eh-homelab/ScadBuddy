@@ -126,6 +126,9 @@ def test_has_open_requests_and_the_default_provider(rows: OrderStore, order: Ord
             currency="USD", created_by=BY,
         )  # fmt: skip
         assert has_open_requests(conn, "fake") and not has_open_requests(conn, "other")
+        # A failed request's page can still be approved (#4959): it holds the provider.
+        set_request_status(conn, req.id, "failed")
+        assert has_open_requests(conn, "fake")
         set_request_status(conn, req.id, "cancelled")
         assert not has_open_requests(conn, "fake")
         conn.execute(

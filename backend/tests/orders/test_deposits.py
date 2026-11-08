@@ -424,12 +424,13 @@ def test_a_failed_deposit_request_is_cancelled_and_replaced(shop: Shop) -> None:
     ]
 
 
-def test_a_payment_leaves_a_failed_deposit_request_failed(shop: Shop) -> None:
+def test_a_payment_that_reaches_the_deposit_pays_a_failed_deposit_request(shop: Shop) -> None:
+    """#4959: a customer can approve a failed request's page again, so it is paid too."""
     order = shop.lifecycle.set_deposit(shop.order().id, BY, 2000)
     [req] = requests_for(shop, order)
     set_request_status(shop, req.id, "failed")
     shop.lifecycle.add_payment(order.id, BY, amount_minor=2000, method="cash")
-    assert [r.status for r in requests_for(shop, order)] == ["failed"]
+    assert [r.status for r in requests_for(shop, order)] == ["paid"]
 
 
 def test_a_provider_payment_that_reaches_the_deposit_pays_its_request(

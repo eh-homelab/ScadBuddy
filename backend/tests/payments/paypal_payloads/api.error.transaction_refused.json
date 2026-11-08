@@ -1,0 +1,18 @@
+{
+  "name": "UNPROCESSABLE_ENTITY",
+  "details": [
+    {
+      "issue": "TRANSACTION_REFUSED",
+      "description": "The request was refused."
+    }
+  ],
+  "message": "The requested action could not be performed, semantically incorrect, or failed business validation.",
+  "debug_id": "f63fbc340a6ce",
+  "links": [
+    {
+      "href": "https://developer.paypal.com/api/orders/v2/#error-TRANSACTION_REFUSED",
+      "rel": "information_link",
+      "method": "GET"
+    }
+  ]
+}

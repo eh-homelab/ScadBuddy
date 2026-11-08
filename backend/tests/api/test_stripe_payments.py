@@ -151,7 +151,18 @@ def test_a_bank_debit_that_fails_records_no_money(
     }
     assert request_status(client, order_id) == "failed"
     assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
-    # A failed request no longer needs the webhook secret, so Stripe can be disconnected.
+    # A failed request holds its provider until it is cancelled (#4959; for PayPal its
+    # page can be approved again). Its session completed, so Stripe refuses the expire
+    # and the session reads closed: the close is confirmed, with nothing left to retry.
+    assert client.delete("/api/v1/payments/providers/stripe").status_code == 409
+    stripe["expire"].respond(400, json={"error": {"message": "This session is not open."}})
+    stripe.get(f"/v1/checkout/sessions/{CS}").respond(
+        json=payload("api.checkout_session.expired.json")
+    )
+    request_id = client.get(f"/api/v1/orders/{order_id}/payment-requests").json()[0]["id"]
+    done = client.post(f"/api/v1/orders/{order_id}/payment-requests/{request_id}/cancel")
+    assert done.json()["status"] == "cancelled"
+    assert done.json()["close_pending_at"] is None
     assert client.delete("/api/v1/payments/providers/stripe").status_code == 204
 
 
