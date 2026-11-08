@@ -4,9 +4,15 @@ The draft is the visitor's cart: an order with ``source = 'storefront'``, no num
 no customer until it is submitted (`Lifecycle.ensure_draft`). `add_listing_item` checks
 the visitor's values against the listing, never trusting the edge
 (`renders.py` `checked_choice`), and adds a model item with revision 1 from the listing's
-snapshot, titled as the listing. The add runs in one transaction with its
-``Idempotency-Key``'s ledger row (`idempotent_write`), so a request the edge sends again
-after a lost answer adds one item. `remove_item` does the same for a delete.
+snapshot, titled as the listing, and records the names of the parameters the listing
+offered: the draft shows only those values, never the listing's locks or the template's
+other defaults. A draft holds at most `MAX_DRAFT_ITEMS` items. The add runs in one
+transaction with its ``Idempotency-Key``'s ledger row (`idempotent_write`), so a request
+the edge sends again after a lost answer adds one item. Each write looks up its key before
+any other work (`stored`): a retry of a write that committed answers with the order that
+write named, whatever changed since, and checks or makes nothing. `remove_item` does the
+same for a delete. The bus is told after the commit, of the order as the transaction left
+it.
 
 Every write names the visitor's row (`Lifecycle` ``cart_of``), which the lifecycle checks
 under the order's lock: another visitor's draft or item is 404 ``item_not_found``, never
@@ -22,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Final
 from fastapi import status
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent_write
+from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
 from scadbuddy.orders.attachments import blob_key
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem
@@ -30,7 +36,7 @@ from scadbuddy.orders.models import Attachment, Order, OrderItem
 from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
 from scadbuddy.orders.storefront.renders import checked_choice
-from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
+from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
     AddListingItem,
     DraftAttachment,
@@ -47,6 +53,8 @@ if TYPE_CHECKING:
 #: The ledger's names of the routes (`idempotent_write`).
 ADD_ROUTE: Final = "POST /storefront/draft/items"
 REMOVE_ROUTE: Final = "DELETE /storefront/draft/items/{item_id}"
+#: The most items one draft holds.
+MAX_DRAFT_ITEMS: Final = 50
 
 
 def _orders(state: AppState) -> OrdersComponent:
@@ -66,6 +74,16 @@ def _draft_changed() -> ApiError:
     )
 
 
+def _draft_full() -> ApiError:
+    """422 ``draft_full``: the draft holds `MAX_DRAFT_ITEMS` items already."""
+    return problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "draft_full",
+        f"Your order holds {MAX_DRAFT_ITEMS} items, the most it can. Remove one first.",
+        limit=MAX_DRAFT_ITEMS,
+    )
+
+
 async def _url(content: ContentStore, attachment: Attachment) -> str | None:
     """A presigned GET of the attachment's blob, or None when the index lost it."""
     stat = await asyncio.to_thread(content.index.get, blob_key(attachment.sha256))
@@ -76,30 +94,39 @@ async def _url(content: ContentStore, attachment: Attachment) -> str | None:
     return await backend.presign_get(stat.ref.backend_id, PUBLIC_MEDIA_TTL)
 
 
-def _inputs(item: OrderItem) -> dict[str, Any] | None:
-    """A model item's parameter values; None on any other kind."""
-    if item.kind != "model" or item.reference is None:
+def _inputs(item: OrderItem, offered: list[str] | None) -> dict[str, Any] | None:
+    """The values of the parameters the listing offered when the item was added; None
+    for an item not added from a listing, or not a model item."""
+    if item.kind != "model" or item.reference is None or offered is None:
         return None
     params = item.reference.inputs.get("params")
-    return dict(params) if isinstance(params, dict) else {}
+    if not isinstance(params, dict):
+        return {}
+    return {name: params[name] for name in offered if name in params}
 
 
 async def _view(state: AppState, order: Order) -> DraftView:
     """The visitor's view of ``order``."""
     orders = _orders(state)
 
-    def read() -> list[tuple[OrderItem, list[Attachment]]]:
-        return [
-            (item, orders.store.subject_attachments(item_subject(item.id)))
-            for item in orders.store.items(order.id)
-        ]
+    def read() -> tuple[list[OrderItem], dict[str, list[str] | None], list[Attachment]]:
+        return (
+            orders.store.items(order.id),
+            orders.store.storefront_offered(order.id),
+            orders.store.attachments(order.id),
+        )
 
-    rows = await asyncio.to_thread(read)
-    content = public_content(state) if any(files for _, files in rows) else None
+    rows, offered, files = await asyncio.to_thread(read)
+    by_subject: dict[str, list[Attachment]] = {}
+    for attachment in files:
+        by_subject.setdefault(attachment.subject, []).append(attachment)
+    content = (
+        public_content(state) if any(item_subject(item.id) in by_subject for item in rows) else None
+    )
     items: list[DraftItem] = []
-    for item, files in rows:
+    for item in rows:
         attachments: list[DraftAttachment] = []
-        for attachment in files:
+        for attachment in by_subject.get(item_subject(item.id), []):
             assert content is not None
             url = await _url(content, attachment)
             if url is not None:
@@ -112,7 +139,7 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 kind=item.kind,
                 title=item.title,
                 quantity=item.quantity,
-                inputs=_inputs(item),
+                inputs=_inputs(item, offered.get(item.id)),
                 notes=item.notes if item.kind == "request" else None,
                 attachments=attachments,
             )
@@ -123,6 +150,30 @@ async def _view(state: AppState, order: Order) -> DraftView:
         minor_exponent=order.minor_exponent,
         items=items,
     )
+
+
+def _stored(state: AppState, key: str, route: str, asked: Any) -> Replay | None:
+    with state.projection.pool.connection() as conn:
+        return stored(conn, "storefront", key, route, asked)
+
+
+async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
+    """The view of the order a write's reply names, while it is still the visitor's;
+    409 ``draft_changed`` once it is not (swept)."""
+    orders = _orders(state)
+    order_id: str = reply.body["order_id"]
+
+    def find() -> Order | None:
+        visitor = VisitorStore(state.projection.pool).find(visitor_id)
+        order = orders.store.order(order_id)
+        if visitor is None or order is None or order.storefront_visitor_id != visitor.id:
+            return None
+        return order
+
+    order = await asyncio.to_thread(find)
+    if order is None:
+        raise _draft_changed()
+    return await _view(state, order)
 
 
 async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
@@ -142,78 +193,94 @@ async def add_listing_item(
     state: AppState, visitor_id: str, key: str, body: AddListingItem
 ) -> DraftView:
     """The listing at ``body``'s values added to the visitor's draft, made on its first
-    add: a model item with revision 1, titled as the listing. Refusals: 404
+    add: a model item with revision 1, titled as the listing. A retry of a committed add
+    (the same key) answers its order as it is now and does nothing else. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 409 ``draft_changed``."""
+    ``name`` and ``reason``), 422 ``draft_full``, 409 ``draft_changed``."""
     orders = _orders(state)
+    asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
+    reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
+    if reply is not None:
+        return await _answer(state, visitor_id, reply)
     listing, resolved = await checked_choice(orders, body)
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     by = visitor_actor(visitor)
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])
-    asked = {"visitor": visitor.id, **body.model_dump(mode="json")}
-    entry = NewModelItem(resolved=resolved, quantity=body.quantity, title=listing.title)
-    added: list[OrderItem] = []
+    entry = NewModelItem(
+        resolved=resolved,
+        quantity=body.quantity,
+        title=listing.title,
+        storefront_offered=tuple(listing.params),
+    )
 
-    def write() -> None:
+    def write() -> Replay:
         # Outside the ledger's transaction: two first adds at once make one draft.
         draft = orders.lifecycle.ensure_draft(visitor.id, by, currency=currency)
+        changes: list[tuple[Order, list[OrderItem]]] = []
 
         def add(conn: Any) -> Replay:
-            added.extend(
-                orders.lifecycle.add_items(draft.id, by, [entry], cart_of=visitor.id, conn=conn)
-            )
-            return Replay(200, {"order_id": draft.id, "item_id": added[0].id})
+            items = orders.lifecycle.add_items(draft.id, by, [entry], cart_of=visitor.id, conn=conn)
+            # Under the order's lock, which the add took: a full draft takes nothing.
+            if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
+                raise _draft_full()
+            order = orders.store.order(draft.id, conn=conn)
+            assert order is not None
+            changes.append((order, items))
+            return Replay(200, {"order_id": draft.id, "item_id": items[0].id})
 
         with state.projection.pool.connection() as conn:
-            idempotent_write(conn, "storefront", key, ADD_ROUTE, asked, lambda: add(conn))
-        if added:
-            orders.lifecycle.told(draft.id, added)
+            done = idempotent_write(conn, "storefront", key, ADD_ROUTE, asked, lambda: add(conn))
+        for order, items in changes:
+            orders.lifecycle.told(order, items)
+        return done
 
     try:
-        await asyncio.to_thread(write)
+        reply = await asyncio.to_thread(write)
     except LifecycleError:
         raise _draft_changed() from None
-    order = await asyncio.to_thread(orders.store.draft_of, visitor.id)
-    if order is None:
-        raise _draft_changed()
-    return await _view(state, order)
+    return await _answer(state, visitor_id, reply)
 
 
 async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) -> DraftView:
     """The item taken off the visitor's draft. 404 ``item_not_found`` unless the item is
     on the draft that visitor owns, checked under the order's lock; 409 ``draft_changed``
-    for an item the lifecycle keeps."""
+    for an item the lifecycle keeps. A retry of a committed delete (the same key) answers
+    its order as it is now and does nothing else."""
     if ITEM_ID.fullmatch(item_id) is None:
         raise item_not_found()
     orders = _orders(state)
+    asked = {"visitor": token_sha256(visitor_id), "item_id": item_id}
+    reply = await asyncio.to_thread(_stored, state, key, REMOVE_ROUTE, asked)
+    if reply is not None:
+        return await _answer(state, visitor_id, reply)
 
-    def write() -> Order | None:
+    def write() -> Replay:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
         draft = None if visitor is None else orders.store.draft_of(visitor.id)
         if visitor is None or draft is None:
             raise item_not_found()
         by = visitor_actor(visitor)
-        asked = {"visitor": visitor.id, "item_id": item_id}
-        removed = False
+        changes: list[Order] = []
 
         def remove(conn: Any) -> Replay:
-            nonlocal removed
             orders.lifecycle.delete_item(draft.id, item_id, by, cart_of=visitor.id, conn=conn)
-            removed = True
+            order = orders.store.order(draft.id, conn=conn)
+            assert order is not None
+            changes.append(order)
             return Replay(200, {"order_id": draft.id, "item_id": item_id})
 
         with state.projection.pool.connection() as conn:
-            idempotent_write(conn, "storefront", key, REMOVE_ROUTE, asked, lambda: remove(conn))
-        if removed:
-            orders.lifecycle.told(draft.id)
-        return orders.store.draft_of(visitor.id)
+            done = idempotent_write(
+                conn, "storefront", key, REMOVE_ROUTE, asked, lambda: remove(conn)
+            )
+        for order in changes:
+            orders.lifecycle.told(order)
+        return done
 
     try:
-        order = await asyncio.to_thread(write)
+        reply = await asyncio.to_thread(write)
     except LifecycleError as error:
         if error.not_found:
             raise item_not_found() from None
         raise _draft_changed() from None
-    if order is None:
-        raise _draft_changed()
-    return await _view(state, order)
+    return await _answer(state, visitor_id, reply)

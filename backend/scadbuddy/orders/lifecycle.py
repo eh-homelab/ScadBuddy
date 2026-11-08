@@ -342,6 +342,8 @@ class NewItem:
 class NewModelItem(NewItem):
     resolved: ResolvedReference
     output_id: str | None = None
+    #: The parameter names a storefront listing offered (#5282); None for any other add.
+    storefront_offered: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -599,12 +601,11 @@ class Lifecycle:
                 ),
             )
 
-    def told(self, order_id: str, items: Sequence[OrderItem] = ()) -> None:
+    def told(self, order: Order, items: Sequence[OrderItem] = ()) -> None:
         """Tell the bus of a transition that ran in the caller's transaction (``conn``),
-        once that has committed: the order as it reads now, and ``items``."""
-        order = self.store.order(order_id)
-        if order is not None:
-            self._told(_Change(order, [(item, None) for item in items]))
+        once that has committed: ``order`` as the caller read it inside that transaction
+        (so a later change, a submit among them, never colours the event), and ``items``."""
+        self._told(_Change(order, [(item, None) for item in items]))
 
     def _lock(self, conn: Conn, order_id: str) -> Order:
         try:
@@ -2845,6 +2846,7 @@ class Lifecycle:
             notes=entry.notes,
             sku=entry.sku,
             origin_archive_ids=entry.origin_archive_ids,
+            storefront_offered=entry.storefront_offered,
         )
         self._added(conn, order, item, by, after_acceptance)
         item, _ = self._revise(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -15,10 +16,15 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
+from scadbuddy.core.events import Event, EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.orders import lifecycle as lifecycle_module
 from scadbuddy.orders.component import ORDERS, OrdersComponent
-from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.lifecycle import Lifecycle, NewModelItem
+from scadbuddy.orders.models import Order
+from scadbuddy.orders.storefront import drafts as drafts_module
+from scadbuddy.orders.storefront.inputs import listing_reference
 from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingSnapshot
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
@@ -189,7 +195,8 @@ def test_add_to_order_makes_revision_one(
             "kind": "model",
             "title": "A demo box",
             "quantity": 2,
-            "inputs": {"width": 40, "height": 5},
+            # Only what the listing offered: never its locks or the template's defaults.
+            "inputs": {"width": 40},
             "notes": None,
             "attachments": [],
         }
@@ -227,7 +234,7 @@ def test_a_stale_listing_is_409_and_the_item_keeps_its_revision(
     r = crud.post("/draft/items", json=add_body(listing, {"width": 41}), key="b2")
     assert r.status_code == 409 and r.json()["type"] == f"{STOREFRONT_PROBLEMS}listing_changed"
     [item] = crud.get("/draft").json()["items"]
-    assert item["inputs"] == {"width": 40, "height": 5}
+    assert item["inputs"] == {"width": 40}
 
 
 def test_another_visitor_cannot_see_or_remove_my_item(
@@ -362,3 +369,175 @@ def test_the_add_is_the_visitors_on_the_audit_line(
     assert len(added) == 1
     assert added[0].by.kind == "visitor"
     assert (added[0].by.principal or "").startswith("storefront_visitor:")
+
+
+# -- fix round 1 ---------------------------------------------------------------------------
+
+
+def the_draft(api: TestClient) -> Order:
+    with _state(api).projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM orders WHERE source = 'storefront' AND submitted_at IS NULL"
+        ).fetchone()
+    assert row is not None
+    order = _orders(api).store.order(row["id"])
+    assert order is not None
+    return order
+
+
+def test_an_item_not_from_a_listing_shows_no_inputs(
+    crud: CrudCaller, api: TestClient, owner_lifecycle: Lifecycle, listing: Listing
+) -> None:
+    crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="m1")
+    draft = the_draft(api)
+    resolved = listing_reference(listing, {"width": 30, "height": 5}, {}, filaments={})
+    owner_lifecycle.add_items(
+        draft.id, draft.created_by, [NewModelItem(resolved=resolved, quantity=1)]
+    )
+    items = crud.get("/draft").json()["items"]
+    assert [i["inputs"] for i in items] == [{"width": 40}, None]
+
+
+def test_a_retried_add_replays_whatever_changed_since(
+    crud: CrudCaller, listing: Listing, republish: Callable[[], Listing]
+) -> None:
+    first = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="n1")
+    republish()
+    again = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="n1")
+    assert (again.status_code, again.json()) == (200, first.json())
+
+
+def test_a_retried_add_makes_no_draft(crud: CrudCaller, api: TestClient, listing: Listing) -> None:
+    crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="o1")
+    draft = the_draft(api)
+    # The sweep takes the draft.
+    with _state(api).projection.pool.connection() as conn:
+        conn.execute("DELETE FROM orders WHERE id = %s", (draft.id,))
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="o1")
+    assert r.status_code == 409 and r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_changed"
+    assert crud.get("/draft").json() is None
+
+
+def test_a_retried_removal_replays_whatever_changed_since(
+    crud: CrudCaller, api: TestClient, listing: Listing
+) -> None:
+    draft = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="p1").json()
+    item_id = draft["items"][0]["id"]
+    first = crud.delete(f"/draft/items/{item_id}", key="p2")
+    assert first.status_code == 200
+    # The draft is submitted meanwhile (as Task 12's submit leaves it): the retry still
+    # answers the order its removal named.
+    customer = _orders(api).store.insert_customer(
+        display_name="Visitor", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    with _state(api).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE orders SET submitted_at = now(), number = 9001, customer_id = %s WHERE id = %s",
+            (customer.id, draft["id"]),
+        )
+    again = crud.delete(f"/draft/items/{item_id}", key="p2")
+    assert (again.status_code, again.json()["id"]) == (200, draft["id"])
+
+
+@pytest.fixture
+def heard(monkeypatch: pytest.MonkeyPatch) -> list[OrderChanged | OrderItemChanged]:
+    """Every order event the lifecycle publishes, as it publishes it: the bus itself
+    delivers later, on its own thread."""
+    events: list[OrderChanged | OrderItemChanged] = []
+
+    def publish(bus: EventBus | None, event: Event) -> None:
+        if isinstance(event, OrderChanged | OrderItemChanged):
+            events.append(event)
+        emit(bus, event)
+
+    monkeypatch.setattr(lifecycle_module, "emit", publish)
+    return events
+
+
+def test_an_add_tells_the_bus_of_a_cart_once(
+    crud: CrudCaller, listing: Listing, heard: list[OrderChanged | OrderItemChanged]
+) -> None:
+    crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="q1")
+    # The draft's creation, then the add: every event a cart's.
+    assert [(e.kind, e.cart) for e in heard] == [
+        ("order.changed", True),
+        ("order.changed", True),
+        ("order_item.changed", True),
+    ]
+    heard.clear()
+    # A replay and a refused add tell nothing.
+    crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="q1")
+    crud.post("/draft/items", json=add_body(listing, {"width": 99}), key="q2")
+    assert heard == []
+
+
+def test_a_removal_tells_the_bus_of_a_cart_once(
+    crud: CrudCaller, listing: Listing, heard: list[OrderChanged | OrderItemChanged]
+) -> None:
+    draft = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="r1").json()
+    heard.clear()
+    crud.delete(f"/draft/items/{draft['items'][0]['id']}", key="r2")
+    assert [(e.kind, e.cart) for e in heard] == [("order.changed", True)]
+    heard.clear()
+    crud.delete(f"/draft/items/{draft['items'][0]['id']}", key="r2")
+    assert heard == []
+
+
+def test_the_tell_uses_the_order_the_transaction_left(
+    crud: CrudCaller,
+    api: TestClient,
+    listing: Listing,
+    heard: list[OrderChanged | OrderItemChanged],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="s1")
+    heard.clear()
+    store = _orders(api).store
+    read = store.order
+
+    def submitted_after(order_id: str, *, conn: Any = None) -> Order | None:
+        # Read outside a transaction, the order is already submitted (a submit that
+        # committed right after the add).
+        order = read(order_id, conn=conn)
+        if conn is None and order is not None:
+            return order.model_copy(update={"submitted_at": datetime.now(UTC)})
+        return order
+
+    monkeypatch.setattr(store, "order", submitted_after)
+    crud.post("/draft/items", json=add_body(listing, {"width": 41}), key="s2")
+    assert heard and all(e.cart for e in heard)
+
+
+def test_a_full_draft_takes_no_item(
+    crud: CrudCaller, listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(drafts_module, "MAX_DRAFT_ITEMS", 2)
+    for n in range(2):
+        r = crud.post("/draft/items", json=add_body(listing, {"width": 40 + n}), key=f"t{n}")
+        assert r.status_code == 200, r.text
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 50}), key="t9")
+    assert r.status_code == 422
+    assert (r.json()["type"], r.json()["limit"]) == (f"{STOREFRONT_PROBLEMS}draft_full", 2)
+    assert len(crud.get("/draft").json()["items"]) == 2
+
+
+def test_the_view_reads_the_attachments_once(
+    crud: CrudCaller, api: TestClient, listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for n in range(3):
+        crud.post("/draft/items", json=add_body(listing, {"width": 40 + n}), key=f"u{n}")
+    store = _orders(api).store
+    reads: list[str] = []
+    every = store.attachments
+
+    def counted(order_id: str, *, conn: Any = None) -> Any:
+        reads.append(order_id)
+        return every(order_id, conn=conn)
+
+    def per_item(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("one query per item")
+
+    monkeypatch.setattr(store, "attachments", counted)
+    monkeypatch.setattr(store, "subject_attachments", per_item)
+    assert len(crud.get("/draft").json()["items"]) == 3
+    assert len(reads) == 1

@@ -1099,19 +1099,22 @@ class OrderStore:
         sku: str | None = None,
         approval: Approval | None = None,
         origin_archive_ids: Sequence[int] = (),
+        storefront_offered: Sequence[str] | None = None,
     ) -> OrderItem:
         """Appended after the order's items; ``title`` defaults to the template's name
         and is required for a ``request`` item, which has no reference yet. ``approval``
-        None picks the kind's default: a request is approved design first."""
+        None picks the kind's default: a request is approved design first.
+        ``storefront_offered`` names the parameters a storefront listing offered (#5282)."""
         name = title or (reference.template_name if reference is not None else None)
         if name is None:
             raise ValueError("an item without a reference needs a title")
         row = conn.execute(
             "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
             " approval, slug, commit, inputs, libraries, template_name, render_key, colours,"
-            " output_id, origin_archive_ids) VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0)"
+            " output_id, origin_archive_ids, storefront_offered)"
+            " VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0)"
             " FROM order_items WHERE order_id = %s),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
@@ -1130,10 +1133,23 @@ class OrderStore:
                 Jsonb(_dump(list(colours))),
                 output_id,
                 list(origin_archive_ids),
+                None if storefront_offered is None else list(storefront_offered),
             ),
         ).fetchone()
         assert row is not None
         return _item_of(row)
+
+    def storefront_offered(
+        self, order_id: str, *, conn: Conn | None = None
+    ) -> dict[str, list[str] | None]:
+        """Each item of the order, by id, and the parameter names a storefront listing
+        offered when it was added (None for an item not added from a listing)."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT id, storefront_offered FROM order_items WHERE order_id = %s",
+                (order_id,),
+            ).fetchall()
+        return {row["id"]: row["storefront_offered"] for row in rows}
 
     def insert_custom_item(
         self,

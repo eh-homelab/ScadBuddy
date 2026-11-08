@@ -28,7 +28,7 @@ class Visitor:
     last_seen_at: datetime
 
 
-def _hash(visitor_id: str) -> str:
+def token_sha256(visitor_id: str) -> str:
     """The id's sha256 (hex); ``ValueError`` for an id not of the edge's shape."""
     if not VISITOR_ID.fullmatch(visitor_id):
         raise ValueError("a visitor id is 43 URL-safe base64 characters")
@@ -51,7 +51,7 @@ class VisitorStore:
                 "INSERT INTO storefront_visitors (token_sha256) VALUES (%s)"
                 " ON CONFLICT (token_sha256) DO UPDATE SET last_seen_at = now()"
                 f" RETURNING {_VISITOR}",
-                (_hash(visitor_id),),
+                (token_sha256(visitor_id),),
             ).fetchone()
         assert row is not None
         return Visitor(**row)
@@ -67,6 +67,6 @@ class VisitorStore:
                 " SELECT * FROM touched UNION ALL"
                 f" SELECT {_VISITOR} FROM storefront_visitors WHERE token_sha256 = %(hash)s"
                 " AND NOT EXISTS (SELECT 1 FROM touched)",
-                {"hash": _hash(visitor_id)},
+                {"hash": token_sha256(visitor_id)},
             ).fetchone()
         return None if row is None else Visitor(**row)

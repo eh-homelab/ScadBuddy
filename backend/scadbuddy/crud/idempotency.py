@@ -8,7 +8,8 @@ only ever inserted whole, with the reply, and commits with the write or not at a
 rolled-back write leaves no reply to replay. Two requests with one key are serialised by a
 transaction-scoped advisory lock on the key, so the second waits and replays the first.
 Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record` are the
-two halves, for a route whose write cannot be one callable.
+two halves, for a route whose write cannot be one callable. `stored` reads a reply with no
+lock, for a route that answers a retry before it does any other work.
 """
 
 from __future__ import annotations
@@ -80,6 +81,16 @@ def idempotent(
         "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
         (LOCK_CLASS, f"{caller}\x1f{key}"),
     )
+    return stored(conn, caller, key, route, body)
+
+
+def stored(
+    conn: Connection[DictRow], caller: CrudCaller, key: str, route: str, body: Any
+) -> Replay | None:
+    """The reply stored under ``key``, read with no lock: what a route looks up before
+    any other work, so a retry gets the first answer whatever changed since. None when
+    the key is new, or its write has not committed yet; then `idempotent_write` decides.
+    422 for a key used with another route or body."""
     row = conn.execute(
         "SELECT route, body_sha256, status, body FROM crud_requests WHERE caller = %s AND key = %s",
         (caller, key),
