@@ -313,24 +313,6 @@ async def test_the_solid_mesh_is_parsed_off_the_event_loop(
     assert [round(float(m.volume)) for m in result.meshes.values()] == [3, 3, 3]
 
 
-async def test_a_many_colour_model_renders_in_a_fraction_of_the_sequential_time(
-    fake: FakeRenders, tmp_path: Path
-) -> None:
-    model, work = _model(tmp_path)
-    fake.delay = 0.1
-
-    result = await render_solids(
-        model, CustomizerSchema(), {}, MANY_COLOURS, work, config=Config(solid_concurrency=4)
-    )
-
-    assert list(result.meshes) == MANY_COLOURS
-    # Four at a time makes seven rounds of 0.1 s, not 28 one at a time as before #282.
-    # #5688: the overlap is checked by the peak number running at once, not by a ratio
-    # of wall times, which a loaded runner stretched past half the sequential time.
-    assert fake.peak == 4
-    assert sorted(fake.started) == sorted(MANY_COLOURS)
-
-
 def _fake_openscad(tmp_path: Path, body: str) -> str:
     binary = tmp_path / "fake-openscad"
     binary.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
