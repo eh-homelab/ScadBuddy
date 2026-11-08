@@ -332,6 +332,24 @@ async def test_an_unlinked_printers_typed_intervals_count(
     assert rate.maintenance_per_hour == "0.12"
 
 
+async def test_a_relinked_printer_counts_no_interval_until_it_is_read_again(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    printers.unlink_bambuddy(printer.id)
+    relinked = printers.link_bambuddy(printer.id, 8)
+    # The old link's interval is not taken for one read from the new link.
+    rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
+    assert rate.intervals == "stored"
+    assert rate.maintenance_per_hour == "0"
+    assert [part.why for part in rate.maintenance] == ["not_read"]
+
+
 async def test_bambuddys_intervals_are_kept_to_a_tenth_of_an_hour(
     store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
 ) -> None:

@@ -637,8 +637,9 @@ class MachineRates:
             if row is not None:
                 return row
             if printer_id is None:
-                # A named row gone (the quote's check refuses one): no printer, so the
-                # book's rate, never the default printer's in its place.
+                # A named row gone (the quote's check refuses one, `registry_printer`;
+                # this is one deleted between the check and the run): no printer, so
+                # the book's rate, never the default printer's in its place.
                 return None
         if printer_id is not None:
             return self.printers.by_bambuddy_id(printer_id)
