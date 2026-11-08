@@ -95,7 +95,7 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.totals import balance_due, totals_of
+from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
     EventOutcome,
@@ -480,6 +480,14 @@ def check_submitted(order: Order) -> None:
         raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
 
 
+def check_visitors_cart(order: Order, by: Actor) -> None:
+    """``order_not_submitted`` when anyone but the visitor sets a cart's shipping option or
+    charges (#5281): the back office never acts on a visitor's cart; the storefront sets
+    them as the visitor."""
+    if order.unsubmitted and by.kind != "visitor":
+        raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
+
+
 class Lifecycle:
     def __init__(
         self,
@@ -710,9 +718,12 @@ class Lifecycle:
 
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
-        customer's) and charges while `draft` or `quoted`."""
+        customer's) and charges while `draft` or `quoted`. A cart's charges are the
+        visitor's alone (`order_not_submitted`, ``check_visitors_cart``)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            if edit.charges is not None:
+                check_visitors_cart(order, by)
             self._not_ended(order)
             structural = (
                 edit.charges is not None
@@ -818,9 +829,11 @@ class Lifecycle:
         route after acceptance). An id not in ``storefront_shipping_options`` is a 422
         on ``option_id``; an option that ships needs the order's shipping address
         (`shipping_address_required`), a pickup does not. The audit row is
-        ``shipping.option_set``."""
+        ``shipping.option_set``. A cart's option is the visitor's alone
+        (`order_not_submitted`, ``check_visitors_cart``)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_visitors_cart(order, by)
             self._not_ended(order)
             if order.status not in OPEN_FOR_EDITS:
                 route = (
@@ -1094,7 +1107,8 @@ class Lifecycle:
         (`order_not_editable` past it; `order_not_submitted` on a cart). It cancels the
         open and failed `deposit` requests and clears a waiver; a deposit above what is
         paid opens a `deposit` request for the rest. A pending `deposit` request refuses it
-        (`payment_in_flight`). The same deposit, already asked for, writes nothing."""
+        (`payment_in_flight`). The same deposit, not waived, with no failed deposit request
+        and an open one that already asks for the rest, writes nothing."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
@@ -1225,7 +1239,7 @@ class Lifecycle:
         """The balance a `balance` request that is not cancelled asks of the order, or 0
         when it has no such request or nothing is due (``totals.balance_due``)."""
         found = payments.requests_for_order(conn, order.id)
-        if not any(r.kind == "balance" and r.status != "cancelled" for r in found):
+        if not has_standing_balance(found):
             return 0
         return balance_due(found, totals_of(self.store, conn, order.id).balance_minor)
 

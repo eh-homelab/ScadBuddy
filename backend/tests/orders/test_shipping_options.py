@@ -4,6 +4,7 @@ one that ships needs the order's shipping address, a pickup does not."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
@@ -109,8 +110,41 @@ def test_options_close_with_the_charges_after_quoted(shop: RulesShop) -> None:
 
 def test_a_refusal_on_a_cart_names_the_cart(shop: RulesShop, pool: PgPool) -> None:
     visitor = VisitorStore(pool).ensure("v" * 43)
-    cart = shop.lifecycle.ensure_draft(visitor.id, visitor_actor(visitor), currency="USD")
+    by = visitor_actor(visitor)
+    cart = shop.lifecycle.ensure_draft(visitor.id, by, currency="USD")
     with pytest.raises(LifecycleError) as e:
-        shop.lifecycle.set_shipping_option(cart.id, BY, "post")
+        shop.lifecycle.set_shipping_option(cart.id, by, "post")
     assert e.value.slug == "shipping_address_required"
     assert str(e.value).startswith(f"order cart {cart.id} has no shipping address")
+
+
+def test_the_visitor_sets_the_option_and_charges_on_their_cart(
+    shop: RulesShop, pool: PgPool
+) -> None:
+    visitor = VisitorStore(pool).ensure("v" * 43)
+    by = visitor_actor(visitor)
+    cart = shop.lifecycle.ensure_draft(visitor.id, by, currency="USD")
+    shop.lifecycle.set_shipping_option(cart.id, by, "pickup")
+    assert charges(shop, cart) == [("shipping", "Pickup", 0, "pickup")]
+    rush = ChargeInput(kind="fee", label="Rush", amount_minor=100)
+    shop.lifecycle.edit_order(cart.id, by, OrderEdit(charges=[rush]))
+    assert charges(shop, cart) == [("fee", "Rush", 100, None)]
+
+
+def test_the_back_office_never_sets_a_carts_option_or_charges(
+    shop: RulesShop, pool: PgPool
+) -> None:
+    visitor = VisitorStore(pool).ensure("v" * 43)
+    cart = shop.lifecycle.ensure_draft(visitor.id, visitor_actor(visitor), currency="USD")
+    rush = ChargeInput(kind="fee", label="Rush", amount_minor=100)
+    calls: list[Callable[[], object]] = [
+        lambda: shop.lifecycle.set_shipping_option(cart.id, BY, "pickup"),
+        lambda: shop.lifecycle.edit_order(cart.id, BY, OrderEdit(charges=[rush])),
+    ]
+    for call in calls:
+        with pytest.raises(LifecycleError) as e:
+            call()
+        assert e.value.slug == "order_not_submitted"
+    assert charges(shop, cart) == []
+    # Notes are not a charge: the back office may still write them.
+    assert shop.lifecycle.edit_order(cart.id, BY, OrderEdit(notes="hi")).notes == "hi"

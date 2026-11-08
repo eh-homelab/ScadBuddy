@@ -48,10 +48,15 @@ def item_price(item: OrderItem, quotes: Sequence[Quote]) -> tuple[Money, bool] |
     return newest.unit_price_minor * item.quantity, False
 
 
+def has_standing_balance(requests: Sequence[PaymentRequestView]) -> bool:
+    """The order has a `balance` request that is not cancelled (#5281, gap 2)."""
+    return any(r.kind == "balance" and r.status != "cancelled" for r in requests)
+
+
 def balance_due(requests: Sequence[PaymentRequestView], balance_minor: Money) -> Money:
     """The balance a `balance` request that is not cancelled asks of the order (#5281), or
     0 when it has no such request or nothing is due."""
-    if not any(r.kind == "balance" and r.status != "cancelled" for r in requests):
+    if not has_standing_balance(requests):
         return 0
     return max(balance_minor, 0)
 

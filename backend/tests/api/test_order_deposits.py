@@ -296,6 +296,22 @@ def test_a_cart_is_not_submitted(client: TestClient, cart: str, call: str) -> No
     problem(answer, "order_not_submitted")
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("PUT", "shipping-option", {"option_id": "pickup"}),
+        ("PATCH", "", {"charges": [{"kind": "fee", "label": "Rush", "amount_minor": 100}]}),
+    ],
+)
+def test_the_back_office_sets_no_option_or_charges_on_a_cart(
+    client: TestClient, cart: str, method: str, path: str, body: dict[str, Any]
+) -> None:
+    client.put("/api/v1/settings", json={"storefront_shipping_options": OPTIONS})
+    url = f"/api/v1/orders/{cart}/{path}".rstrip("/")
+    problem(client.request(method, url, json=body), "order_not_submitted")
+    assert detail(client, cart)["charges"] == []
+
+
 PENDING_CALLS: dict[str, tuple[str, str, dict[str, Any] | None]] = {
     "set_deposit": ("PUT", "deposit", {"amount_minor": 500}),
     "apply_policy": ("POST", "deposit/policy", None),

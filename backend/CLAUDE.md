@@ -667,7 +667,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   With the order and its payment requests (`order_totals(..., order=, requests=)`, as `GET
   /orders/{id}` reads them) it also gives `deposit_due_minor` (the deposit less what is
   paid, 0 with none or a waived one) and `shipping_held` (`balance_unpaid`'s rule,
-  `totals.balance_due`); `totals_of`, the lifecycle's read, leaves them at 0 and False.
+  `totals.balance_due` over `has_standing_balance`); `totals_of`, the lifecycle's read,
+  leaves them at 0 and False.
   Deposits, the balance, auto tax and shipping options (#5281, storefront spec §8-§9,
   plan `2026-11-07-storefront-phase-2-payments-deposits.md`, migration
   `…_order_deposits_tax.sql`): `orders.deposit_minor`, `.deposit_waived_reason` and
@@ -686,9 +687,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_not_accepted`), a shipment, or a shipment edit that raises a quantity, is
   `balance_unpaid` (gap 2). The routes that cancel requests (accept, a deposit set or
   applied, an order's cancel, gap 5) run through `Payments.run_closing`, which closes each
-  cancelled request's provider page after the commit and never a kept one's, then
-  `link_pending` links the new request. A storefront cart refuses all five calls
-  (`order_not_submitted`). The tax row is `orders_tax_percent` of the items plus, with
+  cancelled request's provider page after the commit and never a kept one's; accept and
+  the two deposit calls then call `link_pending` to link the new request (an order's
+  cancel opens none and does not). A storefront cart refuses (`order_not_submitted`) a
+  deposit set or applied, both waivers and accept, and refuses its shipping option and its
+  charges (`PATCH` with `charges`) to anyone but the visitor (`check_visitors_cart`): the
+  back office never acts on a visitor's cart. The tax row is `orders_tax_percent` of the items plus, with
   `orders_tax_shipping`, the shipping charges, rounded half up; a typed `tax` charge
   removes it (gap 6). `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
