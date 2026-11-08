@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../../api/client'
 import { mockSettings, resetMockState } from '../../../mocks/handlers'
-import { mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
+import { FAKE_PROVIDER, mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
 import { ORDER_ACCEPTED } from '../../../mocks/features/orders/state'
 import { enter, region, renderSettingsSection } from '../testing'
 import { Component as Payments } from './payments'
@@ -108,6 +108,14 @@ describe('Settings → Payments (#4957)', () => {
     renderSettingsSection(<Payments />, { route })
     expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
     expect(screen.queryByText(/Currency not checked/)).not.toBeInTheDocument()
+  })
+
+  it('a connect takes reports_currency from the provider, not a constant (#5752 review)', async () => {
+    const body = { settings: { account: 'a' }, secrets: { signing_secret: 's' } }
+    const connected = await api.connectPaymentProvider('fake', body)
+    const [listed] = await api.paymentProviders()
+    expect(connected.reports_currency).toBe(listed?.reports_currency)
+    expect(FAKE_PROVIDER.reports_currency).toBe(connected.reports_currency)
   })
 
   it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {

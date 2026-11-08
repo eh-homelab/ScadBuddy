@@ -249,7 +249,9 @@ counted. Shapes:
 at maziggy/bambuddy@2f87192. Each read keeps the intervals of the tasks it counted, to the
 tenth of an hour (an interval that rounds to nothing is not counted), and clears the
 rest, so the stored rate (Bambuddy unreachable, the money view) is the rate last read.
-Once the printer is unlinked, the intervals sent with its inputs are kept as typed.
+Unlinking the printer keeps the intervals last read as typed ones, so a later link counts
+none of them until Bambuddy is read again; the intervals sent with its inputs are kept
+as typed.
 
 ### 6.2 The rate
 

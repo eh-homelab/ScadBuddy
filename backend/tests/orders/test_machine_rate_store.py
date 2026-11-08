@@ -332,6 +332,60 @@ async def test_an_unlinked_printers_typed_intervals_count(
     assert rate.maintenance_per_hour == "0.12"
 
 
+async def test_a_relinked_printer_counts_no_interval_until_it_is_read_again(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    printers.unlink_bambuddy(printer.id)
+    relinked = printers.link_bambuddy(printer.id, 8)
+    # The old link's interval is not taken for one read from the new link.
+    rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
+    assert rate.intervals == "stored"
+    assert rate.maintenance_per_hour == "0"
+    assert [part.why for part in rate.maintenance] == ["not_read"]
+
+
+async def test_a_read_that_ends_after_an_unlink_keeps_nothing(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    printers.unlink_bambuddy(printer.id)
+    # A live read of Bambuddy printer 7 that began before the unlink lands after it.
+    store.remember_intervals(
+        printer.id,
+        7,
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")],
+    )
+    relinked = printers.link_bambuddy(printer.id, 7)
+    rate = await rates(store, printers, settings_store).breakdown(relinked, live=False)
+    assert [part.why for part in rate.maintenance] == ["not_read"]
+
+
+def test_an_unlink_of_a_printer_never_linked_leaves_its_rows_alone(
+    store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    printer = lan_printer(printers)
+    store.replace(printer.id, INPUTS)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE printer_maintenance_costs SET interval_read_at = now() WHERE printer = %s",
+            (uuid.UUID(printer.id),),
+        )
+    printers.unlink_bambuddy(printer.id)
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT interval_read_at FROM printer_maintenance_costs WHERE printer = %s",
+            (uuid.UUID(printer.id),),
+        ).fetchone()
+    assert row is not None and row["interval_read_at"] is not None
+
+
 async def test_bambuddys_intervals_are_kept_to_a_tenth_of_an_hour(
     store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
 ) -> None:
@@ -396,6 +450,7 @@ def test_keeping_intervals_waits_for_a_replace_of_the_same_printer(
     def remember() -> None:
         store.remember_intervals(
             printer.id,
+            7,
             [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")],
         )
         done.set()
