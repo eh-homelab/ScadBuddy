@@ -493,10 +493,17 @@ class PayPalProvider:
         self, credential: Credential, event_id: str, order: dict[str, Any]
     ) -> ProviderEvent:
         """Capture the approved order. The capture's own events record what it did, so
-        this event records nothing itself."""
+        this event records nothing itself. The event is a snapshot: a retry of an
+        approval sent before a cancel carries no mark. So the order is read again just
+        before the capture, and captured only while it is ``APPROVED`` with no unit
+        marked cancelled."""
         order_id = _path_id(order["id"])
         other = ProviderEvent(event_id=event_id, kind="other", provider_ref=order_id)
-        if any(unit.get("custom_id") == CANCELLED for unit in order["purchase_units"]):
+        now = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        units = now.get("purchase_units")
+        if now.get("status") != "APPROVED" or not isinstance(units, list):
+            return other
+        if any(isinstance(u, dict) and u.get("custom_id") == CANCELLED for u in units):
             return other
         path = f"/v2/checkout/orders/{order_id}/capture"
         try:

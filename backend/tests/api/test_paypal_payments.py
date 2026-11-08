@@ -63,6 +63,9 @@ def paypal() -> Iterator[respx.MockRouter]:
             201, json=payload("api.order.captured.json")
         )
         router.patch(f"/v2/checkout/orders/{ORDER}", name="patch").respond(204)
+        router.get(f"/v2/checkout/orders/{ORDER}", name="order").respond(
+            json=payload("api.order.approved.json")
+        )
         router.get(f"/v2/payments/captures/{CAPTURE}").respond(json=payload("api.capture.json"))
         yield router
 
@@ -152,9 +155,25 @@ def test_cancelling_a_request_marks_its_order(client: TestClient, paypal: respx.
     assert cancelled.status_code == 200, cancelled.text
     [patch] = json.loads(paypal["patch"].calls.last.request.content)
     assert patch["value"] == CANCELLED
-    # PayPal's approval of the marked order is never captured.
-    send(client, "checkout.order.approved.cancelled.json")
+    # PayPal's approval of the marked order is never captured, even a retry of one sent
+    # before the cancel, whose payload has no mark: the order is read again first.
+    paypal["order"].respond(json=payload("api.order.approved.cancelled.json"))
+    send(client, "checkout.order.approved.json")
     assert not paypal["capture"].called
+
+
+def test_money_paid_on_a_cancelled_request_is_still_recorded(
+    client: TestClient, paypal: respx.MockRouter
+) -> None:
+    """A capture that completed after the request was cancelled (approved and captured
+    before the cancel reached PayPal) is real money: it is recorded as a payment and the
+    request reads paid, never dropped."""
+    order_id, req = paypal_request(client)
+    client.post(f"/api/v1/orders/{order_id}/payment-requests/{req['id']}/cancel")
+    assert send(client, "payment.capture.completed.json").json() == {"outcome": "recorded"}
+    found = detail(client, order_id)
+    assert [p["amount_minor"] for p in found["payments"]] == [700]
+    assert found["payment_requests"][0]["status"] == "paid"
 
 
 def test_paypal_down_while_verifying_is_503_and_paypal_retries(

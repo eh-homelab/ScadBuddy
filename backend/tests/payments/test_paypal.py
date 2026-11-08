@@ -94,6 +94,10 @@ def pp() -> Any:
         router.post("/v1/notifications/verify-webhook-signature", name="verify").respond(
             json=payload("api.verify.success.json")
         )
+        # The order as it is just before a capture.
+        router.get(f"/v2/checkout/orders/{ORDER}", name="order").respond(
+            json=payload("api.order.approved.json")
+        )
         yield router
 
 
@@ -528,9 +532,39 @@ async def test_an_approved_order_is_captured_and_records_nothing_itself(
 
 
 async def test_a_cancelled_order_is_never_captured(paypal: PayPalProvider, pp: Any) -> None:
+    pp["order"].respond(json=payload("api.order.approved.cancelled.json"))
     # No capture route: a capture call would fail the test.
     event = await parse(paypal, "checkout.order.approved.cancelled.json")
     assert (event.kind, event.provider_ref) == ("other", ORDER)
+
+
+async def test_an_approval_sent_before_the_cancel_is_never_captured(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    """The event is a snapshot: a retry of an approval PayPal sent before the cancel
+    carries no mark. The order read just before the capture has it."""
+    pp["order"].respond(json=payload("api.order.approved.cancelled.json"))
+    # No capture route: a capture call would fail the test.
+    event = await parse(paypal, "checkout.order.approved.json")
+    assert (event.kind, event.provider_ref) == ("other", ORDER)
+    assert pp["order"].called
+
+
+@pytest.mark.parametrize("status", ["COMPLETED", "VOIDED", "PAYER_ACTION_REQUIRED"])
+async def test_an_order_no_longer_approved_is_not_captured(
+    paypal: PayPalProvider, pp: Any, status: str
+) -> None:
+    pp["order"].respond(json=payload("api.order.approved.json") | {"status": status})
+    event = await parse(paypal, "checkout.order.approved.json")
+    assert (event.kind, event.provider_ref) == ("other", ORDER)
+
+
+async def test_paypal_not_answering_the_order_read_is_unavailable(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    pp["order"].respond(500, json={})
+    with pytest.raises(ProviderUnavailableError):
+        await parse(paypal, "checkout.order.approved.json")
 
 
 @pytest.mark.parametrize(
