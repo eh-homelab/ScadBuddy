@@ -10,6 +10,7 @@ import hashlib
 import json
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.orders.storefront import renders as renders_module
 from scadbuddy.orders.storefront.renders import RENDER_FAILED, store_render
 from scadbuddy.render.job_models import Job, QueueFullError, now
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
-from scadbuddy.workflows.commands import TemporalUnavailableError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalUnavailableError,
+    TemporalUnreachableError,
+)
 from tests.api.conftest import set_fake_env
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
@@ -442,12 +451,29 @@ def ledger_rows(crud: CrudCaller, key: str) -> int:
     return n
 
 
-@pytest.mark.parametrize("failure", [TemporalUnavailableError("down"), RuntimeError("unexpected")])
-def test_a_failed_submit_costs_no_render(
+def unreachable() -> Exception:
+    """Temporal's first connect failed: `start_command` raises this with the lazy
+    client's `RuntimeError` as its cause, and nothing was sent."""
+    error = TemporalUnavailableError("down")
+    error.__cause__ = RuntimeError("no connection")
+    return error
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        unreachable,
+        lambda: TemporalUnreachableError("down"),
+        lambda: SnapshotUnavailableError("down"),
+        lambda: SnapshotPendingError("down", retry_after=3),
+        lambda: StoreFullError("down"),
+    ],
+)
+def test_a_submit_that_never_started_costs_no_render(
     crud: CrudCaller,
     listing: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
-    failure: Exception,
+    failure: Any,
 ) -> None:
     """A render that never started is not charged, and the same key sent again is a new
     try: the ledger holds no reply naming the deleted row."""
@@ -455,14 +481,14 @@ def test_a_failed_submit_costs_no_render(
     real = render.submit
 
     async def fails(*_args: Any, **_kwargs: Any) -> Job:
-        raise failure
+        raise failure()
 
     monkeypatch.setattr(render, "submit", fails)
     body = render_body(listing, {"width": 71})
     r = crud.post("/renders", json=body, key="k-failed")
     assert r.status_code == 503, r.text
     assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_unavailable"
-    assert "down" not in r.text and "unexpected" not in r.text
+    assert "down" not in r.text
     assert counted_rows(crud, TOKEN_A) == 0 and counted_rows(crud, TOKEN_A, counted=False) == 0
     assert ledger_rows(crud, "k-failed") == 0
     monkeypatch.setattr(render, "submit", real)
@@ -470,3 +496,107 @@ def test_a_failed_submit_costs_no_render(
     assert again.status_code == 202, again.text
     assert counted_rows(crud, TOKEN_A) == 1
     assert wait_done(crud, TOKEN_A, again.json()["id"])["status"] == "done"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda: TemporalUnavailableError("down"),
+        lambda: CommandStillAcceptingError("down"),
+        lambda: CommandClosedError("down"),
+        lambda: RuntimeError("down"),
+    ],
+)
+def test_a_submit_that_may_have_started_keeps_its_row(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Any,
+) -> None:
+    """The job may exist: the counted row and the saved reply stay, so the same key sent
+    again joins the job and is counted once."""
+    render = _state(crud.api).render
+    real = render.submit
+
+    async def fails(*_args: Any, **_kwargs: Any) -> Job:
+        raise failure()
+
+    monkeypatch.setattr(render, "submit", fails)
+    body = render_body(listing, {"width": 72})
+    r = crud.post("/renders", json=body, key="k-maybe")
+    assert r.status_code == 503, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_unavailable"
+    assert counted_rows(crud, TOKEN_A) == 1 and ledger_rows(crud, "k-maybe") == 1
+    monkeypatch.setattr(render, "submit", real)
+    again = crud.post("/renders", json=body, key="k-maybe")
+    assert again.status_code == 202, again.text
+    assert counted_rows(crud, TOKEN_A) == 1
+    assert crud.get(f"/renders/{again.json()['id']}").status_code == 200
+    wait_done(crud, TOKEN_A, again.json()["id"])
+
+
+class Counted:
+    """`part_volumes` counted, and slowed by ``delay`` seconds."""
+
+    def __init__(self, delay: float = 0.0) -> None:
+        self.calls = 0
+        self.delay = delay
+        self.real = renders_module.part_volumes
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        time.sleep(self.delay)
+        return self.real(*args, **kwargs)
+
+
+def parts_record(crud: CrudCaller, job_id: str) -> dict[str, Any] | None:
+    with _state(crud.api).projection.pool.connection() as conn:
+        row: dict[str, Any] | None = conn.execute(
+            "SELECT parts, error FROM storefront_job_parts WHERE job_id = %s", (job_id,)
+        ).fetchone()
+    return row
+
+
+def test_two_concurrent_estimates_analyse_once(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 62})
+    counted = Counted(delay=1.0)
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    with ThreadPoolExecutor(2) as pool:
+        answers = list(pool.map(lambda _n: crud.get(f"/renders/{job['id']}/estimate"), range(2)))
+    assert [a.status_code for a in answers] == [200, 200], [a.text for a in answers]
+    assert answers[0].json() == answers[1].json()
+    assert counted.calls == 1
+
+
+def test_a_failed_analysis_is_not_tried_again(
+    crud: CrudCaller, corrupt_done_job: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counted = Counted()
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    for _ in range(2):
+        r = crud.get(f"/renders/{corrupt_done_job}/estimate")
+        assert r.status_code == 422, r.text
+        assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_unavailable"
+    assert counted.calls == 1
+    record = parts_record(crud, corrupt_done_job)
+    assert record is not None and record["parts"] is None and record["error"] == "unreadable"
+
+
+def test_an_analysis_past_the_timeout_is_recorded(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 63})
+    state = _state(crud.api)
+    quick = state.settings.model_copy(update={"render_timeout": 0.3})
+    monkeypatch.setattr(state, "settings", quick)
+    counted = Counted(delay=1.5)
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    for _ in range(2):
+        r = crud.get(f"/renders/{job['id']}/estimate")
+        assert r.status_code == 422, r.text
+        assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_unavailable"
+    assert counted.calls == 1
+    record = parts_record(crud, job["id"])
+    assert record is not None and record["error"] == "timeout"

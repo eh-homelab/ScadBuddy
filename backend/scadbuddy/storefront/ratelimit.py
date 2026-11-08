@@ -36,7 +36,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
-from scadbuddy.core.proxies import Network, client_address, plain_address
+from scadbuddy.core.proxies import IPV6_PREFIX, Network, client_address
+from scadbuddy.core.proxies import client_key as client_key  # shared with the CRUD side
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 
 WINDOW: Final = 60.0
@@ -44,8 +45,6 @@ READ_LIMIT: Final = 120
 WRITE_LIMIT: Final = 30
 #: The most clients the table holds.
 MAX_CLIENTS: Final = 50_000
-#: An IPv6 client is its /64.
-IPV6_PREFIX: Final = 64
 #: Past `MAX_PER_PREFIX` /64s of one /48, the next ones share the /48's entry.
 IPV6_ALLOCATION: Final = 48
 MAX_PER_PREFIX: Final = 64
@@ -58,21 +57,6 @@ RATE_LIMITED: Final = f"{STOREFRONT_PROBLEMS}rate_limited"
 _READS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 #: The key of a request with no client address at all.
 _UNKNOWN: Final = "unknown"
-
-
-def client_key(address: str) -> str:
-    """The key a client is counted under: an IPv4 address whole (an IPv4-mapped IPv6
-    one too), an IPv6 address as its /64, and anything else as it is."""
-    plain = plain_address(address.strip().removeprefix("[").removesuffix("]"))
-    try:
-        ip = ipaddress.ip_address(plain)
-    except ValueError:
-        return address
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            return str(ip.ipv4_mapped)
-        return str(ipaddress.IPv6Network((ip, IPV6_PREFIX), strict=False))
-    return str(ip)
 
 
 def _allocation(key: str) -> str | None:

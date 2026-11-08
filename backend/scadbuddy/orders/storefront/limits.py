@@ -9,6 +9,11 @@ rows still open across every visitor against ``storefront_render_concurrency``. 
 transaction-scoped advisory locks on the visitor, on the client and on the open renders,
 always in that order, so two requests cannot both pass one limit.
 
+A client is `core/proxies.py` `client_key` of the address the edge resolved: an IPv6
+address counts as its /64, as the edge's request limit counts it. A visitor with many
+addresses or cookies still meets the shop-wide concurrency limit, which is the hard bound
+on the render work visitors can cause.
+
 A row names its job once the submit answers (`attach`); a visitor reads only the jobs its
 rows name (`owns`).
 """
@@ -26,7 +31,9 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.core.proxies import client_key
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.idempotency import LOCK_CLASS
 
 type Conn = Connection[DictRow]
 type Pool = ConnectionPool[Connection[DictRow]]
@@ -44,6 +51,8 @@ DAY: Final = timedelta(days=1)
 CONCURRENCY_RETRY: Final = 5
 #: The job states that are no longer open.
 SETTLED: Final = ("done", "failed", "cancelled")
+#: The CRUD caller whose ledger records a render's reply.
+CALLER: Final = "storefront"
 
 
 class RenderLimited(Exception):  # noqa: N818  (the plan names it)
@@ -141,6 +150,7 @@ class RenderLimits:
         """A counted row for a render that costs a run, and its id; `RenderLimited` when
         the visitor, the client or the open renders are at their limit. ``visitor_id``
         is the visitor's row id (``storefront_visitors.id``)."""
+        client = client_key(client)
         # The concurrency limit is the whole shop's, so every admit takes one lock
         # (`LOCK_OPEN`) and admits run one at a time. Keep this transaction short: a
         # few counts and one insert, never a Temporal call or other I/O.
@@ -200,7 +210,7 @@ class RenderLimits:
         return self._insert(
             conn,
             visitor_id,
-            client,
+            client_key(client),
             listing_id=listing_id,
             render_key=render_key,
             counted=False,
@@ -209,21 +219,38 @@ class RenderLimits:
         )
 
     def attach(self, row_id: int, job_id: str) -> None:
-        """The job the row's submit answered with."""
+        """The job the row's submit answered with. `LookupError` when the row is gone: a
+        job is never handed to a visitor without a row that owns it."""
         with self._pool.connection() as conn:
-            conn.execute(
+            moved = conn.execute(
                 "UPDATE storefront_renders SET job_id = %s WHERE id = %s", (job_id, row_id)
-            )
+            ).rowcount
+        if moved != 1:
+            raise LookupError(f"no storefront render row {row_id}")
 
     def uncount(self, row_id: int) -> None:
         """The row's render never ran (the queue was full): it counts against no limit."""
         with self._pool.connection() as conn:
             conn.execute("UPDATE storefront_renders SET counted = false WHERE id = %s", (row_id,))
 
-    def drop(self, conn: Conn, row_id: int) -> None:
-        """The row of a render whose submit failed before it named a job: the visitor is
-        not charged for it."""
-        conn.execute("DELETE FROM storefront_renders WHERE id = %s AND job_id IS NULL", (row_id,))
+    def undo(self, row_id: int, key: str) -> None:
+        """A render whose submit never started: its row, and the reply recorded for the
+        edge's ``key`` while that reply still names the row, in one transaction under the
+        key's lock (`crud/idempotency.py` `idempotent`), so the same key sent again
+        admits a new row rather than replaying this one."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
+                (LOCK_CLASS, f"{CALLER}\x1f{key}"),
+            )
+            conn.execute(
+                "DELETE FROM storefront_renders WHERE id = %s AND job_id IS NULL", (row_id,)
+            )
+            conn.execute(
+                "DELETE FROM crud_requests WHERE caller = %s AND key = %s"
+                " AND (body->>'row')::bigint = %s",
+                (CALLER, key, row_id),
+            )
 
     def owned(self, visitor_id: str, job_id: str) -> OwnedRender | None:
         """The visitor's newest row for ``job_id``, or None when the visitor never asked

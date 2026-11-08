@@ -10,6 +10,10 @@ proxy, the trusted peer, appended. Earlier values may have come from the client.
 trusted hop is all the cluster has (Envoy Gateway in front of the pod), so there is no
 right-to-left walk over several.
 
+`client_key` is the key a client is counted under, by the storefront edge's request limit
+and by the CRUD side's render limits alike: one host holds a whole IPv6 /64, so rotating
+addresses inside it is one client.
+
 One deliberate difference: the agent reads ``10.0.0.0/`` as ``/0`` (``Number('')`` is
 0), which trusts every peer. Here it is refused at start like any other malformed entry.
 """
@@ -75,6 +79,26 @@ def plain_address(address: str) -> str:
     socket reports."""
     mapped = _MAPPED.match(address)
     return mapped.group(1) if mapped else address
+
+
+#: An IPv6 client is its /64.
+IPV6_PREFIX: Final = 64
+
+
+def client_key(address: str) -> str:
+    """The key a client is counted under: an IPv4 address whole (an IPv4-mapped IPv6
+    one too), an IPv6 address as its /64 (``2001:db8:1:2::/64``), and anything else as
+    it is."""
+    plain = plain_address(address.strip().removeprefix("[").removesuffix("]"))
+    try:
+        ip = ipaddress.ip_address(plain)
+    except ValueError:
+        return address
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.IPv6Network((ip, IPV6_PREFIX), strict=False))
+    return str(ip)
 
 
 def in_networks(networks: Sequence[Network], address: str | None) -> bool:

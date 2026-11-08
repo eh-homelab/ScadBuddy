@@ -23,9 +23,13 @@ CREATE INDEX storefront_renders_counted ON storefront_renders (counted, created_
 CREATE INDEX storefront_renders_job ON storefront_renders (job_id);
 
 -- The part volumes of a render job's 3MF, analysed once for every visitor who asks for
--- its estimate (plan point 5).
+-- its estimate (plan point 5). A 3MF that cannot be analysed, or not within the render
+-- timeout, keeps its `error` instead (`unreadable` or `timeout`) and is never analysed
+-- again.
 CREATE TABLE storefront_job_parts (
   job_id text PRIMARY KEY,
-  parts jsonb NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  parts jsonb,
+  error text CHECK (error IN ('unreadable', 'timeout')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK ((parts IS NULL) <> (error IS NULL))
 );

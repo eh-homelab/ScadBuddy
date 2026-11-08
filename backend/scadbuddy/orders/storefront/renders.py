@@ -6,8 +6,10 @@ same values share one render. A render that joins an open job of the same key, o
 a finished one, is `RenderLimits.free`; any other is `RenderLimits.admit`, counted against
 the visitor's and the client's limits. Both run inside `idempotent_write` keyed by the
 edge's ``Idempotency-Key``, so a request the edge sends again after a lost answer is
-counted once (plan point 21). A start that fails for any reason but a full queue drops
-the counted row and its recorded reply: a render that never started costs nothing.
+counted once (plan point 21). A start that fails before any job can exist
+(`never_started`) drops the counted row and its recorded reply (`RenderLimits.undo`): a
+render that never started costs nothing. A start that may have made a job keeps both, so
+the same key sent again joins that job.
 
 A visitor reads a render only when one of its own rows names it (`RenderLimits.owns`):
 any other job id, a guessed one among them, is 404 ``render_not_found``. `store_render`
@@ -15,26 +17,32 @@ shows a render with a fixed text in place of its error, never the log.
 
 `render_estimate` is the rough price of a done render (plan point 4): its part volumes,
 analysed once per job into ``storefront_job_parts`` (plan point 5), each at the listing
-filament the visitor chose for its colour.
+filament the visitor chose for its colour. The analyses run on `ANALYSIS_WORKERS` threads
+shared by the process, one per job at a time (`_flights`): a second request for a job
+awaits the first's. A 3MF that cannot be analysed, or not within ``render_timeout``, is
+recorded as such and never analysed again.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import zipfile
+import threading
 from collections.abc import Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
+from temporalio.client import WorkflowUpdateFailedError
 
-from scadbuddy.api.jobs import submit_problems
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, forget, idempotent_write
+from scadbuddy.crud.idempotency import Replay, idempotent_write
 from scadbuddy.orders.component import ORDERS, OrdersComponent
-from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, part_volumes, rough_estimate
+from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, rough_estimate
+from scadbuddy.orders.estimate import part_volumes as part_volumes  # tests count its calls
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.storefront.inputs import (
     InputOutsideListingError,
@@ -46,9 +54,12 @@ from scadbuddy.orders.storefront.listings import problem, published_listing
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import Listing, RenderBody, StoreRender
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
-from scadbuddy.storefront.wire import JOB_ID, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.wire import JOB_ID
+from scadbuddy.workflows.commands import TemporalUnavailableError, TemporalUnreachableError
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -61,7 +72,6 @@ RENDER_ROUTE: Final = "POST /storefront/renders"
 RENDER_FAILED: Final = "This design could not be made with these choices. Try other values."
 RENDER_CANCELLED: Final = "This render was stopped. Try again."
 _PARTS: Final = TypeAdapter(list[EstimatedPart])
-QUEUE_FULL: Final = f"{STOREFRONT_PROBLEMS}render_queue_full"
 #: What a visitor whose render could not start waits before it asks again.
 UNAVAILABLE_RETRY: Final = 5
 
@@ -109,12 +119,21 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
 
 
-def _undo(state: AppState, limits: RenderLimits, row: int, key: str) -> None:
-    """The counted row of a render that never started, and the reply recorded for its
-    key, in one transaction."""
-    with state.projection.pool.connection() as conn, conn.transaction():
-        limits.drop(conn, row)
-        forget(conn, "storefront", key)
+def never_started(error: Exception) -> bool:
+    """Whether a submit that raised ``error`` cannot have started a job: a snapshot not
+    there or still storing, a full store, a run that answered it could not start
+    (`api/jobs.py` ``may_have_started=False``), or Temporal's first connect failing
+    (`api/jobs.py` `_temporal_problem`). Anything else may have started one."""
+    if isinstance(
+        error,
+        SnapshotUnavailableError
+        | SnapshotPendingError
+        | StoreFullError
+        | WorkflowUpdateFailedError
+        | TemporalUnreachableError,
+    ):
+        return True
+    return isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError)
 
 
 def _shared(state: AppState, conn: Any, render_key: str) -> bool:
@@ -134,8 +153,8 @@ async def start_render(
     """The visitor's render of the listing at ``body``'s values. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
     ``name`` and ``reason``), 429 ``render_limited`` (with ``limit``), 429
-    ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start: its row
-    and its recorded reply are dropped, so it costs nothing), each with ``Retry-After``."""
+    ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start; one
+    that `never_started` costs nothing), each with ``Retry-After``."""
     orders = _orders(state)
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
@@ -209,35 +228,33 @@ async def start_render(
     row: int = recorded.body["row"]
     params = reference.inputs.get("params", {})
     try:
-        with submit_problems():
-            try:
-                job = await state.render.submit(
-                    reference.slug,
-                    params if isinstance(params, dict) else {},
-                    model_version=reference.commit,
-                    inputs=reference.inputs,
-                    whole_inputs=listing.snapshot.pipeline,
-                    request_id=key,
-                    reuse_finished=True,
-                )
-            except QueueFullError as error:
-                # The render never ran: it counts against nothing.
-                await asyncio.to_thread(limits.uncount, row)
-                raise problem(
-                    status.HTTP_429_TOO_MANY_REQUESTS,
-                    "render_queue_full",
-                    "The shop is busy making other designs. Try again in a moment.",
-                    headers={"Retry-After": str(error.retry_after)},
-                    retry_after=error.retry_after,
-                ) from None
+        job = await state.render.submit(
+            reference.slug,
+            params if isinstance(params, dict) else {},
+            model_version=reference.commit,
+            inputs=reference.inputs,
+            whole_inputs=listing.snapshot.pipeline,
+            request_id=key,
+            reuse_finished=True,
+        )
+    except QueueFullError as error:
+        # The render never ran: it counts against nothing.
+        await asyncio.to_thread(limits.uncount, row)
+        raise problem(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "render_queue_full",
+            "The shop is busy making other designs. Try again in a moment.",
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+        ) from None
     except Exception as error:
-        if isinstance(error, ApiError) and error.type == QUEUE_FULL:
-            raise
-        # Temporal, the store or a snapshot failed the start: the visitor is not charged.
-        # The row and its recorded reply go together, so the same key sent again (the
-        # edge's client retries a 5xx) admits a new row rather than replaying this one.
         logger.warning("a visitor's render was not started", exc_info=True)
-        await asyncio.to_thread(_undo, state, limits, row, key)
+        if never_started(error):
+            # No job can exist: the visitor is not charged, and the same key sent
+            # again (the edge's client retries a 5xx) admits a new row.
+            await asyncio.to_thread(limits.undo, row, key)
+        # Else the job may exist: the row and its reply stay, so the same key sent again
+        # replays the row and joins the job, counted once.
         raise problem(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "render_unavailable",
@@ -275,48 +292,135 @@ async def owned_job(state: AppState, visitor_id: str, job_id: str) -> tuple[Owne
     return owned, job
 
 
-def _cached_parts(state: AppState, job_id: str) -> list[EstimatedPart] | None:
+@dataclass(frozen=True)
+class _Analysis:
+    """A job's analysis: its parts, or why there are none. ``error`` is ``unreadable``
+    or ``timeout`` (both recorded, never tried again), or ``busy`` (the analysis never
+    started within the timeout; not recorded)."""
+
+    parts: list[EstimatedPart] | None = None
+    error: str | None = None
+
+
+class _InterruptedError(Exception):
+    """The request leading an analysis ended before it: its followers answer 422."""
+
+
+#: The most analyses one process runs at once: every estimate shares these threads.
+ANALYSIS_WORKERS: Final = 2
+_analyses: ThreadPoolExecutor | None = None
+#: The analysis in flight for each job id: a second request awaits the first's.
+_flights: dict[str, Future[_Analysis]] = {}
+_flights_lock = threading.Lock()
+
+
+def _executor() -> ThreadPoolExecutor:
+    global _analyses
+    with _flights_lock:
+        if _analyses is None:
+            _analyses = ThreadPoolExecutor(ANALYSIS_WORKERS, thread_name_prefix="estimate")
+        return _analyses
+
+
+def _recorded(state: AppState, job_id: str) -> _Analysis | None:
     with state.projection.pool.connection() as conn:
         row = conn.execute(
-            "SELECT parts FROM storefront_job_parts WHERE job_id = %s", (job_id,)
+            "SELECT parts, error FROM storefront_job_parts WHERE job_id = %s", (job_id,)
         ).fetchone()
-    return None if row is None else _PARTS.validate_python(row["parts"])
+    if row is None:
+        return None
+    if row["error"] is not None:
+        return _Analysis(error=row["error"])
+    return _Analysis(parts=_PARTS.validate_python(row["parts"]))
 
 
-def _store_parts(state: AppState, job_id: str, parts: list[EstimatedPart]) -> None:
+def _record(state: AppState, job_id: str, analysis: _Analysis) -> _Analysis:
+    """``analysis`` written once for the job; the record that stands."""
+    parts = None
+    if analysis.parts is not None:
+        parts = Jsonb(_PARTS.dump_python(analysis.parts, mode="json"))
     with state.projection.pool.connection() as conn:
         conn.execute(
-            "INSERT INTO storefront_job_parts (job_id, parts) VALUES (%s, %s)"
+            "INSERT INTO storefront_job_parts (job_id, parts, error) VALUES (%s, %s, %s)"
             " ON CONFLICT (job_id) DO NOTHING",
-            (job_id, Jsonb(_PARTS.dump_python(parts, mode="json"))),
+            (job_id, parts, analysis.error),
         )
+    stood = _recorded(state, job_id)
+    assert stood is not None
+    return stood
+
+
+async def _analyse(state: AppState, job: Job) -> _Analysis:
+    """The job's part volumes on the shared threads (`ANALYSIS_WORKERS`), under
+    ``render_timeout``. A failure or a timeout is recorded; an analysis still queued at
+    the timeout is withdrawn and not recorded (``busy``)."""
+    stood = await asyncio.to_thread(_recorded, state, job.id)
+    if stood is not None:
+        return stood
+    result = job.result
+    assert result is not None
+    await materialize_result(state.store.blobs, result)
+    started = threading.Event()
+    model = state.paths.root / result.model_3mf
+    plates = max(len(result.plates), 1)
+
+    def work() -> list[EstimatedPart]:
+        started.set()
+        return part_volumes(model, plates, result.warnings)
+
+    running = _executor().submit(work)
+    try:
+        parts = await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(running)), timeout=state.settings.render_timeout
+        )
+    except TimeoutError:
+        if not started.is_set() and running.cancel():
+            return _Analysis(error="busy")
+        logger.warning("a render's 3MF took past the render timeout to analyse")
+        analysis = _Analysis(error="timeout")
+    except Exception:
+        logger.warning("a render's 3MF could not be analysed", exc_info=True)
+        analysis = _Analysis(error="unreadable")
+    else:
+        analysis = _Analysis(parts=parts)
+    return await asyncio.to_thread(_record, state, job.id, analysis)
 
 
 async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
-    """The job's part volumes: stored, else analysed once under ``render_timeout``."""
-    cached = await asyncio.to_thread(_cached_parts, state, job.id)
-    if cached is not None:
-        return cached
-    result = job.result
-    assert result is not None
-    try:
-        await materialize_result(state.store.blobs, result)
-        parts = await asyncio.wait_for(
-            asyncio.to_thread(
-                part_volumes,
-                state.paths.root / result.model_3mf,
-                max(len(result.plates), 1),
-                result.warnings,
-            ),
-            timeout=state.settings.render_timeout,
-        )
-    except (ValueError, KeyError, OSError, zipfile.BadZipFile, TimeoutError):
-        logger.warning("a render's 3MF could not be analysed", exc_info=True)
-        raise _unavailable(
-            "We cannot price this design here. Add it to your order and we will price it."
-        ) from None
-    await asyncio.to_thread(_store_parts, state, job.id, parts)
-    return parts
+    """The job's part volumes: recorded, else analysed once per job (`_flights`)."""
+    analysis = await asyncio.to_thread(_recorded, state, job.id)
+    if analysis is None:
+        with _flights_lock:
+            flight = _flights.get(job.id)
+            lead = flight is None
+            if flight is None:
+                flight = _flights[job.id] = Future()
+        if lead:
+            try:
+                analysis = await _analyse(state, job)
+                flight.set_result(analysis)
+            except BaseException as error:
+                flight.set_exception(_InterruptedError())
+                if isinstance(error, Exception):
+                    logger.warning("a render's estimate failed", exc_info=True)
+                    analysis = _Analysis(error="busy")
+                else:
+                    raise
+            finally:
+                with _flights_lock:
+                    _flights.pop(job.id, None)
+        else:
+            try:
+                analysis = await asyncio.wrap_future(flight)
+            except _InterruptedError:
+                analysis = _Analysis(error="busy")
+    if analysis.parts is not None:
+        return analysis.parts
+    if analysis.error == "busy":
+        raise _unavailable("The price is not ready yet. Try again in a moment.")
+    raise _unavailable(
+        "We cannot price this design here. Add it to your order and we will price it."
+    )
 
 
 def _filament_for(

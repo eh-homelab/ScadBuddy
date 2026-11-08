@@ -4,6 +4,7 @@ visitor. A render a visitor shares with another costs nothing."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -12,7 +13,9 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.idempotency import LOCK_CLASS, Replay, record
 from scadbuddy.orders.storefront.limits import RenderLimited, RenderLimits
+from scadbuddy.orders.storefront.renders import RENDER_ROUTE
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, PgPool
 
@@ -268,3 +271,101 @@ def test_only_the_visitor_who_asked_owns_a_render(
     limits.attach(shared, "job-1")
     assert limits.owns(visitors[0], "job-1") and limits.owns(visitors[1], "job-1")
     assert not limits.owns(visitors[2], "job-1")
+
+
+def test_two_addresses_in_one_64_share_a_render_allowance(
+    limits: RenderLimits, conn: Conn, visitors: list[str]
+) -> None:
+    """Rotating IPv6 addresses inside one /64 is one client, as at the edge."""
+    for n, v in enumerate(visitors[:3]):
+        limits.admit(
+            conn,
+            v,
+            f"2001:db8:1:2::{n + 1}",
+            listing_id="l",
+            render_key=f"k{n}",
+            settings=SETTINGS,
+            now=T0,
+        )
+    with pytest.raises(RenderLimited) as refused:
+        limits.admit(
+            conn,
+            visitors[3],
+            "2001:db8:1:2:ffff::9",
+            listing_id="l",
+            render_key="k9",
+            settings=SETTINGS,
+            now=T0,
+        )
+    assert refused.value.limit == "per_minute"
+    shared = limits.free(conn, visitors[4], "2001:db8:1:2::77", listing_id="l", render_key="k")
+    row = conn.execute("SELECT client FROM storefront_renders WHERE id = %s", (shared,)).fetchone()
+    assert row is not None and row["client"] == "2001:db8:1:2::/64"
+
+
+@pytest.mark.parametrize(
+    ("address", "key"),
+    [
+        ("203.0.113.1", "203.0.113.1"),
+        ("::ffff:203.0.113.1", "203.0.113.1"),
+        ("2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"),
+    ],
+)
+def test_the_client_key_is_shared_by_both_sides(address: str, key: str) -> None:
+    from scadbuddy.core.proxies import client_key
+    from scadbuddy.storefront import ratelimit
+
+    assert client_key(address) == key
+    assert ratelimit.client_key is client_key
+
+
+def test_attach_needs_the_row(limits: RenderLimits) -> None:
+    """A job is never handed to a visitor without a row that owns it."""
+    with pytest.raises(LookupError):
+        limits.attach(987654, "job-x")
+
+
+def _ledger(conn: Conn, key: str, row: int) -> None:
+    record(conn, "storefront", key, RENDER_ROUTE, {"b": 1}, Replay(200, {"row": row}))
+
+
+def _ledgered(conn: Conn, key: str) -> bool:
+    found = conn.execute(
+        "SELECT 1 FROM crud_requests WHERE caller = 'storefront' AND key = %s", (key,)
+    ).fetchone()
+    return found is not None
+
+
+def test_undo_forgets_only_the_reply_naming_its_row(
+    limits: RenderLimits, conn: Conn, visitor: str
+) -> None:
+    row = limits.admit(
+        conn, visitor, "203.0.113.1", listing_id="l", render_key="k", settings=SETTINGS, now=T0
+    )
+    _ledger(conn, "mine", row)
+    _ledger(conn, "other", row + 1000)
+    limits.undo(row, "other")
+    assert _ledgered(conn, "other")
+    limits.undo(row, "mine")
+    assert not _ledgered(conn, "mine")
+    assert conn.execute("SELECT 1 FROM storefront_renders WHERE id = %s", (row,)).fetchone() is None
+
+
+def test_undo_waits_for_the_keys_lock(
+    limits: RenderLimits, pg_pool: PgPool, conn: Conn, visitor: str
+) -> None:
+    row = limits.admit(
+        conn, visitor, "203.0.113.1", listing_id="l", render_key="k", settings=SETTINGS, now=T0
+    )
+    _ledger(conn, "held", row)
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute(
+            "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
+            (LOCK_CLASS, "storefront\x1fheld"),
+        )
+        undone = threading.Thread(target=limits.undo, args=(row, "held"))
+        undone.start()
+        undone.join(0.5)
+        assert undone.is_alive() and _ledgered(conn, "held")
+    undone.join(5)
+    assert not undone.is_alive() and not _ledgered(conn, "held")
