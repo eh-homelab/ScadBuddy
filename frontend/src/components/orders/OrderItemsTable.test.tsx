@@ -1,12 +1,12 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { Quote } from '../../api/types'
 import { resetMockState } from '../../mocks/handlers'
 import { seedActivity } from '../../mocks/features/activity'
 import { seedOperation } from '../../mocks/features/operations'
-import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
+import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, PROBLEMS, seedCart, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
 import { LOCKED_TEXT, REVISED_TEXT } from './itemActions'
@@ -57,10 +57,10 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(table).getByRole('columnheader', { name: 'Unit price' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'Line total' })).toBeInTheDocument()
     const cells = within(row(ITEM_APPROVED)).getAllByRole('cell')
-    // Picture, item, status, qty, unit price, line total: 15.00 a unit, two of them.
-    expect(cells[3]).toHaveTextContent('2')
-    expect(cells[4]).toHaveTextContent('$15.00')
-    expect(cells[5]).toHaveTextContent('$30.00')
+    // Select, picture, item, status, qty, unit price, line total: 15.00 a unit, two of them.
+    expect(cells[4]).toHaveTextContent('2')
+    expect(cells[5]).toHaveTextContent('$15.00')
+    expect(cells[6]).toHaveTextContent('$30.00')
     expect(within(row(ITEM_APPROVED)).queryByText('not accepted')).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: /^Unit price for/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Accept unit price' })).not.toBeInTheDocument()
@@ -73,7 +73,7 @@ describe('OrderItemsTable · unit price', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveValue('7.25')
     expect(within(row(ITEM_DRAFT)).getByText('not accepted')).toBeInTheDocument()
-    expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$14.50')
+    expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[6]).toHaveTextContent('$14.50')
   })
 
   it('records a typed price and accepts it on Enter', async () => {
@@ -91,7 +91,7 @@ describe('OrderItemsTable · unit price', () => {
     await waitFor(() => expect(within(row(ITEM_DRAFT)).getByText('Approved')).toBeInTheDocument())
     expect(within(row(ITEM_DRAFT)).queryByText('not accepted')).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveValue('12.50')
-    expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$25.00')
+    expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[6]).toHaveTextContent('$25.00')
     expect(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' })).toBeDisabled()
     expect(screen.queryByTestId('order-unpriced')).not.toBeInTheDocument()
   })
@@ -157,7 +157,7 @@ describe('OrderItemsTable · unit price', () => {
     // The quote stands, not accepted, as the backend keeps it, and the row reloads to show
     // it: 12.50 a unit, 25.00 for two, with the refusal still there.
     expect(quotesOfDraft().map((q) => q.accepted)).toEqual([false])
-    await waitFor(() => expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$25.00'))
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[6]).toHaveTextContent('$25.00'))
     expect(within(row(ITEM_DRAFT)).getByText('not accepted')).toBeInTheDocument()
     expect(within(row(ITEM_DRAFT)).getByRole('alert')).toHaveTextContent(/on hold/)
   })
@@ -183,7 +183,7 @@ describe('OrderItemsTable · unit price', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.type(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' }), '12.50{Enter}')
     expect(await within(row(ITEM_DRAFT)).findByRole('alert')).toHaveTextContent(/on hold/)
-    await waitFor(() => expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$25.00'))
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[6]).toHaveTextContent('$25.00'))
     if (order) order.on_hold = false
     await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' }))
     await waitFor(() => expect(quotesOfDraft().map((q) => [q.unit_price_minor, q.accepted])).toEqual([[1250, true]]))
@@ -303,7 +303,7 @@ describe('OrderItemsTable · unit price', () => {
     render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     expect(screen.queryByRole('textbox', { name: 'Unit price for Name Keychain' })).not.toBeInTheDocument()
-    expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[4]).toHaveTextContent('$9.00')
+    expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$9.00')
     // In no sum: the line total says "not counted", and the unit price never "not accepted".
     expect(within(row(ITEM_DRAFT)).getByText('not counted')).toBeInTheDocument()
     expect(within(row(ITEM_DRAFT)).queryByText('not accepted')).not.toBeInTheDocument()
@@ -394,7 +394,8 @@ describe('OrderItemsTable · row menu', () => {
   it('disables Unfulfil on an order on hold, and says why', async () => {
     state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
     expect(await openMenu()).toHaveAttribute('data-disabled')
-    expect(screen.getByText('The order is on hold. Release it first.')).toBeInTheDocument()
+    // Unfulfil's, and Duplicate's (#4955): a copy is an add after acceptance, refused on hold.
+    expect(screen.getAllByText('The order is on hold. Release it first.')).toHaveLength(2)
   })
 
   it('disables Unfulfil for an item a shipment carries, and says why', async () => {
@@ -464,7 +465,7 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
     const names = (await screen.findAllByRole('menuitem')).map((m) => m.textContent)
-    expect(names).toEqual(['Open details', 'Quote from a slice…', 'Delete item'])
+    expect(names).toEqual(['Open details', 'Quote from a slice…', 'Duplicate', 'Delete item'])
     await user.click(screen.getByRole('menuitem', { name: 'Quote from a slice…' }))
     const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
     expect(within(drawer).getByTestId('item-section-quote')).toBeInTheDocument()
@@ -532,14 +533,14 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     })
   })
 
-  it("offers an accepted item's print and fulfil, both refused with the reason on hold", async () => {
+  it("offers an accepted item's print, fulfil and duplicate, all refused with the reason on hold", async () => {
     state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
     const { user } = render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
     await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
     expect(await screen.findByRole('menuitem', { name: 'Fulfil…' })).toHaveAttribute('data-disabled')
     expect(screen.getByRole('menuitem', { name: /^Print/ })).toHaveAttribute('data-disabled')
-    expect(screen.getAllByText('The order is on hold. Release it first.')).toHaveLength(2)
+    expect(screen.getAllByText('The order is on hold. Release it first.')).toHaveLength(3)
   })
 
   it('turns the header and menu writes off while a write runs', async () => {
@@ -723,6 +724,163 @@ describe('OrderItemsTable · inline edit (#4955)', () => {
     await user.type(input, '6{Enter}')
     expect(updated).not.toHaveBeenCalled()
     await act(async () => finish())
+  })
+})
+
+// #4955 step 3, spec 2026-11-07 §4.1 — Duplicate in the ⋯ menu, and bulk actions: select rows,
+// then Fulfil (one dialog, a quantity per item), Print or Remove.
+describe('OrderItemsTable · duplicate and bulk actions (#4955)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
+  const rowsTitled = (title: string) => screen.getAllByRole('button', { name: title })
+
+  it('duplicates an item from its menu', async () => {
+    const duplicated = vi.spyOn(api, 'duplicateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Duplicate' }))
+    await waitFor(() => expect(rowsTitled('Name Keychain')).toHaveLength(2))
+    expect(duplicated).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, {})
+  })
+
+  it('asks before duplicating on an accepted order, then adds it after acceptance', async () => {
+    const duplicated = vi.spyOn(api, 'duplicateOrderItem')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Duplicate' }))
+    const confirm = await screen.findByRole('alertdialog', { name: /^Duplicate/ })
+    expect(confirm).toHaveTextContent('ORD-2026-2 is accepted. Adding an item changes what the customer gets.')
+    expect(duplicated).not.toHaveBeenCalled()
+    await user.click(within(confirm).getByRole('button', { name: 'Duplicate' }))
+    await waitFor(() => expect(duplicated).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED, { after_acceptance: true }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+  })
+
+  it('selects rows one by one or all at once, and says how many', async () => {
+    const custom = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const card = screen.getByRole('region', { name: 'Items' })
+    expect(within(card).queryByTestId('bulk-actions')).toBeNull()
+    await user.click(within(row(custom.id)).getByRole('checkbox', { name: 'Select Rush fee' }))
+    expect(within(card).getByTestId('bulk-actions')).toHaveTextContent('1 selected')
+    await user.click(within(card).getByRole('checkbox', { name: 'Select all items' }))
+    expect(within(card).getByTestId('bulk-actions')).toHaveTextContent('2 selected')
+    await user.click(within(card).getByRole('button', { name: 'Clear selection' }))
+    expect(within(card).queryByTestId('bulk-actions')).toBeNull()
+  })
+
+  it('fulfils the selected items from one dialog, a quantity for each', async () => {
+    const fulfilled = vi.spyOn(api, 'fulfilOrderItems')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('checkbox', { name: /^Select / }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Fulfil…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fulfil items' })
+    const quantity = within(dialog).getByRole('textbox', { name: /^Quantity made of / })
+    expect(quantity).toHaveValue('2')
+    await user.clear(quantity)
+    await user.type(quantity, '1')
+    await user.click(within(dialog).getByRole('button', { name: 'Fulfil' }))
+    await waitFor(() => expect(fulfilled).toHaveBeenCalledWith(ORDER_ACCEPTED, [{ item_id: ITEM_APPROVED, quantity: 1 }]))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Fulfil items' })).toBeNull())
+    // One of two made: the item stays open, and the selection clears.
+    expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('approved')
+    expect(screen.queryByTestId('bulk-actions')).toBeNull()
+  })
+
+  it("shows the bulk fulfil's refusal in its dialog, by the item's title", async () => {
+    vi.spyOn(api, 'fulfilOrderItems').mockRejectedValue(
+      new ApiError({ type: `${PROBLEMS}item_not_approved`, title: 'Conflict', status: 409, detail: `item ${ITEM_APPROVED} is printed, not approved`, items: [ITEM_APPROVED] }),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const title = state.items.find((i) => i.id === ITEM_APPROVED)!.title
+    await user.click(within(row(ITEM_APPROVED)).getByRole('checkbox', { name: `Select ${title}` }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Fulfil…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fulfil items' })
+    await user.click(within(dialog).getByRole('button', { name: 'Fulfil' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(`(${title})`)
+  })
+
+  it('fulfils only the selected items the bulk route takes: approved or failed', async () => {
+    const added = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await screen.findByTestId(`order-item-${added.id}`)
+    await user.click(screen.getByRole('checkbox', { name: 'Select all items' }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Fulfil…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fulfil items' })
+    expect(within(dialog).getAllByRole('textbox').map((box) => box.getAttribute('aria-label'))).toEqual(['Quantity made of Name Keychain'])
+  })
+
+  it('turns the page writes off while a bulk remove runs', async () => {
+    let finish: () => void = () => undefined
+    vi.spyOn(api, 'deleteOrderItem').mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)))
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('checkbox', { name: 'Select Name Keychain' }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Remove…' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add product', hidden: true })).toBeDisabled())
+    await act(async () => finish())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add product' })).toBeEnabled())
+  })
+
+  it('drops the selection when the order is cancelled', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('checkbox', { name: 'Select Name Keychain' }))
+    expect(screen.getByTestId('bulk-actions')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancel order…' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel the order' }))
+    await waitFor(() => expect(state.orders.find((o) => o.id === ORDER_DRAFT)?.status).toBe('cancelled'))
+    await waitFor(() => expect(screen.queryByTestId('bulk-actions')).toBeNull())
+  })
+
+  it('turns Fulfil off, with the reason, when no selected item can be fulfilled now', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('checkbox', { name: 'Select Name Keychain' }))
+    const bar = screen.getByTestId('bulk-actions')
+    expect(within(bar).getByRole('button', { name: 'Fulfil…' })).toBeDisabled()
+    expect(within(bar).getByRole('button', { name: 'Print…' })).toBeDisabled()
+    expect(bar).toHaveTextContent('No selected item can be fulfilled or printed now.')
+  })
+
+  it('removes the selected items after a confirm: a draft is deleted, the rest cancelled', async () => {
+    const custom = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+    const deleted = vi.spyOn(api, 'deleteOrderItem')
+    const cancelled = vi.spyOn(api, 'cancelOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all items' }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Remove…' }))
+    const confirm = await screen.findByRole('alertdialog', { name: 'Remove 2 items?' })
+    expect(confirm).toHaveTextContent('Delete Name Keychain')
+    expect(confirm).toHaveTextContent('Cancel Rush fee')
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(deleted).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT))
+    expect(cancelled).toHaveBeenCalledWith(ORDER_DRAFT, custom.id)
+    await waitFor(() => expect(screen.queryByTestId(`order-item-${ITEM_DRAFT}`)).toBeNull())
+  })
+
+  it("opens each selected item's print in turn", async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('checkbox', { name: /^Select / }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Print…' }))
+    expect(await screen.findByRole('dialog', { name: 'Print the line item' })).toBeInTheDocument()
+  })
+
+  it("selects nothing on a visitor's cart", async () => {
+    const cart = seedCart()
+    const added = await api.addOrderItem(cart.id, { kind: 'request', title: 'Tag', quantity: 1 })
+    render(cart.id)
+    await screen.findByTestId(`order-item-${added.id}`)
+    expect(screen.queryByRole('checkbox', { name: /^Select/ })).toBeNull()
   })
 })
 

@@ -296,6 +296,7 @@ export function OrderPage() {
             setOpenItem(item.id)
           }}
           busy={busy}
+          onWriting={setBusy}
           onAct={(action) => void act(action)}
           costs={costs.data?.order_id === order.id ? costs.data : undefined}
         />

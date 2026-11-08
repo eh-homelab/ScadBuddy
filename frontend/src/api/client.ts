@@ -216,6 +216,7 @@ import type {
   Fulfilment,
   AttemptArchives,
   ArchiveCopy,
+  FulfilLine,
   FulfilmentInput,
   OrderAttachment,
   OrderAttachmentPatch,
@@ -2472,6 +2473,14 @@ export const api = {
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
+  /** #4955 — a copy of the item's design, quantity and title, with no quote (a custom item
+   * keeps its price); `after_acceptance` on an accepted order, as an add after acceptance. */
+  duplicateOrderItem: (orderId: string, itemId: string, body: { after_acceptance?: boolean } = {}) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/duplicate`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #4955 — several items made by hand at once: an accepted attempt of each line's quantity,
+   * all or none (`POST /orders/{id}/fulfil`). */
+  fulfilOrderItems: (orderId: string, items: FulfilLine[]) =>
+    request<Fulfilment[]>(`/orders/${seg(orderId)}/fulfil`, { method: 'POST', body: JSON.stringify({ items }) }),
   // -- an order's files (#4251, spec 2026-10-18 §6.2) ---------------------------------------
   /** Any file, on the order or (with `itemId`) on one of its items; an upload as a command. */
   addOrderAttachment: (
