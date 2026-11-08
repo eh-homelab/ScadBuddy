@@ -64,6 +64,7 @@ from scadbuddy.orders.printing import (
     ItemPrintRequest,
     print_check,
     print_item,
+    sent_keys,
     sent_setup,
     test_print_check,
 )
@@ -362,11 +363,13 @@ class _Renders:
 def filled(sent: Mapping[str, Any], setup: Mapping[str, Any] | None) -> dict[str, Any]:
     """An item print's request (its operation's ``request``, dumped with
     ``exclude_unset``) with each part of the quote's print setup it left out (#4673,
-    ``printing.quoted_setup``; a null one stays out, as the request's default)."""
+    ``printing.quoted_setup``; a null one stays out, as the request's default). A null
+    ``choices`` or ``filament_plan`` sent is left out (``printing.sent_keys``)."""
+    kept = sent_keys(sent)
     quoted = {
-        key: value for key, value in (setup or {}).items() if key not in sent and value is not None
+        key: value for key, value in (setup or {}).items() if key not in kept and value is not None
     }
-    return {**quoted, **sent}
+    return {**quoted, **{key: value for key, value in sent.items() if key in kept}}
 
 
 def print_body(
@@ -537,7 +540,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         sent = request["request"]
         # Validated once (#5720 review): choices and spools may be the quote's (#4673).
         asked = ItemPrintRequest.model_validate(sent)
-        setup = sent_setup(asked, sent)
+        setup = sent_setup(asked, sent_keys(sent))
         revision_id = request.get("revision_id")
         if revision_id is not None:
             checked = await test_print_check(

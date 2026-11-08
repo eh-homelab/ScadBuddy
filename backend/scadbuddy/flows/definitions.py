@@ -154,6 +154,35 @@ class FlowDefinitions:
         except FlowExistsError:
             return None
 
+    async def upgrade_builtin(
+        self,
+        name: str,
+        script: str,
+        author: dict[str, Any],
+        *,
+        head: str,
+        inputs_schema: dict[str, Any] | None,
+        message: str,
+    ) -> Definition | None:
+        """A new version of a built-in flow (#4673) over its unedited ``head`` (the
+        built-in's own commit), or None when ``head`` is no longer the newest version:
+        another replica upgraded it first, or a person's version came after. The flow's
+        details stay as they are."""
+        try:
+            return await asyncio.to_thread(
+                self._write,
+                name,
+                author,
+                None,
+                script,
+                None,
+                inputs_schema,
+                message=message,
+                expect_head=head,
+            )
+        except FlowExistsError:
+            return None
+
     async def restore(
         self,
         name: str,
@@ -293,6 +322,7 @@ class FlowDefinitions:
         display_name: str | None = None,
         description: str | None = None,
         only_new: bool = False,
+        expect_head: str | None = None,
     ) -> Definition:
         self._require()
         # A built-in's authorship goes in its commit too, so git, reconcile and the row
@@ -331,6 +361,7 @@ class FlowDefinitions:
                 description=description,
                 only_new=only_new,
                 builtin=builtin if isinstance(builtin, str) else None,
+                expect_head=expect_head,
             )
         except DetailsNotSavedError as error:
             # The version is committed and indexed: answer it, never fail it (#3186).

@@ -928,7 +928,9 @@ def test_a_print_with_no_choices_prints_the_quotes_setup(
     _accepted(bambuddy, shop, quote)
     queue_route()
 
-    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json={}, headers=press()))
+    # #5732 review: an explicit null is left out, as `{}`: never a 500.
+    nulls = {"choices": None, "filament_plan": None}
+    attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=nulls, headers=press()))
 
     assert attempt["sliced_sha256"] == quote["sliced_sha256"]
     [request] = sent
@@ -953,6 +955,8 @@ def test_a_print_whose_choices_differ_from_the_quotes_wants_a_new_quote(
     for other, named in (
         (body(tier="draft"), "choices"),
         ({**body(), "printer_id": 2}, "printer_id"),
+        # #5732 review: an explicit null is named as one.
+        ({**body(), "prime_tower": None}, "prime_tower (null)"),
     ):
         refusal = problem(
             bambuddy.post(f"{shop.path}/print", json=other, headers=press()), "requote_needed"
@@ -994,5 +998,13 @@ def test_a_manual_quote_prints_with_the_requests_choices_and_needs_some(
         bambuddy.post(f"{item.path}/print", json={}, headers=press()), "print_setup_missing", 422
     )
     assert "choices" in refusal["detail"]
+    # #5732 review: an explicit null is none sent: a 422 naming it, never a 500.
+    nulled = {"choices": None, "filament_plan": body()["filament_plan"]}
+    refusal = problem(
+        bambuddy.post(f"{item.path}/print", json=nulled, headers=press()),
+        "print_setup_missing",
+        422,
+    )
+    assert "choices" in refusal["detail"] and "filament_plan" not in refusal["detail"]
     attempt = printed(item, key="print-manual")
     assert attempt["sliced_sha256"] is None

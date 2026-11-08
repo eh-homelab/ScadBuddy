@@ -1,11 +1,21 @@
 import { useState } from 'react'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Revision } from '../../api/types'
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
 import { offersPrint } from './itemActions'
 import { Button } from '@/components/ui/button'
+
+/** #4673 — what a `requote_needed` print refusal adds: an item's print with no choices
+ * prints its quote's setup, so a print whose choices differ can still go (the dialog is
+ * reworked in a later step of #4673). */
+export const REQUOTE_HINT = "Print with no choices to use the quote's print setup, or quote it again."
+
+function withHint(cause: unknown): unknown {
+  if (!(cause instanceof ApiError) || !cause.problem.type?.endsWith('/requote_needed')) return cause
+  return new ApiError({ ...cause.problem, detail: `${cause.detail.replace(/\.?$/, '.')} ${REQUOTE_HINT}` })
+}
 
 /** The order states past acceptance, in which an item is made (§3.5). */
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
@@ -71,8 +81,12 @@ export function ItemPrintDialog({
         itemId: item.id,
         quoted: (quoted?.part_settings ?? null) as PartSettingsMap | null,
         start: async (body) => {
-          if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
-          else await api.printItem(order.id, item.id, body)
+          try {
+            if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
+            else await api.printItem(order.id, item.id, body)
+          } catch (cause) {
+            throw withHint(cause)
+          }
           onChanged()
         },
       }}

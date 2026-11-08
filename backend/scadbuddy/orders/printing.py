@@ -338,11 +338,23 @@ class ItemPrintRequest(PrintRunRequest):
     choices: PrintChoices | None = None  # type: ignore[assignment]
 
 
+#: The parts of an item print's body that an explicit null leaves out, as if not sent
+#: (#5732 review): the run has no print without them, so null is never "none".
+NULL_IS_OMITTED = frozenset({"choices", "filament_plan"})
+
+
+def sent_keys(sent: Mapping[str, Any]) -> set[str]:
+    """The keys an item print's request sent, without a :data:`NULL_IS_OMITTED` one
+    sent as null."""
+    return {key for key, value in sent.items() if not (key in NULL_IS_OMITTED and value is None)}
+
+
 def sent_setup(body: ItemPrintRequest, sent: Collection[str]) -> dict[str, Any]:
     """The :data:`QUOTED_SETUP` and ``filament_plan`` an item print's request sent
     (``sent``: the keys of its operation's ``request``, dumped with ``exclude_unset``),
     in ``PrintRunRequest``'s JSON shapes, as the quote records them
-    (``quote.print_setup``). The spools are never compared, only filled."""
+    (``quote.print_setup``). The spools are never compared, only filled. ``sent`` is
+    :func:`sent_keys`'s, so a null ``choices`` or ``filament_plan`` is not sent."""
     keys = {key for key in (*QUOTED_SETUP, "filament_plan") if key in sent}
     return body.model_dump(mode="json", include=keys) if keys else {}
 
@@ -413,9 +425,11 @@ def _same_setup(item: OrderItem, quote: Quote, asked: Mapping[str, Any] | None) 
         return
     differs = setup_differences(asked, recorded)
     if differs:
+        # An explicit null is named as one (#5732 review): it is not the quote's either.
+        named = [f"{key} (null)" if asked[key] is None else key for key in differs]
         raise requote(
             item,
-            f"its print sends {', '.join(differs)} the quote was not sliced with: quote with"
+            f"its print sends {', '.join(named)} the quote was not sliced with: quote with"
             " them, or send none to print with the quote's",
         )
 

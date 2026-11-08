@@ -106,7 +106,8 @@ def _build(core: Core, components: Components) -> OrdersComponent:
 
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
-    # §7.2: the built-in flow, once, when its name never had a version. Beside the start,
+    # §7.2: the built-in flow, when its name never had a version or its newest is an
+    # unedited older built-in (#4673). Beside the start,
     # so a slow flows repository delays nothing (review of #5682).
     registering: asyncio.Task[bool] | None = None
     if orders.flows is not None and orders.core.settings.orders_builtin_flow:

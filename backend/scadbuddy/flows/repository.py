@@ -254,6 +254,7 @@ class FlowHistory(GitRepo):
         description: str | None = None,
         only_new: bool = False,
         builtin: str | None = None,
+        expect_head: str | None = None,
     ) -> tuple[str, int]:
         """One new version of ``name``: ``script`` with its ``inputs`` schema (none when
         None), or the script and schema at the commit ``restore``. Under the write lock:
@@ -263,12 +264,19 @@ class FlowHistory(GitRepo):
         :class:`DetailsNotSavedError` (naming them) when the version was saved but its
         details commit failed. With ``only_new``, :class:`FlowExistsError` when ``name``
         has any version, deleted or not, checked under the same lock (#4252). ``builtin``
-        names the built-in registering it, in the commit's ``BUILTIN_TRAILER``."""
+        names the built-in registering it, in the commit's ``BUILTIN_TRAILER``. With
+        ``expect_head`` (a commit), :class:`FlowExistsError` unless it is still the
+        newest version of ``name``, checked under the same lock (#4673: a built-in's
+        upgrade, once from replicas starting together)."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
             if only_new and self.versions(name):
                 raise FlowExistsError(f"{name!r} has versions")
+            if expect_head is not None:
+                newest = self.versions(name)
+                if not newest or newest[0].commit != expect_head:
+                    raise FlowExistsError(f"{name!r} has a newer version than {expect_head}")
             found = self.register_locked(
                 name,
                 version_id,

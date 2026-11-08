@@ -89,7 +89,10 @@ describe('PrintItem', () => {
     const run = within(dialog).getByTestId('run-item-print')
     await waitFor(() => expect(run).toBeEnabled())
     await user.click(run)
-    expect(await within(dialog).findByTestId('quote-error')).toHaveTextContent('needs a new quote')
+    const error = await within(dialog).findByTestId('quote-error')
+    expect(error).toHaveTextContent('needs a new quote')
+    // #4673: the refusal says how to print anyway.
+    expect(error).toHaveTextContent("Print with no choices to use the quote's print setup, or quote it again.")
     expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('approved')
   })
 

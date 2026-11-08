@@ -1,12 +1,13 @@
 """The built-in `order-fulfilment` flow (#4252, orders spec §7.2).
 
-The orders component registers it at start as version 1 of an ordinary flow, only when
-no flow of that name has ever had a version (`FlowDefinitions.register_new`): the shop
-edits it into version 2 or deletes it, and a later build never rewrites it (a new
-built-in is a new name). It runs on an `order.changed` trigger the shop makes, matched
-to `accepted`, with a standing grant naming `queue_print`, `order_item_fulfil` and
-`order_attach` (an agent call's grant only narrows the run's); nothing here makes that
-trigger or approves that grant.
+The orders component registers it at start as version 1 of an ordinary flow when no
+flow of that name has ever had a version (`FlowDefinitions.register_new`). While the
+newest version is still the built-in's own, a build with another script adds it as a new
+version (#4673, `_upgraded`); once the shop edits it or deletes it, no build rewrites it.
+It runs on an `order.changed` trigger the shop makes, matched to `accepted`,
+with a standing grant naming `queue_print`, `order_item_fulfil` and `order_attach` (an
+agent call's grant only narrows the run's); nothing here makes that trigger or approves
+that grant.
 
 A print refused `requote_needed` (the accepted quote's sliced file is gone or changed)
 asks a person and never re-quotes: on an accepted order a new quote is open only after a
@@ -21,6 +22,7 @@ import logging
 from typing import Any
 
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.flows.repository import FlowCommit
 from scadbuddy.flows.typecheck import check_script
 
 logger = logging.getLogger(__name__)
@@ -290,15 +292,22 @@ asyncio.run(main())
 
 
 async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
-    """Register version 1 of the built-in when the name never had a version; whether it
-    did. A failure is logged: the app starts either way, and the next start tries again.
-    Without the flows' repository there is nowhere to put it."""
+    """Register version 1 of the built-in when the name never had a version, or this
+    build's script as a new version when the newest is still an unedited built-in one
+    with another script (#4673: an install that registered an older built-in); whether it
+    wrote one. A person's version, or a deleted flow, stands. A failure is logged: the app
+    starts either way, and the next start tries again. Without the flows' repository there
+    is nowhere to put it."""
     if not definitions.history.available:
         return False
     try:
-        # The usual start: the name has versions, so nothing to check or write.
-        # `register_new`'s locked check stays the guard (review of #5682).
-        if await asyncio.to_thread(definitions.history.versions, NAME):
+        # The usual start: the name has versions, so nothing to write unless the newest
+        # is an older built-in. `register_new`'s locked check stays the guard (review of
+        # #5682).
+        versions = await asyncio.to_thread(definitions.history.versions, NAME)
+        if versions:
+            if await _upgraded(definitions, versions[0]):
+                return True
             logger.info("the built-in %s flow was not registered: the name has versions", NAME)
             return False
         # The check a registration route applies (review of #5682): a build whose script
@@ -330,3 +339,33 @@ async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
         )
         return False
     return True
+
+
+async def _upgraded(definitions: FlowDefinitions, newest: FlowCommit) -> bool:
+    """This build's script as a new version over ``newest`` when it is the built-in's own
+    (`BUILTIN_TRAILER`), not deleted, and another script; whether it wrote one. Checked
+    again under the history's write lock (``expect_head``), so replicas starting together
+    write it once."""
+    if newest.builtin != NAME:
+        return False
+    if definitions.states.state(NAME).deleted_at is not None:
+        return False
+    script = await asyncio.to_thread(definitions.history.script_at, NAME, newest.commit)
+    if script == SCRIPT:
+        return False
+    if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
+        logger.error(
+            "the built-in %s flow does not type-check; not upgraded",
+            NAME,
+            extra={"problems": len(problems)},
+        )
+        return False
+    made = await definitions.upgrade_builtin(
+        NAME,
+        SCRIPT,
+        AUTHOR,
+        head=newest.commit,
+        inputs_schema=INPUTS_SCHEMA,
+        message="Update the built-in order-fulfilment flow",
+    )
+    return made is not None

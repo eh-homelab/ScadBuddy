@@ -77,6 +77,68 @@ async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     assert len(definitions.history.versions(NAME)) == 2
 
 
+#: A built-in version a running install registered before this build's script (#5682's
+#: sent the model's remembered choices, which #4673 refuses against a quote's setup).
+OLD_SCRIPT = SCRIPT.replace(
+    '    if accepted and accepted[0].get("choices") is not None:\n        return {}\n', ""
+)
+
+
+async def _registered_old(definitions: FlowDefinitions) -> None:
+    await definitions.start()
+    assert OLD_SCRIPT != SCRIPT
+    made = await definitions.register_new(
+        NAME,
+        OLD_SCRIPT,
+        builtin_flow.AUTHOR,
+        inputs_schema=INPUTS_SCHEMA,
+        message="Add the built-in order-fulfilment flow",
+        display_name=builtin_flow.DISPLAY_NAME,
+        description=builtin_flow.DESCRIPTION,
+    )
+    assert made is not None
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_an_unedited_built_in_is_brought_up_to_this_builds_script(
+    definitions: FlowDefinitions,
+) -> None:
+    """#5732 review: an install that registered an older built-in gets this build's as a
+    new version, once, even from two replicas starting together; a person's own version
+    (the test above) or a delete stands."""
+    await _registered_old(definitions)
+    results = await asyncio.gather(
+        ensure_builtin_flow(definitions), ensure_builtin_flow(definitions)
+    )
+    assert sorted(results) == [False, True]
+    newest, first = definitions.history.versions(NAME)
+    assert definitions.history.script_at(NAME, newest.commit) == SCRIPT
+    assert definitions.history.script_at(NAME, first.commit) == OLD_SCRIPT
+    assert newest.builtin == NAME
+    assert await ensure_builtin_flow(definitions) is False
+    assert len(definitions.history.versions(NAME)) == 2
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_an_edited_built_in_is_not_replaced(definitions: FlowDefinitions) -> None:
+    await _registered_old(definitions)
+    await definitions.register(NAME, "return 'mine'", {"kind": "browser"}, approval_timeout_s=None)
+    assert await ensure_builtin_flow(definitions) is False
+    newest, _ = definitions.history.versions(NAME)
+    assert definitions.history.script_at(NAME, newest.commit) == "return 'mine'"
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_a_deleted_built_in_is_not_brought_back(definitions: FlowDefinitions) -> None:
+    await _registered_old(definitions)
+    await definitions.delete(NAME, {"kind": "browser"})
+    assert await ensure_builtin_flow(definitions) is False
+    assert len(definitions.history.versions(NAME)) == 1
+
+
 @pytest.mark.parametrize(
     ("switch", "flows", "registered"),
     [(True, "defs", True), (False, "defs", False), (True, None, False)],
@@ -225,10 +287,10 @@ class _Host:
         self.grants.append(kwargs.get("grant"))
         return {"summary": "ok"}
 
-    def run(self) -> Any:
+    def run(self, script: str = SCRIPT) -> Any:
         names = ("trigger", "inputs", "tool", "queue_print", "wait_for_human", "sleep", "agent")
         scope: dict[str, Any] = {name: getattr(self, name) for name in names}
-        exec(SCRIPT.replace("asyncio.run(main())", "RESULT = asyncio.run(main())"), scope)
+        exec(script.replace("asyncio.run(main())", "RESULT = asyncio.run(main())"), scope)
         return scope["RESULT"]
 
 
@@ -273,6 +335,13 @@ def test_an_item_whose_quote_records_its_setup_prints_with_it() -> None:
     host.run()
     assert host.requests == [{}]
     assert "get_print_choices" not in host.calls
+    # Version 1's script (#5682) sent the model's remembered choices against the same
+    # quote, which the print now refuses: the reason an unedited one is upgraded
+    # (`test_an_unedited_built_in_is_brought_up_to_this_builds_script`).
+    old = _Host([item], [_OK], [])
+    old.run(OLD_SCRIPT)
+    [request] = old.requests
+    assert request["choices"] and "get_print_choices" in old.calls
 
 
 def test_a_hold_asks_until_the_order_is_released() -> None:

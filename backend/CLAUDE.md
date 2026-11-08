@@ -614,8 +614,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
   script, inputs `notify` and `settle_hours`), registered by
-  `ensure_builtin_flow` at the component's start only when the name never had a version
-  (`FlowDefinitions.register_new`, `FlowExistsError`), so a person's edit or delete stands;
+  `ensure_builtin_flow` at the component's start when the name never had a version
+  (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
+  is still an unedited built-in one with another script (#4673, `_upgraded`:
+  `FlowDefinitions.upgrade_builtin`, which writes only while the newest is the one it
+  read, `expect_head`), so a person's edit or delete stands;
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
   settings) switches it. It prints each approved or failed item through `queue_print`
   with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
@@ -630,8 +633,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the agent to record the attempts under a grant kept to the order, and with `notify`,
   once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
   through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
-  component's start; it reads the versions first (a name with any registers nothing),
-  then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
+  component's start; it reads the versions first (a name with any registers nothing,
+  unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
   build (`flows/reconcile.py` `created_by`).
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
