@@ -606,7 +606,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
   `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,
   `outward` what commits it to the customer: accept, a quote's acceptance, fulfil, ship,
-  close, cancel). Frontend: `pages/OrdersPage.tsx`, `OrderPage.tsx`, `CustomersPage.tsx`,
+  close, cancel, a deposit, shipping without full payment). Frontend: `pages/OrdersPage.tsx`, `OrderPage.tsx`, `CustomersPage.tsx`,
   `CustomerPage.tsx` over `components/records/` (`DataTable`, `FilterBar`, `RecordDrawer`,
   extracted from the Activity components, which wrap them) and `components/orders/`; the
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
@@ -664,6 +664,39 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`orders/totals.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  With the order and its payment requests (`order_totals(..., order=, requests=)`, as `GET
+  /orders/{id}` reads them) it also gives `deposit_due_minor` (the deposit less what is
+  paid, 0 with none or a waived one) and `shipping_held` (`balance_unpaid`'s rule,
+  `totals.balance_due`); `totals_of`, the lifecycle's read, leaves them at 0 and False.
+  Deposits, the balance, auto tax and shipping options (#5281, storefront spec §8-§9,
+  plan `2026-11-07-storefront-phase-2-payments-deposits.md`, migration
+  `…_order_deposits_tax.sql`): `orders.deposit_minor`, `.deposit_waived_reason` and
+  `.balance_waived_reason`; `order_charges.auto` (the one tax row ScadBuddy computes,
+  `Lifecycle._retax`) and `.shipping_option_id`. `set_deposit` and `apply_deposit_policy`
+  (`PUT /orders/{id}/deposit`, `POST …/deposit/policy`, gap 7) work while `draft` or
+  `quoted`: they cancel the open and failed `deposit` requests and open one for the
+  deposit less what is paid on the default provider (gap 4); a pending one refuses them
+  (`payment_in_flight`). Until the deposit is paid (gap 3) or waived (`POST
+  …/deposit/waive`, a reason of 1 to 500 characters), a revision is not sent and a test
+  print is not claimed (`deposit_unpaid`). `accept_order` leaves an order that asked for
+  money (a deposit, or a request not cancelled) with one open `balance` request for the
+  rest, cancelling its other open or failed requests (gap 1), and is refused
+  `payment_in_flight` while one is pending. While a `balance` request stands, the balance
+  is above zero and no one waived it (`POST …/balance/waive`, once accepted, else
+  `order_not_accepted`), a shipment, or a shipment edit that raises a quantity, is
+  `balance_unpaid` (gap 2). The routes that cancel requests (accept, a deposit set or
+  applied, an order's cancel, gap 5) run through `Payments.run_closing`, which closes each
+  cancelled request's provider page after the commit and never a kept one's, then
+  `link_pending` links the new request. A storefront cart refuses all five calls
+  (`order_not_submitted`). The tax row is `orders_tax_percent` of the items plus, with
+  `orders_tax_shipping`, the shipping charges, rounded half up; a typed `tax` charge
+  removes it (gap 6). `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
+  for none) writes the order's one `shipping` charge from Settings → Orders'
+  `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
+  `option_id`, an option that ships needs the shipping address
+  (`shipping_address_required`), a pickup does not (gap 15). Routes in
+  `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
+  `order_deposit_waive` and `order_shipping_option_set` (write).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or
@@ -905,7 +938,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   manual payment, and a disconnect is refused while one is pending. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
-  (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
+  (`/orders/{id}/payment-requests`, and the deposit, waiver and shipping-option routes of
+  #5281 above), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
   most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`

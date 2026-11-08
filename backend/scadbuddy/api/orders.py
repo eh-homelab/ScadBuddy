@@ -1052,7 +1052,13 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             charges=charges,
             payments=payments,
             shipments=store.shipments(order.id),
-            totals=order_totals([(item, item.quotes) for item in items], charges, payments),
+            totals=order_totals(
+                [(item, item.quotes) for item in items],
+                charges,
+                payments,
+                order=order,
+                requests=requests,
+            ),
             attachments=store.attachments(order.id),
             projects=store.projects(order.id),
             payment_requests=requests,
@@ -1245,10 +1251,18 @@ PROJECTS_WAIT_SECONDS = 20.0
         "missing."
     ),
 )
-async def accept_order(order_id: str, orders: OrdersDep) -> Order:
+async def accept_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
+    """The requests the accept cancels have their pages closed after the commit; the
+    balance request it opens is then linked."""
     check_path(order_id)
     by = current_actor()
-    accepted = await _run(lambda: orders.lifecycle.accept_order(order_id, by))
+    try:
+        accepted = await service.service.run_closing(
+            order_id, lambda: orders.lifecycle.accept_order(order_id, by)
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
+    await service.service.link_pending(accepted.id)
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would
     # leave it unrecorded, and the next ensure would make a second of the same name.
     ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))

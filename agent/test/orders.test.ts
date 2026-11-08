@@ -70,6 +70,10 @@ describe('order tools (#4249)', () => {
       'order_reopen',
       'order_request_payment',
       'order_payment_requests',
+      'order_deposit_set',
+      'order_deposit_waive',
+      'order_balance_waive',
+      'order_shipping_option_set',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -99,6 +103,10 @@ describe('order tools (#4249)', () => {
       order_reopen: 'outward',
       order_request_payment: 'outward',
       order_payment_requests: 'read',
+      order_deposit_set: 'outward',
+      order_deposit_waive: 'write',
+      order_balance_waive: 'outward',
+      order_shipping_option_set: 'write',
     })
   })
 
@@ -307,6 +315,66 @@ describe('order tools (#4249)', () => {
     expect(firstText(await tool('order_payment_requests').execute({ order_id: ORDER }, ctx()))).toEqual([REQUEST])
     await tool('order_request_payment').execute({ order_id: ORDER, provider: null }, ctx())
     expect(sent).toEqual({ provider: null })
+  })
+
+  it('sets a deposit or applies the policy as an outward step, waives with a reason (#5281)', async () => {
+    const ORDER_ROW = { id: ORDER, deposit_minor: 2000 }
+    const calls: string[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/deposit`, async ({ request }) => {
+        calls.push(`DEPOSIT ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/deposit/policy`, async ({ request }) => {
+        calls.push(`POLICY ${await request.text()}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/deposit/waive`, async ({ request }) => {
+        calls.push(`WAIVE DEPOSIT ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/balance/waive`, async ({ request }) => {
+        calls.push(`WAIVE BALANCE ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(ORDER_ROW)
+      }),
+    )
+    expect(tool('order_deposit_set').risk).toBe('outward')
+    expect(tool('order_balance_waive').risk).toBe('outward')
+    expect(tool('order_deposit_waive').risk).toBe('write')
+    expect(tool('order_shipping_option_set').risk).toBe('write')
+    expect(firstText(await tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: 2000 }, ctx()))).toEqual(ORDER_ROW)
+    await tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: null }, ctx())
+    await tool('order_deposit_set').execute({ order_id: ORDER, policy: true }, ctx())
+    await tool('order_deposit_waive').execute({ order_id: ORDER, reason: 'trusted' }, ctx())
+    await tool('order_balance_waive').execute({ order_id: ORDER, reason: 'pays on pickup' }, ctx())
+    expect(calls).toEqual([
+      'DEPOSIT {"amount_minor":2000}',
+      'DEPOSIT {"amount_minor":null}',
+      'POLICY ',
+      'WAIVE DEPOSIT {"reason":"trusted"}',
+      'WAIVE BALANCE {"reason":"pays on pickup"}',
+    ])
+    await expect(tool('order_deposit_set').execute({ order_id: ORDER }, ctx())).rejects.toThrow(ToolError)
+    await expect(tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: 5, policy: true }, ctx())).rejects.toThrow(ToolError)
+    // The input schema refuses these before any call (a parse error, thrown at once).
+    expect(() => tool('order_deposit_set').execute({ order_id: ORDER, amount_minor: 0 }, ctx())).toThrow('amount_minor')
+    expect(() => tool('order_deposit_waive').execute({ order_id: ORDER, reason: '' }, ctx())).toThrow('reason')
+    expect(() => tool('order_balance_waive').execute({ order_id: ORDER, reason: 'x'.repeat(501) }, ctx())).toThrow('reason')
+    expect(calls).toHaveLength(5)
+  })
+
+  it('sets or clears the shipping option, naming Settings → Orders (#5281)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/shipping-option`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: ORDER })
+      }),
+    )
+    expect(tool('order_shipping_option_set').description).toContain('Settings → Orders')
+    await tool('order_shipping_option_set').execute({ order_id: ORDER, option_id: 'pickup' }, ctx())
+    await tool('order_shipping_option_set').execute({ order_id: ORDER, option_id: null }, ctx())
+    expect(sent).toEqual([{ option_id: 'pickup' }, { option_id: null }])
   })
 
   it('records a payment that closes a request (#4957)', async () => {

@@ -333,3 +333,18 @@ def test_a_failed_request_is_cancelled_at_accept(shop: Shop) -> None:
         e.detail for e in shop.rows.events(order.id) if e.kind == "payment_request.cancelled"
     ]
     assert cancels == [{"request_id": req.id}]
+
+
+def test_a_failed_request_beside_a_deposit_leaves_one_request_at_accept(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    shop.lifecycle.set_deposit(order.id, BY, 300)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=100, method="cash")
+    failed = shop.lifecycle.open_payment_request(order.id, BY, amount_minor=200, provider=None)
+    set_request_status(shop, failed.id, "failed")
+    order = shop.lifecycle.accept_order(order.id, BY)
+    found = requests_for(shop, order)
+    open_ones = [(r.kind, r.amount_minor) for r in found if r.status == "open"]
+    assert open_ones == [("balance", 1000 - 100)]
+    assert next(r for r in found if r.id == failed.id).status == "cancelled"

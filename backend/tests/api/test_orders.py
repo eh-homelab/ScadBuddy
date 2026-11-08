@@ -164,6 +164,8 @@ def test_patch_edits_notes_due_addresses_and_charges(client: TestClient) -> None
         "total_minor": 300,
         "paid_minor": 0,
         "balance_minor": 300,
+        "deposit_due_minor": 0,
+        "shipping_held": False,
     }
     cleared = client.patch(f"/api/v1/orders/{order['id']}", json={"shipping_address_id": None})
     assert cleared.status_code == 200

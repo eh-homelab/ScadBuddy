@@ -95,7 +95,7 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.totals import totals_of
+from scadbuddy.orders.totals import balance_due, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
     EventOutcome,
@@ -1024,7 +1024,7 @@ class Lifecycle:
     # a revision is not sent and a test print is not claimed (`deposit_unpaid`). A deposit
     # request a change cancels is `payment_request.cancelled` on the audit line, as a
     # request's own cancel is; the payments service closes its provider's page after the
-    # commit, as it does for an order's cancel (`Payments.cancel_order`).
+    # commit, as it does for an order's cancel (`Payments.run_closing`).
 
     def _deposit_editable(self, order: Order) -> None:
         check_submitted(order)
@@ -1091,9 +1091,10 @@ class Lifecycle:
 
     def set_deposit(self, order_id: str, by: Actor, amount_minor: Money | None) -> Order:
         """The order's deposit, or None for none, while `draft` or `quoted`
-        (`order_not_editable` past it). It cancels the open `deposit` request and clears
-        a waiver; a deposit above what is paid opens a `deposit` request for the rest.
-        The same deposit, already asked for, writes nothing."""
+        (`order_not_editable` past it; `order_not_submitted` on a cart). It cancels the
+        open and failed `deposit` requests and clears a waiver; a deposit above what is
+        paid opens a `deposit` request for the rest. A pending `deposit` request refuses it
+        (`payment_in_flight`). The same deposit, already asked for, writes nothing."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
@@ -1131,9 +1132,9 @@ class Lifecycle:
 
     def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
-        1 to 500 characters). The open deposit request stays open. An order with no
-        deposit has nothing to waive, and the same reason again changes nothing: it is
-        returned as it is, nothing written."""
+        1 to 500 characters). The open deposit request stays open. A cart is
+        `order_not_submitted`. An order with no deposit has nothing to waive, and the same
+        reason again changes nothing: it is returned as it is, nothing written."""
         reason = reason.strip()
         if not 1 <= len(reason) <= 500:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
@@ -1173,8 +1174,9 @@ class Lifecycle:
 
     # -- the balance (#5281, storefront spec §9) ------------------------------------------
     # An order that asked for money (a deposit, or a payment request not cancelled) is
-    # left at acceptance with one open `balance` request for the rest: its other open
-    # requests are cancelled. While a balance request stands (not `cancelled`), the
+    # left at acceptance with one open `balance` request for the rest: its other open or
+    # failed requests are cancelled, and the payments service closes their pages after the
+    # commit (`Payments.run_closing`). While a balance request stands (not `cancelled`), the
     # balance is above zero and no one waived it, the order does not ship, and a shipment
     # edit does not raise a quantity (`balance_unpaid`). A back-office order with no
     # request ships as it always did.
@@ -1221,13 +1223,11 @@ class Lifecycle:
 
     def _balance_due(self, conn: Conn, order: Order) -> int:
         """The balance a `balance` request that is not cancelled asks of the order, or 0
-        when it has no such request or nothing is due."""
-        if not any(
-            found.kind == "balance" and found.status != "cancelled"
-            for found in payments.requests_for_order(conn, order.id)
-        ):
+        when it has no such request or nothing is due (``totals.balance_due``)."""
+        found = payments.requests_for_order(conn, order.id)
+        if not any(r.kind == "balance" and r.status != "cancelled" for r in found):
             return 0
-        return max(totals_of(self.store, conn, order.id).balance_minor, 0)
+        return balance_due(found, totals_of(self.store, conn, order.id).balance_minor)
 
     def _balance_paid(self, conn: Conn, order: Order) -> None:
         """Refuses (`balance_unpaid`) while the order has a `balance` request not
@@ -1245,9 +1245,10 @@ class Lifecycle:
 
     def waive_balance(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Ship without full payment": the order ships unpaid, for ``reason`` (trimmed,
-        1 to 500 characters), once accepted (`order_not_accepted` before). The open
-        balance request stays open. The same reason again, or nothing to waive (no
-        balance request that is not cancelled, or no balance due), writes nothing."""
+        1 to 500 characters), once accepted (`order_not_accepted` before;
+        `order_not_submitted` on a cart). The open balance request stays open. The same
+        reason again, or nothing to waive (no balance request that is not cancelled, or no
+        balance due), writes nothing."""
         reason = reason.strip()
         if not 1 <= len(reason) <= 500:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)

@@ -262,16 +262,31 @@ function detail(order: Order): OrderDetail {
   }
   const charged = charges.reduce((sum, c) => sum + c.amount_minor, 0)
   const paid = payments.reduce((sum, p) => sum + p.amount_minor, 0)
+  const balance = subtotal + charged - paid
+  const requests = state.paymentRequests.filter((r) => r.order_id === order.id)
+  // #5281: the deposit less what is paid, and `balance_unpaid`'s rule (`totals.balance_due`).
+  const depositDue = order.deposit_minor != null && order.deposit_waived_reason == null ? Math.max(0, order.deposit_minor - paid) : 0
+  const held = order.balance_waived_reason == null && balance > 0 && requests.some((r) => r.kind === 'balance' && r.status !== 'cancelled')
   return {
     order,
     items,
     charges,
     payments,
-    payment_requests: state.paymentRequests.filter((r) => r.order_id === order.id),
+    payment_requests: requests,
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
     projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
-    totals: { subtotal_minor: subtotal, pending_minor: pending, unpriced_items: unpriced, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
+    totals: {
+      subtotal_minor: subtotal,
+      pending_minor: pending,
+      unpriced_items: unpriced,
+      charges_minor: charged,
+      total_minor: subtotal + charged,
+      paid_minor: paid,
+      balance_minor: balance,
+      deposit_due_minor: depositDue,
+      shipping_held: held,
+    },
   }
 }
 

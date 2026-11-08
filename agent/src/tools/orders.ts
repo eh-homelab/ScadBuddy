@@ -44,6 +44,12 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 // customer nothing. Removing one is `outward` (AI spec §8.1, a delete): its bytes are
 // freed and no history brings them back. The list, the bytes and the thumbnail stay the
 // page's (coverage.ts): order_get carries the list.
+//
+// Deposits and the balance (#5281, storefront spec §9): setting a deposit asks the customer
+// for money and shipping without full payment lets goods go unpaid, so order_deposit_set
+// and order_balance_waive are `outward`; proceeding without the deposit and the shipping
+// option are records the shop keeps, `write`. None of them sees a provider's secret: the
+// backend links a request after the commit and answers with the order.
 
 const ID = z.string().min(1).max(100)
 const orderId = ID.describe('An order id, as order_list or order_create returns it')
@@ -530,6 +536,112 @@ export const orderTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/orders/{order_id}/payment-requests', { params: { path: { order_id } } }),
           `list the payment requests of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_deposit_set',
+    label: "Set an order's deposit",
+    description:
+      "Set the order's deposit (#5281) while it is draft or quoted: `amount_minor` (null for none), or `policy: true` " +
+      "for the deposit the shop's policy asks of the order now; give exactly one. It cancels the open and failed " +
+      'deposit requests, clears a waiver, and asks the customer for what of the deposit is not paid yet on the ' +
+      'default provider, so it is outward: a person must approve it first (it returns a pending action). Until the ' +
+      'deposit is paid or waived, a revision is not sent and a test print is not claimed (`deposit_unpaid`). 409 ' +
+      '`payment_in_flight` while a deposit payment is pending; `order_not_submitted` on a storefront cart.',
+    input: z.object({
+      order_id: orderId,
+      amount_minor: money.min(1).nullable().optional().describe("The deposit in the order's currency; null for none"),
+      policy: z.literal(true).optional().describe("Set the deposit the shop's policy asks instead of an amount"),
+    }),
+    risk: 'outward',
+    routes: ['PUT /api/v1/orders/{order_id}/deposit', 'POST /api/v1/orders/{order_id}/deposit/policy'],
+    summarize: ({ order_id, amount_minor, policy }) =>
+      policy
+        ? `Set the policy's deposit on order ${order_id}`
+        : amount_minor == null
+          ? `Clear the deposit of order ${order_id}`
+          : `Set a deposit of ${amount_minor} on order ${order_id}`,
+    handler: async ({ order_id, amount_minor, policy }, { backend }) => {
+      if ((amount_minor !== undefined) === (policy !== undefined)) {
+        throw new ToolError('give exactly one of amount_minor and policy')
+      }
+      return json(
+        policy
+          ? await ok(
+              backend.POST('/api/v1/orders/{order_id}/deposit/policy', { params: { path: { order_id } } }),
+              `apply the deposit policy to order ${order_id}`,
+            )
+          : await ok(
+              backend.PUT('/api/v1/orders/{order_id}/deposit', {
+                params: { path: { order_id } },
+                body: { amount_minor: amount_minor ?? null },
+              }),
+              `set the deposit of order ${order_id}`,
+            ),
+      )
+    },
+  }),
+  defineTool({
+    name: 'order_deposit_waive',
+    label: 'Proceed without the deposit',
+    description:
+      'Proceed without the deposit (#5281): the work goes on unpaid, for `reason`, which the order keeps. The deposit ' +
+      'request stays open. Nothing to waive, or the same reason again, changes nothing. `order_not_submitted` on a ' +
+      'storefront cart.',
+    input: z.object({ order_id: orderId, reason: z.string().min(1).max(500) }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/deposit/waive'],
+    summarize: ({ order_id, reason }) => `Proceed without the deposit of order ${order_id}: ${reason}`,
+    handler: async ({ order_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/deposit/waive', { params: { path: { order_id } }, body: { reason } }),
+          `waive the deposit of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_balance_waive',
+    label: 'Ship without full payment',
+    description:
+      'Ship without full payment (#5281): once the order is accepted, it ships with its balance unpaid, for `reason`. ' +
+      'Without it a shipment is refused (`balance_unpaid`) while a balance request stands and the balance is above ' +
+      'zero. The balance request stays open. It lets goods go unpaid, so it is outward: a person must approve it ' +
+      'first (it returns a pending action). `order_not_accepted` before acceptance; `order_not_submitted` on a cart.',
+    input: z.object({ order_id: orderId, reason: z.string().min(1).max(500) }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/balance/waive'],
+    summarize: ({ order_id, reason }) => `Ship order ${order_id} without full payment: ${reason}`,
+    handler: async ({ order_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/balance/waive', { params: { path: { order_id } }, body: { reason } }),
+          `waive the balance of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_shipping_option_set',
+    label: "Choose an order's shipping option",
+    description:
+      "Choose the order's shipping option (#5281) while it is draft or quoted: `option_id` is one of the shop's " +
+      'shipping options, kept in Settings → Orders (read them with get_settings, `storefront_shipping_options`); null ' +
+      "removes it. The option becomes the order's one `shipping` charge. An option that ships needs the order's " +
+      'shipping address (`shipping_address_required`); a pickup does not.',
+    input: z.object({
+      order_id: orderId,
+      option_id: z.string().min(1).max(100).nullable().describe('A shipping option id; null for none'),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/orders/{order_id}/shipping-option'],
+    summarize: ({ order_id, option_id }) =>
+      option_id === null ? `Remove the shipping option of order ${order_id}` : `Ship order ${order_id} by ${option_id}`,
+    handler: async ({ order_id, option_id }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/orders/{order_id}/shipping-option', { params: { path: { order_id } }, body: { option_id } }),
+          `set the shipping option of order ${order_id}`,
         ),
       ),
   }),

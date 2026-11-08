@@ -6,6 +6,11 @@ commit. A refusal is the orders problem
 (``orders/problems.py`` ``refused``); a provider that is not offered or not connected is
 422 on ``provider``.
 
+The deposit, the two waivers and the shipping option (#5281, storefront spec §8-§9): a
+deposit set or applied by the policy cancels the requests it replaces through
+``Payments.run_closing``, which closes their pages after the commit, then links the new
+request (``link_pending``).
+
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
 """
@@ -13,12 +18,14 @@ runtime (``api/components.py``).
 import asyncio
 
 from fastapi import APIRouter, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.orders import check_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.lifecycle import LifecycleError
+from scadbuddy.orders.models import Money, Order
 from scadbuddy.orders.problems import refused
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.component import PaymentsDep
@@ -119,5 +126,127 @@ async def link_payment_request(
     try:
         await asyncio.to_thread(_request_of, orders, order_id, request_id)
         return await service.service.link(request_id)
+    except LifecycleError as error:
+        raise refused(error) from None
+
+
+# -- the deposit, the balance and the shipping option (#5281) ---------------------------------
+
+
+class DepositBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: The deposit, or null for none.
+    amount_minor: Money | None = Field(ge=1)
+
+
+class WaiveBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ShippingOptionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: An id from Settings → Orders' shipping options, or null for none.
+    option_id: str | None
+
+
+@router.put(
+    "/{order_id}/deposit",
+    response_model=Order,
+    summary="Set the order's deposit",
+    description=(
+        "While draft or quoted. It cancels the open and failed deposit requests, closes"
+        " their payment pages, clears a waiver, and asks for what of the deposit is not"
+        " paid yet on the default provider. 409 `payment_in_flight` while a deposit"
+        " request is pending; `order_not_submitted` on a storefront cart."
+    ),
+)
+async def set_deposit(
+    order_id: str, body: DepositBody, orders: OrdersDep, service: PaymentsDep
+) -> Order:
+    check_path(order_id)
+    by = current_actor()
+    try:
+        order = await service.service.run_closing(
+            order_id, lambda: orders.lifecycle.set_deposit(order_id, by, body.amount_minor)
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
+    await service.service.link_pending(order_id)
+    return order
+
+
+@router.post(
+    "/{order_id}/deposit/policy",
+    response_model=Order,
+    summary="Set the deposit the shop's policy asks",
+    description="As `PUT …/deposit`, with the amount the deposit policy asks of the order now.",
+)
+async def apply_deposit_policy(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
+    check_path(order_id)
+    by = current_actor()
+    try:
+        order = await service.service.run_closing(
+            order_id, lambda: orders.lifecycle.apply_deposit_policy(order_id, by)
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
+    await service.service.link_pending(order_id)
+    return order
+
+
+@router.post(
+    "/{order_id}/deposit/waive",
+    response_model=Order,
+    summary="Proceed without the deposit",
+    description="The work goes on unpaid, for `reason`. The deposit request stays open.",
+)
+async def waive_deposit(order_id: str, body: WaiveBody, orders: OrdersDep) -> Order:
+    check_path(order_id)
+    by = current_actor()
+    try:
+        return await asyncio.to_thread(orders.lifecycle.waive_deposit, order_id, by, body.reason)
+    except LifecycleError as error:
+        raise refused(error) from None
+
+
+@router.post(
+    "/{order_id}/balance/waive",
+    response_model=Order,
+    summary="Ship without full payment",
+    description=(
+        "Once accepted, the order ships with its balance unpaid, for `reason`. The balance"
+        " request stays open."
+    ),
+)
+async def waive_balance(order_id: str, body: WaiveBody, orders: OrdersDep) -> Order:
+    check_path(order_id)
+    by = current_actor()
+    try:
+        return await asyncio.to_thread(orders.lifecycle.waive_balance, order_id, by, body.reason)
+    except LifecycleError as error:
+        raise refused(error) from None
+
+
+@router.put(
+    "/{order_id}/shipping-option",
+    response_model=Order,
+    summary="Choose the order's shipping option",
+    description=(
+        "Writes the order's one `shipping` charge from the option (null removes it), while"
+        " draft or quoted. An option that ships needs the order's shipping address"
+        " (`shipping_address_required`); a pickup does not."
+    ),
+)
+async def set_shipping_option(order_id: str, body: ShippingOptionBody, orders: OrdersDep) -> Order:
+    check_path(order_id)
+    by = current_actor()
+    try:
+        return await asyncio.to_thread(
+            orders.lifecycle.set_shipping_option, order_id, by, body.option_id
+        )
     except LifecycleError as error:
         raise refused(error) from None
