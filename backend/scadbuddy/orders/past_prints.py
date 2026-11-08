@@ -37,7 +37,7 @@ from scadbuddy.orders.integrations import (
     not_linked,
 )
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
-from scadbuddy.orders.models import Actor, ColourSlot, LibraryFileRef, Quote
+from scadbuddy.orders.models import Actor, ColourSlot, LibraryFileRef, OrderItem, Quote
 from scadbuddy.orders.pricing import ArchivePlate, PlateFilament
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
@@ -82,6 +82,10 @@ class ArchiveCopies(Protocol):
         """``path``'s bytes as a new library file named ``filename``."""
         ...
 
+    async def trash(self, file_id: int) -> None:
+        """The file moved to the library's trash."""
+        ...
+
 
 class NativeArchiveCopies:
     """`ArchiveCopies` over ScadBuddy's native library: a copy is filed at its root."""
@@ -99,6 +103,9 @@ class NativeArchiveCopies:
         with path.open("rb") as data:
             row = await self.native.upload(filename, data, None)
         return LibraryFileRef(id=row.id, filename=row.name, library="native")
+
+    async def trash(self, file_id: int) -> None:
+        await self.native.trash([file_id])
 
 
 def _conflict(slug: str, message: str, **extensions: Any) -> ApiError:
@@ -140,6 +147,8 @@ async def copied_file(
         if kept is not None:
             return kept
     facts = await _facts(integrations, archive_id)
+    # The store's spool is made on its first use (`NativeLibrary.thumbnail`).
+    await asyncio.to_thread(workdir.mkdir, parents=True, exist_ok=True)
     target = workdir / f".archive-{archive_id}-{uuid.uuid4().hex}"
     try:
         try:
@@ -164,9 +173,11 @@ async def copied_file(
         store.record_archive_copy, archive_id, made.id, replace=existing
     )
     if stands != made.id:
-        # Another pick of the same archive recorded its copy first: use that one.
+        # Another pick of the same archive recorded its copy first: use that one, and
+        # leave no second copy in the library.
         other = await copies.file(stands)
         if other is not None:
+            await copies.trash(made.id)
             return other
     return made
 
@@ -190,6 +201,24 @@ def archive_colours(
         )
         for slot in sorted(colours)
     ]
+
+
+def _bad_archive(message: str) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        message,
+        errors=[{"loc": ["body", "archive_id"], "msg": message}],
+    )
+
+
+async def _prints_item(store: OrderStore, archive_id: int, item: OrderItem) -> bool:
+    """Whether the item's own output or library file printed ``archive_id``."""
+    origin = await asyncio.to_thread(store.archive_origin, archive_id)
+    if origin is None:
+        return False
+    if origin.output_id is not None:
+        return origin.output_id == item.output_id
+    return item.library_file is not None and origin.library_file_id == item.library_file.id
 
 
 def _plate(facts: ArchiveFacts, index: int) -> ArchivePlate:
@@ -232,17 +261,24 @@ async def quote_from_archive(
     recorded (`Lifecycle.record_archive_quote`)."""
     store = lifecycle.store
     _, policy, _ = await asyncio.to_thread(book.policy)
-    await asyncio.to_thread(quote_check, store, policy, order_id, item_id, request)
+    # `filament_id` stands for every slot the print used, which only its archives name:
+    # the check sees it as one slot's.
+    checked = request
+    if request.filament_id is not None:
+        checked = request.model_copy(update={"filaments": {0: request.filament_id}})
+    await asyncio.to_thread(quote_check, store, policy, order_id, item_id, checked)
     item = await asyncio.to_thread(store.item, item_id)
     order = await asyncio.to_thread(store.order, order_id)
     assert item is not None and order is not None
     archive_id = request.archive_id or next(iter(item.origin_archive_ids), None)
     if archive_id is None:
-        message = f"item {item_id} was not taken from a past print: name its archive_id"
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            message,
-            errors=[{"loc": ["body", "archive_id"], "msg": message}],
+        raise _bad_archive(f"item {item_id} was not taken from a past print: name its archive_id")
+    if archive_id not in item.origin_archive_ids and not await _prints_item(
+        store, archive_id, item
+    ):
+        raise _bad_archive(
+            f"archive {archive_id} is not a print of item {item_id}: it was not taken from"
+            " it, and neither its output nor its library file printed it"
         )
     run = await asyncio.to_thread(store.archive_run_plates, archive_id) or [(None, archive_id)]
     missing = [plate for plate, found in run if found is None]
@@ -269,16 +305,18 @@ async def quote_from_archive(
             )
         archives.append(facts)
         plates.append(_plate(facts, facts.plate_id or plate_id or position))
+    filaments = dict(request.filaments)
+    if request.filament_id is not None:
+        used = {slot.slot_id - 1 for a in archives for slot in a.slots if slot.used_g}
+        filaments = {slot: request.filament_id for slot in used} | filaments
     try:
         if not item.colours:
-            colours = archive_colours(archives, request.filaments)
+            colours = archive_colours(archives, filaments)
             await asyncio.to_thread(
                 lambda: lifecycle.update_item(order_id, item_id, by, colours=colours)
             )
         else:
-            await asyncio.to_thread(
-                set_filaments, lifecycle, order_id, item_id, request.filaments, by
-            )
+            await asyncio.to_thread(set_filaments, lifecycle, order_id, item_id, filaments, by)
     except LifecycleError as error:
         raise refused(error) from None
     item = await asyncio.to_thread(store.item, item_id)

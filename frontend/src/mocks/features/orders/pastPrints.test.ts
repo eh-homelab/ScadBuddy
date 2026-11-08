@@ -47,14 +47,15 @@ describe('past prints mock (#4777)', () => {
       [2, 3300],
     ])
     expect(quote.total_minor).toBe(quote.unit_price_minor * 2)
-    const failed = await failure(api.quoteItemFromArchive(ORDER_DRAFT, item.id, { archive_id: 9105, filaments }))
-    expect(failed?.problem.type).toBe(PROBLEMS + 'archive_not_succeeded')
+    // A print that is not the item's is refused before anything is read.
+    const stranger = await failure(api.quoteItemFromArchive(ORDER_DRAFT, item.id, { archive_id: 9105, filaments }))
+    expect(stranger?.status).toBe(422)
   })
 
   it('gives a library file item with no slots the slots its print used', async () => {
     const item = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9103, quantity: 1 })
     expect(item.colours).toEqual([])
-    await api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filaments: { '0': FILAMENT_PLA } })
+    await api.quoteItemFromArchive(ORDER_DRAFT, item.id, { filament_id: FILAMENT_PLA })
     const after = state.items.find((i) => i.id === item.id)
     expect(after?.colours).toEqual([{ slot: 0, colour: '#D62828', filament_id: FILAMENT_PLA }])
     expect(after?.status).toBe('quoted')

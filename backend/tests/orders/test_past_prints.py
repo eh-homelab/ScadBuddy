@@ -108,6 +108,15 @@ def shop(rows: OrderStore, pool: PgPool) -> QuoteShop:
     return QuoteShop(rows, BlobRefs(pool))
 
 
+def taken_from(pool: PgPool, item_id: str, *archive_ids: int) -> None:
+    """The item as if it were added from those archives."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_items SET origin_archive_ids = %s WHERE id = %s",
+            (list(archive_ids), item_id),
+        )
+
+
 # -- where an archive came from ---------------------------------------------------------------
 
 
@@ -165,6 +174,11 @@ class Copies:
     def __init__(self) -> None:
         self.files: dict[int, str] = {}
         self.next = 5_000_000_001
+        self.trashed: list[int] = []
+
+    async def trash(self, file_id: int) -> None:
+        self.trashed.append(file_id)
+        self.files.pop(file_id, None)
 
     async def file(self, file_id: int) -> LibraryFileRef | None:
         name = self.files.get(file_id)
@@ -191,6 +205,32 @@ async def test_a_foreign_archive_is_copied_once_and_reused(
     del copies.files[first.id]
     third = await copied_file(rows, seam, copies, 71, tmp_path)
     assert third.id != first.id and len(seam.downloads) == 2
+
+
+async def test_the_copy_makes_its_folder_and_a_lost_race_trashes_its_copy(
+    rows: OrderStore, tmp_path: Path
+) -> None:
+    # The store's spool is made on its first use: a fresh pod has none yet.
+    spool = tmp_path / "cache" / "blob-spool"
+    seam, copies = Seam(plate(71)), Copies()
+    first = await copied_file(rows, seam, copies, 71, spool)
+    assert first.id in copies.files and list(spool.iterdir()) == []
+
+    class Racing(Copies):
+        """Another pick records its copy of 72 while this one uploads."""
+
+        async def upload(self, filename: str, path: Path) -> LibraryFileRef:
+            made = await super().upload(filename, path)
+            rows.record_archive_copy(72, first.id, replace=None)
+            return made
+
+    racing = Racing()
+    racing.next = 6_000_000_001
+    racing.files[first.id] = "theirs.gcode.3mf"
+    won = await copied_file(rows, Seam(plate(72)), racing, 72, spool)
+    # The other pick's copy stands; this pick's own is not left in the library.
+    assert won.id == first.id
+    assert racing.trashed == [6_000_000_001]
 
 
 async def test_an_archive_gone_before_the_copy_is_refused(rows: OrderStore, tmp_path: Path) -> None:
@@ -220,6 +260,9 @@ async def test_a_two_plate_print_is_priced_from_both_archives(
         # A plate with no actual time is priced at its estimate.
         plate(82, plate_id=2, actual_seconds=None, slots=[{"slot_id": 1, "used_g": 4.0}]),
     )
+    # A print of the item's own output is its print, whether or not it was added from it.
+    with shop.rows.transaction() as conn:
+        conn.execute("UPDATE order_items SET output_id = %s WHERE id = %s", (OUTPUT, shop.item.id))
     quote = await quote_from_archive(
         shop.lifecycle, seam, Book(), shop.order.id, shop.item.id, archive_request(shop, 82), BY
     )
@@ -276,17 +319,24 @@ async def test_an_archive_quote_refuses_a_print_it_cannot_price(
             )
         return caught.value
 
+    unnamed = await refused(Seam(plate(71)), None)
+    assert (unnamed.status, unnamed.extensions["errors"][0]["loc"]) == (
+        422,
+        ["body", "archive_id"],
+    )
+    # Any other print is not this item's: it is not priced from it.
+    stranger = await refused(Seam(plate(55)), 55)
+    assert (stranger.status, stranger.extensions["errors"][0]["loc"]) == (
+        422,
+        ["body", "archive_id"],
+    )
+    taken_from(pool, shop.item.id, 81, 71)
     missing = await refused(Seam(plate(81)), 81)
     assert (missing.status, missing.type) == (409, PROBLEMS + "archive_plates_missing")
     failed = await refused(Seam(plate(71, status="failed")), 71)
     assert (failed.status, failed.type) == (409, PROBLEMS + "archive_not_succeeded")
     gone = await refused(Seam(), 71)
     assert (gone.status, gone.type) == (409, PROBLEMS + "archive_gone")
-    unnamed = await refused(Seam(plate(71)), None)
-    assert (unnamed.status, unnamed.extensions["errors"][0]["loc"]) == (
-        422,
-        ["body", "archive_id"],
-    )
     assert shop.rows.quotes(shop.item.id) == []
 
 
@@ -298,15 +348,17 @@ async def test_a_library_file_item_takes_its_slots_from_the_archive(shop: QuoteS
         quantity=1,
         origin_archive_ids=(71,),
     )
+    # One filament for every slot the print used: the item has none to name yet.
+    request = ArchiveQuoteRequest(filament_id=shop.pla)
     quote = await quote_from_archive(
-        shop.lifecycle, Seam(plate(71)), Book(), shop.order.id, item.id, archive_request(shop), BY
+        shop.lifecycle, Seam(plate(71)), Book(), shop.order.id, item.id, request, BY
     )
     assert (quote.source, quote.revision_id) == ("archive", None)
     after = shop.rows.item(item.id)
     assert after is not None
     assert [(s.slot, s.colour, s.filament_id) for s in after.colours] == [
         (0, "#FF0000", shop.pla),
-        (1, "#00FF00", shop.petg),
+        (1, "#00FF00", shop.pla),
     ]
 
 

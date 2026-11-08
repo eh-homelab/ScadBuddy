@@ -9,14 +9,6 @@ import { filamentLabel } from './FilamentsEditor'
 import { refusalText } from './refusal'
 
 /**
- * Slots an item with none yet is priced over (a library file item before its first
- * quote): every one gets the chosen filament, and the backend keeps only those the print
- * used as the item's slots (`orders/past_prints.py` `archive_colours`). More than any
- * printer's AMS units and external spools hold.
- */
-const ANY_SLOT = 32
-
-/**
  * "Quote from the print" (#4777, order operations spec 2026-11-07 §3.2): an `archive`
  * quote of an item taken from a past print, priced from what that print used (every plate
  * archive of its run, the slicer's grams and the actual time) at the price book in force,
@@ -47,11 +39,13 @@ export function ArchiveQuote({
   const ready = colours.length > 0 ? colours.every((c) => value[String(c.slot)]) : every !== ''
 
   async function quote() {
-    const chosen = colours.length > 0 ? value : Object.fromEntries(Array.from({ length: ANY_SLOT }, (_, slot) => [String(slot), every]))
+    // An item with no slots yet names one filament, which the backend gives every slot
+    // the print used (`ArchiveQuoteRequest.filament_id`).
+    const body = colours.length > 0 ? { filaments: value } : { filament_id: every }
     setBusy(true)
     setError(null)
     try {
-      await api.quoteItemFromArchive(orderId, itemId, { filaments: chosen })
+      await api.quoteItemFromArchive(orderId, itemId, body)
       onQuoted()
     } catch (err) {
       setError(refusalText(err))

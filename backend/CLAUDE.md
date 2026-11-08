@@ -828,10 +828,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a copy of its printed file (`/archives/{id}/download`) in the native library,
   `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
   the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is
-  needed and the Bambuddy library serves. The item keeps `origin_archive_ids` (the archive and
+  needed and the Bambuddy library serves. The copy's download makes the spool directory
+  first, and a pick that loses a race to record its copy trashes its own. The item keeps `origin_archive_ids` (the archive and
   its print run's other linked plates, `OrderStore.archive_run_plates`). Quote source
   `archive`: `POST …/items/{item}/quotes/archive` (`ArchiveQuoteRequest`: `archive_id`,
-  default the item's first origin, and `filaments`), `quote_from_archive`: the slice quote's
+  default the item's first origin, one of its origins or printed by its output or library
+  file, else 422; `filaments`; `filament_id` for every slot the print used), `quote_from_archive`: the slice quote's
   check, then every plate archive of the run (`print_sends` by `run_id`, `print_links` by
   queue item; 409 `archive_plates_missing` for a plate with none, `archive_not_succeeded` for
   a status other than `completed`, `archive_gone`), grams per slot from

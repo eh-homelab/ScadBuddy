@@ -124,14 +124,17 @@ class SliceQuoteRequest(BaseModel):
 
 class ArchiveQuoteRequest(BaseModel):
     """`POST /orders/{id}/items/{item}/quotes/archive` (#4777, order operations spec
-    §3.2): the past print to price the item from (``archive_id``; omitted, the first
-    archive the item was taken from) and the price-book filament of each colour slot, as
-    a slice quote's ``filaments``."""
+    §3.2): the past print to price the item from (``archive_id``: one the item was taken
+    from, or one its output or library file printed; omitted, the first archive it was
+    taken from) and the price-book filament of each colour slot, as a slice quote's
+    ``filaments``. ``filament_id`` prices every slot the print used that ``filaments``
+    does not name, for an item with no slots yet (a library file item)."""
 
     model_config = ConfigDict(extra="forbid")
 
     archive_id: int | None = Field(default=None, ge=1)
     filaments: dict[int, str] = Field(default_factory=dict)
+    filament_id: str | None = None
 
 
 class QuoteError(ValueError):

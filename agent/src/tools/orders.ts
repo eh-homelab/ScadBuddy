@@ -1069,12 +1069,20 @@ export const orderTools: Tool[] = [
       slice: sliceQuote.optional(),
       archive: z
         .object({
-          archive_id: z.number().int().min(1).optional().describe('The past print; omitted, the one the item was taken from'),
+          archive_id: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("The past print: one the item was taken from or one its output or file printed; omitted, the item's first"),
           filaments: z
             .object({})
             .catchall(ID)
             .default({})
             .describe('Price-book filament per colour slot, `{slot: filament_id}` (slot from 0), as `slice` takes them'),
+          filament_id: ID.optional().describe(
+            'For an item with no colour slots yet (a library file item): the filament of every slot the print used',
+          ),
         })
         .strict()
         .optional(),

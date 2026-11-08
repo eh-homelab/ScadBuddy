@@ -340,6 +340,12 @@ export const handlers = [
       const archiveId = body.archive_id ?? found.origin_archive_ids?.[0]
       if (archiveId == null) return fieldProblem(request, 'archive_id', `item ${found.id} was not taken from a past print: name its archive_id`)
       const picked = pastPrint(archiveId)
+      // `past_prints.py` `_prints_item`: one the item was taken from, or one its output or file printed.
+      const its =
+        (found.origin_archive_ids ?? []).includes(archiveId) ||
+        (picked?.output_id !== undefined && picked.output_id === found.output_id) ||
+        (picked?.library_file_id !== undefined && picked.library_file_id === found.library_file?.id)
+      if (!its) return fieldProblem(request, 'archive_id', `archive ${archiveId} is not a print of item ${found.id}`)
       if (!picked) return problem(request, 409, `Bambuddy has no archive ${archiveId} any more`, PROBLEMS + 'archive_gone', { archive_id: archiveId })
       const run = picked.run.map((id) => pastPrint(id))
       if (run.some((p) => !p)) return problem(request, 409, `archive ${archiveId}'s print run has plates with no archive`, PROBLEMS + 'archive_plates_missing', { archive_id: archiveId })
@@ -347,7 +353,8 @@ export const handlers = [
       if (failed) {
         return problem(request, 409, `archive ${failed.id} is ${failed.status ?? 'of unknown status'}: only a completed print is a quote source`, PROBLEMS + 'archive_not_succeeded', { archive_id: failed.id })
       }
-      const filaments = body.filaments ?? {}
+      const used = run.flatMap((p) => p!.slots.filter((s) => s.used_g > 0).map((s) => String(s.slot_id - 1)))
+      const filaments: Record<string, string> = { ...(body.filament_id ? Object.fromEntries(used.map((slot) => [slot, body.filament_id!])) : {}), ...(body.filaments ?? {}) }
       const plates = run.map((p) => ({
         index: p!.plate_id ?? 1,
         print_seconds: p!.actual_time_seconds ?? p!.print_time_seconds ?? 0,

@@ -2143,7 +2143,9 @@ async def quote_item_from_archive(
     ``archive_plates_missing`` (a plate of the run has no archive),
     ``archive_not_succeeded`` (a failed or cancelled print), ``archive_gone``,
     ``not_linked``; 422 ``archive_id`` for an item taken from no past print and none
-    named, ``archive_plate`` for an archive that records no grams or time."""
+    named, or an archive that is not the item's print (not taken from it, and printed by
+    neither its output nor its library file), ``archive_plate`` for an archive that records
+    no grams or time."""
     check_path(order_id, item_id)
     by = current_actor()
     return await quote_from_archive(
