@@ -340,7 +340,9 @@ the controls are then empty. They stay off until a check that asked for the choi
 stand has answered. The request's own `part_settings` do not change the process, so the
 dialog asks only until the values are read for the other choices as they stand
 (`lib/usePrintCheck.ts` `processKey`, #5686): a settled edit of a setting checks again
-without reading the preset again. A re-check that fails keeps the values already read for
+without reading the preset again. An answer whose values are `None` (the preset could not
+be read, or the check refused before it read the process) is not a read: the next check
+asks again. A re-check that fails keeps the values already read for
 those choices, so the controls stay on; a change of printer, nozzle or other choice drops
 them, and another process's values are never shown. A value set back to the slot's default, or reset, is unset, and only
 what is set is sent (`lib/partSettings.ts` `sentPartSettings`, `withSetting`,
