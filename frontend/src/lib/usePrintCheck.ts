@@ -28,7 +28,9 @@ export interface PrintCheckState {
    * #5627 — a check of this source read the process's part settings for the choices as
    * they stand now. Only the request's own `part_settings` may differ: they do not change
    * the process's values, and a field typed in must stay enabled. A later check that
-   * failed does not drop them (#5686); another process's values are never used.
+   * failed does not drop them (#5686); another process's values are never used. It is
+   * also true for an answer that asked and got no values (`process_part_settings: null`),
+   * so the controls turn on, empty; the next check asks again for that case (#5698).
    */
   processValuesRead: boolean
   /** #5627 — the process's part settings, only while `processValuesRead`; else `null`. */
