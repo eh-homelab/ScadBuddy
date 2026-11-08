@@ -376,6 +376,8 @@ async def test_a_printer_the_sync_links_to_another_bambuddy_printer_counts_no_ol
         [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
     )
     await rates(store, printers, settings_store, live).breakdown(printer)
+    read = await rates(store, printers, settings_store).breakdown(printer, live=False)
+    assert [part.why for part in read.maintenance] == [None]
     # Bambuddy printer 7 is gone from the strip; its serial now reports as printer 8.
     relinked = printers.ensure_bambuddy(
         8, serial=printer.serial, name="H2C", model="H2C", listed={8}
@@ -383,6 +385,30 @@ async def test_a_printer_the_sync_links_to_another_bambuddy_printer_counts_no_ol
     assert relinked.id == printer.id and relinked.bambuddy_printer_id == 8
     rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
     assert [part.why for part in rate.maintenance] == ["not_read"]
+
+
+async def test_intervals_read_on_the_synthetic_row_survive_its_merge_into_a_relinked_printer(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    # Bambuddy printer 8 is listed before its serial is known: a synthetic row, whose
+    # intervals are read from printer 8.
+    synthetic = printers.ensure_bambuddy(8, serial=None, name="H2C", model="H2C")
+    assert synthetic.id != printer.id
+    store.replace(synthetic.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(synthetic)
+    # Printer 8 reports the serial of printer 7's row: the synthetic row merges into it.
+    relinked = printers.ensure_bambuddy(
+        8, serial=printer.serial, name="H2C", model="H2C", listed={8}
+    )
+    assert relinked.id == printer.id and printers.get(synthetic.id) is None
+    rate = await rates(store, printers, settings_store).breakdown(relinked, live=False)
+    assert rate.intervals == "stored"
+    assert [part.why for part in rate.maintenance] == [None]
+    assert rate.maintenance_per_hour != "0"
 
 
 def test_an_unlink_of_a_printer_never_linked_leaves_its_rows_alone(

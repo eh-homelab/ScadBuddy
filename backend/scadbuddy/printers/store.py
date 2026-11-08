@@ -737,6 +737,10 @@ class PrinterStore:
                 and holder.kind == "physical"
                 and not live(holder.bambuddy_printer_id)
             ):
+                if holder.bambuddy_printer_id not in (None, bambuddy_printer_id):
+                    # Its old link's intervals are not this Bambuddy printer's (#4625).
+                    # Before the merge: the synthetic row's were read from this one.
+                    _forget_read_intervals(conn, holder.id)
                 merged = None
                 if linked is not None:  # the synthetic row made meanwhile is this printer
                     self._merge(conn, linked.id, holder.id)
@@ -744,9 +748,6 @@ class PrinterStore:
                 row = self._update(
                     conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
                 )
-                if holder.bambuddy_printer_id not in (None, bambuddy_printer_id):
-                    # Its old link's intervals are not this Bambuddy printer's (#4625).
-                    _forget_read_intervals(conn, row.id)
                 return row, merged, True
             if linked is not None:  # the serial's row is another live Bambuddy printer's
                 return linked, None, False
