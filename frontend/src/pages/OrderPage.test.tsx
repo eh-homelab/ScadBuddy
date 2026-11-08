@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
-import { resetMockState } from '../mocks/handlers'
+import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
@@ -375,6 +375,56 @@ describe('OrderPage, the balance (#5281)', () => {
     expect(within(totals).getByText('Deposit due')).toBeInTheDocument()
     expect(totals).toHaveTextContent('$10.00')
     expect(within(totals).getByText('Shipping held until the balance is paid')).toBeInTheDocument()
+  })
+
+  // Review fix round 1, minor 1: a waiver made in the Summary card clears the Shipments alert.
+  it('clears the unpaid-balance alert once the balance is waived elsewhere on the page', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'ready'
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const shipments = screen.getByRole('region', { name: 'Shipments' })
+    await user.click(within(shipments).getByRole('button', { name: 'Add shipment' }))
+    await within(shipments).findByRole('alert')
+    const money = screen.getByRole('region', { name: 'Deposit and balance' })
+    await user.click(within(money).getByRole('button', { name: 'Ship without full payment' }))
+    await user.type(screen.getByLabelText('Reason'), 'pays on delivery')
+    await user.click(screen.getByRole('button', { name: 'Ship unpaid' }))
+    await waitFor(() => expect(within(shipments).queryByRole('alert')).toBeNull())
+  })
+})
+
+// Review fix round 1, important 2: the shipping option and the charges editor write one list.
+describe('OrderPage, the shipping option and the charges (#5281)', () => {
+  beforeEach(() => {
+    resetMockState()
+    setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }] })
+  })
+
+  it('keeps the shipping charge: Add charge, pick an option, Save', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const charges = screen.getByRole('region', { name: 'Charges' })
+    await user.click(within(charges).getByRole('button', { name: 'Add charge' }))
+    // The editor has unsaved rows: the picker waits for them.
+    expect(screen.getByRole('combobox', { name: 'Shipping option' })).toBeDisabled()
+    expect(screen.getByText('Save or discard the charges first')).toBeInTheDocument()
+    await user.click(within(charges).getByRole('button', { name: 'Discard' }))
+    await choose(user, screen.getByRole('combobox', { name: 'Shipping option' }), 'Tracked post · $6.50')
+    await waitFor(() => expect(within(charges).getByLabelText('Charge 1 label')).toHaveValue('Tracked post'))
+    await user.click(within(charges).getByRole('button', { name: 'Add charge' }))
+    await choose(user, within(charges).getByRole('combobox', { name: 'Charge 2 kind' }), 'fee')
+    await user.type(within(charges).getByLabelText('Charge 2 label'), 'Rush')
+    await user.type(within(charges).getByLabelText('Charge 2 amount'), '3')
+    await user.click(within(charges).getByRole('button', { name: 'Save charges' }))
+    await waitFor(() =>
+      expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT).map((c) => [c.kind, c.label, c.amount_minor, c.shipping_option_id ?? null])).toEqual([
+        ['shipping', 'Tracked post', 650, 'post'],
+        ['fee', 'Rush', 300, null],
+      ]),
+    )
+    expect(screen.getByRole('combobox', { name: 'Shipping option' })).toBeEnabled()
   })
 })
 

@@ -11,6 +11,8 @@ import { refusalText } from '../orders/refusal'
 
 type Row = { id: string; label: string; price: string; ships: boolean }
 
+/** `money.py` `ShippingOption.label`'s bound. */
+const LABEL_MAX = 200
 /** `money.py` `ShippingOption.id`. */
 const OPTION_ID = /^[a-z0-9_-]{1,40}$/
 
@@ -23,6 +25,7 @@ function optionOf(row: Row, n: number, exponent: number): ShippingOption | strin
   if (!OPTION_ID.test(id)) return `Option ${n}: enter an id of 1 to 40 lowercase letters, digits, - or _, such as post.`
   const label = row.label.trim()
   if (!label) return `Option ${n}: enter the label the customer sees, such as Tracked post.`
+  if ([...label].length > LABEL_MAX) return `Option ${n}: a label is at most ${LABEL_MAX} characters.`
   const price = toMinor(row.price, exponent)
   if (price === null || price < 0) return `Option ${n}: enter the price, such as 6.50, or 0.`
   return { id, label, amount_minor: price, ships: row.ships }
@@ -36,7 +39,8 @@ function optionOf(row: Row, n: number, exponent: number): ShippingOption | strin
  */
 export function ShippingOptionsEditor() {
   const settings = useAsync(() => api.getSettings(), [])
-  const book = useAsync(() => api.priceBook(), [])
+  // Read again on `settings.changed`, so a new `orders_currency` relabels the amounts.
+  const book = useAsync(() => api.priceBook(), [], ['settings'])
   const currency = book.data?.currency ?? 'USD'
   const exponent = book.data?.minor_exponent ?? 2
   const [rows, setRows] = useState<Row[] | null>(null)
@@ -70,6 +74,12 @@ export function ShippingOptionsEditor() {
             const option = optionOf(row, index + 1, exponent)
             if (typeof option === 'string') {
               setError(option)
+              return
+            }
+            // `settings_store.py` `_unique_option_ids`.
+            const first = options.findIndex((o) => o.id === option.id)
+            if (first >= 0) {
+              setError(`Option ${index + 1}: the id ${option.id} is already used by option ${first + 1}.`)
               return
             }
             options.push(option)

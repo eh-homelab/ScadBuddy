@@ -55,4 +55,19 @@ describe('ShippingOptionPicker (#5281)', () => {
     await screen.findByText('Shipping option')
     expect(screen.queryByRole('combobox', { name: 'Shipping option' })).toBeNull()
   })
+
+  // Review fix round 1, minor 4: an option Settings no longer lists is still named.
+  it('names an option the settings no longer list', async () => {
+    setMockSettings({ ...mockSettings(), storefront_shipping_options: [...OPTIONS, { id: 'courier', label: 'Courier', amount_minor: 900, ships: false }] })
+    await api.setShippingOption(ORDER_DRAFT, 'courier')
+    renderPage(<Host id={ORDER_DRAFT} />)
+    expect(await screen.findByRole('combobox', { name: 'Shipping option' })).toHaveTextContent('courier (removed)')
+  })
+
+  it('stays off with a note while the charges have unsaved edits', async () => {
+    renderPage(<ShippingOptionPicker order={{ id: ORDER_DRAFT, status: 'draft', currency: 'USD', minor_exponent: 2, source: 'back_office', submitted_at: null }} charges={[]} options={OPTIONS} onChanged={() => {}} disabled />)
+    expect(await screen.findByRole('combobox', { name: 'Shipping option' })).toBeDisabled()
+    expect(screen.getByText('Save or discard the charges first')).toBeInTheDocument()
+  })
 })
+

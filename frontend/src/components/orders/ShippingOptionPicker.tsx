@@ -20,11 +20,14 @@ export function ShippingOptionPicker({
   charges,
   options,
   onChanged,
+  disabled = false,
 }: {
   order: Pick<Order, 'id' | 'status' | 'currency' | 'minor_exponent' | 'source' | 'submitted_at'>
   charges: OrderCharge[]
   options: ShippingOption[]
   onChanged: () => void
+  /** While the charges editor has unsaved rows: a save of them would undo the option. */
+  disabled?: boolean
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -48,7 +51,7 @@ export function ShippingOptionPicker({
       <span className="text-xs text-muted-foreground">Shipping option</span>
       <Select
         value={chosen ?? NONE}
-        disabled={busy}
+        disabled={busy || disabled}
         onValueChange={(value) => {
           setBusy(true)
           setError(null)
@@ -64,6 +67,7 @@ export function ShippingOptionPicker({
         </SelectTrigger>
         <SelectContent position="popper">
           <SelectItem value={NONE}>No shipping option</SelectItem>
+          {chosen !== null && !current && <SelectItem value={chosen}>{`${chosen} (removed)`}</SelectItem>}
           {options.map((option) => (
             <SelectItem key={option.id} value={option.id}>
               {text(option)}
@@ -71,6 +75,7 @@ export function ShippingOptionPicker({
           ))}
         </SelectContent>
       </Select>
+      {disabled && <p className="text-xs text-muted-foreground">Save or discard the charges first</p>}
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}

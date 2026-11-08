@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
+import { api } from '../../api/client'
+import { emitRealtime } from '../../mocks/realtime'
 import { DepositPolicyEditor } from './DepositPolicyEditor'
 
 describe('DepositPolicyEditor (#5281)', () => {
@@ -37,4 +39,16 @@ describe('DepositPolicyEditor (#5281)', () => {
     expect(await within(policy).findByRole('alert')).toHaveTextContent('Rule 1: enter a percent above 0 and at most 100, such as 50.')
     expect(mockSettings().orders_deposit_policy).toEqual([])
   })
+
+  it('follows a change of the shop currency saved elsewhere', async () => {
+    const { user } = renderPage(<DepositPolicyEditor />)
+    const policy = screen.getByRole('region', { name: 'Deposit policy' })
+    await waitFor(() => expect(within(policy).getByRole('button', { name: 'Add rule' })).toBeEnabled())
+    await user.click(within(policy).getByRole('button', { name: 'Add rule' }))
+    expect(within(policy).getByLabelText('Rule 1 amount (USD)')).toBeInTheDocument()
+    await api.putSettings({ orders_currency: 'EUR' })
+    emitRealtime('settings.changed', ['settings'], { section: 'orders' })
+    expect(await within(policy).findByLabelText('Rule 1 amount (EUR)')).toBeInTheDocument()
+  })
 })
+

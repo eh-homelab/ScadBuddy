@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Order, OrderCharge } from '../../api/types'
 import { formatMoney, toMajor, toMinor } from '../../lib/money'
 import { Badge } from '@/components/ui/badge'
@@ -22,6 +22,7 @@ export function ChargesEditor({
   charges,
   mode,
   onChanged,
+  onDirtyChange,
 }: {
   order: Pick<Order, 'id' | 'number' | 'status' | 'currency' | 'minor_exponent'>
   charges: OrderCharge[]
@@ -29,6 +30,9 @@ export function ChargesEditor({
    * route after a confirm, null shows the charges read-only. */
   mode: AddMode | null
   onChanged: () => void
+  /** Told when the editor gets unsaved rows and when it loses them (#5281: the shipping
+   * option picker writes the same list, so it waits while they stand). */
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const { currency, minor_exponent: exponent } = order
   const editable = mode !== null
@@ -42,6 +46,17 @@ export function ChargesEditor({
   useEffect(() => {
     if (!dirty) setRows(charges.filter((c) => !c.auto).map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent), shipping_option_id: c.shipping_option_id ?? null })))
   }, [charges, exponent, dirty])
+  const told = useRef(onDirtyChange)
+  useEffect(() => {
+    told.current = onDirtyChange
+  })
+  useEffect(() => {
+    told.current?.(dirty)
+  }, [dirty])
+  // The backend takes a `tax` row with the auto row's label for the auto row sent back as
+  // read, and drops it (`Lifecycle._typed`): such a row needs another label.
+  const clashes = (row: Row) => auto !== undefined && row.kind === 'tax' && row.label.trim() === auto.label
+  const clash = rows.some(clashes)
   const autoRow = auto && (
     <p className="flex justify-between gap-2 text-[13px]" data-testid="auto-tax">
       <span>
@@ -76,7 +91,9 @@ export function ChargesEditor({
   const edit = (index: number, patch: Partial<Row>) => {
     setDirty(true)
     setConfirming(false)
-    setRows((was) => was.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+    // A charge edited away from its option's label or price no longer claims the option.
+    const unclaim = 'label' in patch || 'amount' in patch ? { shipping_option_id: null } : {}
+    setRows((was) => was.map((row, i) => (i === index ? { ...row, ...patch, ...unclaim } : row)))
   }
 
   return (
@@ -86,6 +103,7 @@ export function ChargesEditor({
         className="flex flex-col gap-2"
         onSubmit={(event) => {
           event.preventDefault()
+          if (clash) return
           const body = []
           for (const row of rows) {
             const minor = toMinor(row.amount, exponent)
@@ -145,6 +163,11 @@ export function ChargesEditor({
             >
               Remove
             </Button>
+            {clashes(row) && auto && (
+              <p role="alert" aria-label={`Charge ${index + 1} label problem`} className="w-full text-xs text-warn">
+                {`A typed tax needs a label other than “${auto.label}”, the automatic tax; this tax then replaces it.`}
+              </p>
+            )}
           </div>
         ))}
         {autoRow}
@@ -166,7 +189,21 @@ export function ChargesEditor({
               Back
             </Button>
           )}
-          <Button type="submit" size="sm" disabled={busy || !dirty}>
+          {dirty && !confirming && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setDirty(false)
+                setError(null)
+              }}
+            >
+              Discard
+            </Button>
+          )}
+          <Button type="submit" size="sm" disabled={busy || !dirty || clash}>
             {confirming ? 'Change the accepted order' : 'Save charges'}
           </Button>
         </div>

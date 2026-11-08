@@ -5,6 +5,7 @@ import type { Order, OrderCharge } from '../../api/types'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { useAsync } from '../../lib/useAsync'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { addMode } from './afterAcceptance'
 import { ChargesEditor } from './ChargesEditor'
@@ -161,5 +162,53 @@ describe('ChargesEditor', () => {
         }),
       )
     })
+
+    // Review fix round 1, important 1: the backend drops a typed tax with the auto row's label.
+    it("refuses a typed tax with the auto row's label until it has another", async () => {
+      setMockSettings({ ...mockSettings(), orders_tax_percent: '10', orders_tax_shipping: true })
+      await api.updateOrder(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }] })
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      await within(region).findByTestId('auto-tax')
+      await user.click(within(region).getByRole('button', { name: 'Add charge' }))
+      await choose(user, within(region).getByRole('combobox', { name: 'Charge 2 kind' }), 'tax')
+      await user.type(within(region).getByLabelText('Charge 2 label'), 'Tax 10%')
+      await user.type(within(region).getByLabelText('Charge 2 amount'), '0')
+      expect(within(region).getByRole('alert', { name: 'Charge 2 label problem' })).toHaveTextContent('A typed tax needs a label other than “Tax 10%”, the automatic tax; this tax then replaces it.')
+      expect(within(region).getByRole('button', { name: 'Save charges' })).toBeDisabled()
+      await user.clear(within(region).getByLabelText('Charge 2 label'))
+      await user.type(within(region).getByLabelText('Charge 2 label'), 'Sales tax')
+      expect(within(region).queryByRole('alert', { name: 'Charge 2 label problem' })).toBeNull()
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 1000 }, { kind: 'tax', label: 'Sales tax', amount_minor: 0 }] }))
+    })
+
+    // Review fix round 1, minor 5: a charge edited away from its option's price no longer claims it.
+    it("drops the shipping option from a charge whose label or amount is edited", async () => {
+      setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }] })
+      await api.setShippingOption(ORDER_DRAFT, 'post')
+      const plain = vi.spyOn(api, 'updateOrder')
+      const { user } = renderPage(<Host />)
+      const region = await screen.findByRole('region', { name: 'Charges' })
+      const amount = await within(region).findByLabelText('Charge 1 amount')
+      await user.clear(amount)
+      await user.type(amount, '5')
+      await user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Tracked post', amount_minor: 500 }] }))
+    })
+
+    it('discards unsaved edits', async () => {
+      const dirty = vi.fn()
+      const o = { ...order(ORDER_DRAFT, 'draft') }
+      const { user } = renderPage(<ChargesEditor order={o} charges={[]} mode={addMode(o)} onChanged={() => {}} onDirtyChange={dirty} />)
+      const region = screen.getByRole('region', { name: 'Charges' })
+      await user.click(within(region).getByRole('button', { name: 'Add charge' }))
+      expect(dirty).toHaveBeenLastCalledWith(true)
+      await user.click(within(region).getByRole('button', { name: 'Discard' }))
+      expect(within(region).queryByLabelText('Charge 1 label')).toBeNull()
+      expect(dirty).toHaveBeenLastCalledWith(false)
+    })
   })
 })
+

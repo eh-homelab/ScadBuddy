@@ -135,6 +135,9 @@ export function OrderPage() {
   const providers = useAsync(() => api.paymentProviders(), []).data
   const providerLabel = (id: string) => (providers ?? []).find((p) => p.id === id)?.label ?? id
   const [payment, setPayment] = useState({ amount: '', method: '', request: NO_REQUEST })
+  // #5281 — the charges editor's unsaved rows hold the shipping option picker, which writes
+  // the same list: a save of stale rows would undo the option.
+  const [chargesDirty, setChargesDirty] = useState(false)
 
   function reload() {
     view.refresh()
@@ -376,8 +379,8 @@ export function OrderPage() {
               {/* #4955 step 4 — the summary: subtotal, each charge, total, paid and balance. */}
               <h2 className="text-sm font-medium">Summary</h2>
               {/* #5281 — the shipping option writes the order's one shipping charge. */}
-              <ShippingOptionPicker order={order} charges={charges} options={shippingOptions} onChanged={reload} />
-              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} />
+              <ShippingOptionPicker order={order} charges={charges} options={shippingOptions} disabled={chargesDirty} onChanged={reload} />
+              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} onDirtyChange={setChargesDirty} />
               <OrderSummary
                 currency={order.currency}
                 exponent={order.minor_exponent}
@@ -460,7 +463,7 @@ export function OrderPage() {
 
         <Card size="sm">
           <CardContent>
-            <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} onChanged={reload} />
+            <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} shippingHeld={totals.shipping_held} onChanged={reload} />
           </CardContent>
         </Card>
 

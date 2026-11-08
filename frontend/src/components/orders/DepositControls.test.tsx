@@ -73,4 +73,26 @@ describe('DepositControls (#5281)', () => {
     expect(await screen.findByText(/Ships without full payment: pays on delivery/)).toBeInTheDocument()
     await waitFor(() => expect(state.orders.find((o) => o.id === ORDER_ACCEPTED)?.balance_waived_reason).toBe('pays on delivery'))
   })
+
+  // Review fix round 1, minor 2: a shipped order has no shipment left to hold.
+  it('offers no Ship without full payment once shipped', async () => {
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'shipped'
+    renderPage(<Host id={ORDER_ACCEPTED} />)
+    await screen.findByTestId('deposit-state')
+    expect(screen.queryByRole('button', { name: 'Ship without full payment' })).toBeNull()
+  })
+
+  // Review fix round 1, minor 3: a cancelled reason is not carried into the next waiver.
+  it('forgets a reason typed before Cancel', async () => {
+    await api.setDeposit(ORDER_DRAFT, 2000)
+    const { user } = renderPage(<Host id={ORDER_DRAFT} />)
+    await user.click(await screen.findByRole('button', { name: 'Proceed without deposit' }))
+    await user.type(screen.getByLabelText('Reason'), 'not this one')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByLabelText('Reason')).toBeNull())
+    await user.click(screen.getByRole('button', { name: 'Proceed without deposit' }))
+    expect(screen.getByLabelText('Reason')).toHaveValue('')
+  })
 })
+

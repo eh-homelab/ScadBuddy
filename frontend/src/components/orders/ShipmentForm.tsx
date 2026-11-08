@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderItemDetail, Shipment } from '../../api/types'
 import { formatMoney, toMinor } from '../../lib/money'
@@ -25,6 +25,7 @@ export function ShipmentForm({
   items,
   shipments,
   enabled,
+  shippingHeld = false,
   onChanged,
 }: {
   orderId: string
@@ -34,6 +35,8 @@ export function ShipmentForm({
   items: OrderItemDetail[]
   shipments: Shipment[]
   enabled: boolean
+  /** The order's `totals.shipping_held`: once false, a `balance_unpaid` alert is stale. */
+  shippingHeld?: boolean
   onChanged: () => void
 }) {
   const left = remaining(items, shipments)
@@ -45,6 +48,13 @@ export function ShipmentForm({
   const [error, setError] = useState<string | null>(null)
   const [unpaid, setUnpaid] = useState(false)
   const [waiving, setWaiving] = useState(false)
+  // The balance waived or paid elsewhere on the page: the refusal no longer stands.
+  useEffect(() => {
+    if (unpaid && !shippingHeld) {
+      setUnpaid(false)
+      setError(null)
+    }
+  }, [unpaid, shippingHeld])
   const titles = Object.fromEntries(items.map((i) => [i.id, i.title]))
 
   return (

@@ -16,12 +16,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
-import { isCart, OPEN_FOR_EDITS } from './afterAcceptance'
+import { isCart, OPEN_FOR_EDITS, TAKES_ITEMS } from './afterAcceptance'
 import { refusalText } from './refusal'
 
 /** The backend's bound on a waiver's reason (`api/order_payments.py` `WaiveBody`). */
 const REASON_MAX = 500
-const ACCEPTED = new Set<Order['status']>(['accepted', 'in_production', 'ready', 'shipped'])
 
 /**
  * A step that goes on without money the order asks for: it says what happens and takes a
@@ -67,7 +66,10 @@ export function ReasonDialog({
       open={open}
       onOpenChange={(next) => {
         if (busy) return
-        if (!next) setError(null)
+        if (!next) {
+          setError(null)
+          setReason('')
+        }
         onOpenChange(next)
       }}
     >
@@ -208,7 +210,8 @@ export function DepositControls({
         </div>
       )}
       {order.balance_waived_reason && <p className="text-[13px]">Ships without full payment: {order.balance_waived_reason}</p>}
-      {!ended && ACCEPTED.has(order.status) && held && (
+      {/* Once shipped there is no shipment left to hold. */}
+      {!ended && TAKES_ITEMS.has(order.status) && held && (
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-[13px] text-warn">The unpaid balance holds the shipment.</p>
           <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setWaiving('balance')}>

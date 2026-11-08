@@ -57,7 +57,8 @@ function ruleOf(row: Row, n: number, exponent: number): DepositRule | string {
  */
 export function DepositPolicyEditor() {
   const settings = useAsync(() => api.getSettings(), [])
-  const book = useAsync(() => api.priceBook(), [])
+  // Read again on `settings.changed`, so a new `orders_currency` relabels the amounts.
+  const book = useAsync(() => api.priceBook(), [], ['settings'])
   const currency = book.data?.currency ?? 'USD'
   const exponent = book.data?.minor_exponent ?? 2
   const [rows, setRows] = useState<Row[] | null>(null)

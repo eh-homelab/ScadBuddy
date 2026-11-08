@@ -1,7 +1,7 @@
 import { HttpResponse, http } from 'msw'
 import type { DepositRule, Order, OrderCharge, PaymentRequestView, ShippingOption } from '../../../api/types'
 import { mockSettings } from '../../handlers'
-import { event, lock, notEnded, OPEN_FOR_EDITS, rederive, refused, TAKES_ITEMS, totalsOf, transition } from './orders'
+import { checkSubmitted, event, lock, notEnded, OPEN_FOR_EDITS, rederive, refused, TAKES_ITEMS, totalsOf, transition } from './orders'
 import { BROWSER, fieldProblem, newId, now, Refused, state } from './state'
 
 /**
@@ -158,11 +158,16 @@ export function balanceUnpaid(orderId: string): Refused | null {
   return new Refused('balance_unpaid', `order ${order.number}'s balance is not paid: ${due} due; record the payment or ship without full payment`)
 }
 
-/** `Lifecycle._open_balance`: at acceptance, one open `balance` request for the rest of an order that asked for money. */
-export function openBalance(order: Order) {
+/**
+ * `Lifecycle._open_balance`: at acceptance, one open `balance` request for the rest of an
+ * order that asked for money. `reopened`: a cancelled order back past quoted, whose cancel
+ * ended every request, so any request at all says it asked.
+ */
+export function openBalance(order: Order, reopened = false) {
   const found = requestsOf(order.id)
-  if (found.some((r) => r.status === 'pending')) throw new Refused('payment_in_flight', `order ${order.number}'s payment is in flight; wait until it settles`)
-  if (order.deposit_minor == null && !found.some((r) => r.status !== 'cancelled')) return
+  if (!reopened && found.some((r) => r.status === 'pending')) throw new Refused('payment_in_flight', `order ${order.number}'s payment is in flight; wait until it settles`)
+  const asked = reopened ? found.length > 0 : found.some((r) => r.status !== 'cancelled')
+  if (order.deposit_minor == null && !asked) return
   const due = totalsOf(order).balance_minor
   const live = found.filter((r) => r.status === 'open' || r.status === 'failed')
   const [only] = live
@@ -184,6 +189,7 @@ export function closeDeposit(order: Order, paymentId: string) {
 }
 
 function depositEditable(order: Order) {
+  checkSubmitted(order)
   notEnded(order)
   if (!OPEN_FOR_EDITS.has(order.status)) throw new Refused('order_not_editable', `order ${order.number} is ${order.status}: its deposit is set while draft or quoted`)
 }
@@ -252,6 +258,7 @@ export const handlers = [
     if (reason instanceof Response) return reason
     return transition(request, () => {
       const order = lock(String(params.id))
+      checkSubmitted(order)
       notEnded(order)
       if (order.deposit_minor == null || order.deposit_waived_reason === reason) return order
       order.deposit_waived_reason = reason
@@ -265,6 +272,7 @@ export const handlers = [
     if (reason instanceof Response) return reason
     return transition(request, () => {
       const order = lock(String(params.id))
+      checkSubmitted(order)
       notEnded(order)
       if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
       if (order.balance_waived_reason === reason || !balanceDue(order)) return order
@@ -278,6 +286,8 @@ export const handlers = [
     const body = (await request.json()) as { option_id?: string | null }
     try {
       const order = lock(String(params.id))
+      // `check_visitors_cart`: the back office never sets a visitor's option.
+      checkSubmitted(order)
       notEnded(order)
       if (!OPEN_FOR_EDITS.has(order.status)) {
         const route = TAKES_ITEMS.has(order.status) ? `; change the charges with PUT /orders/${order.id}/charges/after-acceptance` : ''

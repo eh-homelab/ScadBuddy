@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { api } from '../../../api/client'
+import { api, ApiError } from '../../../api/client'
 import { mockSettings, resetMockState, setMockSettings } from '../../handlers'
 import { depositFor } from './money'
-import { ORDER_DRAFT, state } from './state'
+import { ORDER_ACCEPTED, ORDER_DRAFT, PROBLEMS, seedCart, state } from './state'
 
 const autoTax = () => state.charges.filter((c) => c.order_id === ORDER_DRAFT && c.auto).map((c) => [c.label, c.amount_minor])
 
@@ -33,4 +33,25 @@ describe('the mock money rules (#5281, `orders/money.py`)', () => {
     expect(depositFor([{ criterion: 'has_request', amount_minor: 2000 }, { criterion: 'first_order', percent: '25' }], { ...at, currency: 'EUR' })).toBe(2500)
     expect(depositFor([], at)).toBeNull()
   })
+
+  // Review fix round 1, minor 6: the cart and the reopen, as the backend has them.
+  it("refuses the deposit, both waivers and the shipping option on a visitor's cart", async () => {
+    const cart = seedCart()
+    const slug = (call: Promise<unknown>) => call.then(() => null, (error: unknown) => (error instanceof ApiError ? error.problem.type : String(error)))
+    expect(await slug(api.setDeposit(cart.id, 1000))).toBe(`${PROBLEMS}order_not_submitted`)
+    expect(await slug(api.applyDepositPolicy(cart.id))).toBe(`${PROBLEMS}order_not_submitted`)
+    expect(await slug(api.waiveDeposit(cart.id, 'why'))).toBe(`${PROBLEMS}order_not_submitted`)
+    expect(await slug(api.waiveBalance(cart.id, 'why'))).toBe(`${PROBLEMS}order_not_submitted`)
+    expect(await slug(api.setShippingOption(cart.id, null))).toBe(`${PROBLEMS}order_not_submitted`)
+  })
+
+  it('opens the balance request again for a cancelled order reopened past quoted that asked for money', async () => {
+    const order = state.orders.find((o) => o.id === ORDER_ACCEPTED)!
+    order.deposit_minor = 1000
+    await api.cancelOrder(ORDER_ACCEPTED)
+    expect(state.paymentRequests.filter((r) => r.order_id === ORDER_ACCEPTED && r.status === 'open')).toEqual([])
+    await api.reopenOrder(ORDER_ACCEPTED)
+    expect(state.paymentRequests.filter((r) => r.order_id === ORDER_ACCEPTED && r.status === 'open').map((r) => [r.kind, r.amount_minor])).toEqual([['balance', 3500]])
+  })
 })
+

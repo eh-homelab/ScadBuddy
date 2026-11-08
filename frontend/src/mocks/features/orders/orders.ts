@@ -766,7 +766,7 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
 }
 
 /** `lifecycle.py` `check_submitted` (#5282): a visitor's cart takes no quote, money or work. */
-function checkSubmitted(order: Order) {
+export function checkSubmitted(order: Order) {
   if (order.source === 'storefront' && order.submitted_at == null) throw new Refused('order_not_submitted', `${order.number ?? 'The cart'} is a visitor's cart, not submitted`)
 }
 
@@ -1197,6 +1197,8 @@ export const handlers = [
       state.events.splice(before)
       event(order, 'order.status', { from_status: from, to: order.status, reopened: true, items: restored })
       retax(order.id)
+      // `_open_balance(reopened=True)`, after the retax: the cancel ended the balance request.
+      if (from === 'cancelled' && TAKES_ITEMS.has(base)) openBalance(order, true)
       return order
     }),
   ),
