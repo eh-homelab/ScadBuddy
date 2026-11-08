@@ -7,13 +7,14 @@ import { quoteToPrint } from './price'
 import { offersPrint } from './itemActions'
 import { Button } from '@/components/ui/button'
 
-/** #4673 — what a `requote_needed` print refusal adds: an item's print with no choices
- * prints its quote's setup, so a print whose choices differ can still go (the dialog is
- * reworked in a later step of #4673). */
-export const REQUOTE_HINT = "Print with no choices to use the quote's print setup, or quote it again."
+/** #4673 — what a print refused because its setup differs from the quote's
+ * (`reason: "setup_differs"`) adds: the steps this page offers. An item's print with no
+ * choices prints the quote's setup, which the assistant can send; this dialog always
+ * sends its own (it is reworked in a later step of #4673). */
+export const REQUOTE_HINT = "Quote the item again, or ask the assistant to print it with the quote's setup."
 
 function withHint(cause: unknown): unknown {
-  if (!(cause instanceof ApiError) || !cause.problem.type?.endsWith('/requote_needed')) return cause
+  if (!(cause instanceof ApiError) || (cause.problem as { reason?: string }).reason !== 'setup_differs') return cause
   return new ApiError({ ...cause.problem, detail: `${cause.detail.replace(/\.?$/, '.')} ${REQUOTE_HINT}` })
 }
 

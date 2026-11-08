@@ -38,6 +38,8 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import FULFILMENT_HOLDER
 from scadbuddy.orders.operations import ORDER_ITEM_PRINT, existing_run, print_body
 from scadbuddy.orders.printing import print_request_id
+from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.models import PrinterPatch
 from scadbuddy.workflows.print_models import SourceSpec
 from tests.api.conftest import follow_operation
 from tests.api.test_customers import create as create_customer
@@ -715,6 +717,56 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
             assert {name: queued[name] for name in CALIBRATIONS} == CALIBRATIONS
 
 
+def test_a_quotes_lan_path_on_a_printer_no_longer_on_the_lan_wants_a_new_quote(
+    model: str,
+    settings: Settings,
+    s3: S3Settings,
+    kek_file: Path,  # noqa: F811
+    tmp_path: Path,
+    fake_openscad: str,
+    library: FakeLibrary,  # noqa: F811
+) -> None:
+    """#5732 review: a print that leaves `path` out takes the quote's `native`. When the
+    printer no longer prints over the LAN, the refusal says the path was the quote's and
+    how to go on, never the run's own words about a path the print did not send."""
+    two_colours(fake_openscad)
+    Projects()
+    for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        configure(client)
+        with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
+            slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
+            row = _lan_routed(client)
+            shop = QuoteShop(client)
+            lan_plan = {
+                "slots": [
+                    {"slot_id": 1, "spool_id": tray_spool_id(0, 1)},
+                    {"slot_id": 2, "spool_id": tray_spool_id(0, 1)},
+                ]
+            }
+            started = shop.post(
+                printer=row,
+                printer_id=None,
+                path="native",
+                filament_plan=lan_plan,
+                choices=LAN_CHOICES,
+            )
+            assert started.status_code == 202, started.text
+            op = follow_operation(client, started.json(), timeout=120, poll=0.2)
+            assert op["status"] == "succeeded", op
+            quote = op["result"]
+            assert quote["choices"]["path"] == "native"
+            assert client.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+            assert client.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+
+            printers: Printers = _state(client).components.get(PRINTERS)
+            printers.store.patch(row, PrinterPatch.model_validate({"preferred_path": "bambuddy"}))
+            refusal = problem(
+                client.post(f"{shop.path}/print", json={}, headers=press()), "requote_needed"
+            )
+            assert "quote was sliced on the LAN" in refusal["detail"]
+            assert 'path "bambuddy"' in refusal["detail"]
+
+
 @pytest.mark.parametrize("path", ["print", "revisions/r1/test-print"])
 def test_a_print_records_whether_a_caller_of_the_api_asked(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
@@ -962,6 +1014,9 @@ def test_a_print_whose_choices_differ_from_the_quotes_wants_a_new_quote(
             bambuddy.post(f"{shop.path}/print", json=other, headers=press()), "requote_needed"
         )
         assert named in refusal["detail"]
+        # #5732 review: the setup refusal names what differs, apart from the words.
+        assert refusal["differs"] == [named.removesuffix(" (null)")]
+        assert refusal["reason"] == "setup_differs"
     assert not sent
 
     queue_route()

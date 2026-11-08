@@ -119,9 +119,9 @@ def print_request_id(item_id: str, idempotency_key: str) -> str:
     return REQUEST_ID_PREFIX + digest
 
 
-def _refused(slug: str, message: str, *, items: list[str] | None = None) -> ApiError:
+def _refused(slug: str, message: str, *, items: list[str] | None = None, **more: Any) -> ApiError:
     extensions: dict[str, Any] = {"items": items} if items else {}
-    return ApiError(status.HTTP_409_CONFLICT, message, type_=PROBLEMS + slug, **extensions)
+    return ApiError(status.HTTP_409_CONFLICT, message, type_=PROBLEMS + slug, **extensions, **more)
 
 
 def made(attempts: list[Fulfilment]) -> int:
@@ -134,11 +134,27 @@ def accepted_quote(quotes: list[Quote]) -> Quote | None:
     return next((quote for quote in quotes if quote.accepted), None)
 
 
-def requote(item: OrderItem, why: str) -> ApiError:
+def requote(item: OrderItem, why: str, **more: Any) -> ApiError:
+    """``requote_needed`` for ``item``; ``more`` are the problem's extra fields (the setup
+    refusal's ``differs``)."""
     return _refused(
         "requote_needed",
         f"item {item.id} needs a new quote before it prints: {why}",
         items=[item.id],
+        **more,
+    )
+
+
+def quoted_path_refusal(item_id: str) -> ApiError:
+    """``requote_needed`` for a print that left ``path`` out and so took its quote's
+    ``native`` (#4673), on a printer the run would no longer reach over the LAN (#5732
+    review): the run's own refusal would name a path the print never sent."""
+    return _refused(
+        "requote_needed",
+        f"item {item_id} needs a new quote before it prints: its quote was sliced on the"
+        ' LAN (path "native"), and the printer does not print over the LAN now: quote it'
+        ' again, or send path "bambuddy" to slice it again on Bambuddy\'s route',
+        items=[item_id],
     )
 
 
@@ -431,6 +447,9 @@ def _same_setup(item: OrderItem, quote: Quote, asked: Mapping[str, Any] | None) 
             item,
             f"its print sends {', '.join(named)} the quote was not sliced with: quote with"
             " them, or send none to print with the quote's",
+            # What differs, for a caller that tells this refusal from the others.
+            reason="setup_differs",
+            differs=differs,
         )
 
 

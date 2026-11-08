@@ -59,7 +59,7 @@ class StatusChange(NamedTuple):
 _TRIGGER = (
     "id, name, definition_id, kind, schedule, event, overlap, inputs, approval_timeout_s,"
     " paused, paused_at, paused_by, paused_reason, created_by, created_at, updated_by,"
-    " updated_at,"
+    " updated_at, notice,"
     " (SELECT d.version FROM workflow_definitions d WHERE d.id = definition_id) AS version"
 )
 _GRANT = (
@@ -144,6 +144,25 @@ class TriggerStore:
         20). The run grants it seeded keep their rows, but spend only under the approval
         that seeded them (`FlowStore.consume_grant`), so their outward calls wait."""
         return await self._call(self._update, trigger_id, fields, by, revoked_by)
+
+    async def move_builtin(
+        self,
+        trigger_id: str,
+        from_definition_id: str,
+        to_definition_id: str,
+        approval_id: str,
+        by: dict[str, Any],
+    ) -> Trigger | None:
+        """Move a built-in flow's trigger to the built-in's newer version (#4673), keeping
+        its approved standing grant. Under the trigger's row lock: None, moving nothing,
+        unless it still runs ``from_definition_id`` and its live grant is still the
+        approval ``approval_id``."""
+        return await self._call(
+            self._move_builtin, trigger_id, from_definition_id, to_definition_id, approval_id, by
+        )
+
+    async def set_notice(self, trigger_id: str, notice: str | None) -> None:
+        await self._call(self._set_notice, trigger_id, notice)
 
     async def set_paused(
         self, trigger_id: str, paused: bool, by: dict[str, Any] | None, reason: str | None
@@ -339,6 +358,9 @@ class TriggerStore:
         }
         sets = "".join(f", {column} = %({column})s" for column in columns)
         anew = bool({"kind", "event"} & set(fields))
+        # A trigger moved to another version has nothing left to say about the old one.
+        if "definition_id" in fields:
+            sets += ", notice = NULL"
         with self._pool.connection() as conn, conn.transaction():
             # The row lock an approval checks what it saw under.
             row = conn.execute(
@@ -362,6 +384,39 @@ class TriggerStore:
                 (trigger_id,),
             )
         return Trigger.model_validate(row)
+
+    def _move_builtin(
+        self,
+        trigger_id: str,
+        from_definition_id: str,
+        to_definition_id: str,
+        approval_id: str,
+        by: dict[str, Any],
+    ) -> Trigger | None:
+        with self._pool.connection() as conn, conn.transaction():
+            trigger = self._locked_trigger(conn, trigger_id)
+            if trigger is None or trigger.definition_id != from_definition_id:
+                return None
+            grant = self._live_grant(conn, trigger_id)
+            if grant is None or grant.status != "approved" or grant.approval_id != approval_id:
+                return None
+            # Not `_update`: the grant stays approved, since the built-in's new version
+            # was checked to call nothing it does not already admit.
+            row = conn.execute(
+                "UPDATE flow_triggers SET definition_id = %s, notice = NULL,"
+                " updated_by = %s, updated_at = now()"
+                f" WHERE id = %s RETURNING {_TRIGGER}",
+                (to_definition_id, Jsonb(by), trigger_id),
+            ).fetchone()
+        assert row is not None
+        return Trigger.model_validate(row)
+
+    def _set_notice(self, trigger_id: str, notice: str | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE flow_triggers SET notice = %s WHERE id = %s AND notice IS DISTINCT FROM %s",
+                (notice, trigger_id, notice),
+            )
 
     def _set_paused(
         self, trigger_id: str, paused: bool, by: dict[str, Any] | None, reason: str | None

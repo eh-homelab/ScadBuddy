@@ -64,6 +64,7 @@ from scadbuddy.orders.printing import (
     ItemPrintRequest,
     print_check,
     print_item,
+    quoted_path_refusal,
     sent_keys,
     sent_setup,
     test_print_check,
@@ -569,6 +570,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))
+        native = await native_run(body)
+        if body.path == "native" and "path" not in sent_keys(sent) and not native:
+            raise quoted_path_refusal(request["item_id"])
         if body.printer is not None:
             settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
@@ -577,7 +581,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
         # so a refusal writes nothing, and recorded with it so a retry keys its run as
         # the first try did. On the native path the plan is the request's.
-        if not await native_run(body):
+        if not native:
             printer_id = body.printer_id
             if printer_id is None and body.printer is not None:
                 row = await asyncio.to_thread(components.get(PRINTERS).store.get, body.printer)

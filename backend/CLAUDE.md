@@ -244,7 +244,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   everything from the trigger's row (the Schedule carries the trigger id only) and runs
   as its creator, with a run grant only from a standing grant a person approved; never
   take an author or a grant status from a body. A trigger pins a version; any edit
-  returns its standing grant to requested, and an approval names the state it saw
+  returns its standing grant to requested (the one exception: the built-in flow's move,
+  `orders/builtin_flow.py` `move_triggers`, #4673), and an approval names the state it saw
   (`seen`); a fire is admitted, and a standing grant spent, under row locks.
   The `orders` bound (#4252, orders spec §7.2): `GrantRule.orders` (ids, or `"any"`)
   bounds `queue_print` and `tool` by the order the call names (`CallFacts.order_id`: an
@@ -618,7 +619,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
   is still an unedited built-in one with another script (#4673, `_upgraded`:
   `FlowDefinitions.upgrade_builtin`, which writes only while the newest is the one it
-  read, `expect_head`), so a person's edit or delete stands;
+  read, `expect_head`, and never over a delete), so a person's edit or delete stands.
+  A trigger pins its version, so `move_triggers` then moves each trigger of an older
+  built-in version to the newest (`TriggerStore.move_builtin`, under the row lock, its
+  approved grant kept) only when the grant is in force and admits, by function and tool,
+  every call the new script makes that its version did not (`script_calls`; `agent(`
+  never); any other trigger gets `NEWER_NOTICE` in `flow_triggers.notice`, which an edit of
+  its version clears;
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
   settings) switches it. It prints each approved or failed item through `queue_print`
   with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
@@ -662,8 +669,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
   An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
   the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
-  `operations.py` `filled`); one sent that differs is `requote_needed`
-  (`setup_differences`: not `path`, a printer name left null, or the spools), and a quote
+  `operations.py` `filled`); one sent that differs is `requote_needed` with `reason`
+  `setup_differs` and `differs` (`setup_differences`: not `path`, a printer name left
+  null, or the spools; the dialog adds its hint only then), a quote's `native` path taken
+  on a printer no longer on the LAN is `requote_needed` naming that
+  (`quoted_path_refusal`), and a quote
   with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET

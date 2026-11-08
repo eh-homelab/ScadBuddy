@@ -160,7 +160,11 @@ on shutdown.
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (default `true`: at start the API registers the
   built-in `order-fulfilment` flow as version 1 when no flow of that name ever had a
   version, and this build's script as a new version when the newest is still an unedited
-  built-in one (#4673); a person's edit or delete stands, and nothing runs until a person makes its
+  built-in one (#4673). A trigger pins its version: each trigger of an older built-in
+  version moves to the new one, keeping its approved grant, only when the new script calls
+  nothing its version did not that the grant does not admit; any other trigger stays, with
+  the notice "A newer built-in flow exists; re-approve to use it." A person's edit or
+  delete stands, and nothing runs until a person makes its
   trigger and approves its grant; `false` registers nothing; read from the environment
   only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
   are the request's, each print is refused and the flow asks a person to print the item

@@ -1076,7 +1076,11 @@ What this relies on, and what the design adds for it:
   #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
   `notify` and `settle_hours`), registered at start when its name never had a version
   (`FlowDefinitions.register_new`), and as a new version when the newest is still an
-  unedited built-in one with another script (#4673), so a person's edit or delete stands;
+  unedited built-in one with another script (#4673), so a person's edit or delete stands.
+  A trigger pins its version: each trigger of an older built-in version moves to the new
+  one, its approved grant kept, only when that grant admits every call the new script
+  makes that its version did not; any other trigger stays, with the notice "A newer
+  built-in flow exists; re-approve to use it.";
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
   and on a refusal (`order_on_hold`, `requote_needed`, any other), or print choices it
   cannot read (no output, or one gone), asks a person with

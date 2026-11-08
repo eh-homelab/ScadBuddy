@@ -57,6 +57,15 @@ describe('FlowTriggers', () => {
     expect(within(render_).getByText(/outward calls wait for you/)).toBeInTheDocument()
   })
 
+  // #4673: a trigger of an older built-in version the upgrade did not move says so.
+  it("shows a trigger's notice", async () => {
+    changeFlowTrigger('trig-hourly', { notice: 'A newer built-in flow exists; re-approve to use it.' })
+    render()
+    const hourly = await row(/Every hour/)
+    expect(within(hourly).getByRole('note')).toHaveTextContent('A newer built-in flow exists; re-approve to use it.')
+    expect(within(await row(/When a render finishes/)).queryByRole('note')).toBeNull()
+  })
+
   it('approves a requested grant as it was shown', async () => {
     const { user } = render()
     await approveRenderGrant(user)
