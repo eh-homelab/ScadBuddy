@@ -111,16 +111,19 @@ describe('Settings → Payments (#4957)', () => {
   })
 
   it('a connect takes reports_currency from the provider, not a constant (#5752 review)', async () => {
-    // Not the mock's usual false, so a hard-coded false cannot pass.
+    // Not the mock's usual false, so a hard-coded false cannot pass. resetMockState
+    // (beforeEach) puts it back.
     FAKE_PROVIDER.reports_currency = true
-    try {
-      const body = { settings: { account: 'a' }, secrets: { signing_secret: 's' } }
-      expect((await api.connectPaymentProvider('fake', body)).reports_currency).toBe(true)
-      const [listed] = await api.paymentProviders()
-      expect(listed?.reports_currency).toBe(true)
-    } finally {
-      FAKE_PROVIDER.reports_currency = false
-    }
+    const body = { settings: { account: 'a' }, secrets: { signing_secret: 's' } }
+    expect((await api.connectPaymentProvider('fake', body)).reports_currency).toBe(true)
+    const [listed] = await api.paymentProviders()
+    expect(listed?.reports_currency).toBe(true)
+  })
+
+  it('puts reports_currency back at resetMockState', () => {
+    FAKE_PROVIDER.reports_currency = true
+    resetMockState()
+    expect(FAKE_PROVIDER.reports_currency).toBe(false)
   })
 
   it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {
