@@ -18,6 +18,7 @@ removed by Plaid when it posts, and the posted one comes with a new id. A sugges
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.orders.totals import totals_of
 from scadbuddy.payments import plaid
-from scadbuddy.payments.bank import BankLinks
+from scadbuddy.payments.bank import BankLinks, LinkedAccess
 from scadbuddy.payments.plaid import PlaidError
 
 logger = logging.getLogger(__name__)
@@ -128,29 +129,42 @@ async def _read(linked: plaid.PlaidKeys, access_token: str, start: str | None) -
 async def sync_deposits(bank: BankLinks) -> int:
     """Read the linked account's deposits since the stored cursor and suggest their
     orders. The number of new suggestions. A Plaid failure keeps its code on the link
-    and the cursor where it was."""
-    linked = bank.access()
+    and the cursor where it was. Every Postgres call runs in a thread: the sync also runs
+    on the API's event loop."""
+    linked = await asyncio.to_thread(bank.access)
     if linked is None:
         return 0
-    with bank.store.transaction() as conn:
-        row = conn.execute("SELECT sync_cursor FROM bank_links").fetchone()
-    start: str | None = row["sync_cursor"] if row else None
+    start = await asyncio.to_thread(_cursor, bank.store)
     try:
         read = await _read(linked.keys, linked.access_token, start)
     except PlaidError as error:
         logger.warning("the deposit sync could not read Plaid: %s", error.code)
-        with bank.store.transaction() as conn:
-            conn.execute(
-                "UPDATE bank_links SET sync_error = %s WHERE item_id = %s",
-                (error.code or "unavailable", linked.item_id),
-            )
+        await asyncio.to_thread(_failed, bank.store, linked.item_id, error.code)
         return 0
-    with bank.store.transaction() as conn:
+    return await asyncio.to_thread(_store, bank.store, linked, start, read)
+
+
+def _cursor(store: OrderStore) -> str | None:
+    with store.transaction() as conn:
+        row = conn.execute("SELECT sync_cursor FROM bank_links").fetchone()
+    return row["sync_cursor"] if row else None
+
+
+def _failed(store: OrderStore, item_id: str, code: str | None) -> None:
+    with store.transaction() as conn:
+        conn.execute(
+            "UPDATE bank_links SET sync_error = %s WHERE item_id = %s",
+            (code or "unavailable", item_id),
+        )
+
+
+def _store(store: OrderStore, linked: LinkedAccess, start: str | None, read: _Read) -> int:
+    with store.transaction() as conn:
         now = conn.execute("SELECT item_id, sync_cursor FROM bank_links FOR UPDATE").fetchone()
         if now is None or now["item_id"] != linked.item_id or now["sync_cursor"] != start:
             # Unlinked, or another sync stored its cursor first: that one's reads stand.
             return 0
-        suggested = _apply(bank.store, conn, linked.item_id, linked.account_id, read)
+        suggested = _apply(store, conn, linked.item_id, linked.account_id, read)
         conn.execute(
             "UPDATE bank_links SET sync_cursor = %s, synced_at = clock_timestamp(),"
             " sync_error = NULL WHERE item_id = %s",

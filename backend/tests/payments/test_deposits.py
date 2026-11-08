@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -116,6 +117,31 @@ async def bank(rows: OrderStore, pool: PgPool) -> Bank:
     with respx.mock as router:
         await linked(made.bank, router)
     return made
+
+
+async def test_the_sync_calls_the_database_off_the_event_loop(
+    bank: Bank, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync also runs on the API's loop, after a webhook's answer (step 4): every
+    Postgres call goes through ``asyncio.to_thread``, as ``Payments.link`` does."""
+    loop_thread = threading.get_ident()
+    on_loop: list[str] = []
+    real = OrderStore.transaction
+
+    def watched(self: OrderStore, *args: Any, **kwargs: Any) -> Any:
+        if threading.get_ident() == loop_thread:
+            on_loop.append("transaction")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(OrderStore, "transaction", watched)
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=httpx.Response(200, json=payload("transactions.sync.json"))
+        )
+        await sync_deposits(bank.bank)
+        router.post(SYNC).mock(side_effect=httpx.ConnectError("down"))
+        await sync_deposits(bank.bank)
+    assert on_loop == []
 
 
 async def test_nothing_linked_syncs_nothing(rows: OrderStore) -> None:
