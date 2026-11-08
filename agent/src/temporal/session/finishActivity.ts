@@ -62,8 +62,9 @@ export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: Turn
       })
       if (written) events.committed(sessionId, written.tail, written.seqs)
       // The session's spend on the orders it revised (#5330), with this turn's in it. Also on a
-      // retry that wrote nothing: a report the first try could not send is sent then.
-      await costs?.report(sessionId)
+      // retry that wrote nothing. Not awaited: a slow backend never holds up the next turn, and
+      // a report cut off with its process is still pending at the next turn's end.
+      void costs?.report(sessionId)
       return written !== undefined
     },
   }

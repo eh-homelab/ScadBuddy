@@ -33,6 +33,11 @@ describe('crudCostPoster', () => {
   it("tells the route's refusal from a failure to try again", async () => {
     expect(await crudCostPoster('http://api', answering(404, true))(REPORT, 1_000)).toBe('refused')
     expect(await crudCostPoster('http://api', answering(409, true))(REPORT, 1_000)).toBe('refused')
+    expect(await crudCostPoster('http://api', answering(422, true))(REPORT, 1_000)).toBe('refused')
+    // No credential yet, a dead one, another caller's or a busy API: sent again later.
+    for (const status of [400, 401, 403, 429]) {
+      expect(await crudCostPoster('http://api', answering(status, true))(REPORT, 1_000)).toBe('failed')
+    }
     expect(await crudCostPoster('http://api', answering(404, false))(REPORT, 1_000)).toBe('failed')
     expect(await crudCostPoster('http://api', answering(503, true))(REPORT, 1_000)).toBe('failed')
     const down: typeof fetch = async () => {

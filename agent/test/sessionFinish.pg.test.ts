@@ -45,7 +45,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     const m = manager({ sql: db.sql, paths: await tempPaths() })
     const { session } = await m.start(browser, { origin: 'chat', title: 'order work' })
     const reported: string[] = []
-    const finish = sessionFinishActivities(db.sql, m.events, { report: async (id) => void reported.push(id) })[SESSION_FINISH_ACTIVITY]
+    // A report that never ends holds up neither the turn's end nor the next turn.
+    const finish = sessionFinishActivities(db.sql, m.events, {
+      report: (id) => {
+        reported.push(id)
+        return new Promise<void>(() => {})
+      },
+    })[SESSION_FINISH_ACTIVITY]
     const turn = randomUUID()
     await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${turn} WHERE id = ${session.id}`
     expect(await finish({ sessionId: session.id, turnId: turn, outcome: 'done' })).toBe(true)

@@ -118,6 +118,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     ])
   })
 
+  it('sends a share whose answer was lost again as it was, whatever the spend since', async () => {
+    const id = await session(1)
+    await revise(id, 'a', 'a1')
+    answer = 'failed'
+    await costs.report(id)
+    await spend(id, 3)
+    await revise(id, 'b', 'b1')
+    answer = 'recorded'
+    await costs.report(id)
+    // `a` keeps the 1.00 it was sent; `b` gets the 2.00 spent since.
+    expect(posted.map((p) => [p.orderId, p.costUsd])).toEqual([
+      ['a', '1.00000000'],
+      ['a', '1.00000000'],
+      ['b', '2.00000000'],
+    ])
+    const [row] = await db.sql<{ total: number }[]>`SELECT SUM(reported_usd) AS total FROM ai_session_order_costs WHERE session_id = ${id}`
+    expect(Number(row!.total)).toBeCloseTo(3)
+  })
+
+  it('runs one report of a session at a time', async () => {
+    const id = await session(1)
+    await revise(id, 'a', 'a1')
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const slow = new OrderCosts(db.sql, async (report) => {
+      posted.push(report)
+      await held
+      return 'recorded'
+    })
+    const first = slow.report(id)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    await slow.report(id)
+    release()
+    await first
+    expect(posted.map((p) => p.orderId)).toEqual(['a'])
+  })
+
   it('reports nothing for a session with no spend since', async () => {
     const id = await session(0)
     await revise(id, 'a', 'a1')

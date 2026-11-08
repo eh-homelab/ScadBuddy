@@ -14,15 +14,16 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // The spend since the last report is split equally between the orders still to report; an
 // order with one revised item gets the entry on that item, one with several on the order.
 // The backend writes one entry per order and session, so an order already reported in this
-// session records nothing more. A report that failed (the backend out of reach, a 5xx) stays
-// for the next turn's end; one refused for good (a 4xx: the order gone, a currency no rate
-// reaches) is dropped and carried none of the spend, which the next order's report gets. A
-// share the backend found under one minor unit of the order's currency (it answers no entry)
-// stays to report, with the next turn's spend. One turn's reports share one deadline
-// (REPORT_DEADLINE_MS, well under the finish activity's 30 s); what it leaves waits for the
-// next turn's end. A report whose answer was lost after the backend wrote it is sent again
-// with the larger spend since; the backend keeps the first entry, so that extra spend is
-// counted as carried and is in no entry.
+// session records nothing more. A report the route refuses for good (404 the order gone,
+// 409 a currency no rate reaches, 422 a body it cannot take) is dropped and carried none of
+// the spend, which the next order's report gets. Any other failure (no credential yet or a
+// dead one, 401 and 403; 429; a 5xx; the backend out of reach) keeps it, with the share it
+// sent (`attempted_usd`), and the next report sends that same share again: an answer lost
+// after the backend wrote the entry loses no spend. A share the backend found under one minor
+// unit of the order's currency (it answers no entry) stays to report, with the next turn's
+// spend. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it leaves waits
+// for the next turn's end. The finish activity does not wait for `report`, and a session runs
+// one report at a time in this process.
 // Neither `record` nor `report` ever throws: a cost report never fails a call or a turn.
 
 export const REVISION_TOOLS: ReadonlySet<string> = new Set(['order_item_revision_add', 'order_item_revision_add_after_acceptance'])
@@ -39,17 +40,20 @@ export type AssistantCostReport = {
 }
 
 /**
- * `recorded` (written now or before), `refused` (a 4xx: never sent again), `deferred` (under one
- * minor unit: nothing written, sent again with more spend), `failed` (sent again at the next report).
+ * `recorded` (written now or before), `refused` (404, 409 or 422 from the route: never sent
+ * again), `deferred` (under one minor unit: nothing written, sent again with more spend),
+ * `failed` (anything else: the same share sent again at the next report).
  */
 export type ReportAnswer = 'recorded' | 'refused' | 'deferred' | 'failed'
 export type PostCost = (report: AssistantCostReport, timeoutMs: number) => Promise<ReportAnswer>
 
 export const ASSISTANT_COST_PATH = (orderId: string) => `/api/v1/internal/crud/agent/orders/${encodeURIComponent(orderId)}/assistant-cost`
-/** How long one order's report waits for the backend: it runs at a turn's end, before the next turn. */
+/** How long one order's report waits for the backend. */
 export const REPORT_TIMEOUT_MS = 5_000
-/** How long all of one turn's reports may take, within the finish activity's 30 s. */
+/** How long all of one turn's reports may take. */
 export const REPORT_DEADLINE_MS = 15_000
+/** The route's refusals that no later try mends: the order gone, its currency, the body. */
+const FINAL_REFUSALS: ReadonlySet<number> = new Set([404, 409, 422])
 /** Less time left than this, and the rest wait for the next turn's end. */
 const MIN_POST_MS = 1_000
 
@@ -74,9 +78,10 @@ export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch): Pos
         return answer.entry === null ? 'deferred' : 'recorded'
       }
       await response.body?.cancel()
-      // A 4xx from the route itself (its CRUD header) is final; anything else, a proxy's or
-      // a missing route on an older API, is tried again.
-      return response.status < 500 && response.headers.get('x-scadbuddy-crud') === '1' ? 'refused' : 'failed'
+      // Only the route's own (its CRUD header) 404, 409 or 422 is final. A 401 or 403 (no
+      // credential yet, a dead one), a 429, a 5xx, a proxy's answer or a missing route on an
+      // older API is tried again.
+      return FINAL_REFUSALS.has(response.status) && response.headers.get('x-scadbuddy-crud') === '1' ? 'refused' : 'failed'
     } catch {
       return 'failed'
     }
@@ -87,13 +92,16 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value !== '' && value.length <= 100 ? value : null
 }
 
-type Pending = { order_id: string; order_item_id: string }
+type Pending = { order_id: string; order_item_id: string; attempted_usd: number | null }
+type Order = { id: string; items: string[]; attempted: number | null }
 
 export class OrderCosts implements TouchedSink {
   private readonly sql: Sql
   private readonly post: PostCost
   private readonly onError: ((err: unknown) => void) | undefined
   private readonly now: () => number
+  /** The sessions with a report running in this process. */
+  private readonly running = new Set<string>()
 
   constructor(sql: Sql, post: PostCost, onError?: (err: unknown) => void, options: { now?: () => number } = {}) {
     this.sql = sql
@@ -120,47 +128,79 @@ export class OrderCosts implements TouchedSink {
     }
   }
 
-  /** Sends the session's spend since its last report to each order still to report. Never throws. */
+  /**
+   * Sends each order still to report its share: the share an earlier report sent and heard no
+   * answer for, else an equal part of the session's spend not yet carried or sent. Never throws.
+   */
   async report(sessionId: string): Promise<void> {
-    const deadline = this.now() + REPORT_DEADLINE_MS
+    // A report already running for the session sends what this one would; what it leaves
+    // waits for the next turn's end.
+    if (this.running.has(sessionId)) return
+    this.running.add(sessionId)
     try {
-      const pending = await this.sql<Pending[]>`
-        SELECT order_id, order_item_id FROM ai_session_order_costs
-        WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
-      if (pending.length === 0) return
-      const [row] = await this.sql<{ cost: number; reported: number; principal: string }[]>`
-        SELECT s.cost_usd AS cost, s.owner_id AS principal,
-               (SELECT COALESCE(SUM(reported_usd), 0) FROM ai_session_order_costs WHERE session_id = s.id) AS reported
-        FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
-      if (!row) return
-      const orders = new Map<string, string[]>()
-      for (const p of pending) orders.set(p.order_id, [...(orders.get(p.order_id) ?? []), p.order_item_id])
-      const since = Math.max(Number(row.cost) - Number(row.reported), 0)
-      const share = since / orders.size
-      for (const [orderId, items] of orders) {
-        // Under a hundredth of a cent nothing is sent (the backend would write nothing):
-        // the order stays to report, with the next turn's spend.
-        if (share < 1e-4) continue
-        const left = deadline - this.now()
-        if (left < MIN_POST_MS) break
-        const answer = await this.post(
-          {
-            orderId,
-            orderItemId: items.length === 1 ? items[0]! : null,
-            sessionId,
-            principal: row.principal,
-            costUsd: share.toFixed(8),
-          },
-          Math.min(REPORT_TIMEOUT_MS, left),
-        )
-        if (answer === 'failed' || answer === 'deferred') continue
-        const carried = answer === 'recorded' ? share / items.length : 0
-        await this.sql`
-          UPDATE ai_session_order_costs SET reported_at = now(), reported_usd = ${carried}
-          WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NULL`
-      }
+      await this.send(sessionId)
     } catch (err) {
       this.onError?.(err)
+    } finally {
+      this.running.delete(sessionId)
+    }
+  }
+
+  private async send(sessionId: string): Promise<void> {
+    const deadline = this.now() + REPORT_DEADLINE_MS
+    const pending = await this.sql<Pending[]>`
+      SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs
+      WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
+    if (pending.length === 0) return
+    const [row] = await this.sql<{ cost: number; carried: number; principal: string }[]>`
+      SELECT s.cost_usd AS cost, s.owner_id AS principal,
+             (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
+              FROM ai_session_order_costs WHERE session_id = s.id) AS carried
+      FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
+    if (!row) return
+    const byId = new Map<string, Order>()
+    for (const p of pending) {
+      const order = byId.get(p.order_id) ?? { id: p.order_id, items: [], attempted: null }
+      order.items.push(p.order_item_id)
+      if (p.attempted_usd !== null) order.attempted = (order.attempted ?? 0) + Number(p.attempted_usd)
+      byId.set(p.order_id, order)
+    }
+    const orders = [...byId.values()]
+    const fresh = orders.filter((o) => o.attempted === null)
+    const share = fresh.length === 0 ? 0 : Math.max(Number(row.cost) - Number(row.carried), 0) / fresh.length
+    // Under a hundredth of a cent no new share is sent (the backend would write nothing): those
+    // orders stay to report, with the next turn's spend.
+    const due = share < 1e-4 ? orders.filter((o) => o.attempted !== null) : orders
+    for (const order of due) {
+      const left = deadline - this.now()
+      if (left < MIN_POST_MS) return
+      const amount = order.attempted ?? share
+      if (order.attempted === null) {
+        await this.sql`
+          UPDATE ai_session_order_costs SET attempted_usd = ${amount / order.items.length}
+          WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
+      }
+      const answer = await this.post(
+        {
+          orderId: order.id,
+          orderItemId: order.items.length === 1 ? order.items[0]! : null,
+          sessionId,
+          principal: row.principal,
+          costUsd: amount.toFixed(8),
+        },
+        Math.min(REPORT_TIMEOUT_MS, left),
+      )
+      if (answer === 'failed') continue
+      if (answer === 'deferred') {
+        await this.sql`
+          UPDATE ai_session_order_costs SET attempted_usd = NULL
+          WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
+        continue
+      }
+      await this.sql`
+        UPDATE ai_session_order_costs
+        SET reported_at = now(), reported_usd = ${answer === 'recorded' ? this.sql`COALESCE(attempted_usd, 0)` : 0}, attempted_usd = NULL
+        WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
     }
   }
 }
