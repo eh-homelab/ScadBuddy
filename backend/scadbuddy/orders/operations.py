@@ -103,6 +103,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ORDER_ITEM_QUOTE = "order_item_quote"
+#: Set, in a copy of the quote's request only, by the quote route's check of a slice's
+#: own body before it makes the slice's revision (#4673, #5761 review).
+BODY_ONLY = "body_only"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
 ORDER_ATTEMPT_COPY = "order_attempt_copy"
@@ -494,6 +497,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 request["item_id"],
                 body,
                 expected_revision_id=request.get("revision_id"),
+                # The quote route's check before a slice's revision (#5761 review).
+                body_only=bool(request.get(BODY_ONLY)),
             )
         )
         await asyncio.to_thread(support_check, orders.store, request["item_id"], body)
@@ -946,6 +951,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             queue="library",
             run_timeout=QUOTE_TIMEOUT,
             where="the item's quotes",
+            # #4673: the revision a slice's new design made is the route's, after the
+            # key is looked up; the body's `design` keys the request instead.
+            unkeyed=frozenset({"revision_id"}),
             # The render and every plate's slice outlast the command deadline: the
             # caller follows the operation anyway.
             answers_running=True,

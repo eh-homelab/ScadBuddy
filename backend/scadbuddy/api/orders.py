@@ -45,6 +45,7 @@ from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
     operation_answer,
+    recorded,
     run_operation,
 )
 from scadbuddy.api.printing import asked_by_api
@@ -119,7 +120,12 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
+from scadbuddy.orders.operations import (
+    BODY_ONLY,
+    ORDER_ATTEMPT_COPY,
+    ORDER_ITEM_PRINT,
+    ORDER_ITEM_QUOTE,
+)
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
@@ -2301,38 +2307,51 @@ async def quote_item(
     accepted order: that path's refusals apply unchanged (``item_locked``,
     ``order_on_hold``, ``print_in_flight``, ``deposit_unpaid``, …), and 422 on
     ``inputs`` or ``commit`` as a revision's. The quote is of that revision; one made
-    after it refuses the quote (409 ``revision_superseded``: slice again). A storefront
-    cart is refused first (``order_not_submitted``). The same design again makes no
-    revision, so a re-sent request makes one."""
+    after it refuses the quote (409 ``revision_superseded``: slice again). The body's
+    own checks above run before the revision, so their refusals write nothing; a
+    storefront cart is refused first (``order_not_submitted``). A replayed key is
+    answered from its operation with no revision made, and the same design again makes
+    none."""
     check_path(order_id, item_id)
-    revision_id: str | None = None
+    kind = ops.kinds[ORDER_ITEM_QUOTE]
+    subject = subject_of(item_id)
+    request: dict[str, Any] = {
+        "order_id": order_id,
+        "item_id": item_id,
+        "request": body.model_dump(mode="json", exclude={"inputs", "commit"}),
+        # Ruling 12: who it is for comes from the author header, never the body.
+        "by": current_actor().model_dump(mode="json"),
+        "revision_id": None,
+    }
     if body.inputs is not None or body.commit is not None:
-        revision_id = await _slice_revision(
-            order_id,
-            item_id,
-            body,
-            orders,
-            catalogue=catalogue,
-            history=history,
-            outputs=outputs,
-            paths=paths,
-            config=config,
-            fetcher=fetcher,
-            payments=service,
+        # #4673: the design keys the request; the revision it makes does not (`unkeyed`).
+        request["design"] = body.model_dump(mode="json", include={"inputs", "commit"})
+        # A replayed key is answered from its operation, with no revision made (#5761
+        # review); else the body's own checks first, so a refusal writes nothing.
+        found = await recorded(
+            ops, kind=kind, subject=subject, request=request, idempotency_key=idempotency_key
         )
+        if found is None:
+            await kind.check({**request, BODY_ONLY: True})
+            request["revision_id"] = await _slice_revision(
+                order_id,
+                item_id,
+                body,
+                orders,
+                catalogue=catalogue,
+                history=history,
+                outputs=outputs,
+                paths=paths,
+                config=config,
+                fetcher=fetcher,
+                payments=service,
+            )
     result = await run_operation(
         ops,
         response,
-        kind=ops.kinds[ORDER_ITEM_QUOTE],
-        subject=subject_of(item_id),
-        request={
-            "order_id": order_id,
-            "item_id": item_id,
-            "request": body.model_dump(mode="json", exclude={"inputs", "commit"}),
-            "revision_id": revision_id,
-            # Ruling 12: who it is for comes from the author header, never the body.
-            "by": current_actor().model_dump(mode="json"),
-        },
+        kind=kind,
+        subject=subject,
+        request=request,
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, Quote)

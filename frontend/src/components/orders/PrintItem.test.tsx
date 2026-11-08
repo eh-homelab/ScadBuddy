@@ -63,6 +63,8 @@ describe('PrintItem', () => {
       if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
         Object.assign(quote, {
           choices: { printer_id: null, printer: null, path: null, choices: quoted, prime_tower: null, supports: null, print_sequence: 'by object' },
+          // Not the dialog's own picks (21 then 27): the quote's spools, swapped.
+          filament_plan: { slots: [{ slot_id: 1, spool_id: 27 }, { slot_id: 2, spool_id: 21 }], force_colour_match: false },
         })
       }
     }
@@ -76,6 +78,10 @@ describe('PrintItem', () => {
     await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
     const body = printed.mock.calls[0]![2]
     expect(body.choices).toMatchObject({ tier: 'draft' })
+    expect(body.filament_plan?.slots).toEqual([
+      { slot_id: 1, spool_id: 27 },
+      { slot_id: 2, spool_id: 21 },
+    ])
     // The tower, supports and sequence are left out: the backend takes the quote's.
     expect(body).not.toHaveProperty('print_sequence')
   })

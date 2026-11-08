@@ -801,3 +801,52 @@ def test_a_slice_with_new_inputs_keeps_the_revise_paths_refusals(bambuddy: TestC
 
     bad = shop.post(commit="0" * 40)
     assert bad.status_code == 422, bad.text
+
+
+def test_a_refused_slice_with_new_inputs_writes_no_revision(bambuddy: TestClient) -> None:
+    """#5761 review: the body's own checks (filaments, support slots, price book, machine
+    rate) run before the revision, so a 422 writes nothing and an accepted item keeps
+    its one revise after acceptance."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    archived = bambuddy.post(f"/api/v1/orders/price-book/filaments/{shop.petg}/archive")
+    assert archived.status_code == 200, archived.text
+
+    refused = shop.post(inputs=WIDER)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["type"].endswith("/filaments")
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1]
+    assert item["revised_after_acceptance"] is False
+
+
+def test_a_replayed_slice_makes_no_revision_after_anothers(bambuddy: TestClient) -> None:
+    """#5761 review: a replayed key is answered from its operation before any revision is
+    made, even when the item's design has changed since."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    first = shop.post("slice-replay", inputs=WIDER)
+    assert first.status_code == 202, first.text
+    op = follow_operation(bambuddy, first.json(), timeout=120, poll=0.2)
+    reference = shop.get_item()["reference"]
+    other = bambuddy.post(
+        f"{shop.path}/revisions",
+        json={
+            "reference": {
+                "slug": reference["slug"],
+                "commit": reference["commit"],
+                "inputs": {"params": {"width": 16}},
+            }
+        },
+    )
+    assert other.status_code == 201, other.text
+
+    again = shop.post("slice-replay", inputs=WIDER)
+    # The finished operation's own answer: its quote.
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == op["result"]["id"]
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2, 3]

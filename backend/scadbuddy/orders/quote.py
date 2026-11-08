@@ -290,9 +290,13 @@ def quote_check(
     request: SliceQuoteRequest | ArchiveQuoteRequest,
     *,
     expected_revision_id: str | None = None,
+    body_only: bool = False,
 ) -> dict[int, str | None]:
     """Ruling 8's refusals, from the rows (with ``expected_revision_id``, the revision a
     slice's new inputs made, 409 ``revision_superseded`` once another is current, #4673):
+    With ``body_only`` (a slice whose new design the route revises first, #5761
+    review) only what the revision cannot change is checked: the cart, the filaments and
+    the price book; the item's state is the revise path's to refuse.
     404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
     accepted quote on an order that takes items after acceptance, #5349, or was revised after
@@ -312,7 +316,7 @@ def quote_check(
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
-    if not requote_open(order, item, store.quotes(item.id)):
+    if not body_only and not requote_open(order, item, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"order {order.label} is {order.status}: an item is quoted while the order is"
@@ -320,7 +324,7 @@ def quote_check(
             " revised after acceptance",
             type_=PROBLEMS + "order_not_open",
         )
-    if item.status in SETTLED:
+    if not body_only and item.status in SETTLED:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"item {item_id} is {item.status}",

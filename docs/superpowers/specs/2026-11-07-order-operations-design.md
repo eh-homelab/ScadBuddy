@@ -224,9 +224,14 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   item's. When they differ from the item's reference, the route (`api/orders.py`
   `_slice_revision`) resolves them as a revision's reference and makes the revision through
   `Lifecycle.add_revision`, `after_acceptance` for an item with an accepted quote on a
-  `TAKES_ITEMS` order not yet revised after acceptance **(call)**, so every refusal of
-  that path applies unchanged; the same design makes none, so a re-sent request makes one
-  revision. The operation's request carries the revision as `revision_id`, and the check
+  `TAKES_ITEMS` order not yet revised after acceptance, so every refusal of that path
+  applies unchanged. Before it, the route looks up the request's key (a replay is
+  answered from its operation, with no revision made) and runs the quote's own check on
+  the body alone (`quote_check` `body_only`: the cart, the filaments, the support slots,
+  the price book and the machine rate), so a refusal there writes nothing and leaves an
+  accepted item's one revise after acceptance unused. The same design makes no revision.
+  The design keys the operation's request (`design`); the revision does not (the kind's
+  `unkeyed`). The operation's request carries the revision as `revision_id`, and the check
   (`quote_check`), the run (`quote_run`) and the record (`record_slice_quote`, under the
   order's lock) refuse 409 `revision_superseded` once another revision is current; the
   order page says to slice again (`refusal.ts` `SUPERSEDED_TEXT`). A storefront cart is
