@@ -213,8 +213,10 @@ class Payments:
         linked = await asyncio.to_thread(
             lambda: self._orders.lifecycle.set_request_link(found.id, hosted=hosted, error=error)
         )
-        if hosted is not None and linked.status != "open" and linked.provider_ref is None:
-            # Closed while the provider answered: the new page must not stay payable.
+        if hosted is not None and linked.status != "open" and linked.hosted_url is None:
+            # Closed while the provider answered: the new page must not stay payable. The
+            # lifecycle kept its reference with the mark (#5700), so a failure here is
+            # tried again by the sweep.
             await self._close_page(found.id, found.provider, hosted.provider_ref)
         return linked
 

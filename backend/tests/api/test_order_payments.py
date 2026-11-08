@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
 from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.models import Actor
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.fake import FAKE
 from scadbuddy.payments.models import HostedRequest
@@ -26,6 +27,7 @@ pytestmark = pytest.mark.requires_postgres
 
 FAKE_CONNECT = {"settings": {"account": "a"}, "secrets": {"signing_secret": "s3cret"}}
 PROBLEMS = "https://scadbuddy.dev/problems/orders/"
+BY = Actor(kind="browser")
 
 
 def with_payments(settings: Settings, tmp_path: Path) -> Settings:
@@ -395,3 +397,39 @@ def test_a_reference_another_request_holds_is_a_link_error(
     second = request_payment(client, order["id"], amount_minor=600)
     assert (second["status"], second["provider_ref"], second["hosted_url"]) == ("open", None, None)
     assert second["link_error"] == "the provider's reference is held by another payment request"
+
+
+def test_a_page_made_after_the_cancel_is_retried_until_closed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5700: the request is cancelled while the provider makes its page. The page's
+    reference is kept on the cancelled request with the mark, so a close that fails
+    there is tried again by the sweep like any other."""
+    connect_fake(client)
+    order = payable_order(client)
+    orders = _state(client).components.get(ORDERS)
+    real = FAKE.create_request
+    made: list[str] = []
+
+    async def cancelled_meanwhile(credential: Any, request: Any, **kwargs: Any) -> HostedRequest:
+        orders.lifecycle.cancel_payment_request(request.order_id, request.id, BY)
+        hosted = await real(credential, request, **kwargs)
+        made.append(hosted.provider_ref)
+        return hosted
+
+    async def down(credential: Any, provider_ref: str) -> None:
+        raise ProviderError("down")
+
+    monkeypatch.setattr(FAKE, "create_request", cancelled_meanwhile)
+    monkeypatch.setattr(FAKE, "cancel_request", down)
+    req = request_payment(client, order["id"])
+    assert (req["status"], req["hosted_url"]) == ("cancelled", None)
+    assert req["close_pending_at"] is not None
+    cancels = _cancels(monkeypatch)
+    monkeypatch.setattr(FAKE, "cancel_request", type(FAKE).cancel_request.__get__(FAKE))
+    _due(client, req["id"])
+    service = _state(client).components.get(PAYMENTS).service
+    assert asyncio.run(service.retry_closes()) == 1
+    assert cancels == made
+    [closed] = client.get(f"/api/v1/orders/{order['id']}/payment-requests").json()
+    assert (closed["status"], closed["close_pending_at"]) == ("cancelled", None)

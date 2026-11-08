@@ -948,5 +948,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   wait is over (`closes_due`: `CLOSE_RETRY_FIRST_MINUTES` after the mark or the last try,
   doubled per failed try, at most a day). It never runs the lifecycle again. The order
   page says "Close not yet confirmed" while the mark stands (`PaymentRequests.tsx`).
-  Not covered: a page made after its request was cancelled (`Payments.link`'s race),
-  whose `provider_ref` is not stored, is closed once and not tried again.
+  A page the provider made after its request was cancelled or paid by hand
+  (`Payments.link`'s race) is kept with its `provider_ref`, no `hosted_url`, and the mark
+  (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`), so the sweep
+  retries it like any other.

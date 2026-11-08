@@ -436,8 +436,24 @@ def test_a_link_for_a_request_no_longer_open_is_not_written(shop: PayShop) -> No
         hosted=HostedRequest.model_validate({"provider_ref": "fake_late", "hosted_url": LINK}),
         error=None,
     )
-    assert (late.status, late.provider_ref, late.hosted_url) == ("cancelled", None, None)
+    # #5700: the page is kept as a page to close, never as a link to pay.
+    assert (late.status, late.provider_ref, late.hosted_url) == ("cancelled", "fake_late", None)
+    assert late.close_pending_at is not None
     assert late.link_error == "the payment request is cancelled"
+
+
+def test_a_page_made_after_a_payment_by_hand_is_kept_to_close(shop: PayShop) -> None:
+    """#5700: paid by hand while the provider answered."""
+    order, _ = shop.accepted()
+    req = shop.lifecycle.open_payment_request(order.id, BY, provider="fake")
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=1000, payment_request_id=req.id)
+    late = shop.lifecycle.set_request_link(
+        req.id,
+        hosted=HostedRequest.model_validate({"provider_ref": "fake_late", "hosted_url": LINK}),
+        error=None,
+    )
+    assert (late.status, late.provider_ref, late.hosted_url) == ("paid", "fake_late", None)
+    assert late.close_pending_at is not None and late.link_error is None
 
 
 # -- cancel (Review Focus 1 and 2) -----------------------------------------------------------

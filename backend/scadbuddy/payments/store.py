@@ -155,11 +155,15 @@ def set_request_link(
     provider_ref: str | None,
     hosted_url: str | None,
     link_error: str | None,
+    close_pending: bool = False,
 ) -> PaymentRequestView:
+    """``close_pending`` (#5700): the page was made after the request closed, so it is
+    kept only as a page to close, marked as `set_request_status` marks one."""
     row = conn.execute(
-        "UPDATE payment_requests SET provider_ref = %s, hosted_url = %s, link_error = %s"
+        "UPDATE payment_requests SET provider_ref = %s, hosted_url = %s, link_error = %s,"
+        " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END"
         f" WHERE id = %s RETURNING {_VIEW}",
-        (provider_ref, hosted_url, link_error, request_id),
+        (provider_ref, hosted_url, link_error, close_pending, request_id),
     ).fetchone()
     assert row is not None
     return PaymentRequestView.model_validate(row)

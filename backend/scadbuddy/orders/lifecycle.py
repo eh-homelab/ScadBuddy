@@ -922,9 +922,11 @@ class Lifecycle:
         """The provider's answer to a request's link, under the request's order lock: its
         hosted page, or why it failed (the link it had stays). A request no longer open
         (cancelled or expired while the provider answered) keeps no new link, so no one
-        pays it. A paid request is returned as it is: it needs no link and no error. A
-        reference another request holds is kept as ``link_error``, not as the link. No
-        audit row: the link is the provider's, not a person's decision."""
+        pays it; a page made then keeps its reference, marked to close (#5700), so the
+        housekeeping sweep closes it if the close after the commit fails. A paid request is
+        returned as it is: it needs no link and no error. A reference another request holds
+        is kept as ``link_error``, not as the link. No audit row: the link is the
+        provider's, not a person's decision."""
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
             if found is None:
@@ -934,8 +936,21 @@ class Lifecycle:
             order = self._lock(conn, found.order_id)
             found = payments.request(conn, request_id) or found
             if found.status == "paid":
-                return found
+                if hosted is None or found.provider_ref is not None:
+                    return found
+                # Paid by hand while the provider answered: keep the page only to close it.
+                return payments.set_request_link(
+                    conn,
+                    request_id,
+                    provider_ref=hosted.provider_ref,
+                    hosted_url=None,
+                    link_error=None,
+                    close_pending=True,
+                )
+            late_ref: str | None = None
             if found.status != "open":
+                if hosted is not None and found.provider_ref is None:
+                    late_ref = hosted.provider_ref
                 hosted, error = None, f"the payment request is {found.status}"
             try:
                 # A savepoint: a refused write leaves the transaction usable.
@@ -943,9 +958,14 @@ class Lifecycle:
                     linked = payments.set_request_link(
                         conn,
                         request_id,
-                        provider_ref=found.provider_ref if hosted is None else hosted.provider_ref,
+                        provider_ref=(
+                            (found.provider_ref or late_ref)
+                            if hosted is None
+                            else hosted.provider_ref
+                        ),
                         hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
                         link_error=error,
+                        close_pending=late_ref is not None,
                     )
             except errors.UniqueViolation:
                 # ``payment_requests_ref``: the provider answered with another request's
