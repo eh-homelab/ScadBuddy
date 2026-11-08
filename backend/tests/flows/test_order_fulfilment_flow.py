@@ -59,15 +59,26 @@ async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
 
 class _Host:
     """The script's host functions, faked: `prints` answers each `queue_print` in turn,
-    `answers` each question (an `Exception` is a question nobody answered)."""
+    `answers` each question (an `Exception` is a question nobody answered), and `later`
+    each `order_get` after the first, as (items, order status); the last one stands."""
 
     def __init__(
-        self, items: list[dict[str, Any]], prints: list[dict[str, Any]], answers: list[Any]
+        self,
+        items: list[dict[str, Any]],
+        prints: list[dict[str, Any]],
+        answers: list[Any],
+        *,
+        later: list[tuple[list[dict[str, Any]], str]] | None = None,
+        notify: bool = False,
+        settle_hours: int = 48,
     ) -> None:
         self.items = items
         self.prints = prints
         self.answers = answers
-        self.tools: list[str] = []
+        self.later = later or [(items, "in_production")]
+        self.settings = {"notify": notify, "settle_hours": settle_hours}
+        self.reads = 0
+        self.calls: list[str] = []
         self.printed: list[str] = []
         self.questions: list[str] = []
 
@@ -75,14 +86,21 @@ class _Host:
         return {"kind": "order.changed", "order_id": "o1"}
 
     async def inputs(self) -> dict[str, Any]:
-        return {"notify": False}
+        return self.settings
 
     async def tool(self, name: str, args: dict[str, Any]) -> str:
-        self.tools.append(name)
+        self.calls.append(name)
         if name == "order_get":
-            return json.dumps({"order": {"id": "o1", "number": "ORD-1"}, "items": self.items})
+            self.reads += 1
+            items, status = (self.items, "accepted")
+            if self.reads > 1:
+                items, status = self.later[min(self.reads - 2, len(self.later) - 1)]
+            order = {"id": "o1", "number": "ORD-1", "status": status}
+            return json.dumps({"order": order, "items": items})
         if name == "get_print_choices":
             return json.dumps({"default_nozzles": [], "bed_type": "pei"})
+        if name == "order_notify_customer":
+            return json.dumps({"text": "Order ORD-1 is ready.", "sent": False})
         raise AssertionError(f"unexpected tool {name}")
 
     async def queue_print(self, source: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
@@ -96,12 +114,18 @@ class _Host:
             raise answer
         return {"answer": answer}
 
+    async def sleep(self, seconds: float) -> None:
+        self.calls.append("sleep")
+
     async def agent(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append("agent")
         return {"summary": "ok"}
 
-    def run(self) -> None:
-        names = ("trigger", "inputs", "tool", "queue_print", "wait_for_human", "agent")
-        exec(SCRIPT, {name: getattr(self, name) for name in names})
+    def run(self) -> Any:
+        names = ("trigger", "inputs", "tool", "queue_print", "wait_for_human", "sleep", "agent")
+        scope: dict[str, Any] = {name: getattr(self, name) for name in names}
+        exec(SCRIPT.replace("asyncio.run(main())", "RESULT = asyncio.run(main())"), scope)
+        return scope["RESULT"]
 
 
 def _item(item_id: str, status: str = "approved") -> dict[str, Any]:
@@ -121,7 +145,7 @@ def test_a_stale_quote_asks_a_person_and_never_re_quotes() -> None:
     host = _Host([_item("a"), _item("b")], [_refused("requote_needed"), _OK, _OK], ["print"])
     host.run()
     assert host.printed == ["a", "a", "b"]
-    assert "order_item_quote" not in host.tools
+    assert "order_item_quote" not in host.calls
     assert "re-quote" in host.questions[0]
 
 
@@ -139,6 +163,53 @@ def test_an_unanswered_or_skipped_item_never_ends_the_run() -> None:
         [_refused("requote_needed"), _refused("x"), _OK],
         [TimeoutError("nobody answered"), "skip"],
     )
-    host.run()
+    result = host.run()
     # A failed item prints again; a fulfilled one is not printed.
     assert host.printed == ["a", "b", "c"]
+    assert result["skipped"] == ["a", "b"]
+
+
+def test_a_failed_print_with_no_error_names_no_none_and_warns_of_a_queued_copy() -> None:
+    failed = {"status": "failed", "problem": None, "error": None, "may_have_queued": True}
+    host = _Host([_item("a")], [failed], ["skip"])
+    host.run()
+    assert "None" not in host.questions[0] and "no reason given" in host.questions[0]
+    assert "check the queue before you answer print" in host.questions[0]
+
+
+def test_the_check_waits_for_the_prints_to_end() -> None:
+    """Review of #5682: a print run ends once its plates are queued, so the agent's check
+    and the "ready" message wait until no printed item is queued or printing."""
+    host = _Host(
+        [_item("a"), _item("b")],
+        [_OK, _OK],
+        [],
+        later=[
+            ([_item("a", "printing"), _item("b", "queued")], "in_production"),
+            ([_item("a", "printed"), _item("b", "printing")], "in_production"),
+            ([_item("a", "printed"), _item("b", "printed")], "in_production"),
+            ([_item("a", "fulfilled"), _item("b", "fulfilled")], "ready"),
+        ],
+        notify=True,
+    )
+    result = host.run()
+    assert host.calls.count("sleep") == 2
+    assert host.calls.index("agent") > max(i for i, c in enumerate(host.calls) if c == "sleep")
+    assert host.calls[-1] == "order_notify_customer"
+    assert result["message"] == {"text": "Order ORD-1 is ready.", "sent": False}
+
+
+def test_prints_still_running_at_the_deadline_end_the_run_without_a_check() -> None:
+    printing = ([_item("a", "printing")], "in_production")
+    host = _Host([_item("a")], [_OK], [], later=[printing], notify=True, settle_hours=1)
+    result = host.run()
+    assert "agent" not in host.calls and "order_notify_customer" not in host.calls
+    assert "did not end within 1 hours" in result["summary"]
+    assert host.calls.count("sleep") == 12
+
+
+def test_no_ready_message_for_an_order_that_is_not_ready() -> None:
+    host = _Host([_item("a")], [_OK], [], notify=True)
+    result = host.run()
+    assert "agent" in host.calls and "order_notify_customer" not in host.calls
+    assert result["message"] is None

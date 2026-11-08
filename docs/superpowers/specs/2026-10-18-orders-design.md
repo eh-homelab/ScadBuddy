@@ -1073,8 +1073,8 @@ What this relies on, and what the design adds for it:
   As built (#4252): `order_notify_customer` is `read` and only composes: it reads the
   order and the customer and answers the template's text addressed to the customer's
   primary contacts, `sent: false`, for a person to send. Sending through a plugin is
-  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, input
-  `notify`), registered at start only when its name never had a version
+  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
+  `notify` and `settle_hours`), registered at start only when its name never had a version
   (`FlowDefinitions.register_new`), so a person's edit or delete stands;
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
   and on a refusal (`order_on_hold`, `requote_needed`, any other) asks a person with
@@ -1083,8 +1083,12 @@ What this relies on, and what the design adds for it:
   `quote_check` refuses a new quote for an item whose accepted quote stands on an
   accepted order (`order_not_open`) until a person revises it after acceptance (§3.5),
   so the accepted price stands until a person decides, and there is no
-  `auto_accept_quotes_under_minor`. It hands the attempts to the agent under a grant
-  kept to the order. A trigger to run it is made by a person.
+  `auto_accept_quotes_under_minor`. A print run ends once its plates are queued, so
+  the flow then waits, reading the order every five minutes, until no printed item is
+  `queued` or `printing` (at most the input `settle_hours`, default 48; past it the run
+  ends with a summary and no check). Only then does it hand the attempts to the agent
+  under a grant kept to the order, and it composes `ready` only when the re-read order
+  is `ready`. A trigger to run it is made by a person.
 
 `order_item_quote` takes two modes (phase 2, plan 2026-10-22 Ruling 11): `manual`
 (`{unit_price_minor, label?}`, the typed price) or `slice` (`{printer_id?,

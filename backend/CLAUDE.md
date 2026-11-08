@@ -613,7 +613,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
-  script, input `notify`), registered by
+  script, inputs `notify` and `settle_hours`), registered by
   `ensure_builtin_flow` at the component's start only when the name never had a version
   (`FlowDefinitions.register_new`, `FlowExistsError`), so a person's edit or delete stands;
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
@@ -621,9 +621,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
   other) asks a person to fix it and answer `print`, and an unanswered or skipped item
   is passed over, never the run's end. It never re-quotes: on an accepted order a new
-  quote opens only after a person's revision after acceptance. It asks
-  the agent to record the attempts under a grant kept to the order, and with `notify`
-  calls `order_notify_customer` (`read`: it composes the text and sends nothing; a send
+  quote opens only after a person's revision after acceptance. A print run ends once
+  its plates are queued, so it then reads `order_get` every `POLL_S` (`sleep`) until no
+  printed item is `queued` or `printing`, for at most the input `settle_hours` (default
+  48; past it the run ends with a summary and no check). Only then does it ask
+  the agent to record the attempts under a grant kept to the order, and with `notify`,
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
   through a plugin is #5660).
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
   `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and

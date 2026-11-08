@@ -27,8 +27,8 @@ DISPLAY_NAME = "Order fulfilment"
 DESCRIPTION = (
     "Prints each approved or failed line item of an accepted order from its accepted "
     "quote, asks a person when a print cannot start (the order on hold, or a stale "
-    "quote to re-quote), has an agent check the prints and record them, and writes the "
-    "customer's message when asked to."
+    "quote to re-quote), waits for the prints to end, has an agent check them and "
+    "record them, and writes the customer's message once the order is ready."
 )
 #: Who registered it: the build, never a person or an agent.
 AUTHOR: dict[str, Any] = {"kind": "builtin", "name": NAME}
@@ -39,7 +39,17 @@ INPUTS_SCHEMA: dict[str, Any] = {
         "notify": {
             "type": "boolean",
             "default": False,
-            "description": "Write the customer's 'ready' message when the order is done",
+            "description": "Write the customer's 'ready' message when the order is ready",
+        },
+        "settle_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 168,
+            "default": 48,
+            "description": (
+                "How long to wait for the prints to end before the check; past it the "
+                "run ends with what is still printing, and no check"
+            ),
         },
     },
     "additionalProperties": False,
@@ -62,6 +72,10 @@ FULFILMENT_REPORT = {
 PRINTABLE = ["approved", "failed"]
 #: How long a question to a person waits, in seconds. An unanswered one skips its item.
 ASK_TIMEOUT_S = 86400
+#: An item still on its way to the printer or on it.
+IN_FLIGHT = ["queued", "printing"]
+#: How often the order is read while its prints run, in seconds.
+POLL_S = 300
 
 
 def data(text):
@@ -127,12 +141,31 @@ async def print_item(order, item):
                 "is gone or changed. Revise and re-quote it, then answer print, or skip."
             )
         else:
-            question = (
-                f"The print of {item['title']} did not go: {out['status']}, "
-                f"{out['error']}. Answer print to try again, or skip."
-            )
+            reason = out["error"] or "no reason given"
+            question = f"The print of {item['title']} did not go: {out['status']}, {reason}. "
+            if out.get("may_have_queued"):
+                question += (
+                    "It may be on the printer's queue anyway: check the queue before you "
+                    "answer print, or it may print twice. "
+                )
+            question += "Answer print to try again, or skip."
         if await ask(question) != "print":
             return False
+
+
+async def settle(order_id, printed, hours):
+    """The order once none of `printed` (item ids) is queued or printing: a print run
+    ends once its plates are queued, not once they are printed. None past `hours`."""
+    left = hours * 3600
+    while True:
+        detail = data(await tool("order_get", {"order_id": order_id}))
+        busy = [i for i in detail["items"] if i["id"] in printed and i["status"] in IN_FLIGHT]
+        if not busy:
+            return detail
+        if left <= 0:
+            return None
+        await sleep(POLL_S)
+        left -= POLL_S
 
 
 async def main():
@@ -143,25 +176,43 @@ async def main():
     order_id = ev["order_id"]
     detail = data(await tool("order_get", {"order_id": order_id}))
     order = detail["order"]
+    printed = []
     skipped = []
     for item in detail["items"]:
         if item["status"] not in PRINTABLE or item["kind"] == "custom":
             continue
-        if not await print_item(order, item):
+        if await print_item(order, item):
+            printed.append(item["id"])
+        else:
             skipped.append(item["title"])
-    done = await agent(
-        f"Check every printed item of order {order['number']} (id {order_id}): add the "
-        "finished photo and the timelapse to each attempt, count the good ones as made, "
-        "and tell me what failed.",
-        ["print"],
-        FULFILMENT_REPORT,
-        grant={"rules": [{"fn": "tool", "tool": "order_item_fulfil", "orders": [order_id]}]},
-    )
+    done = None
+    if printed:
+        settled = await settle(order_id, printed, settings["settle_hours"])
+        if settled is None:
+            return {
+                "summary": (
+                    f"Order {order['number']}'s prints did not end within "
+                    f"{settings['settle_hours']} hours, so nothing was checked."
+                ),
+                "skipped": skipped,
+                "message": None,
+            }
+        done = await agent(
+            f"Check every printed item of order {order['number']} (id {order_id}): add "
+            "the finished photo and the timelapse to each attempt, count the good ones as "
+            "made, and tell me what failed.",
+            ["print"],
+            FULFILMENT_REPORT,
+            grant={"rules": [{"fn": "tool", "tool": "order_item_fulfil", "orders": [order_id]}]},
+        )
     message = None
     if settings["notify"]:
-        message = data(await tool("order_notify_customer", {
-            "order_id": order_id, "template": "ready",
-        }))
+        # Only an order the checks made ready, never one with prints failed or skipped.
+        now = data(await tool("order_get", {"order_id": order_id}))
+        if now["order"]["status"] == "ready":
+            message = data(await tool("order_notify_customer", {
+                "order_id": order_id, "template": "ready",
+            }))
     return {"report": done, "skipped": skipped, "message": message}
 
 
