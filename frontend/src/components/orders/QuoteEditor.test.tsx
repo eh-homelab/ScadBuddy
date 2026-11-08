@@ -84,6 +84,32 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     expect(start.mock.calls[0]?.[0].filaments).toEqual(Object.fromEntries(slots.map((_, index) => [String(index), FILAMENT_PLA])))
   })
 
+  it('quotes an item taken from a past print from that print (#4777)', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9101, quantity: 1 })
+    const onChanged = vi.fn()
+    const quoted = vi.spyOn(api, 'quoteItemFromArchive')
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={added.id} currency="USD" exponent={2} quotes={[]} editable onChanged={onChanged} item={added} slice={{ start: vi.fn(), dismiss: vi.fn() }} />,
+    )
+    await user.click(screen.getByTestId('quote-from-print'))
+    const form = screen.getByRole('group', { name: 'Quote from the print' })
+    const quote = within(form).getByRole('button', { name: 'Quote' })
+    for (const slot of within(form).queryAllByRole('combobox', { name: /^Filament for slot/ })) {
+      if (quote.hasAttribute('disabled')) await selectOption(user, slot, /^Bambu PLA/)
+    }
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(quoted).toHaveBeenCalledWith(ORDER_DRAFT, added.id, { filaments: Object.fromEntries(added.colours.map((c) => [String(c.slot), c.filament_id ?? FILAMENT_PLA])) })
+  })
+
+  it('offers no quote from a print to an item from elsewhere (#4777)', () => {
+    renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={item(ITEM_DRAFT, ORDER_DRAFT, 'draft')} slice={{ start: vi.fn(), dismiss: vi.fn() }} />,
+    )
+    expect(screen.queryByTestId('quote-from-print')).toBeNull()
+  })
+
   it('keeps the dialog and its choices open when the check refuses the quote (#4693)', async () => {
     const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockRejectedValue(new ApiError(409, 'The order is not open for quotes.'))
     const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')

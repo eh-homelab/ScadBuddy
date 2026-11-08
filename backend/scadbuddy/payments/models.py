@@ -11,8 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, UrlConstraints
 from scadbuddy.orders.models import Actor, Money
 
 PaymentRequestKind = Literal["deposit", "balance"]
-PaymentRequestStatus = Literal["open", "paid", "expired", "cancelled"]
-ProviderEventKind = Literal["paid", "refunded", "expired", "other"]
+#: ``pending``: the customer paid by a method that settles later (a US bank debit, #4958);
+#: ``failed``: that payment did not settle. Neither records money.
+PaymentRequestStatus = Literal["open", "pending", "paid", "expired", "cancelled", "failed"]
+#: ``fee``: the provider's fee for a payment it already told, once it is known (#4958).
+ProviderEventKind = Literal["paid", "pending", "failed", "refunded", "expired", "fee", "other"]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]
@@ -51,6 +54,9 @@ class ProviderEvent(BaseModel):
     amount_minor: Money | None = Field(default=None, ge=1)
     currency: str | None = None
     fee_minor: Money | None = Field(default=None, ge=0)
+    #: When the provider made the event (#4958): how long a ``fee`` that arrived
+    #: before its payment is sent back for a retry (``Lifecycle._late_fee``).
+    created_at: datetime | None = None
 
 
 class HostedRequest(BaseModel):

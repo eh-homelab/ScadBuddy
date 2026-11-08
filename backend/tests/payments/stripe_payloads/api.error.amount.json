@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "Amount must be at least $0.50 usd",
+    "param": "line_items[0][price_data][unit_amount]",
+    "type": "invalid_request_error"
+  }
+}

@@ -7,11 +7,11 @@ stored: every figure is computed on read.
 
 **Prints** (§4.1). Every attempt counts, test prints and failures included. Its grams are its
 ``actual_grams``, else the grams of the quote it printed from (the item's quote whose
-``sliced_sha256`` is the attempt's, else its accepted slice quote) times the units it was
-sent (``copies``, else ``quantity``, else 1), marked ``estimated``. Those grams are priced
-at that quote's own price per gram (its filament lines over its grams), else at the price
-book's ``cost_per_kg`` of the item's colour slots' filaments, weighted by the quote's grams
-per slot when known and equally otherwise, marked ``estimated``. Its seconds
+``sliced_sha256`` is the attempt's, else its accepted slice or archive quote, #4777) times
+the units it was sent (``copies``, else ``quantity``, else 1), marked ``estimated``. Those
+grams are priced at that quote's own price per gram (its filament lines over its grams),
+else at the price book's ``cost_per_kg`` of the item's colour slots' filaments, weighted by
+the quote's grams per slot when known and equally otherwise, marked ``estimated``. Its seconds
 (``actual_seconds``, else the quote's seconds times the units, ``estimated``) are priced at
 the quote's ``machine_time`` line over its seconds, else at today's
 ``pricing_machine_rate_per_hour``, ``estimated``. A figure with no source is left out and
@@ -53,6 +53,7 @@ from pydantic import BaseModel, computed_field
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.integrations import NotLinkedError
 from scadbuddy.orders.models import (
+    MEASURED_SOURCES,
     CostEntry,
     Filament,
     Fulfilment,
@@ -158,7 +159,7 @@ class ItemCost(Margin):
     quote_id: str | None
     quote_source: QuoteSource | None
     #: The quote's figures for the item's whole quantity; the grams and seconds only
-    #: from a slice quote.
+    #: from a slice or archive quote (#4777).
     quoted_seconds: int | None
     quoted_grams: float | None
     quoted_filament_minor: Money | None
@@ -232,7 +233,7 @@ def _minor(value: Decimal | None) -> Money | None:
 
 
 class _Unit:
-    """A slice quote's figures for one unit."""
+    """A slice or archive quote's figures for one unit."""
 
     def __init__(self, quote: Quote) -> None:
         plates = [Plate.model_validate(plate) for plate in quote.plates]
@@ -255,7 +256,7 @@ class _Unit:
 
 
 def _unit(quote: Quote | None) -> _Unit | None:
-    if quote is None or quote.source != "slice" or not quote.plates:
+    if quote is None or quote.source not in MEASURED_SOURCES or not quote.plates:
         return None
     return _Unit(quote)
 
@@ -307,9 +308,9 @@ class _Item:
 
     def weights_of(self, unit: _Unit | None) -> dict[int, Decimal]:
         """Grams per colour slot to weigh the price book by: the attempt's quote's, else
-        the item's newest slice quote's (a manual quote names none); empty unknown."""
+        the item's newest slice or archive quote's (a manual quote names none); empty unknown."""
         if unit is None or not unit.slot_grams:
-            slices = [q for q in self.quotes if q.source == "slice" and q.plates]
+            slices = [q for q in self.quotes if q.source in MEASURED_SOURCES and q.plates]
             newest = max(slices, key=lambda q: (q.created_at, q.id), default=None)
             unit = _unit(newest)
         return {} if unit is None else unit.slot_grams

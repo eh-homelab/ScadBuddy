@@ -26,7 +26,9 @@ from scadbuddy.payments.provider import (
 )
 
 SIGNATURE_HEADER: Final = "x-fake-signature"
-_KINDS: Final[frozenset[str]] = frozenset({"paid", "refunded", "expired"})
+_KINDS: Final[frozenset[str]] = frozenset(
+    {"paid", "pending", "failed", "refunded", "expired", "fee"}
+)
 
 
 def sign(secret: str, body: bytes) -> str:
@@ -61,6 +63,7 @@ class FakeProvider:
         *,
         return_url: str | None,
         idempotency_key: str,
+        order_number: str,
     ) -> HostedRequest:
         ref = f"fake_{request.id}"
         return HostedRequest.model_validate(
@@ -70,7 +73,7 @@ class FakeProvider:
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
         self.cancelled.append(provider_ref)
 
-    def parse_webhook(
+    async def parse_webhook(
         self, credential: Credential, headers: Mapping[str, str], body: bytes
     ) -> ProviderEvent:
         secret = credential.secrets.get("signing_secret", "")
@@ -87,6 +90,7 @@ class FakeProvider:
                 amount_minor=data.get("amount_minor"),
                 currency=data.get("currency"),
                 fee_minor=data.get("fee_minor"),
+                created_at=data.get("created_at"),
             )
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError):
             raise ProviderError("the event body is malformed") from None

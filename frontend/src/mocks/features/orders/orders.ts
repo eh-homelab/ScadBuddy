@@ -31,6 +31,7 @@ import { pushRevision } from './revisions'
 import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
+import { archiveCopies, pastPrint } from './pastPrints'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -480,17 +481,26 @@ const NATIVE_ID_BASE = 1_000_000_000
  * answer: the file only (any other source, kind or custom field is 422), and a file the
  * library does not have or does not print is 422 on `library_file_id`.
  */
-function addLibraryItem(request: Request, order: Order, body: OrderItemCreate & Record<string, unknown>, afterAcceptance: boolean) {
+function addLibraryItem(
+  request: Request,
+  order: Order,
+  body: OrderItemCreate & Record<string, unknown>,
+  afterAcceptance: boolean,
+  // #4777 — a past print's copy in the native library, which the library mock does not list.
+  copy?: { id: number; filename: string },
+  origin: number[] = [],
+) {
   if ('kind' in body && body.kind !== 'library_file') return fieldProblem(request, 'body', `library_file_id names a library file item: drop kind '${String(body.kind)}'`)
-  const fileId = body.library_file_id
+  const fileId = copy?.id ?? body.library_file_id
   if (fileId == null) return fieldProblem(request, 'body', 'a library_file item needs a library_file_id')
   if (!Number.isInteger(fileId) || fileId < 1) return fieldProblem(request, 'library_file_id', 'Input should be greater than or equal to 1')
   const named = (['slug', 'commit', 'inputs', 'output_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
   if (named.length) return fieldProblem(request, 'body', `a library file item names its file only: drop ${named.join(', ')}`)
-  const file = mockLibraryFile(fileId)
+  const listed = copy ? undefined : mockLibraryFile(fileId)
+  const file = copy ?? listed
   if (!file) return fieldProblem(request, 'library_file_id', `no library file ${fileId} in the library that serves`)
-  if (!['3mf', 'gcode.3mf', 'stl'].includes((file.file_type ?? '').toLowerCase())) {
-    return fieldProblem(request, 'library_file_id', `library file ${file.filename} is a ${file.file_type ?? 'file of unknown type'}: ScadBuddy prints only 3MF and STL files`)
+  if (listed && !['3mf', 'gcode.3mf', 'stl'].includes((listed.file_type ?? '').toLowerCase())) {
+    return fieldProblem(request, 'library_file_id', `library file ${listed.filename} is a ${listed.file_type ?? 'file of unknown type'}: ScadBuddy prints only 3MF and STL files`)
   }
   try {
     takesItem(order, afterAcceptance)
@@ -513,11 +523,12 @@ function addLibraryItem(request: Request, order: Order, body: OrderItemCreate & 
       approval: 'together',
       current_revision_id: null,
       revised_after_acceptance: false,
+      origin_archive_ids: origin,
       created_at: at,
       updated_at: at,
     }
     state.items.push(created)
-    added(order, created, afterAcceptance, { item_kind: 'library_file', library_file_id: file.id })
+    added(order, created, afterAcceptance, { item_kind: 'library_file', library_file_id: file.id, ...(origin.length ? { origin_archive_ids: origin } : {}) })
     rederive(order)
     return HttpResponse.json(created, { status: 201 })
   } catch (error) {
@@ -549,8 +560,14 @@ function addItems(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
       if (answer.status !== 201) {
         seedOrders(saved)
         const problem = (await answer.json()) as Record<string, unknown>
+        // `api/orders.py` `_in_item`: each field refusal's place inside `items[index]`.
+        const errors = Array.isArray(problem['errors'])
+          ? (problem['errors'] as { loc?: unknown[] }[]).map((e) =>
+              Array.isArray(e.loc) && e.loc[0] === 'body' ? { ...e, loc: ['body', 'items', index, ...e.loc.slice(1)] } : e,
+            )
+          : undefined
         return HttpResponse.json(
-          { ...problem, detail: `items[${index}]: ${String(problem['detail'])}`, item_index: index },
+          { ...problem, ...(errors ? { errors } : {}), detail: `items[${index}]: ${String(problem['detail'])}`, item_index: index },
           { status: answer.status, headers: { 'Content-Type': 'application/problem+json' } },
         )
       }
@@ -560,15 +577,50 @@ function addItems(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
   }
 }
 
+/**
+ * #4777 — a past print's item, as `api/orders.py` `_archive_item` makes it: the archive alone
+ * names it; it is the item of the output or library file that printed it, else of its copy
+ * in the native library (one per archive, reused), and keeps its run's archives.
+ */
+async function addArchiveItem(info: Parameters<Parameters<typeof http.post>[1]>[0], order: Order, body: OrderItemCreate & Record<string, unknown>, afterAcceptance: boolean) {
+  const { request } = info
+  const named = (['slug', 'commit', 'inputs', 'output_id', 'library_file_id', 'unit_price_minor', 'requires_printing', 'accept'] as const).filter((name) => body[name] != null)
+  if ('kind' in body) named.push('kind' as never)
+  if (named.length) return fieldProblem(request, 'body', `archive_id names a past print, the item's only source: drop ${named.join(', ')}`)
+  const archiveId = body.archive_id as number
+  const found = pastPrint(archiveId)
+  const origin = found ? [...new Set([...found.run, archiveId])].sort((a, b) => a - b) : [archiveId]
+  const { archive_id: _picked, ...rest } = body
+  if (found?.output_id || found?.library_file_id) {
+    const source = found.output_id ? { output_id: found.output_id } : { library_file_id: found.library_file_id }
+    const one = new Request(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify({ ...rest, ...source }) })
+    const answer = (await addItem(afterAcceptance)({ ...info, request: one } as never)) as Response
+    if (answer.status !== 201) return answer
+    const created = (await answer.json()) as OrderItem
+    const stored = state.items.find((i) => i.id === created.id)
+    if (stored) stored.origin_archive_ids = origin
+    return HttpResponse.json(stored ?? created, { status: 201 })
+  }
+  if (!found) return problem(request, 409, `Bambuddy has no archive ${archiveId} any more`, PROBLEMS + 'archive_gone', { archive_id: archiveId })
+  if (mockSettings().library_backend !== 'native') {
+    return problem(request, 409, `archive ${archiveId} was printed by nothing of ScadBuddy's, so its file is copied into the native library, and the native library does not serve`, PROBLEMS + 'archive_copy_not_native', { archive_id: archiveId })
+  }
+  const copy = archiveCopies.get(archiveId) ?? { id: NATIVE_ID_BASE + archiveId, filename: found.filename }
+  archiveCopies.set(archiveId, copy)
+  return addLibraryItem(request, order, rest, afterAcceptance, copy, origin)
+}
+
 /** `POST /orders/:id/items` and, with `afterAcceptance`, `…/items/after-acceptance` (#5349). */
 function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
-  return async ({ request, params }) => {
+  return async (info) => {
+    const { request, params } = info
     const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'library_file_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
+    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'library_file_id', 'archive_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
     if (extra) return extra
     if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
     const order = state.orders.find((o) => o.id === params.id)
     if (!order) return problem(request, 404, `no order '${String(params.id)}'`)
+    if (body.archive_id != null) return addArchiveItem(info, order, body, afterAcceptance)
     if (body.library_file_id != null || body.kind === 'library_file') return addLibraryItem(request, order, body, afterAcceptance)
     if (body.kind === 'custom') {
       // `ItemCreate._shape` and `Lifecycle.add_custom_item` (#4954).

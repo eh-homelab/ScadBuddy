@@ -103,6 +103,7 @@ from scadbuddy.payments.models import (
     PaymentRequestView,
     ProviderEvent,
 )
+from scadbuddy.payments.provider import EventTooEarlyError
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,11 @@ QUOTE_HOLDER = "order_item_quote"
 #: the reaper's grace: a ref younger than this may belong to a run about to insert its
 #: row (Ruling 3).
 QUOTE_TIMEOUT = timedelta(minutes=30)
+
+
+#: How long a provider's fee that arrived before its payment is sent back for a retry
+#: (#4958); after it, the fee is recorded as ignored.
+FEE_RETRY_WINDOW = timedelta(hours=24)
 
 
 class LifecycleError(Exception):
@@ -291,6 +297,9 @@ class NewItem:
     title: str | None = None
     notes: str = ""
     sku: str | None = None
+    #: The Bambuddy archives a past print's item is taken from (#4777); a model or
+    #: library file item's only.
+    origin_archive_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1000,6 +1009,19 @@ class Lifecycle:
                 payments.set_request_status(conn, found.id, "expired")
                 self._event(conn, order, by, "payment_request.expired", request_id=found.id)
             return "recorded", None
+        if event.kind in ("pending", "failed"):
+            # #4958: money on its way, or money that did not come. Neither is a payment.
+            # A request already past ``pending`` keeps its status: the provider does not
+            # keep event order, so a late ``pending`` must not undo a ``paid``.
+            if found.status != "open" and not (
+                event.kind == "failed" and found.status == "pending"
+            ):
+                return "ignored", None
+            payments.set_request_status(conn, found.id, event.kind)
+            self._event(conn, order, by, f"payment_request.{event.kind}", request_id=found.id)
+            return "recorded", None
+        if event.kind == "fee":
+            return self._late_fee(conn, order, found, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
@@ -1039,17 +1061,27 @@ class Lifecycle:
         self._close_balance(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
-            fee, _ = self.store.insert_cost_entry(
-                conn,
-                order.id,
-                CostEntryInput(
-                    kind="payment_fee",
-                    amount_minor=event.fee_minor,
-                    source=f"payment:{payment.id}",
-                    note=f"{provider} fee",
-                ),
-                created_by=by,
-            )
+            self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return "recorded", payment
+
+    def _write_fee(
+        self, conn: Conn, order: Order, payment_id: str, provider: str, fee_minor: int, by: Actor
+    ) -> bool:
+        """The provider's fee for ``payment_id`` as a ``payment_fee`` cost entry, and whether
+        this call wrote it. The unique ``(order_id, kind, source)`` index keeps it to one
+        per payment (``insert_cost_entry`` writes ON CONFLICT DO NOTHING)."""
+        fee, written = self.store.insert_cost_entry(
+            conn,
+            order.id,
+            CostEntryInput(
+                kind="payment_fee",
+                amount_minor=fee_minor,
+                source=f"payment:{payment_id}",
+                note=f"{provider} fee",
+            ),
+            created_by=by,
+        )
+        if written:
             self._event(
                 conn,
                 order,
@@ -1060,7 +1092,51 @@ class Lifecycle:
                 entry_kind=fee.kind,
                 amount_minor=fee.amount_minor,
             )
-        return "recorded", payment
+        return written
+
+    def _late_fee(
+        self,
+        conn: Conn,
+        order: Order,
+        found: PaymentRequestView,
+        provider: str,
+        event: ProviderEvent,
+        by: Actor,
+    ) -> tuple[EventOutcome, Payment | None]:
+        """#4958: a fee the provider knew only after it told the payment. It goes on the
+        payment this provider made for the request (a paid request's own, or one recorded
+        on a request paid by hand), under the order's lock taken by the caller, once: a
+        payment that already has its fee keeps it. Events come in any order, so a fee
+        whose payment is not recorded yet is `EventTooEarlyError`: the transaction rolls
+        back, its event row too, and the provider's retry is read again. Only while the
+        request is open or pending and the event is younger than `FEE_RETRY_WINDOW`:
+        after that the payment is not coming, and the event is recorded as ignored, so
+        a poison event is not answered 503 for ever."""
+        if not event.fee_minor:
+            return "ignored", None
+        payment = next(
+            (
+                p
+                for p in self.store.payments(order.id, conn=conn)
+                if p.provider == provider
+                and p.payment_request_id == found.id
+                and p.reference == found.provider_ref
+                and p.amount_minor > 0
+            ),
+            None,
+        )
+        if payment is None:
+            young = (
+                event.created_at is not None
+                and datetime.now(UTC) - event.created_at < FEE_RETRY_WINDOW
+            )
+            if found.status not in ("open", "pending") or not young:
+                return "ignored", None
+            raise EventTooEarlyError(
+                f"the {provider} payment this fee belongs to is not recorded yet"
+            )
+        written = self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
+        return ("recorded" if written else "ignored"), payment
 
     # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
     # A record of what the job took, allowed in every status, ended and on hold included:
@@ -1524,7 +1600,10 @@ class Lifecycle:
         **detail: Any,
     ) -> None:
         """The add's audit row. After acceptance it is ``item.added_after_acceptance``,
-        naming the item and the status the order had (#5349)."""
+        naming the item and the status the order had (#5349). A past print's item names
+        the archives it was taken from (#4777)."""
+        if item.origin_archive_ids:
+            detail["origin_archive_ids"] = item.origin_archive_ids
         if after_acceptance:
             self._event(
                 conn,
@@ -1848,13 +1927,21 @@ class Lifecycle:
         notes: str = "",
         sku: str | None = None,
         after_acceptance: bool = False,
+        origin_archive_ids: tuple[int, ...] = (),
     ) -> OrderItem:
         """A library file item (#5544): the file's id, name and library, with no template
         commit and no inputs. It starts `draft`, unpriced, approved with its quote (it has
         no design to approve first), and takes a slice quote of the file or a manual one.
         The caller has read the file from the library that serves. ``after_acceptance``
-        as `add_item`'s."""
-        entry = NewLibraryItem(file=file, quantity=quantity, title=title, notes=notes, sku=sku)
+        as `add_item`'s; ``origin_archive_ids`` as `NewItem`'s."""
+        entry = NewLibraryItem(
+            file=file,
+            quantity=quantity,
+            title=title,
+            notes=notes,
+            sku=sku,
+            origin_archive_ids=origin_archive_ids,
+        )
         [item] = self.add_items(order_id, by, [entry], after_acceptance=after_acceptance)
         return item
 
@@ -1936,6 +2023,7 @@ class Lifecycle:
                 title=entry.title,
                 notes=entry.notes,
                 sku=entry.sku,
+                origin_archive_ids=entry.origin_archive_ids,
             )
             self._added(
                 conn,
@@ -1992,6 +2080,7 @@ class Lifecycle:
             title=entry.title,
             notes=entry.notes,
             sku=entry.sku,
+            origin_archive_ids=entry.origin_archive_ids,
         )
         self._added(conn, order, item, by, after_acceptance)
         item, _ = self._revise(
@@ -2403,6 +2492,47 @@ class Lifecycle:
                 unit_price_minor=body.unit_price_minor,
                 quantity=item.quantity,
                 created_by=by,
+                revision_id=item.current_revision_id,
+            )
+            change = self._recorded(conn, order, item, quote, by)
+        self._told(change)
+        return quote
+
+    def record_archive_quote(
+        self, order_id: str, item_id: str, priced: Priced, plates: Sequence[Plate], by: Actor
+    ) -> Quote:
+        """An `archive` quote (#4777, order operations spec §3.2): ``plates`` read from a
+        past print's archives, priced at the book in force, with no sliced file. As a
+        manual quote: the order open for the item's price, the item not settled, not
+        custom, with a design; it names the item's current revision."""
+        self.ensure_revision(order_id, item_id, by)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            self._open_for_requote(conn, order, item, "an item's price")
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if item.kind == "custom":
+                raise LifecycleError(
+                    "item_custom",
+                    f"item {item_id} is a custom item: its price is its own field",
+                    items=[item.id],
+                )
+            if not has_design(item):
+                raise LifecycleError(
+                    "item_has_no_design", f"item {item_id} has no design yet", items=[item.id]
+                )
+            quote = self.store.insert_quote(
+                conn,
+                item.id,
+                source="archive",
+                lines=priced.lines,
+                unit_cost_minor=priced.unit_cost_minor,
+                unit_price_minor=priced.unit_price_minor,
+                quantity=item.quantity,
+                created_by=by,
+                plates=[plate.model_dump(mode="json") for plate in plates],
                 revision_id=item.current_revision_id,
             )
             change = self._recorded(conn, order, item, quote, by)

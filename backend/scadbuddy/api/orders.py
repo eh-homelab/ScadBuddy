@@ -118,11 +118,12 @@ from scadbuddy.orders.models import (
     TimeEntryInput,
 )
 from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
+from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
-from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
+from scadbuddy.orders.quote import ArchiveQuoteRequest, SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
@@ -252,13 +253,27 @@ class ItemCreate(ReferenceBody):
     item (#5280) is what a customer wants made before any design exists: a ``title``,
     ``quantity``, ``notes`` and ``sku`` only; its first revision names the design. A
     ``library_file`` item (#5544) names a file of the library: ``library_file_id``, with
-    ``kind`` left out or ``library_file``, and no other source."""
+    ``kind`` left out or ``library_file``, and no other source. A past print (#4777) is
+    ``archive_id`` alone, with ``kind`` left out: the archive decides the item's kind."""
 
     kind: ItemKind = "model"
     output_id: str | None = None
     #: A file of the library that serves (#5544), as `print_output` takes one: the item
     #: prints it. Its ``kind`` is ``library_file``.
     library_file_id: int | None = Field(default=None, ge=1)
+    archive_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "A Bambuddy archive (a past print, `GET /farm/archives`), alone: the item is"
+            " a `model` item of the output that printed it, a `library_file` item of the"
+            " library file that printed it, or else a `library_file` item of a copy of its"
+            " printed file in the native library (one per archive, reused). It keeps"
+            " `origin_archive_ids`. 409 `archive_gone` for an archive Bambuddy no longer"
+            " has, `archive_copy_not_native` when a copy is needed and the native library"
+            " does not serve."
+        ),
+    )
     quantity: int = Field(ge=1, le=MAX_QUANTITY)
     title: str | None = Field(default=None, max_length=200)
     notes: str = ""
@@ -282,6 +297,29 @@ class ItemCreate(ReferenceBody):
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
+        if self.archive_id is not None:
+            named = [
+                name
+                for name in (
+                    "slug",
+                    "commit",
+                    "inputs",
+                    "output_id",
+                    "library_file_id",
+                    "unit_price_minor",
+                    "requires_printing",
+                    "accept",
+                )
+                if getattr(self, name) is not None
+            ]
+            if "kind" in self.model_fields_set:
+                named.append("kind")
+            if named:
+                raise ValueError(
+                    f"archive_id names a past print, the item's only source: drop"
+                    f" {', '.join(named)}"
+                )
+            return self
         if self.library_file_id is not None or self.kind == "library_file":
             if "kind" in self.model_fields_set and self.kind != "library_file":
                 raise ValueError(
@@ -1590,6 +1628,7 @@ async def _add_items(
             entries.append(
                 await _new_item(
                     body,
+                    orders,
                     after_acceptance=after_acceptance,
                     catalogue=catalogue,
                     history=history,
@@ -1635,6 +1674,7 @@ def _in_item(extensions: dict[str, Any], index: int) -> dict[str, Any]:
 
 async def _new_item(
     body: ItemCreate,
+    orders: OrdersComponent,
     *,
     after_acceptance: bool,
     catalogue: CatalogueDep,
@@ -1647,7 +1687,21 @@ async def _new_item(
     library: PrintLibrary,
 ) -> NewItem:
     """What one body adds: a library file read from the library that serves, a model
-    item's reference resolved."""
+    item's reference resolved, a past print's item of the kind its archive gives."""
+    if body.archive_id is not None:
+        return await _archive_item(
+            body,
+            body.archive_id,
+            orders,
+            catalogue=catalogue,
+            history=history,
+            outputs=outputs,
+            paths=paths,
+            config=config,
+            fetcher=fetcher,
+            settings=settings,
+            library=library,
+        )
     if body.kind == "library_file":
         assert body.library_file_id is not None
         file = await _library_file(body.library_file_id, settings, library)
@@ -1690,6 +1744,75 @@ async def _new_item(
         notes=body.notes,
         sku=body.sku,
     )
+
+
+async def _archive_item(
+    body: ItemCreate,
+    archive_id: int,
+    orders: OrdersComponent,
+    *,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    settings: SettingsStore,
+    library: PrintLibrary,
+) -> NewItem:
+    """A past print's item (#4777, order operations spec §3.2): a model item of the output
+    that printed the archive, else a library file item of the file that printed it, else
+    one of a copy of its printed file in the native library. An output or file gone since
+    falls through to the copy. Each keeps the archives of its print run."""
+    store = orders.store
+    run = await asyncio.to_thread(store.archive_run_plates, archive_id)
+    origin_ids = tuple(sorted({found for _, found in run if found is not None} | {archive_id}))
+    origin = await asyncio.to_thread(store.archive_origin, archive_id)
+    common: dict[str, Any] = {
+        "quantity": body.quantity,
+        "title": body.title,
+        "notes": body.notes,
+        "sku": body.sku,
+        "origin_archive_ids": origin_ids,
+    }
+    if origin is not None and origin.output_id is not None:
+        try:
+            resolved = await _resolved(
+                ReferenceBody(),
+                origin.output_id,
+                catalogue=catalogue,
+                history=history,
+                outputs=outputs,
+                paths=paths,
+                config=config,
+                fetcher=fetcher,
+            )
+        except ApiError as error:
+            if error.status != status.HTTP_422_UNPROCESSABLE_CONTENT:
+                raise
+        else:
+            return NewModelItem(resolved=resolved, output_id=origin.output_id, **common)
+    if origin is not None and origin.library_file_id is not None:
+        try:
+            file = await _library_file(origin.library_file_id, settings, library)
+        except ApiError as error:
+            if error.status != status.HTTP_422_UNPROCESSABLE_CONTENT:
+                raise
+        else:
+            return NewLibraryItem(file=file, **common)
+    native = await library.serving_native()
+    if native is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"archive {archive_id} was printed by nothing of ScadBuddy's, so its file is"
+            " copied into the native library, and the native library does not serve",
+            type_=PROBLEMS + "archive_copy_not_native",
+            archive_id=archive_id,
+        )
+    file = await copied_file(
+        store, orders.integrations, NativeArchiveCopies(native), archive_id, native.spool
+    )
+    return NewLibraryItem(file=file, **common)
 
 
 async def _library_file(
@@ -2010,6 +2133,34 @@ async def record_quote(
     check_path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.record_manual_quote(order_id, item_id, body, by))
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/quotes/archive",
+    response_model=Quote,
+    status_code=status.HTTP_201_CREATED,
+    summary="Quote an item from a past print",
+)
+async def quote_item_from_archive(
+    order_id: str, item_id: str, body: ArchiveQuoteRequest, orders: OrdersDep
+) -> Quote:
+    """An `archive` quote (#4777, order operations spec §3.2): priced from what a past
+    print used, at the price book in force, with no re-slice. Every plate archive of the
+    print run is read (grams per slot as the slicer estimated them, the actual seconds,
+    else the estimate); the body's filaments are written on the item as a slice quote's
+    are. Refused as a slice quote's check is (404, 409 ``order_not_open``,
+    ``item_not_open``, 422 ``filaments``, ``price_book``), and 409
+    ``archive_plates_missing`` (a plate of the run has no archive),
+    ``archive_not_succeeded`` (a failed or cancelled print), ``archive_gone``,
+    ``not_linked``; 422 ``archive_id`` for an item taken from no past print and none
+    named, or an archive that is not the item's print (not taken from it, and printed by
+    neither its output nor its library file), ``archive_plate`` for an archive that records
+    no grams or time."""
+    check_path(order_id, item_id)
+    by = current_actor()
+    return await quote_from_archive(
+        orders.lifecycle, orders.integrations, orders.price_book, order_id, item_id, body, by
+    )
 
 
 @router.post(
