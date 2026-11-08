@@ -47,7 +47,8 @@ export interface SourceApi {
    */
   run: (body: PrintRunRequest, signal?: AbortSignal, within?: Within) => Promise<PrintRunResult>
   /** #755, #760 — what the run would refuse for `body`, with nothing uploaded or queued. */
-  check: (body: PrintRunRequest) => Promise<PrintCheck>
+  /** `processValues` (#5627): the process's part settings too. */
+  check: (body: PrintRunRequest, processValues?: boolean) => Promise<PrintCheck>
   /**
    * #2169 — slice `body` in the background through the run's own path; nothing queued.
    * `fresh` (#4433, Reslice) slices again even when a finished slice of `body` exists.
@@ -143,7 +144,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
       previewUrl: (plate, onePlate) => (onePlate ? api.outputPreviewGlbUrl(id, plate) : api.outputPreviewGlbUrl(id)),
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
-      check: (body) => api.checkPrint(id, body),
+      check: (body, processValues) => api.checkPrint(id, body, processValues),
       preview: (body, fresh) => api.previewSlice(id, body, fresh),
       readPreview: (jobId, slicer) => api.getPreviewSlice(id, jobId, slicer),
       toolpathUrl: (jobId, slicer) => api.previewToolpathUrl(id, jobId, slicer),
@@ -159,7 +160,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     plateThumbnailUrl: (index) => api.libraryPlateThumbnailUrl(id, index),
     previewUrl: (plate) => api.libraryPreviewGlbUrl(id, plate),
     run: (body, signal, within) => api.runLibraryPrint(id, body, signal, within),
-    check: (body) => api.checkLibraryPrint(id, body),
+    check: (body, processValues) => api.checkLibraryPrint(id, body, processValues),
     preview: (body, fresh) => api.previewLibrarySlice(id, body, fresh),
     readPreview: (jobId, slicer) => api.getLibraryPreviewSlice(id, jobId, slicer),
     toolpathUrl: (jobId, slicer) => api.libraryPreviewToolpathUrl(id, jobId, slicer),

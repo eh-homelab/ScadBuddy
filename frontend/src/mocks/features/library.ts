@@ -39,6 +39,7 @@ import * as fixtures from '../fixtures'
 import { keychainGlb } from '../glb'
 import { H2C_FILE, H2C_FILENAME, H2C_NOZZLES, h2cFilaments, h2cPlan } from '../h2c'
 import {
+  MOCK_PROCESS_PARTS,
   mockLibraryChoices,
   mockLibraryOutput,
   mockSettings,
@@ -528,7 +529,14 @@ export const handlers = [
       const body = (await request.json()) as PrintRunRequest
       return HttpResponse.json({ errors: [], warnings: [], rack: null, nozzle_plan: h2cPlan(body) } satisfies PrintCheck)
     }
-    return HttpResponse.json({ errors: [], warnings: [], rack: null } satisfies PrintCheck)
+    // #5627, #5628 — a library file's controls open on the process's values too.
+    const asked = new URL(request.url).searchParams.get('process_values') === 'true'
+    return HttpResponse.json({
+      errors: [],
+      warnings: [],
+      rack: null,
+      process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
+    } satisfies PrintCheck)
   }),
 
   http.post(`${base}/print/library/:id/run`, async ({ params, request }) => {

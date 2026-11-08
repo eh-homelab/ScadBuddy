@@ -2010,6 +2010,9 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
         "rack": None,
         "nozzle_plan": None,
         "objects": None,
+        "process_part_settings": None,
+        "slot_part_settings": None,
+        "process_inexact": [],
     }
     assert not uploaded.called
     assert not sliced.called

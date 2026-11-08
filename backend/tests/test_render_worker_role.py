@@ -1,17 +1,18 @@
-"""The render worker on a Postgres role of its own (#601, spec 2026-09-27 §9): it
-renders holding exactly `RENDER_GRANTS`, never migrates, and cannot read `settings`."""
+"""The render worker's Postgres role (#601, spec 2026-09-27 §9), which the worker no
+longer uses (#5298: it holds no database, `tests/test_render_worker_nodb.py`): the API
+grants it `RENDER_GRANTS` (nothing now) at start until Task 22 revokes it, it never
+migrates, and it cannot read `settings`; and what the worker does instead goes through
+the API's CRUD routes."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
-import socket
 import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +26,9 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.config import available_cpus, default_solid_concurrency
-from scadbuddy.core.pg_events import PgNotifyEventBus
-from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.render import (
     RemoteAssetRows,
@@ -44,39 +42,28 @@ from scadbuddy.crud.render import (
     RemoteStoreFolders,
 )
 from scadbuddy.library.assets import AssetMeta, RemoteAssetStore
-from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import InstallPermits
 from scadbuddy.library.settings_store import (
     RENDER_FIELDS,
     load_render_store_settings,
 )
 from scadbuddy.render import worker_role
-from scadbuddy.render.job_models import Job
 from scadbuddy.render.pg_store import Migration, migrate
-from scadbuddy.render.projection import JobProjection
-from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import (
-    RENDER_GRANTS,
-    WorkerStoppedError,
     grant_at_start,
     grant_render_role,
-    missing_privileges,
-    pending_migrations,
-    wait_until_ready,
 )
 from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
 from scadbuddy.store.content import BlobScope, ContentStore
 from scadbuddy.store.content_models import BlobRef as IndexedRef
 from scadbuddy.store.index import BlobIndex
-from scadbuddy.worker import build_worker_deps, run_worker
+from scadbuddy.worker import build_worker_deps
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.models import PrepareResult, piece_key
+from scadbuddy.workflows.models import PrepareResult
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
-from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import served_render_crud, threaded_render_crud
-from tests.support.renders import render_to_end
-from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -164,10 +151,8 @@ def _defaults(tmp_path: Path) -> Settings:
 # ── the role's reach ──────────────────────────────────────────────────────────
 
 
-def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) -> None:
+def test_the_role_cannot_read_the_settings(granted: Pool) -> None:
     with granted.connection() as conn:
-        assert missing_privileges(conn) == []
-        assert pending_migrations(conn) == []
         # The store settings come from the API's CRUD route (#5298), not the view.
         for relation in ("settings", "render_settings"):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -187,6 +172,8 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings(granted: Pool) 
             "library_leases",
             "library_pin_holds",
             "library_install_slots",
+            # Nor waits for the API's migrations: it waits for its CRUD areas.
+            "scadbuddy_migrations",
             "operations",
             "print_runs",
             "saved_presets",
@@ -318,13 +305,6 @@ def test_a_role_that_does_not_exist_is_granted_nothing(owner: Pool) -> None:
         assert grant_render_role(conn, f"absent_{uuid.uuid4().hex[:8]}") is False
 
 
-def test_every_grant_names_a_relation_the_schema_has(owner: Pool) -> None:
-    with owner.connection() as conn:
-        for table in RENDER_GRANTS:
-            row = conn.execute("SELECT to_regclass(%s) AS found", (table,)).fetchone()
-            assert row is not None and row["found"] is not None, table
-
-
 # ── the settings it may read ──────────────────────────────────────────────────
 
 
@@ -376,12 +356,16 @@ def test_the_view_passes_every_render_field(owner: Pool) -> None:
 
 
 async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
-    owner: Pool, granted: Pool, worker_conninfo: str, tmp_path: Path
+    owner: Pool, tmp_path: Path
 ) -> None:
     """The per-colour slots a person saves reach a worker that reads settings only
     through the API's CRUD route (#601, #5298), and a change reaches it without a
     restart."""
-    settings = _defaults(tmp_path).model_copy(update={"database_url": worker_conninfo})
+    settings = _defaults(tmp_path)
+    # A remote store: the worker refuses the local one (#5298 plan D11).
+    _put(owner, "store_backend", "bambuddy")
+    _put(owner, "bambuddy_url", BASE_URL)
+    _put(owner, "library_folder_id", INBOX)
     async with served_render_crud(owner, _defaults(tmp_path)) as crud:
         # Re-read on every call, not on the 30 s TTL.
         source = RemoteRenderSettingsSource(crud, ttl=0)
@@ -405,8 +389,6 @@ async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
             await _the_slots_follow_the_settings(owner, deps)
         finally:
             await store.aclose()
-            assert deps.pool is not None
-            deps.pool.close()
             remote.close()
 
 
@@ -441,8 +423,9 @@ def test_the_api_grants_the_role_at_start(
     grant_at_start(owner)
     pool = _pool(worker_conninfo)
     try:
-        with pool.connection() as conn:
-            assert missing_privileges(conn) == []
+        # `RENDER_GRANTS` is empty (#5298): the start grants the role no table.
+        with pool.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT 1 FROM render_jobs LIMIT 1")
     finally:
         pool.close()
 
@@ -456,43 +439,6 @@ def test_a_failed_grant_does_not_stop_the_api(
     monkeypatch.setattr(worker_role, "grant_render_role", refuse)
     grant_at_start(owner)
     assert "could not grant the render worker's database role" in caplog.text
-
-
-# ── waiting for the API ───────────────────────────────────────────────────────
-
-
-def test_the_worker_waits_for_migrations_then_grants(
-    pg_conninfo: str, role: str, worker_conninfo: str
-) -> None:
-    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-        conn.execute(
-            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
-                sql.Identifier(conn.execute("SELECT current_schema()").fetchone()[0]),  # type: ignore[index]
-                sql.Identifier(role),
-            )
-        )
-    pool = _pool(worker_conninfo)
-    try:
-        with pool.connection() as conn:
-            assert pending_migrations(conn)  # nothing migrated yet
-        with pytest.raises(WorkerStoppedError):
-            wait_until_ready(pool, stopping=lambda: True, poll=0.01)
-        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            migrate(conn)
-        with pool.connection() as conn:
-            # Migrated, not yet granted: the ledger is the one relation the role reads
-            # (#5298; everything else goes through the API's CRUD routes).
-            assert missing_privileges(conn) == ["scadbuddy_migrations: SELECT"]
-        # Waits for that grant, rather than failing on the ledger it cannot read.
-        with pytest.raises(WorkerStoppedError):
-            wait_until_ready(pool, stopping=lambda: True, poll=0.01)
-        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            grant_render_role(conn, role)
-        with pool.connection() as conn:
-            assert pending_migrations(conn) == []
-        wait_until_ready(pool, stopping=lambda: True, poll=0.01)
-    finally:
-        pool.close()
 
 
 # ── what a render does, as the role ───────────────────────────────────────────
@@ -614,79 +560,3 @@ async def _the_bambuddy_store_works(
         assert read_back.call_count == len(commits.COMMIT_WAITS)
     finally:
         await backend.aclose()
-
-
-@pytest.mark.requires_temporal
-@pytest.mark.requires_git
-async def test_the_worker_renders_as_its_own_role(
-    settings: Settings,
-    paths: Any,
-    model: str,
-    owner: Pool,
-    granted: Pool,
-    worker_conninfo: str,
-    pg_conninfo: str,
-    tmp_path: Path,
-    health_socket: socket.socket,
-) -> None:
-    queue = f"t-{uuid.uuid4().hex[:8]}"
-    cfg = settings.model_copy(
-        update={
-            "database_url": worker_conninfo,
-            "openscad": fake_3mf_openscad(tmp_path / "bin"),
-            "temporal_task_queue_render": queue,
-            "revision": f"test-{uuid.uuid4().hex[:8]}",
-        }
-    )
-    revision = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX).ensure_repo()
-    assert revision is not None
-    params: dict[str, Any] = {"width": 12}
-    job = Job(
-        id=uuid.uuid4().hex,
-        slug=model,
-        params=params,
-        inputs={"params": params},
-        model_version=revision,
-        created_at=datetime.now(UTC),
-    )
-    # The API's: the worker writes its job rows through the CRUD routes on it (#5298).
-    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
-    projection = JobProjection(pg_conninfo, pool_size=2, events=bus)
-    projection.open()
-    projection.activity = ActivityIndex(projection.pool, events=bus)
-    try:
-        async with (
-            temporal_client() as client,
-            served_render_crud(owner, settings, projection=projection) as crud,
-        ):
-            stop = asyncio.Event()
-            worker = asyncio.create_task(
-                run_worker(cfg, stop=stop, health_port=health_socket, client=client, crud=crud)
-            )
-            try:
-                job = await render_to_end(client, queue, job)
-            finally:
-                stop.set()
-                await asyncio.wait_for(worker, timeout=60)
-        stored = projection.read(job.id)
-    finally:
-        projection.close()
-    assert stored.state == "done", stored.error
-    assert (cfg.data_dir / "blobs" / piece_key(model, revision, "model.scad", params)).is_dir()
-    with owner.connection() as conn:
-        kinds = {
-            row["kind"]
-            for row in conn.execute(
-                "SELECT kind FROM events WHERE payload->>'job_id' = %s", (job.id,)
-            )
-        }
-        refs = conn.execute(
-            "SELECT count(*) AS n FROM blob_refs WHERE holder_id = %s", (job.id,)
-        ).fetchone()
-        # Written by the API in the row's transaction, not left to the repair pass.
-        activity = conn.execute(
-            "SELECT status FROM activity WHERE id = %s", (f"render:{job.id}",)
-        ).fetchone()
-    assert {"job.running", "job.done"} <= kinds
-    assert refs is not None and refs["n"] >= 1
-    assert activity is not None and activity["status"] == "succeeded"

@@ -13,6 +13,7 @@ import type {
   OrderItem,
   OrderProject,
   Payment,
+  PaymentRequestView,
   Quote,
   Revision,
   Shipment,
@@ -66,6 +67,9 @@ export class Refused extends Error {
   }
 }
 
+/** What the mock keeps of a connected provider: no secret, only that it was sent. */
+export type ConnectedProvider = { id: string; account_label: string; is_default: boolean; connected_at: string; last_webhook_at: string | null }
+
 export type State = {
   customers: Customer[]
   orders: Order[]
@@ -77,6 +81,10 @@ export type State = {
   shipments: Shipment[]
   charges: OrderCharge[]
   payments: Payment[]
+  /** #4957 — `payment_requests`, oldest first. */
+  paymentRequests: PaymentRequestView[]
+  /** #4957 — the providers the shop connected (`payments/credentials.py`); never a secret. */
+  providers: ConnectedProvider[]
   events: OrderEvent[]
   /** The year's last number (`order_numbers`). */
   numbers: Record<string, number>
@@ -367,6 +375,8 @@ function fixtures(): State {
     ],
     charges: [{ id: 'h0000000-0000-4000-8000-000000000001', order_id: ORDER_ACCEPTED, kind: 'shipping', label: 'Post', amount_minor: 500, position: 0 }],
     payments: [],
+    paymentRequests: [],
+    providers: [],
     events: [
       { id: 1, order_id: ORDER_DRAFT, at: '2026-10-19T09:00:00Z', by: BROWSER, kind: 'order.created', detail: {} },
       { id: 2, order_id: ORDER_ACCEPTED, at: '2026-10-18T12:00:00Z', by: BROWSER, kind: 'order.created', detail: {} },

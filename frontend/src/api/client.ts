@@ -189,7 +189,7 @@ import type {
   LoginConfigView,
   LoginConfigUpdate,
   LoginDiscoveryReport,
-  ServiceCaller,
+  LegacyCaller,
   ServiceCredentialView,
   AccessTokenCreate,
   AccessTokenCreated,
@@ -248,8 +248,12 @@ import type {
   OrderPatch,
   Payment,
   PaymentCreate,
+  PaymentRequestCreate,
+  PaymentRequestView,
   PolicyUpdate,
   PriceBook,
+  ProviderConnect,
+  ProviderStatus,
   Quote,
   Revision,
   RevisionAnswerInput,
@@ -1635,7 +1639,7 @@ export const api = {
     request<LoginConfigView>('/auth/config', { method: 'PUT', body: JSON.stringify(body) }),
   testLoginConfig: () => request<LoginDiscoveryReport>('/auth/config/test', { method: 'POST' }),
   listServiceCredentials: () => request<ServiceCredentialView[]>('/auth/service-credentials'),
-  rotateServiceCredential: (caller: ServiceCaller) =>
+  rotateServiceCredential: (caller: LegacyCaller) =>
     request<ServiceCredentialView[]>('/auth/service-credentials/rotate', {
       method: 'POST',
       body: JSON.stringify({ caller }),
@@ -2086,8 +2090,10 @@ export const api = {
    * #755 — the check before Print for the body the run would take: `errors` are what
    * it would refuse as a 422, `warnings` its advisories. Reads only.
    */
-  checkPrint: (outputId: string, body: PrintRunRequest) =>
-    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
+  /** `processValues` (#5627) also reads the process's part settings, which the dialog's
+   * "Settings for this colour" open on: asked only once one is open. */
+  checkPrint: (outputId: string, body: PrintRunRequest, processValues = false) =>
+    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check${processValues ? '?process_values=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -2412,6 +2418,17 @@ export const api = {
   /** Undoes a close or a cancel: a closed order takes the status its items and shipments
    * give it again; a cancelled one the status it was cancelled from, with the items it took. */
   reopenOrder: (id: string) => request<Order>(`/orders/${seg(id)}/reopen`, { method: 'POST' }),
+  paymentProviders: () => request<ProviderStatus[]>('/payments/providers'),
+  connectPaymentProvider: (id: string, body: ProviderConnect) =>
+    request<ProviderStatus>(`/payments/providers/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  disconnectPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}`, { method: 'DELETE' }),
+  setDefaultPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}/default`, { method: 'POST' }),
+  requestPayment: (orderId: string, body: PaymentRequestCreate) =>
+    request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
+  cancelPaymentRequest: (orderId: string, requestId: string) =>
+    request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests/${seg(requestId)}/cancel`, { method: 'POST' }),
+  linkPaymentRequest: (orderId: string, requestId: string) =>
+    request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests/${seg(requestId)}/link`, { method: 'POST' }),
   addPayment: (id: string, body: PaymentCreate) =>
     request<Payment>(`/orders/${seg(id)}/payments`, { method: 'POST', body: JSON.stringify(body) }),
   addOrderItem: (orderId: string, body: OrderItemCreate) =>
@@ -2804,8 +2821,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
-    request<PrintCheck>(`/print/library/${fileId}/check`, {
+  checkLibraryPrint: (fileId: number, body: PrintRunRequest, processValues = false) =>
+    request<PrintCheck>(`/print/library/${fileId}/check${processValues ? '?process_values=true' : ''}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

@@ -38,7 +38,17 @@ import types
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    LiteralString,
+    Protocol,
+    Self,
+    Union,
+    get_args,
+    get_origin,
+)
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -52,6 +62,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -63,6 +74,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
+from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -249,6 +261,14 @@ class BambuddyIds(BaseModel):
     printer_id: int | None = None
 
 
+def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
+    """A choices entry as stored and answered: no ``part_settings`` key for none, and only
+    the settings set in each slot (#5627, ``parts_set_only``)."""
+    if dumped.get("part_settings") is None:
+        dumped.pop("part_settings", None)
+    return parts_set_only(dumped, maps=("part_settings",))
+
+
 class ModelPrintChoices(BaseModel):
     """What the print dialog last chose for one model (#78). ``printer_id`` is the
     printer it printed on. ``filament_plan`` is only a plan the user moved off the
@@ -257,8 +277,12 @@ class ModelPrintChoices(BaseModel):
 
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
     (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
-    the template's or the process's. All default to "nothing remembered", so a settings
-    file written before them still loads; an empty ``nozzles`` means the dialog's default.
+    the template's or the process's. ``part_settings`` are its slicer settings per
+    filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
+    (#5628). Kept per model or file only, never at the print options' global or printer
+    scope, since a slot number means one file's colour. All default to "nothing remembered", so
+    a settings file written before them still loads; an empty ``nozzles`` means the
+    dialog's default.
     """
 
     printer_id: int | None = None
@@ -270,6 +294,7 @@ class ModelPrintChoices(BaseModel):
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
+    part_settings: PartSettingsMap | None = None
 
     @model_validator(mode="after")
     def _one_printer_key(self) -> Self:
@@ -277,6 +302,19 @@ class ModelPrintChoices(BaseModel):
         if self.printer_id is not None and self.printer is not None:
             self.printer = None
         return self
+
+    @field_validator("part_settings")
+    @classmethod
+    def _settings_set(cls, value: PartSettingsMap | None) -> PartSettingsMap | None:
+        """Only slots that set something (#5627): none set is nothing remembered."""
+        return normalised(value)
+
+    # `part_settings` only when some are remembered (#5627): an entry with none reads as
+    # it did before the field existed. A lambda with no return annotation, so the schema
+    # stays the model's (`part_settings.parts_set_only` says why).
+    _parts_when_set = model_serializer(mode="wrap")(
+        lambda self, handler: _parts_only_when_set(handler(self))
+    )
 
     @field_validator("nozzles")
     @classmethod
@@ -922,6 +960,11 @@ class SettingsStore:
     def load(self, timeout: float | None = None) -> StoredSettings:
         return self.snapshot(timeout).stored
 
+    def plate_clear_required(self) -> bool:
+        """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that
+        `StoredSettings` does not hold."""
+        return self.snapshot().runtime.lan_require_plate_clear
+
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
         emit(self.events, SettingsChanged(section=section))
@@ -1353,6 +1396,61 @@ def _put_entry(conn: Connection[DictRow], name: str, key: str, value: object) ->
         " ON CONFLICT (name) DO UPDATE"
         " SET value = settings.value || EXCLUDED.value, updated_at = now()",
         (name, key, Jsonb(value)),
+    )
+
+
+class SettingsReader(Protocol):
+    """A read of the settings: the API's `SettingsStore`, or the print worker's
+    `crud/print.py` `RemoteSettingsStore`, which reads them through the API (#5298)."""
+
+    def load(self, timeout: float | None = None) -> StoredSettings: ...
+
+    def plate_clear_required(self) -> bool: ...
+
+
+#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key,
+#: which is also the Bambuddy spool provider's key (`bambuddy/spool_providers.py`). No
+#: other spool provider has a key. `print_projection` leaves every other sealed field null.
+PRINT_SECRETS = frozenset({"bambuddy_api_key"})
+#: The S3 store's connection, which the print worker never reads (it reaches blobs
+#: through the API's routes): `print_projection` answers each as null, or as its default
+#: where the field takes no null. ``store_backend`` stays: a native run reads it.
+PRINT_UNREAD = (
+    "store_s3_endpoint",
+    "store_s3_region",
+    "store_s3_bucket",
+    "store_s3_prefix",
+    "store_s3_access_key_id",
+    "store_s3_path_style",
+)
+
+
+class PrintSettings(StoredSettings):
+    """What the print worker gets of the settings (`print_projection`): the stored
+    settings, and ``lan_require_plate_clear`` as the API resolves it."""
+
+    lan_require_plate_clear: bool = False
+
+
+def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
+    """``snapshot``'s settings with every sealed field null but `PRINT_SECRETS`, and the
+    `PRINT_UNREAD` fields null or default. A sealed field added later is null here until
+    it is named in `PRINT_SECRETS`."""
+    blanked: dict[str, Any] = {
+        name: None
+        for name in SECRET_FIELDS & StoredSettings.model_fields.keys()
+        if name not in PRINT_SECRETS
+    }
+    for name in PRINT_UNREAD:
+        field = StoredSettings.model_fields[name]
+        nullable = type(None) in get_args(field.annotation)
+        blanked[name] = None if nullable else field.get_default(call_default_factory=True)
+    return PrintSettings.model_validate(
+        {
+            **snapshot.stored.model_dump(),
+            **blanked,
+            "lan_require_plate_clear": snapshot.runtime.lan_require_plate_clear,
+        }
     )
 
 

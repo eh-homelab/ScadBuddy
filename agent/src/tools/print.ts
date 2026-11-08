@@ -1216,9 +1216,11 @@ export const printTools: Tool[] = [
     label: "Remember a model's print choices",
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
-      'time: the printer, per-slot spools, nozzles, the quality tier or named process, and the print sequence. ' +
-      'Replaces the entry whole: an omitted part is forgotten, and passing nothing forgets them all ' +
-      '(get_print_choices shows the current `model_choices`).',
+      'time: the printer, per-slot spools, nozzles, the quality tier or named process, the print sequence, and ' +
+      'the slicer settings per filament slot (`part_settings`, #5627). Replaces the entry whole: an omitted ' +
+      'part is forgotten, and passing nothing forgets them all (get_print_choices shows the current ' +
+      '`model_choices`). Settings per slot are kept per model or library file only, never by set_print_options: ' +
+      "a slot number names one file's colour.",
     input: z
       .object({
         slug: slug.optional(),
@@ -1239,6 +1241,7 @@ export const printTools: Tool[] = [
           .nullable()
           .optional()
           .describe("An Advanced-mode print sequence (#4970); omit for the template's own"),
+        part_settings: partSettings,
       })
       .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
         message: 'name one: slug or library_file_id',
@@ -1246,7 +1249,7 @@ export const printTools: Tool[] = [
     risk: 'write',
     routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],
     handler: async (
-      { slug, library_file_id, printer_id, printer, filament_plan, nozzles, tier, process_name, print_sequence },
+      { slug, library_file_id, printer_id, printer, filament_plan, nozzles, tier, process_name, print_sequence, part_settings },
       { backend },
     ) => {
       const body = {
@@ -1257,6 +1260,7 @@ export const printTools: Tool[] = [
         tier: tier ?? null,
         process_name: process_name ?? null,
         print_sequence: print_sequence ?? null,
+        part_settings: part_settings ?? null,
       }
       if (library_file_id !== undefined) {
         return json(

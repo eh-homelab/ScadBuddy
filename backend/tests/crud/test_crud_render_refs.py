@@ -10,7 +10,9 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
+from typing import Any
 
+import httpx
 import pytest
 
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
@@ -88,18 +90,36 @@ async def test_a_ref_sent_twice_writes_one_row(
 
 @pytest.mark.parametrize("holder_kind", ["output", "preset", "slice", "attempt"])
 async def test_a_ref_for_any_holder_but_a_job_is_a_403(
-    refs: RemoteBlobRefs, projection: JobProjection, holder_kind: str
+    refs: RemoteBlobRefs,
+    projection: JobProjection,
+    holder_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A render credential pins blobs for its jobs only, and the refusal is final: no
     re-exchange, no retry inside the budget."""
     job = _job(projection)
-    # The credential's first exchange is made first (#5655: on a loaded runner it took
-    # longer than the budget), so the time below is the refusal's alone.
     await asyncio.to_thread(refs.add, "piece-0", "job", job.id)
-    started = time.monotonic()
+    # #5655: the refusal is judged by what the client did, not by the wall time, which a
+    # loaded runner stretched past a 0.5 s budget. One request, no wait before another,
+    # no credential refresh.
+    client = refs._client
+    sent: list[str] = []
+    waits: list[float] = []
+    refreshes: list[object] = []
+    request = client._http.request
+
+    def counted(method: str, path: str, **kwargs: Any) -> httpx.Response:
+        sent.append(path)
+        return request(method, path, **kwargs)
+
+    monkeypatch.setattr(client._http, "request", counted)
+    monkeypatch.setattr(client, "_sleep", waits.append)
+    monkeypatch.setattr(client._auth, "refresh", refreshes.append)
     with pytest.raises(CrudRefusedError) as refused:
         await asyncio.to_thread(refs.add, "piece-1", holder_kind, job.id)
-    assert time.monotonic() - started < 0.5
+    assert len(sent) == 1, sent
+    assert waits == []
+    assert refreshes == []
     assert refused.value.status == 403
     assert refused.value.problem.get("reason") == "holder-kind"
     assert _refs(projection) == [("piece-0", "job", job.id)]

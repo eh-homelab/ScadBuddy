@@ -201,7 +201,7 @@ async def test_a_follows_two_reads_share_one_query() -> None:
     recent = RecentRuns(store, ttl=2.0, clock=lambda: clock[0])  # type: ignore[arg-type]
     lan = LanProgress(recent.latest, _Rows(), _Reports(report()))  # type: ignore[arg-type]
     assert await lan.read("o" * 32) is not None
-    assert await newest_failure(store, "o" * 32, latest=recent.latest) is None  # type: ignore[arg-type]
+    assert await newest_failure(store, "o" * 32, latest=recent.latest) is None
     assert store.calls == 1
     clock[0] = 3.0
     await lan.read("o" * 32)

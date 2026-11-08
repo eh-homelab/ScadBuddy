@@ -50,7 +50,7 @@ describe('usePrintCheck', () => {
     check.mockResolvedValue(verdict('refused'))
     const { result } = renderHook(() => usePrintCheck(SOURCE, request('0.4')))
     await settle()
-    expect(check).toHaveBeenCalledWith(OUTPUT.id, request('0.4'))
+    expect(check).toHaveBeenCalledWith(OUTPUT.id, request('0.4'), false)
     expect(result.current.verdict).toEqual(verdict('refused'))
     expect(result.current.current).toBe(true)
     expect(result.current.error).toBeUndefined()
@@ -104,7 +104,7 @@ describe('usePrintCheck', () => {
     expect(result.current.verdict).toBeNull()
     expect(result.current.current).toBe(false)
     await settle()
-    expect(library).toHaveBeenCalledWith(89, request('0.4'))
+    expect(library).toHaveBeenCalledWith(89, request('0.4'), false)
   })
 
   it('reports a failed read as an error, with no verdict, and reads again on reload', async () => {
@@ -128,5 +128,40 @@ describe('usePrintCheck', () => {
     expect(result.current.error).toBeUndefined()
     expect(result.current.verdict).toEqual(verdict('again'))
     expect(result.current.current).toBe(true)
+  })
+
+  it("drops the process's values once the choices change, until the new check answers (#5627)", async () => {
+    const parts = (top: number): PrintCheck => ({
+      errors: [],
+      warnings: [],
+      rack: null,
+      process_part_settings: { top_shell_layers: top },
+    })
+    check.mockResolvedValueOnce(parts(5)).mockResolvedValueOnce(parts(5)).mockResolvedValueOnce(parts(7))
+    const { result, rerender } = renderHook(
+      ({ size, top }: { size: Size; top?: number }) =>
+        usePrintCheck(
+          SOURCE,
+          { ...request(size), ...(top === undefined ? {} : { part_settings: { '1': { top_shell_layers: top } } }) },
+          true,
+        ),
+      { initialProps: { size: '0.4' } as { size: Size; top?: number } },
+    )
+    await settle()
+    expect(result.current.processValuesRead).toBe(true)
+    expect(result.current.processPartSettings).toEqual({ top_shell_layers: 5 })
+
+    // A setting typed in changes only the request's part_settings: the values still hold.
+    rerender({ size: '0.4', top: 9 })
+    expect(result.current.processValuesRead).toBe(true)
+    await settle(ANALYSIS_DEBOUNCE_MS)
+
+    // Another nozzle is another process: nothing is shown until its check answers.
+    rerender({ size: '0.2', top: 9 })
+    expect(result.current.processValuesRead).toBe(false)
+    expect(result.current.processPartSettings).toBeNull()
+    await settle(ANALYSIS_DEBOUNCE_MS)
+    expect(result.current.processValuesRead).toBe(true)
+    expect(result.current.processPartSettings).toEqual({ top_shell_layers: 7 })
   })
 })

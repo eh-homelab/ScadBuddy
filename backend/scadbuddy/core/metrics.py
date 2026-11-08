@@ -103,11 +103,11 @@ _WORKER_COMMON = frozenset(
         "default_executor_stalls",
     }
 )
-#: A worker that starts its event bus listens and prunes the log too.
-_LISTENING = frozenset({"events_received", "events_resyncs", "event_log_pruned"})
-#: A worker that serves operations ends their records (`OperationStore.finish`, #2295).
-#: The 202 past the deadline (`operations_deferred`) is the API's alone.
-_OPERATIONS = frozenset({"operation_duration", "operations_finished"})
+#: No worker listens on the event bus or ends an operation's record (#5298): the API
+#: logs their events, ends the records and counts them (`OperationStore.finish`, #2295),
+#: so `events_received`, `operations_finished` and `operation_duration` are the API's.
+#: The dashboards pick the workers' operation kinds by name
+#: (`backend/tests/test_dashboard_operation_kinds.py`).
 
 #: The attributes each worker role registers (#664): only what that worker sets, so its
 #: /metrics never carries the API's series as constant zeros (`scadbuddy_render_store_up
@@ -133,15 +133,12 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "asset_prune_failures",
     },
     "print": _WORKER_COMMON
-    | _LISTENING
-    | _OPERATIONS
     | {
-        "activity_write_failures",
         "print_follows_running",
         "rack_watch_settle_failed",
         "crud_client_seconds",
     },
-    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS | {"crud_client_seconds"},
+    "projects": _WORKER_COMMON | {"crud_client_seconds"},
 }
 
 

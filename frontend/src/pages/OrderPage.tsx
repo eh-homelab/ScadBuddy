@@ -9,6 +9,7 @@ import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
+import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
@@ -40,6 +41,8 @@ import { useAsync } from '../lib/useAsync'
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
+/** The "For request" select's value for a payment that answers no request. */
+const NO_REQUEST = '__no_request__'
 /** #4693 — the search parameter naming the open line item: `/orders/<id>?item=<item id>`. */
 const ITEM_PARAM = 'item'
 const ITEM_HASH = `#${itemAnchor('')}`
@@ -116,7 +119,9 @@ export function OrderPage() {
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
   const [due, setDue] = useState<string | null>(null)
-  const [payment, setPayment] = useState({ amount: '', method: '' })
+  const providers = useAsync(() => api.paymentProviders(), []).data
+  const providerLabel = (id: string) => (providers ?? []).find((p) => p.id === id)?.label ?? id
+  const [payment, setPayment] = useState({ amount: '', method: '', request: NO_REQUEST })
 
   function reload() {
     view.refresh()
@@ -158,6 +163,10 @@ export function OrderPage() {
     )
   }
   const { order, items, totals, charges, payments, shipments, attachments } = detail
+  const requests = detail.payment_requests ?? []
+  const openRequests = requests.filter((r) => r.status === 'open')
+  // A request closed elsewhere leaves the list: the select falls back to none.
+  const chosenRequest = openRequests.some((r) => r.id === payment.request) ? payment.request : NO_REQUEST
   const editable = OPEN_FOR_EDITS.has(order.status)
   // #5349: `after_acceptance` on an accepted, in-production or ready order not on hold.
   const adds = addMode(order)
@@ -380,13 +389,14 @@ export function OrderPage() {
                   {payments.map((p) => (
                     <li key={p.id} className="flex justify-between gap-2">
                       <span>
-                        {p.method ?? 'Payment'} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
+                        {p.provider ? `Paid by ${providerLabel(p.provider)}` : (p.method ?? 'Payment')} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
                       </span>
                       <span className="sb-num">{formatMoney(p.amount_minor, order.currency, order.minor_exponent)}</span>
                     </li>
                   ))}
                 </ul>
               )}
+              <PaymentRequests order={order} requests={requests} balanceMinor={totals.balance_minor} onChanged={reload} />
               {order.status !== 'cancelled' && (
                 <form
                   className="flex flex-wrap items-end gap-2"
@@ -397,7 +407,7 @@ export function OrderPage() {
                       setRefusal({ text: 'Enter the amount received, such as 12.50.', items: [] })
                       return
                     }
-                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: payment.method.trim() || null })).then(() => setPayment({ amount: '', method: '' }))
+                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: payment.method.trim() || null, ...(chosenRequest === NO_REQUEST ? {} : { payment_request_id: chosenRequest }) })).then(() => setPayment({ amount: '', method: '', request: NO_REQUEST }))
                   }}
                 >
                   <div className="flex flex-col gap-1">
@@ -408,6 +418,24 @@ export function OrderPage() {
                     <Label htmlFor="payment-method">Method</Label>
                     <Input id="payment-method" className="w-28" placeholder="cash, card" value={payment.method} onChange={(e) => setPayment({ ...payment, method: e.target.value })} />
                   </div>
+                  {openRequests.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor="payment-request">For request</Label>
+                      <Select value={chosenRequest} onValueChange={(request) => setPayment({ ...payment, request })}>
+                        <SelectTrigger id="payment-request" aria-label="For request" className="w-52">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem value={NO_REQUEST}>No request</SelectItem>
+                          {openRequests.map((r) => (
+                            <SelectItem key={r.id} value={r.id}>
+                              {`${r.kind === 'deposit' ? 'Deposit' : 'Balance'} ${formatMoney(r.amount_minor, order.currency, order.minor_exponent)}`}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                   <Button type="submit" size="sm" variant="outline" disabled={busy}>
                     Record payment
                   </Button>
@@ -459,7 +487,7 @@ export function OrderPage() {
               {[...events.data].reverse().map((e) => (
                 <li key={e.id}>
                   <span className="text-foreground">{e.kind}</span>
-                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : 'browser'}
+                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : 'browser'}
                 </li>
               ))}
             </ol>

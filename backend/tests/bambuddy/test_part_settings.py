@@ -15,7 +15,13 @@ import pytest
 import trimesh
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.part_settings import PartSettings, overrides_of, unknown_slots
+from scadbuddy.bambuddy.part_settings import (
+    PartSettings,
+    inexact_part_settings,
+    overrides_of,
+    process_part_settings,
+    unknown_slots,
+)
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import run_key
 from scadbuddy.bambuddy.send import (
@@ -86,6 +92,57 @@ def test_each_setting_is_written_as_the_slicer_stores_it() -> None:
 def test_an_unknown_key_or_a_value_out_of_range_is_refused(settings: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         PrintRunRequest.model_validate(body(part_settings={"2": settings}))
+
+
+def test_the_process_values_are_read_as_the_settings_take_them() -> None:
+    """#5627: a preset's strings (a vector option a list), the density with its ``%``; a
+    value out of the bounds, of another shape or left out is not read."""
+    read = process_part_settings(
+        {
+            "top_shell_layers": " 5 ",
+            "bottom_shell_layers": "1001",
+            "wall_loops": ["3", "3"],
+            "sparse_infill_density": "15%",
+            "sparse_infill_pattern": "gyroid",
+            "ironing_type": 4,
+        }
+    )
+
+    assert read.model_dump(exclude_none=True) == {
+        "top_shell_layers": 5,
+        "wall_loops": 3,
+        "sparse_infill_density": 15,
+        "sparse_infill_pattern": "gyroid",
+    }
+    assert process_part_settings({}) == PartSettings()
+
+
+@pytest.mark.parametrize(
+    ("density", "read"),
+    [
+        ("15.5%", 16),
+        ("15.4%", 15),
+        ("0.5%", 1),
+        ("99.5%", 100),
+        ("100.5%", None),
+        ("x%", None),
+        ("1e30%", None),
+    ],
+)
+def test_a_fractional_preset_density_is_rounded_to_a_whole_percent(
+    density: str, read: int | None
+) -> None:
+    """#5627 review: Bambu Studio's density may carry a fraction; the control takes whole
+    percents, so it opens on the nearest, half up, not empty."""
+    assert process_part_settings({"sparse_infill_density": density}).sparse_infill_density == read
+
+
+def test_a_rounded_density_is_named_inexact() -> None:
+    """#5627 review: 15.5% opens the control on 16, and 16 is still a change."""
+    assert inexact_part_settings({"sparse_infill_density": "15.5%"}) == ["sparse_infill_density"]
+    assert inexact_part_settings({"sparse_infill_density": ["15%"]}) == []
+    assert inexact_part_settings({"sparse_infill_density": "1e30%"}) == []
+    assert inexact_part_settings({}) == []
 
 
 def test_slot_zero_is_refused() -> None:

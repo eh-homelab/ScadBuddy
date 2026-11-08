@@ -1,8 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
-import { MAZE_SLUG } from '../../mocks/fixtures'
-import { resetMockState } from '../../mocks/handlers'
+import { BOOKMARK_SLUG, DOLLHOUSE_SLUG, MAZE_SLUG, outputs as fixtureOutputs } from '../../mocks/fixtures'
+import { addMockOutput, resetMockState } from '../../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../../mocks/features/orders/state'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -348,6 +348,28 @@ describe('AddItemDialog (#4251)', () => {
     ])
     const order = await api.order(ORDER_DRAFT)
     expect(order.items.filter((i) => i.output_id === NOVA || i.output_id === WORKSHOP).map((i) => i.quantity)).toEqual([2, 1])
+  })
+
+  it("reads each listed model's schema once, however many models the page spans (#4777 review)", async () => {
+    for (const [index, slug] of [MAZE_SLUG, DOLLHOUSE_SLUG, BOOKMARK_SLUG].entries()) {
+      addMockOutput({ ...fixtureOutputs[0]!, id: String(index + 1).repeat(32), slug, name: `Other ${index}`, params: {} })
+    }
+    const read = api.getSchema.bind(api)
+    // Answers that land one at a time, while the others are still in flight.
+    const schema = vi.spyOn(api, 'getSchema').mockImplementation(async (slug, version) => {
+      await new Promise((resolve) => setTimeout(resolve, 20 + 40 * [MAZE_SLUG, DOLLHOUSE_SLUG, BOOKMARK_SLUG].indexOf(slug)))
+      return read(slug, version)
+    })
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.click(within(dialog).getByRole('button', { name: 'Recent renders' }))
+    const list = await within(dialog).findByRole('list', { name: 'Recent renders' })
+    await waitFor(() => expect(within(list).getAllByRole('checkbox')).toHaveLength(6))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await waitFor(() => expect(within(list).getByTestId(`recent-${NOVA}`)).toHaveTextContent('Name on the tag: Nova'))
+    const slugs = schema.mock.calls.map(([slug]) => slug)
+    expect([...slugs].sort()).toEqual([...new Set(slugs)].sort())
+    expect(new Set(slugs).size).toBe(4)
   })
 
   it('filters recent renders by time, model, tag, text and whether an order has them (#4777)', async () => {

@@ -19,9 +19,10 @@ takes the ``wall_loops`` bound, 1000, for them too.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.render.bambu3mf import PartOverrides
 from scadbuddy.render.colours import colour_hex
@@ -56,6 +57,37 @@ SparseInfillPattern = Literal[
 ]
 #: ``ironing_type``'s ``enum_values`` (PrintConfig.cpp lines 4075-4078).
 IroningType = Literal["no ironing", "top", "topmost", "solid"]
+
+
+def without_unset(dumped: dict[str, Any]) -> dict[str, Any]:
+    """``dumped`` without its unset (``None``) values."""
+    return {key: value for key, value in dumped.items() if value is not None}
+
+
+def parts_set_only(
+    dumped: dict[str, Any], *, maps: Collection[str] = (), single: Collection[str] = ()
+) -> dict[str, Any]:
+    """A read model's dump (#5627) with only the settings set in each field of ``maps``
+    (a dumped :data:`PartSettingsMap`) and ``single`` (a dumped :class:`PartSettings`):
+    an unset one is the process's, so what a read gives back (``get_print``,
+    ``model_choices``, a check) is a value a request takes again, the agent's strict
+    ``part_settings`` among them. Only read models strip them: a request's own dump stays
+    as it was, since ``runs.run_key`` digests it, and a changed key would start a second
+    print for a retry that spans the deploy. Called from a lambda ``model_serializer``,
+    which has no return annotation: with one, pydantic gives the answer a schema of its
+    own (``-Output``), and the API's request and answer types would part."""
+    for field in maps:
+        value = dumped.get(field)
+        if isinstance(value, dict):
+            dumped[field] = {
+                slot: without_unset(inner) if isinstance(inner, dict) else inner
+                for slot, inner in value.items()
+            }
+    for field in single:
+        value = dumped.get(field)
+        if isinstance(value, dict):
+            dumped[field] = without_unset(value)
+    return dumped
 
 
 class PartSettings(BaseModel):
@@ -119,6 +151,65 @@ def dumped(value: PartSettingsMap | None) -> dict[str, dict[str, Any]] | None:
     if kept is None:
         return None
     return {str(slot): settings.model_dump(exclude_none=True) for slot, settings in kept.items()}
+
+
+def _decimal(text: str) -> Decimal | None:
+    """``text`` as a finite number; ``None`` when it is not one."""
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _whole_percent(text: str) -> str:
+    """``text`` rounded to a whole number, half up; as it is when it is not a number, or
+    too large to round (``1e30``: ``quantize`` refuses it), so the bounds refuse it."""
+    number = _decimal(text)
+    if number is None:
+        return text
+    try:
+        return str(number.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
+        return text
+
+
+def inexact_part_settings(values: Mapping[str, Any]) -> list[str]:
+    """The part settings whose process value :func:`process_part_settings` rounded (#5627):
+    a fractional density (``15.5%``) opens the control on 16, but 16 is still a change
+    from what the process prints, so the dialog sends it."""
+    value = values.get("sparse_infill_density")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str):
+        return []
+    number = _decimal(value.strip().removesuffix("%").strip())
+    whole = number is None or number == number.to_integral_value()
+    return [] if whole else ["sparse_infill_density"]
+
+
+def process_part_settings(values: Mapping[str, Any]) -> PartSettings:
+    """The process's own value of each part setting (#5627), from a process preset's
+    flattened values (``PresetValues.values``: a string, or a list of strings for a
+    vector option, ``slicing/presets.py`` ``apply_overrides``). The print dialog opens
+    each control on it. A value the preset leaves out, or one out of :class:`PartSettings`'
+    bounds, is left out: the dialog then shows the control empty. A fractional density
+    (``15.5%``) is rounded to the nearest whole percent, half up, which the control takes."""
+    read: dict[str, Any] = {}
+    for key in PartSettings.model_fields:
+        value = values.get(key)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if key == "sparse_infill_density":
+            text = _whole_percent(text.removesuffix("%").strip())
+        try:
+            read[key] = PartSettings.model_validate({key: text}).model_dump()[key]
+        except ValidationError:
+            continue
+    return PartSettings.model_validate(read)
 
 
 #: How a template's ``part_print_settings`` (#5626) names a part: by the OpenSCAD

@@ -13,18 +13,17 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, NoReturn, cast, get_args
+from typing import Any, NoReturn, cast, get_args
 
 import httpx
 import psycopg
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Summary
-from psycopg.rows import DictRow, dict_row
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.deployment.v1 import (
@@ -130,6 +129,7 @@ from tests.conftest import (
     fake_3mf_openscad,
 )
 from tests.crud.crud_support import FixedToken, served_render_crud, static_render_crud
+from tests.support.render_store import fake_bambuddy, pin_snapshot, use_bambuddy_store
 from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
@@ -185,6 +185,8 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     build_id = f"test-{uuid.uuid4().hex[:8]}"
     cfg = settings.model_copy(
         update={
+            # Its own volume: it shares none with the API on a remote store (plan D11).
+            "data_dir": tmp_path / "worker-data",
             "openscad": fake_3mf_openscad(tmp_path / "bin"),
             "temporal_task_queue_render": queue,
             "revision": build_id,
@@ -213,7 +215,8 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     try:
         async with (
             temporal_client() as client,
-            served_render_crud(projection.pool, cfg, projection=projection) as crud,
+            _bambuddy_store(projection.pool, settings, model, revision),
+            served_render_crud(projection.pool, settings, projection=projection) as crud,
         ):
             stop = asyncio.Event()
             worker = asyncio.create_task(
@@ -227,10 +230,10 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
                         "build_id": build_id,
                         "task_queue": queue,
                         "store": {
-                            "backend": "local",
-                            "configured_backend": "local",
+                            "backend": "bambuddy",
+                            "configured_backend": "bambuddy",
                             "render_key_fallback": False,
-                            "multi_worker": False,
+                            "multi_worker": True,
                             "settings_current": True,
                         },
                     }
@@ -272,12 +275,25 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     # A model with no scene.json (not a mesh model) never runs the paint stage.
     assert samples.get('scadbuddy_render_stage_seconds_count{stage="paint"}', 0) == 0
     assert f'revision="{build_id}"' in metrics
-    # Refreshed per scrape from this process's store (the local one: no cache to size).
+    # Refreshed per scrape from this process's store: its piece cache holds the piece.
     assert samples["scadbuddy_store_render_key_fallback"] == 0
-    assert samples["scadbuddy_worker_cache_bytes"] == 0
+    assert samples["scadbuddy_worker_cache_bytes"] > 0
     # None of the API's series, whose zeros would fire its alerts (#664).
     assert "scadbuddy_render_store_up" not in metrics
     assert not _families(metrics) & API_ONLY
+
+
+@contextlib.asynccontextmanager
+async def _bambuddy_store(
+    pool: PgPool, settings: Settings, slug: str, revision: str
+) -> AsyncIterator[None]:
+    """A fake Bambuddy saved as the API's store, with ``slug``'s snapshot at ``revision``
+    stored as the API's pin stores it: a render worker runs only on a remote store, and
+    renders from the snapshot, with no git (#5298 plan D11)."""
+    with fake_bambuddy() as bambuddy:
+        use_bambuddy_store(pool, bambuddy)
+        await pin_snapshot(pool, settings, slug, revision)
+        yield
 
 
 # ── the drain after stop ───────────────────────────────────────────────────────
@@ -2262,18 +2278,19 @@ WORKER_OWN = {
         "scadbuddy_build_info",
         "scadbuddy_print_follows_running",
         "scadbuddy_rack_watch_settle_failed",
-        "scadbuddy_events_received",
         "scadbuddy_event_loop_lag_seconds",
-        "scadbuddy_operation_duration_seconds",
-        "scadbuddy_operations_finished",
     },
     "projects": {
         "scadbuddy_build_info",
-        "scadbuddy_events_received",
         "scadbuddy_event_loop_lag_seconds",
-        "scadbuddy_operation_duration_seconds",
-        "scadbuddy_operations_finished",
     },
+}
+#: What no worker sets any more (#5298): it neither listens on the event bus nor ends an
+#: operation's record. The API does both.
+API_SINCE_5298 = {
+    "scadbuddy_events_received",
+    "scadbuddy_operation_duration_seconds",
+    "scadbuddy_operations_finished",
 }
 
 
@@ -2292,6 +2309,7 @@ def test_a_worker_exports_its_own_series_and_none_of_the_apis(role: str) -> None
     if role != "render":
         assert "scadbuddy_render_stage_seconds" not in exposed
         assert "scadbuddy_worker_cache_bytes" not in exposed
+        assert not exposed & API_SINCE_5298
 
 
 async def test_the_render_workers_scrape_carries_no_api_series(tmp_path: Path) -> None:
@@ -2407,11 +2425,17 @@ def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: P
     assert worker_module._allocated_bytes(root) == int(du.stdout.split()[0])
 
 
+#: Store settings that name a Bambuddy store: a render worker refuses the local one.
+REMOTE_STORE = RenderStoreSettings(
+    store_backend="bambuddy", bambuddy_url="http://bambuddy.test", library_folder_id=1, api_key="k"
+)
+
+
 def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
-    """`build_worker_deps` on the default store settings (the local store), read once."""
-    source, current = StoreSettingsSource(), RenderStoreSettings()
+    """`build_worker_deps` on `REMOTE_STORE`, read once."""
+    source, current = StoreSettingsSource(), REMOTE_STORE
     source.seed(current)
-    remote = static_render_crud().blocking()
+    remote = static_render_crud(current).blocking()
     return worker_module.build_worker_deps(
         settings,
         source,
@@ -2420,73 +2444,38 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         refs=RemoteBlobRefs(remote),
         geometry=RemoteGeometryIndex(remote),
         index=RemoteBlobIndex(remote),
-        folders=RemoteStoreFolders(static_render_crud()),
+        folders=RemoteStoreFolders(static_render_crud(current)),
         assets=RemoteAssetRows(remote),
         leases=RemoteCheckoutLeases(remote),
         slots=RemoteInstallSlots(remote),
     )
 
 
-class _RecordingPool(PgPool):
-    """Records each pool the worker opens."""
-
-    opened: ClassVar[list[PgPool]] = []
-
-    def open(self, *args: Any, **kwargs: Any) -> None:
-        super().open(*args, **kwargs)
-        self.opened.append(self)
-
-
-def _recording_row_pool(conninfo: str, *, name: str, max_size: int, min_size: int = 0) -> PgPool:
-    """`core/pg_pool.py` `row_pool` as the worker calls it, making a `_RecordingPool`."""
-    return _RecordingPool(
-        conninfo,
-        min_size=min_size,
-        max_size=max_size,
-        open=False,
-        connection_class=psycopg.Connection[DictRow],
-        kwargs={"autocommit": True, "row_factory": dict_row},
-        name=name,
-    )
-
-
-def test_a_refused_store_closes_the_pool_the_worker_opened(
-    settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def refuse(**_: object) -> NoReturn:
-        raise StoreNotReadyError("refused")
-
-    monkeypatch.setattr(_RecordingPool, "opened", [])
-    monkeypatch.setattr(worker_module, "row_pool", _recording_row_pool)
-    monkeypatch.setattr(worker_module, "build_store", refuse)
-    with pytest.raises(StoreNotReadyError):
-        _built(settings)
-    assert len(_RecordingPool.opened) == 1 and _RecordingPool.opened[0].closed
-
-
-async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
+def test_the_local_store_is_refused_before_anything_is_built(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#601: on an unmigrated schema the worker waits for the API rather than
-    migrating; a stop ends the wait, and what it opened is closed."""
-    opened: list[PgPool] = []
-    monkeypatch.setattr(_RecordingPool, "opened", opened)
-    monkeypatch.setattr(worker_module, "row_pool", _recording_row_pool)
-    stop = asyncio.Event()
-    worker = asyncio.create_task(
-        worker_module.run_worker(settings, stop=stop, health_port=None, crud=static_render_crud())
-    )
-    for _ in range(600):
-        if opened:
-            break
-        await asyncio.sleep(0.05)
-    assert not worker.done()
-    stop.set()
-    await asyncio.wait_for(worker, timeout=30)
-    assert len(opened) == 1 and opened[0].closed
-    with psycopg.connect(settings.database_url) as conn:
-        ledger = conn.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
-    assert ledger == (None,)
+    """Plan D11: the local backend runs only in-process."""
+
+    def build(**_: object) -> NoReturn:
+        raise AssertionError("built a store")
+
+    monkeypatch.setattr(worker_module, "build_store", build)
+    source, current = StoreSettingsSource(), RenderStoreSettings()
+    remote = static_render_crud().blocking()
+    with pytest.raises(worker_module.LocalStoreRefusedError, match="D11"):
+        worker_module.build_worker_deps(
+            settings,
+            source,
+            current,
+            jobs=RemoteJobProjection(remote),
+            refs=RemoteBlobRefs(remote),
+            geometry=RemoteGeometryIndex(remote),
+            index=RemoteBlobIndex(remote),
+            folders=RemoteStoreFolders(static_render_crud()),
+            assets=RemoteAssetRows(remote),
+            leases=RemoteCheckoutLeases(remote),
+            slots=RemoteInstallSlots(remote),
+        )
 
 
 async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
@@ -2504,7 +2493,9 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
 
     monkeypatch.setattr(worker_module, "build_worker_deps", build)
     with pytest.raises(StoreNotReadyError):
-        await worker_module.run_worker(settings, health_port=None, crud=static_render_crud())
+        await worker_module.run_worker(
+            settings, health_port=None, crud=static_render_crud(REMOTE_STORE)
+        )
     assert loops == [None]
 
 
@@ -2524,8 +2515,6 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
         assert checkout.read_text() == "// std\n"
     finally:
         await store.aclose()
-        assert deps.pool is not None
-        deps.pool.close()
 
 
 @pytest.mark.requires_postgres
@@ -2543,8 +2532,6 @@ async def test_the_render_workers_job_rows_go_through_the_api(
         assert isinstance(deps.geometry, RemoteGeometryIndex)
     finally:
         await store.aclose()
-        assert deps.pool is not None
-        deps.pool.close()
 
 
 @pytest.mark.parametrize(
@@ -2803,7 +2790,7 @@ async def test_the_render_workers_readyz_waits_for_the_render_queue_to_route_to_
                 stop=stop,
                 health_port=health_socket,
                 client=client,
-                crud=static_render_crud(),
+                crud=static_render_crud(REMOTE_STORE),
             )
         )
         try:
@@ -2847,3 +2834,25 @@ async def test_wait_until_routed_gives_up_and_says_so(
         )
     assert not routed and asked
     assert "does not route to this build" in caplog.text
+
+
+def test_a_refused_local_store_is_the_pods_termination_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan D11: `kubectl describe pod` shows why a render worker on `local` crash-loops."""
+    log = tmp_path / "termination-log"
+    monkeypatch.setattr(worker_module, "TERMINATION_LOG", log)
+    monkeypatch.setattr(worker_module, "parse_queue", lambda: "render")
+    monkeypatch.setattr(worker_module, "configure_logging", lambda *_: None)
+    monkeypatch.setattr(worker_module, "configure_tracing", lambda *_, **__: None)
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", "temporal.invalid:7233")
+    monkeypatch.setenv("SCADBUDDY_DATA_DIR", str(tmp_path))
+
+    def refuse(coro: Any) -> NoReturn:
+        coro.close()
+        raise worker_module.LocalStoreRefusedError(worker_module.LOCAL_STORE_REFUSED)
+
+    monkeypatch.setattr(asyncio, "run", refuse)
+    with pytest.raises(worker_module.LocalStoreRefusedError):
+        worker_module.main()
+    assert log.read_text() == worker_module.LOCAL_STORE_REFUSED

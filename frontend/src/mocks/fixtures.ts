@@ -1737,6 +1737,7 @@ function printOf(
       other: { original_archive_id: null, time_accuracy_source: null },
     },
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
+    part_settings: null,
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
   }

@@ -147,6 +147,23 @@ test.describe('print dialog', () => {
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })
 
+  test('sets one colour’s top shell layers, opening on the process value, and prints with them (#5627)', async ({
+    page,
+  }) => {
+    const dialog = await openDialog(page)
+    await dialog.getByTestId('part-settings-toggle-2').click()
+    const settings = dialog.getByTestId('part-settings-2')
+    const top = settings.getByLabel(/Top shell layers/)
+    await expect(top).toHaveValue('5')
+    await top.fill('8')
+    await expect(dialog.getByTestId('part-settings-toggle-2')).toContainText('(1 changed)')
+
+    const run = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/run'))
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    expect((await run).postDataJSON()).toMatchObject({ part_settings: { '2': { top_shell_layers: 8 } } })
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
   // #1723 — at phone width, Advanced on and then off again must leave every control
   // reachable: nothing past the screen's edge, and Print on screen, with the choices kept.
   test('stays usable at phone width with Advanced on, and after it is switched off', async ({ page }) => {

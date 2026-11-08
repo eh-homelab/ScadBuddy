@@ -315,8 +315,7 @@ on shutdown.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10): the most connections of the API's main pool
     (`scadbuddy-api`, which the settings, the jobs and the presets share; before #5226
     the settings and the jobs each had a pool of this size, so twice it), and of the
-    render worker's `scadbuddy-render` pool and the print worker's `scadbuddy-settings`
-    pool. Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
+    print worker's `scadbuddy-settings` pool. Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
     too small. The schema is created and migrated at startup.
     An API process's pools hold at most that plus 13 connections: the event bus's 2,
     the features' shared `scadbuddy-rows` 6, `scadbuddy-auth` 2, `scadbuddy-rack-usage`
@@ -569,29 +568,29 @@ kept 24 h in `crud_requests`, written in the write's own transaction, and a retr
 same key gets it back (another body under the same key is `422`).
 
 **Each caller's own database role (#5210).** This is today's state, not the target
-(see the next paragraph). Like the render worker's
-`scadbuddy_render` (below), each caller should connect as a role of its own, so it holds
+(see the next paragraph). Each caller should connect as a role of its own, so it holds
 exactly the tables it touches and its credential's view, never the API's settings
 store or another caller's credential:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
-| render worker | `scadbuddy_render` | `scadbuddy-render.yaml` |
+| render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
 | print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
-| flow runs' worker | `scadbuddy_projects`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-projects.yaml` |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
 CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
 the API itself stays on the database's owner role. At every start the API grants each
 role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
-render worker's `RENDER_GRANTS`) and its credential's view; a role created after the
-API started is granted on the API's next start. A worker on its own role never
-migrates: it waits until the API has migrated and granted it. The agent's role owns the
+render worker's `RENDER_GRANTS`, empty now) and its credential's view; a role created
+after the API started is granted on the API's next start. The print worker, on its own
+role, never migrates: it waits until the API has migrated and granted it. The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
-On 2026-11-05 the render, print and projects workers connected as their own roles, and
+On 2026-11-05 the render, print and projects workers connected as their own roles (the
+projects worker has made no connection since 2026-11-07, #5298), and
 the agent sidecar and the agent workers still connected as the owner. **The target
 (#5295) replaces these roles.** A role per caller in one database is not a boundary, so
 only the CRUD service (the API) will hold a database secret. Every other caller becomes an
@@ -749,54 +748,38 @@ Renders run on a separate worker. It is the
 (`{"ok": true, "build_id": …, "task_queue": …}`) and `/metrics` on port **9090**.
 Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 
-- **One replica in phase 1**, sharing `/data` with the API. A rendered piece is
-  written to `/data/blobs/<piece_key>/` and read back by the API, so both pods mount
-  the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
-  same node (pod affinity); a `ReadWriteOncePod` volume is not, because only one pod
-  may mount it. A piece no job references any more is removed by the API's periodic
-  upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
-  the jobs.
-- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
-  role, below), `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **A remote store (#5298 plan D11).** The worker holds no database, so it runs only on
+  the `bambuddy` or `s3` store. On `local` it refuses to start, and its log says why: the
+  local store runs only in-process (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), on the API's
+  own volume and git. The worker's `/data` is its own (an `emptyDir` is enough). It
+  renders from the template snapshots that the API stores, writes each piece to the
+  store, and keeps a cache of pieces under `/data/blobs/`.
+- **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
   id** (the image stamps it), `SCADBUDDY_API_INTERNAL_URL`, the API's CRUD port
-  (`http://scadbuddy:8082`; the worker reads the store settings and writes its jobs'
-  `render_jobs` rows, their `job.*` events and activity rows, their `blob_refs`, the
-  `piece_geometry` rows, the blob index `store_blobs`, its uploads' `assets` rows and
-  its library leases, pin holds and install slots (`library_leases`,
-  `library_pin_holds`, `library_install_slots`) through its CRUD routes, and the API finds the Bambuddy store's folders `store_folders`
-  for it, #5298), and `SCADBUDDY_SERVICE_TOKEN_FILE` (or
-  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it exchanges for its service
-  credential. The proof is required: without one the worker refuses to start, since
-  it has no other source of a credential. It needs no KEK
-  (`SCADBUDDY_SECRET_KEY_FILE`): the API opens the stored keys before it answers.
+  (`http://scadbuddy:8082`; the worker reads and writes all its data through it, below),
+  and `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it
+  exchanges for its service credential. The proof is required: without one the worker
+  refuses to start, since it has no other source of a credential. It needs no database
+  secret: nothing on the worker reads `SCADBUDDY_DATABASE_URL`, and when it is set the
+  worker logs that it ignores it. It needs no KEK (`SCADBUDDY_SECRET_KEY_FILE`): the API
+  opens the stored keys before it answers.
   The store fields seeded from the environment (`SCADBUDDY_STORE_BACKEND`, the
   Bambuddy and S3 settings, `SCADBUDDY_SOLID_CONCURRENCY` while no row is saved) come
   from the API's environment, not the worker's. Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
-- **Its own database role (#601).** The worker can, and in production should,
-  connect as a role of its own named exactly `scadbuddy_render`, so it never holds
-  the API's settings store (spec 2026-09-27 §9). Create the role with a password
-  (`CREATE ROLE scadbuddy_render LOGIN PASSWORD '…'`; on CNPG a `managed.roles`
-  entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
-  up by hand. At every start the API grants that role exactly
-  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`):
-  the migrations ledger (read only). It gets nothing
-  on `settings`: it reads the store's settings (backend, Bambuddy URL, library
-  folder, render key, S3 keys) from the API's CRUD route
-  `/api/v1/internal/crud/render/settings` (#5298), which answers the full Bambuddy
-  key **only while no render key is saved** in Settings, the fallback `/healthz`
+- **No database (#5298).** The worker opens no database connection. It reads the
+  store's settings (backend, Bambuddy URL, library folder, render key, S3 keys) from the
+  API's CRUD route `/api/v1/internal/crud/render/settings`, which answers the full
+  Bambuddy key **only while no render key is saved** in Settings, the fallback `/healthz`
   reports as `render_key_fallback`. Save a render key and the worker cannot read the
-  full key at all. It gets nothing on `render_jobs`, `events`, `activity`, `blob_refs`,
-  `piece_geometry`, `store_blobs`, `store_folders`, `assets`, `library_leases`,
-  `library_pin_holds` or `library_install_slots` either: the API writes a job's row,
-  its events and its activity row for it, through the routes under
-  `/api/v1/internal/crud/render/jobs`, holds a done job's blobs and records a piece's
-  geometry for it, through `/api/v1/internal/crud/render/blob-refs` and
-  `…/render/geometry`, reads and writes the blob index for it, through
+  full key at all. The API writes a job's row, its events and its activity row for it,
+  through the routes under `/api/v1/internal/crud/render/jobs`, holds a done job's blobs
+  and records a piece's geometry for it, through `/api/v1/internal/crud/render/blob-refs`
+  and `…/render/geometry`, reads and writes the blob index for it, through
   `…/render/blob-index` (it may not store or delete an upload's, font's or snapshot's
   key, which only the API writes: the API drops or forgets a copy the worker cannot read,
   through `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`),
@@ -811,16 +794,17 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `…/render/install-slots`, under the same lock as the API's own library removal, so a
   render or a pin on the worker still holds a removal off; a renew or release must
   name the token the worker took it under, and a lease or hold lives at most five
-  minutes unless renewed. A role granted the older
-  `render_settings` view or those tables keeps them until #5298 revokes the role. A role created after the API started is granted
-  on the API's next start.
+  minutes unless renewed.
+- **The role `scadbuddy_render` (#601)** is no longer used. Remove the worker's
+  database secret from its Deployment. Until #5298 Task 22 revokes and drops the role,
+  the API still grants it `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`),
+  now empty, at every start, and a role granted the older `render_settings` view or
+  the tables above keeps them.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
-  `store-folders`, `assets`, `libraries`) and answers its first read of
-  the store settings, then until the API has applied every migration its build has
-  and its role holds `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
-  worker comes up first, it starts once the API has. On the API's own role (the
-  same `SCADBUDDY_DATABASE_URL`) the grants are there already.
+  `store-folders`, `assets`, `libraries`) and answers its first read of the store
+  settings; it serves `/healthz` only after that. In a rollout where the worker comes up
+  first, it starts once the API has.
 - **Versioning:** workflows are pinned to the build that started them. At start
   the worker makes its own build the deployment's current version, so a new build
   receives new workflows once it is polling. It retries that for a minute after it
@@ -927,12 +911,22 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
-- **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
-  included, are read from it on every use), `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **Environment:** `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
-  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and the Bambuddy
-  URL and key as the API has them (they only seed a database never saved). Its build id
-  is `SCADBUDDY_REVISION`, stamped in the image.
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` and `SCADBUDDY_API_INTERNAL_URL`. It reads the
+  settings, the Bambuddy key included, from the API's CRUD route
+  `GET /api/v1/internal/crud/print/settings` on every use (#5298), as the API resolves
+  them, so its own Bambuddy URL and key variables are not read. That answer is
+  `no-store`. Every other sealed setting (the render key, the S3 secret) is null in it,
+  and so is the rest of the S3 store's connection (`PRINT_UNREAD`; the fields that take
+  no null keep their defaults). Its print runs, their outcomes, its operations' records
+  and the events it publishes go through the CRUD routes too
+  (`/api/v1/internal/crud/print/runs`, `…/outcomes`, `…/operations`, `…/events`, #5298):
+  the API writes each with its event and activity row, and takes only the
+  `print.progress`, `print.settled`, `printer.report` and `printer.changed` events from
+  it, each logged once by its id. The worker does not `LISTEN`. It waits until the API
+  lists the `settings`, `runs`, `operations` and `events` areas before it serves. Its
+  build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
   AUTO_UPGRADE: a run moves to each new build (#2066). They were pinned, and the
@@ -1147,9 +1141,9 @@ and PNGs, downloaded fonts) lives in the blob store. Settings → **Blob store**
 where. The choice is read at start, so it takes effect only when the API and the
 workers restart.
 
-- **`local`** (the default): this server's volume, phase 1's topology. There is **one**
-  render worker, and it shares the API's `/data` volume, as described under "Render
-  worker (#424)" above.
+- **`local`** (the default): this server's volume. Renders then run only in-process
+  (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`): a render worker Deployment holds no database
+  and refuses to start on `local` (#5298 plan D11; "Render worker (#424)" above).
 - **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
@@ -1354,6 +1348,11 @@ folder (or the S3 values) in Settings and choose that store again:
 ```sql
 UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
 ```
+
+On `local` the render worker Deployments stay down: a worker with no database refuses
+to start on the local store (#5298 plan D11), and renders run only in-process
+(`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) until a remote store is set again and the
+workers restart.
 
 When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy` or `s3`),
 set `SCADBUDDY_STORE_BACKEND=local` instead.

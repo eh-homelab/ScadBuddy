@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { api, ApiError } from '../../api/client'
 import type { PrintRunRequest } from '../../api/types'
+import { MOCK_PROCESS_PARTS } from '../handlers'
 import { MULTI_PLATE_FILE } from './library'
 
 describe('library print check mock (#755)', () => {
@@ -9,7 +10,13 @@ describe('library print check mock (#755)', () => {
       errors: [],
       warnings: [],
       rack: null,
+      process_part_settings: null,
     })
+  })
+
+  it("gives the process's part settings only when asked (#5627)", async () => {
+    const checked = await api.checkLibraryPrint(MULTI_PLATE_FILE, {} as PrintRunRequest, true)
+    expect(checked.process_part_settings).toEqual(MOCK_PROCESS_PARTS)
   })
 
   it('refuses a file the library does not have, as the run does', async () => {

@@ -20,6 +20,8 @@ type V1PrintLibraryItemCheckRequestBuilderPostQueryParameters struct {
 	Max_paint_digits *int32 "uriparametername:\"max_paint_digits\""
 	Max_triangles    *int32 "uriparametername:\"max_triangles\""
 	Max_visits       *int32 "uriparametername:\"max_visits\""
+	// Also read the process's own value of each part setting (`process_part_settings`, #5627), which the dialog's Settings for this colour open on: one more read of the process preset's values.
+	Process_values *bool "uriparametername:\"process_values\""
 }
 
 // V1PrintLibraryItemCheckRequestBuilderPostRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
@@ -35,7 +37,7 @@ type V1PrintLibraryItemCheckRequestBuilderPostRequestConfiguration struct {
 // NewV1PrintLibraryItemCheckRequestBuilderInternal instantiates a new V1PrintLibraryItemCheckRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemCheckRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemCheckRequestBuilder {
 	m := &V1PrintLibraryItemCheckRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/check{?max_objects*,max_paint_digits*,max_triangles*,max_visits*}", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/check{?max_objects*,max_paint_digits*,max_triangles*,max_visits*,process_values*}", pathParameters),
 	}
 	return m
 }

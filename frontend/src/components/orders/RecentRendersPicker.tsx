@@ -106,22 +106,20 @@ export function RecentRendersPicker({
   const page = listed.data ?? (listed.loading ? lastPage : undefined)
   const rows = useMemo(() => page?.items ?? [], [page])
 
-  // Each listed model's schema once, for the parameters that differ from its defaults.
+  // Each listed model's schema once, for the parameters that differ from its defaults: a
+  // slug is asked for when it is first listed, and its answer is kept whenever it lands.
   const [schemas, setSchemas] = useState<Record<string, CustomizerSchema | null>>({})
-  const wanted = useMemo(() => [...new Set(rows.map((o) => o.slug))].filter((s) => !(s in schemas)), [rows, schemas])
+  const [asked] = useState(() => new Set<string>())
   useEffect(() => {
-    if (wanted.length === 0) return
-    let live = true
-    for (const one of wanted) {
+    for (const one of new Set(rows.map((o) => o.slug))) {
+      if (asked.has(one)) continue
+      asked.add(one)
       api.getSchema(one).then(
-        (schema) => live && setSchemas((known) => ({ ...known, [one]: schema as CustomizerSchema })),
-        () => live && setSchemas((known) => ({ ...known, [one]: null })),
+        (schema) => setSchemas((known) => ({ ...known, [one]: schema as CustomizerSchema })),
+        () => setSchemas((known) => ({ ...known, [one]: null })),
       )
     }
-    return () => {
-      live = false
-    }
-  }, [wanted])
+  }, [rows, asked])
 
   const nameOf = (s: string) => models.find((m) => m.slug === s)?.name ?? s
 
