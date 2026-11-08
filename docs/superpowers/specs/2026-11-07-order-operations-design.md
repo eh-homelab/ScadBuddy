@@ -185,6 +185,24 @@ have "versions" (git commits: `list_versions`, `diff_version`, `restore_version`
 - Agent: `order_item_quote.slice` gains `inputs`/`commit` (makes the revision first) and
   the three choices; `order_get` lists print setups with their choices.
 
+### 5.4 As built
+
+- PR 1 (#4673): `SliceQuoteRequest` takes `prime_tower`, `supports` and `print_sequence`
+  (`PrintRunRequest`'s own types); `orders/operations.py` `preview_request` passes them to
+  the background slice. `order_item_quotes.choices` (`printer_id`, `printer`, `path`,
+  `choices`, `prime_tower`, `supports`, `print_sequence`, each present, null when left out;
+  `orders/quote.py` `print_setup`) and `filament_plan` are written with a slice quote and
+  shown on `Quote`, so `order_get` lists them. A manual or archive quote has neither. The
+  agent's `order_item_quote.slice` takes the three.
+- The print reads only `prime_tower`, `supports` and `print_sequence` of `choices`
+  (`orders/printing.py` `QUOTED_SETUP`, pulled into PR 1 by its review): an item's print or
+  test print that omits one prints with the quote's (`operations.py` `print_body`'s
+  `setup`, from the check's `quoted_setup`), and one that differs is `requote_needed`
+  (`_same_setup`), as `part_settings` are (#5571). A quote with no `choices` checks
+  nothing. The agent's `order_item_print` takes the three, optional. The rest of
+  `choices` and `filament_plan` are read from PR 2 on: until then the print's own
+  printer, path, `choices` and spools stand, as before.
+
 ### 5.3 Depends on
 
 #5280 (scadify, revisions). Its revisions, `revision_id` on quotes and test prints are on

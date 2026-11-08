@@ -361,3 +361,23 @@ def test_the_webhook_needs_no_session_in_enforce(enforced: TestClient) -> None:
     assert answer.json() == {"outcome": "unmatched"}
     # Every other payments route still wants a person.
     assert enforced.get("/api/v1/payments/providers").status_code == 401
+
+
+def test_a_provider_payment_that_clears_the_balance_closes_the_balance_page(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5700 review N3: the open balance request a provider's payment settles is closed
+    after the commit, as a cancel or a manual payment closes its pages."""
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(client)
+    order = payable_order(client)
+    deposit = request_payment(client, order["id"], kind="deposit", amount_minor=1000)
+    balance = request_payment(client, order["id"], amount_minor=1000)
+    body, headers = signed_event("s3cret", paid(deposit))
+    assert client.post(HOOK, content=body, headers=headers).json() == {"outcome": "recorded"}
+    assert FAKE.cancelled == [balance["provider_ref"]]
+    path = f"/api/v1/orders/{order['id']}/payment-requests"
+    found = {r["id"]: r for r in client.get(path).json()}
+    assert found[balance["id"]]["status"] == "paid"
+    assert found[balance["id"]]["close_pending_at"] is None
+    assert found[deposit["id"]]["close_pending_at"] is None

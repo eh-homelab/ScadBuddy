@@ -135,8 +135,20 @@ replayed webhook, a retried flow) write once.
   `ai_session:<id>`, with the spend it knows. Nothing in the backend reads the agent's
   `ai_*` tables (the database-access rule, #5295). The order's currency may not be USD: a stored setting
   `pricing_usd_rate` (one USD in the order currency, default `1`, env-seeded) converts it,
-  and the entry's note keeps the USD figure. Until that flow exists, nothing writes these
-  entries; the shop can add one by hand.
+  and the entry's note keeps the USD figure. The shop can also add one by hand.
+  As built (#5330): "works on an item" is a successful `order_item_revision_add` (or
+  `_after_acceptance`), the step the request-to-model flow ends with, in a session; the
+  report goes at each turn's end. The route is the agent's own CRUD route, `POST
+  /api/v1/internal/crud/agent/orders/{id}/assistant-cost`, which takes only the `agent`
+  credential (`crud.agent`), not `…/cost-entries`, because new data that crosses services
+  goes through a CRUD route (#5295). It takes the USD figure; the backend converts it (1 for
+  a USD order, `pricing_usd_rate` for an order in the shop's currency, else it refuses
+  `currency_unconvertible`). Each report carries the session's spend since its last report,
+  split equally between the orders it revised since then; an order already reported in the
+  session gets nothing more. An item deleted before the report lands puts the entry on the
+  order. A share the backend refuses for good (the order gone, a currency no rate reaches,
+  a visitor's unsubmitted cart, `order_not_submitted`) is left unattributed, by design: no
+  other order's entry takes it. So is a share under one minor unit once its session is over.
 - **Payment fees.** When the payments seam (#4957) learns a provider's fee for a payment,
   it writes one `payment_fee` entry on the order, `source` `payment:<payment id>`, in the
   transaction that records the payment (agreed with the storefront spec's author). A
@@ -268,8 +280,8 @@ A new page, Orders → Profit, `GET /orders/reports/profit?from=&to=&group=model
   `margin_state` as a filter.
 - `POST/DELETE /orders/{id}/time-entries`, `POST/DELETE /orders/{id}/cost-entries`, each
   an `order_events` audit row, as every order write is. `POST …/cost-entries` also
-  accepts the agent service's service credential, which is how the `assistant` entry
-  arrives (§4.4).
+  accepts the agent service's service credential. As built (#5330), the `assistant` entry
+  arrives on the agent's own CRUD route instead (§4.4).
 - `GET /orders/history/unit-cost?slug=` for §6.3.
 - `GET /orders/reports/profit` for §6.4.
 - Agent tools: `order_costs` (exists, gains the fields), `order_time_add`,

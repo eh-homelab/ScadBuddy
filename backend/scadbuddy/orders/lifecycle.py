@@ -299,6 +299,22 @@ class LabourRate:
     currency: str
 
 
+@dataclass(frozen=True)
+class UsdRate:
+    """``pricing_usd_rate`` (one USD in the shop's currency) and the shop's
+    ``orders_currency`` it is in (job cost spec §4.4)."""
+
+    per_usd: Decimal
+    currency: str
+
+    def factor(self, currency: str) -> Decimal | None:
+        """One USD in ``currency``: 1 for USD, the rate for the shop's currency, else
+        ``None``, since no stored rate reaches a third currency."""
+        if currency == "USD":
+            return Decimal(1)
+        return self.per_usd if currency == self.currency else None
+
+
 @dataclass(frozen=True, kw_only=True)
 class NewItem:
     """One item to add (`Lifecycle.add_items`): what every kind has."""
@@ -922,9 +938,11 @@ class Lifecycle:
         """The provider's answer to a request's link, under the request's order lock: its
         hosted page, or why it failed (the link it had stays). A request no longer open
         (cancelled or expired while the provider answered) keeps no new link, so no one
-        pays it. A paid request is returned as it is: it needs no link and no error. A
-        reference another request holds is kept as ``link_error``, not as the link. No
-        audit row: the link is the provider's, not a person's decision."""
+        pays it; a page made then keeps its reference, marked to close (#5700), so the
+        housekeeping sweep closes it if the close after the commit fails. A paid request is
+        returned as it is: it needs no link and no error. A reference another request holds
+        is kept as ``link_error``, not as the link. No audit row: the link is the
+        provider's, not a person's decision."""
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
             if found is None:
@@ -934,8 +952,21 @@ class Lifecycle:
             order = self._lock(conn, found.order_id)
             found = payments.request(conn, request_id) or found
             if found.status == "paid":
-                return found
+                if hosted is None or found.provider_ref is not None:
+                    return found
+                # Paid by hand while the provider answered: keep the page only to close it.
+                return payments.set_request_link(
+                    conn,
+                    request_id,
+                    provider_ref=hosted.provider_ref,
+                    hosted_url=None,
+                    link_error=None,
+                    close_pending=True,
+                )
+            late_ref: str | None = None
             if found.status != "open":
+                if hosted is not None and found.provider_ref is None:
+                    late_ref = hosted.provider_ref
                 hosted, error = None, f"the payment request is {found.status}"
             try:
                 # A savepoint: a refused write leaves the transaction usable.
@@ -943,9 +974,14 @@ class Lifecycle:
                     linked = payments.set_request_link(
                         conn,
                         request_id,
-                        provider_ref=found.provider_ref if hosted is None else hosted.provider_ref,
+                        provider_ref=(
+                            (found.provider_ref or late_ref)
+                            if hosted is None
+                            else hosted.provider_ref
+                        ),
                         hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
                         link_error=error,
+                        close_pending=late_ref is not None,
                     )
             except errors.UniqueViolation:
                 # ``payment_requests_ref``: the provider answered with another request's
@@ -1282,6 +1318,65 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             items = self._entry_item(conn, order, body.order_item_id)
+            entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def add_assistant_cost(
+        self,
+        order_id: str,
+        *,
+        session_id: str,
+        order_item_id: str | None,
+        cost_usd: Decimal,
+        usd_rate: UsdRate,
+        by: Actor,
+    ) -> tuple[CostEntry | None, bool]:
+        """The assistant's spend in one session (§4.4, #5330): one ``assistant`` entry,
+        source ``ai_session:<id>``, in the order's currency at ``usd_rate`` (converted
+        under the order's lock, as a time entry's rate is), its note keeping the USD
+        figure. An item that is gone or not the order's puts the entry on the order. A
+        second report of the session returns the first entry and writes nothing, whatever
+        its amount; a first report under one minor unit writes nothing
+        and answers ``None``, so the agent keeps it to report with more spend."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            # A visitor's cart is no job yet: nothing is spent on it (storefront spec §6.3).
+            check_submitted(order)
+            # The item the session revised may be gone by now (a draft item deleted before
+            # the report landed): the spend still counts, on the order.
+            found = None if order_item_id is None else self.store.item(order_item_id, conn=conn)
+            items = [found] if found is not None and found.order_id == order.id else []
+            order_item_id = items[0].id if items else None
+            factor = usd_rate.factor(order.currency)
+            if factor is None:
+                raise LifecycleError(
+                    "currency_unconvertible",
+                    f"{order.label} is in {order.currency}; the USD rate is in {usd_rate.currency}",
+                )
+            amount = to_minor(cost_usd * factor, order.currency)
+            source = f"ai_session:{session_id}"
+            if amount < 1:
+                return self.store.cost_entry_of_source(conn, order.id, "assistant", source), False
+            body = CostEntryInput(
+                order_item_id=order_item_id,
+                kind="assistant",
+                amount_minor=amount,
+                note=f"assistant session {session_id}: {cost_usd} USD",
+                source=source,
+            )
             entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
             if not written:
                 return entry, False
@@ -2723,6 +2818,8 @@ class Lifecycle:
         revision_id: str | None,
         quote_id: str | None = None,
         part_settings: dict[str, dict[str, Any]] | None = None,
+        choices: dict[str, Any] | None = None,
+        filament_plan: dict[str, Any] | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
         it, with the plates it read and the sliced file it read them from, under the id
@@ -2738,7 +2835,8 @@ class Lifecycle:
         are taken again in its own transaction, so a row never commits without them,
         whatever another attempt dropped before it. A library file item's quote (#5544)
         names no revision (``revision_id`` None): the item has none. Never on a cart
-        (#5282, ``order_not_submitted``)."""
+        (#5282, ``order_not_submitted``). ``choices`` and ``filament_plan`` are the print
+        setup it sliced with (#4673, ``quote.print_setup``), recorded with it."""
         self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
@@ -2777,6 +2875,8 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
                 part_settings=part_settings,
+                choices=choices,
+                filament_plan=filament_plan,
             )
             self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)

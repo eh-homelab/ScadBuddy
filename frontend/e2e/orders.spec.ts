@@ -261,6 +261,55 @@ test.describe('orders', () => {
     await expect(status(/^Approved$/)).toBeVisible()
   })
 
+  // #4955 step 5, spec 2026-11-07 §4.2 — the items card end to end: add an item, edit it in
+  // place, fulfil from the bulk bar's one dialog, and unfulfil from the row's ⋯ menu.
+  test('the items card: add, edit in place, fulfil and unfulfil', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    const card = page.getByRole('region', { name: 'Items' })
+    const items = card.getByRole('table', { name: 'Line items' })
+    await card.getByRole('button', { name: 'Add custom item' }).click()
+    await items.getByRole('textbox', { name: 'Custom item title' }).fill('Rush fee')
+    await items.getByRole('textbox', { name: 'Custom item unit price' }).fill('5')
+    await items.getByRole('textbox', { name: 'Custom item unit price' }).press('Enter')
+    await expect(items.getByRole('button', { name: 'Rush fee', exact: true })).toBeVisible()
+
+    // Quantity: typed, Enter saves; the line total follows.
+    const quantity = items.getByRole('textbox', { name: 'Quantity for Rush fee' })
+    await quantity.fill('3')
+    await quantity.press('Enter')
+    await expect(page.getByTestId('order-totals')).toContainText('15.00')
+    // Title: Escape keeps it, Enter saves the new one.
+    // The row by its quantity box: while the title is typed, the title's button is gone.
+    const row = items.getByRole('row').filter({ has: page.getByRole('textbox', { name: 'Quantity for Rush fee' }) })
+    const title = items.getByRole('textbox', { name: 'Title for Rush fee' })
+    await row.getByRole('button', { name: 'Edit title' }).click()
+    await title.fill('Ignored')
+    await title.press('Escape')
+    await expect(items.getByRole('button', { name: 'Rush fee', exact: true })).toBeVisible()
+    await row.getByRole('button', { name: 'Edit title' }).click()
+    await title.fill('Rush fee, 24 hours')
+    await title.press('Enter')
+    await expect(items.getByRole('button', { name: 'Rush fee, 24 hours' })).toBeVisible()
+
+    // An accepted order: fulfil from the bulk bar, then unfulfil from the row's menu.
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-2', exact: true }).click()
+    const accepted = page.getByRole('region', { name: 'Items' })
+    const keychain = accepted.getByRole('row').filter({ has: page.getByRole('button', { name: 'Name Keychain', exact: true }) })
+    await keychain.getByRole('checkbox', { name: 'Select Name Keychain' }).click()
+    await accepted.getByTestId('bulk-actions').getByRole('button', { name: 'Fulfil…' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Fulfil items' })
+    await expect(dialog.getByRole('textbox', { name: 'Quantity made of Name Keychain' })).toHaveValue('2')
+    await dialog.getByRole('button', { name: 'Fulfil' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(keychain.getByText('Fulfilled')).toBeVisible()
+    await keychain.getByRole('button', { name: 'Row actions' }).click()
+    await page.getByRole('menuitem', { name: 'Unfulfil…' }).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Unfulfil' }).click()
+    await expect(keychain.getByText('Approved')).toBeVisible()
+  })
+
   test('on a phone the orders page fits', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/orders')

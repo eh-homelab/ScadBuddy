@@ -82,6 +82,7 @@ import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
+import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
@@ -388,10 +389,28 @@ const tabs = new TabHub({
   images: database ? new PostgresTabImageStore(database.sql) : undefined,
 })
 toolServices.browser = tabs
-// What each session touched (#931, sessions/touched.ts), from its tool calls.
-if (database) {
-  toolServices.touched = new SessionResources(database.sql, (err) =>
-    console.error('session resources: could not record a call:', (err as Error).message),
+// What each session touched (#931, sessions/touched.ts), from its tool calls, and the order
+// items it revised, whose spend each turn's end reports to the backend's CRUD route with the
+// service credential (#5330, sessions/orderCosts.ts).
+const orderCosts = database
+  ? new OrderCosts({
+      sql: database.sql,
+      // The session's report lock is held across its posts on the lock client's own connections.
+      locks: database.locks,
+      post: crudCostPoster(config.backendUrl, serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch),
+      onError: (err) => console.error('order costs: could not record or report:', (err as Error).message),
+    })
+  : undefined
+if (database && orderCosts && role.http) {
+  // What a session's last turn left to report (#5330), at start and hourly.
+  const sweep = () => void database.ready().then((ok) => (ok ? orderCosts.sweep() : undefined))
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
+if (database && orderCosts) {
+  toolServices.touched = touchedSinks(
+    new SessionResources(database.sql, (err) => console.error('session resources: could not record a call:', (err as Error).message)),
+    orderCosts,
   )
 }
 // The assistant's workspace (#2329, workspace/store.ts): a session's files, or an
@@ -941,7 +960,7 @@ const temporalWorker =
           // Its events through this replica's event log, so they wake its followers at once and
           // go on the bus under its id (#3365); with no session manager, a log that only publishes.
           ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend)),
-          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
+          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
