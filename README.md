@@ -157,6 +157,13 @@ on shutdown.
   are missing or stale, which after the first pass is none. `false` deletes it; a
   Schedule paused in the Temporal UI stays paused across restarts. Its id ends in the
   library queue's name, like the housekeeping ones);
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` (default `true`: at start the API registers the
+  built-in `order-fulfilment` flow as version 1 when no flow of that name ever had a
+  version; a person's edit or delete stands, and nothing runs until a person makes its
+  trigger and approves its grant; `false` registers nothing; read from the environment
+  only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
+  are the request's, each print is refused and the flow asks a person to print the item
+  from the order's page);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it

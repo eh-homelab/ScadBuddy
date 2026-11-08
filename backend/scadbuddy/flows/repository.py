@@ -63,6 +63,8 @@ DELETED_TRAILER = "ScadBuddy-Flow-Deleted"
 #: A details change's commit (#3186): it names the flow, but is none of its versions.
 DETAILS_TRAILER = "ScadBuddy-Flow-Details"
 DETAILS_FILE = "flow.json"
+#: A version the build registered itself (#4252: a built-in flow), naming the built-in.
+BUILTIN_TRAILER = "ScadBuddy-Flow-Builtin"
 #: A trailer line, as git writes the ones ScadBuddy adds.
 _TRAILER_LINE = re.compile(r"^[A-Za-z0-9-]+: ")
 #: The trailers that mark a paragraph as the one ScadBuddy adds to a flow's commits.
@@ -97,6 +99,7 @@ _FORMAT = (
     f"%x1f%(trailers:key={VERSION_TRAILER},valueonly,separator=%x2c)"
     f"%x1f%(trailers:key={PRINCIPAL_TRAILER},valueonly,separator=%x2c)"
     f"%x1f%(trailers:key={SESSION_TRAILER},valueonly,separator=%x2c)"
+    f"%x1f%(trailers:key={BUILTIN_TRAILER},valueonly,separator=%x2c)"
     "%x1f%b"
 )
 
@@ -151,6 +154,11 @@ class FlowNotPresentError(RevisionNotFoundError):
     """The flow has versions but is not in the tree: it is deleted (#2485)."""
 
 
+class FlowExistsError(GitError):
+    """A registration only for a new name found the name with versions already (#4252):
+    a deleted flow keeps its history, so it counts."""
+
+
 class DetailsNotSavedError(GitError):
     """A registration's version was committed and indexed, but its details commit
     failed (#3186): ``flow.json`` is as it was. Never retry the registration for it, which
@@ -202,6 +210,8 @@ class FlowCommit:
     agent: AgentAuthor | None
     #: The commit message's body, without its trailers (#3186); None for none.
     body: str | None = None
+    #: The built-in that registered it (`BUILTIN_TRAILER`, #4252); None for any other.
+    builtin: str | None = None
 
     @property
     def short(self) -> str:
@@ -242,6 +252,8 @@ class FlowHistory(GitRepo):
         body: str | None = None,
         display_name: str | None = None,
         description: str | None = None,
+        only_new: bool = False,
+        builtin: str | None = None,
     ) -> tuple[str, int]:
         """One new version of ``name``: ``script`` with its ``inputs`` schema (none when
         None), or the script and schema at the commit ``restore``. Under the write lock:
@@ -249,10 +261,14 @@ class FlowHistory(GitRepo):
         ``index(commit, version)``, then, when ``display_name`` or ``description`` changes
         the flow's details, their own commit (#3186). The version's commit and number;
         :class:`DetailsNotSavedError` (naming them) when the version was saved but its
-        details commit failed."""
+        details commit failed. With ``only_new``, :class:`FlowExistsError` when ``name``
+        has any version, deleted or not, checked under the same lock (#4252). ``builtin``
+        names the built-in registering it, in the commit's ``BUILTIN_TRAILER``."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
+            if only_new and self.versions(name):
+                raise FlowExistsError(f"{name!r} has versions")
             found = self.register_locked(
                 name,
                 version_id,
@@ -262,6 +278,7 @@ class FlowHistory(GitRepo):
                 restore=restore,
                 message=message,
                 body=body,
+                builtin=builtin,
             )
             try:
                 self._set_details_locked(name, display_name, description)
@@ -280,9 +297,12 @@ class FlowHistory(GitRepo):
         restore: str | None = None,
         message: str | None = None,
         body: str | None = None,
+        builtin: str | None = None,
     ) -> tuple[str, int]:
         version = len(self.versions(name)) + 1
         trailers = [f"{FLOW_TRAILER}: {name}", f"{VERSION_TRAILER}: {version_id}"]
+        if builtin is not None:
+            trailers.append(f"{BUILTIN_TRAILER}: {builtin}")
         if restore is not None:
             target = self.resolve(restore)
             commit = self._restore_version_locked(
@@ -466,14 +486,16 @@ class FlowHistory(GitRepo):
                 return []
             # Never "no versions": the next registration would number itself v1.
             raise GitError(f"git log failed: {completed.stderr}", str(completed.stderr))
-        found: list[tuple[str, str, str, datetime, str, AgentAuthor | None, str | None]] = []
+        found: list[
+            tuple[str, str, str, datetime, str, AgentAuthor | None, str | None, str | None]
+        ] = []
         for record in completed.stdout.split(_RECORD):
             if not record.strip():
                 continue
             fields = record.split(_FIELD)
-            if len(fields) != 8:  # pragma: no cover - git always emits all eight
+            if len(fields) != 9:  # pragma: no cover - git always emits all nine
                 continue
-            commit, when, subject, name, version_id, principal, session, raw_body = fields
+            commit, when, subject, name, version_id, principal, session, builtin, raw_body = fields
             name, version_id = name.strip(), version_id.strip()
             if not name or not version_id:
                 continue
@@ -491,15 +513,18 @@ class FlowHistory(GitRepo):
                     subject,
                     agent,
                     _body_of(raw_body),
+                    builtin.strip() or None,
                 )
             )
         counts: dict[str, int] = {}
         for _, name, *_rest in found:
             counts[name] = counts.get(name, 0) + 1
         numbered: list[FlowCommit] = []
-        for commit, name, version_id, date, subject, agent, body in found:
+        for commit, name, version_id, date, subject, agent, body, by_build in found:
             numbered.append(
-                FlowCommit(commit, name, version_id, counts[name], date, subject, agent, body)
+                FlowCommit(
+                    commit, name, version_id, counts[name], date, subject, agent, body, by_build
+                )
             )
             counts[name] -= 1
         return numbered

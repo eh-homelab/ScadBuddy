@@ -945,7 +945,7 @@ order = tool("order_get", {"order_id": ev.order_id})
 for item in order["items"]:
     if item["status"] != "approved":
         continue
-    request = print_request(item)   # a helper the built-in will define: the dialog's body
+    request = print_request(item)   # the built-in's helper: the dialog's body
     source = {"order_id": order["id"], "order_item_id": item["id"]}
     out = queue_print(source, request)   # §5.4: the accepted quote's file
     if out["problem"] == "requote_needed":   # a refusal: status "refused", its name in problem
@@ -983,9 +983,8 @@ What this relies on, and what the design adds for it:
   As built (#4252): the source is `{"order_id", "order_item_id"}` (the item's route is
   under its order, and the grant's `orders` bound reads the order from the source). The
   request is the print dialog's body (`filament_plan`, `choices`, ...), as
-  `order_item_print` takes it, since a quote does not store the choices; a later PR of
-  #4252 builds the built-in flow, which will make it from the model's remembered print
-  choices. A refusal before anything printed is `status` `refused` with `error` the
+  `order_item_print` takes it, since a quote does not store the choices; the built-in
+  flow makes it from the model's remembered print choices (`get_print_choices`). A refusal before anything printed is `status` `refused` with `error` the
   problem's detail and `problem` the last segment of its `type` (`requote_needed`,
   `order_on_hold`, `needs_spool_choice`, ...); an operation that failed with no named
   problem, a route that answered at once with none, or a follow of the operation that
@@ -1070,6 +1069,34 @@ What this relies on, and what the design adds for it:
   messaging MCP plugin, #297), or, with none, returns the text for the person to send.
   In the panel an outward call parks for the person as any does; in a flow it is
   covered by a grant rule naming it (§7.2) or parks the same way.
+
+  As built (#4252): `order_notify_customer` is `read` and only composes: it reads the
+  order and the customer and answers the template's text addressed to the customer's
+  primary contacts, `sent: false`, for a person to send. Sending through a plugin is
+  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
+  `notify` and `settle_hours`), registered at start only when its name never had a version
+  (`FlowDefinitions.register_new`), so a person's edit or delete stands;
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` turns it off. It prints each approved or failed item,
+  and on a refusal (`order_on_hold`, `requote_needed`, any other), or print choices it
+  cannot read (no output, or one gone), asks a person with
+  `wait_for_human` to fix it and answer `print`; an unanswered or skipped item is
+  passed over, never the run's end. It does not re-quote, unlike the sketch above:
+  `quote_check` refuses a new quote for an item whose accepted quote stands on an
+  accepted order (`order_not_open`) until a person revises it after acceptance (§3.5),
+  so the accepted price stands until a person decides, and there is no
+  `auto_accept_quotes_under_minor`. A print run ends once its plates are queued, so
+  the flow then waits, reading the order after five minutes and then at waits that
+  double up to an hour, until no printed item is `queued` or `printing` (at most the
+  input `settle_hours`, default 48, maximum 168; past it the run ends with a summary
+  and no check). A run is one workflow with no continue-as-new, and each read adds a
+  timer and the whole order to its history, so the backoff keeps the longest wait to
+  about 170 reads. An item a failed print left `queued` anyway counts as printed. Only then does it hand the attempts to the agent
+  under a grant kept to the order (`order_item_fulfil` and `order_attach`, for each
+  attempt's photo and timelapse; the trigger's standing grant names both, with
+  `queue_print`, since an agent call's grant only narrows the run's), and it composes
+  `ready` only when the re-read order is `ready`. A `library_file` item's print choices
+  come from the library that serves, Bambuddy's or ScadBuddy's own. A trigger to run it
+  is made by a person.
 
 `order_item_quote` takes two modes (phase 2, plan 2026-10-22 Ruling 11): `manual`
 (`{unit_price_minor, label?}`, the typed price) or `slice` (`{printer_id?,
