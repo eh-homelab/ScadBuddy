@@ -568,11 +568,16 @@ def check_path(*values: str) -> None:
 # -- orders ------------------------------------------------------------------------------------
 
 
-def _cost_rates(settings: SettingsStore) -> CostRates:
+def _cost_rates(settings: SettingsStore, orders: OrdersComponent) -> CostRates:
+    """Today's rates; machine time at each printer's machine rate where it has one
+    (#4625). Blocking."""
     runtime = settings.snapshot().runtime
+    machine_rate, printer_rates, serial_rates = orders.machine_rates.money_rates()
     return CostRates(
         shop_currency=runtime.orders_currency,
-        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
+        machine_rate_per_hour=machine_rate,
+        printer_rates=printer_rates,
+        serial_rates=serial_rates,
         labour_per_item=runtime.pricing_labour_per_item,
         thin_margin_percent=runtime.orders_thin_margin_percent,
     )
@@ -685,7 +690,7 @@ async def list_orders(
             decode_cursor(cursor)
         except ValueError:
             raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
-    rates = await asyncio.to_thread(_cost_rates, settings)
+    rates = await asyncio.to_thread(_cost_rates, settings, orders)
     return await asyncio.to_thread(
         _order_page, orders.store, filters, margin_state, cursor, limit, rates
     )
@@ -1000,7 +1005,7 @@ async def unit_cost(
         unit_cost_history,
         orders.store,
         slug,
-        _cost_rates(settings),
+        await asyncio.to_thread(_cost_rates, settings, orders),
         markup_percent=runtime.pricing_markup_percent,
         now=datetime.now(UTC),
         currency=currency,
@@ -1045,7 +1050,7 @@ async def profit(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from and to need a time zone")
     if since >= until:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "from must be before to")
-    rates = await asyncio.to_thread(_cost_rates, settings)
+    rates = await asyncio.to_thread(_cost_rates, settings, orders)
     return await asyncio.to_thread(profit_report, orders.store, rates, since=since, until=until)
 
 
@@ -1168,7 +1173,7 @@ async def get_order_costs(
     order_id: str, orders: OrdersDep, settings: SettingsStoreDep
 ) -> OrderCosts:
     check_path(order_id)
-    rates = _cost_rates(settings)
+    rates = await asyncio.to_thread(_cost_rates, settings, orders)
     costs = await order_costs(orders.store, orders.integrations, order_id, rates)
     if costs is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")

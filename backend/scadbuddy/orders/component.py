@@ -35,12 +35,14 @@ from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.machine_rate import MachineRates, MachineRateStore
 from scadbuddy.orders.money import OrderRules
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.listings import ListingStore
 from scadbuddy.payments.registry import providers
+from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
 
@@ -61,9 +63,12 @@ class OrdersComponent:
         self,
         core: Core,
         pool: ConnectionPool[Connection[DictRow]],
+        components: Components | None = None,
         flows: FlowDefinitions | None = None,
     ) -> None:
         self.core = core
+        #: Read when a machine rate needs the printer registry (#4625).
+        self._components = components
         #: Where the built-in `order-fulfilment` flow is registered at start (#4252).
         self.flows = flows
         self._store: OrderStore | None = None
@@ -76,11 +81,17 @@ class OrdersComponent:
         #: The rows' shared pool (`rows/component.py`), which `ROWS` closes.
         self._pool = pool
 
-    @property
-    def store(self) -> OrderStore:
+    def _opened(self) -> ConnectionPool[Connection[DictRow]]:
+        """The shared pool, opened on first use."""
         if self._store is None:
             self._pool.open(wait=False)
             self._store = OrderStore(self._pool)
+        return self._pool
+
+    @property
+    def store(self) -> OrderStore:
+        self._opened()
+        assert self._store is not None
         return self._store
 
     @property
@@ -124,6 +135,18 @@ class OrdersComponent:
         )
 
     @property
+    def machine_rates(self) -> MachineRates:
+        """Each registry printer's machine rate (#4625): its inputs, and Bambuddy's
+        maintenance intervals for one linked to it."""
+        assert self._components is not None
+        return MachineRates(
+            MachineRateStore(self._opened()),
+            self._components.get(PRINTERS).store,
+            self.integrations,
+            self.core.settings_store,
+        )
+
+    @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
             self._lifecycle = Lifecycle(self.store, self.core.events, self.refs, self.rules)
@@ -139,7 +162,9 @@ ORDERS: Key[OrdersComponent] = Key("orders")
 def _build(core: Core, components: Components) -> OrdersComponent:
     # Flows is built first, so it runs first: its repository is ready when this one
     # starts.
-    return OrdersComponent(core, components.get(ROWS).pool, components.get(FLOWS).definitions)
+    return OrdersComponent(
+        core, components.get(ROWS).pool, components, components.get(FLOWS).definitions
+    )
 
 
 @asynccontextmanager

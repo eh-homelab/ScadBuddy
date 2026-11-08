@@ -40,9 +40,14 @@ _ALL = ("SELECT", "INSERT", "UPDATE", "DELETE")
 _READ = ("SELECT",)
 
 #: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. It reads
-#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route), but a
-#: printer merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `ensure_bambuddy`)
-#: rewrites every table `PRINTER_REFERENCES` names, `settings` and `activity` included.
+#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route). A
+#: printer merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `_ensure_row`)
+#: runs on the API through `POST …/print/printers/ensure-bambuddy` since #4625, so the
+#: worker writes none of the tables `PRINTER_REFERENCES` names for it; the merge's grants
+#: below stay until #5298 Task 29 revokes them (an older pod may still merge in a rollout;
+#: its merge, lacking the machine-rate hook, lets `ON DELETE CASCADE` drop the gone
+#: synthetic row's machine-rate inputs instead of moving them).
+#: Never add a `PRINTER_REFERENCES` table here.
 PRINT_GRANTS: Grants = {
     # The merge's rewrite of a printer's stored choices and plates (`printers/store.py`
     # `_merge`) until #5298 Task 29. The worker reads the settings through the API's CRUD

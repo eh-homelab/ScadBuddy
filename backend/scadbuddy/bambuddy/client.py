@@ -68,6 +68,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
     PresetValues,
     Printer,
+    PrinterMaintenanceOverview,
     PrinterMedia,
     PrinterStatus,
     Project,
@@ -180,6 +181,7 @@ Operation = Literal[
     "media.source",
     "media.thumbnail",
     "media.timelapse",
+    "maintenance.printer",
     "printers.available_filaments",
     "printers.camera.snapshot",
     "printers.camera.stream",
@@ -364,6 +366,20 @@ class BambuddyClient:
             what=f"read printer {printer_id}",
         )
         return Printer.model_validate(response.json())
+
+    async def printer_maintenance(self, printer_id: int) -> PrinterMaintenanceOverview:
+        """``GET /api/v1/maintenance/printers/{id}``: the printer's maintenance tasks and
+        their intervals (#4625). Bambuddy gates it on ``MAINTENANCE_READ``, which an API
+        key holds with ``can_read_status`` (``backend/app/core/auth.py``
+        ``_APIKEY_SCOPE_BY_PERMISSION`` at maziggy/bambuddy@2f871923)."""
+        response = await self._send(
+            "GET",
+            f"/maintenance/printers/{printer_id}",
+            scope=Scope.READ_STATUS,
+            operation="maintenance.printer",
+            what=f"read printer {printer_id}'s maintenance tasks",
+        )
+        return PrinterMaintenanceOverview.model_validate(response.json())
 
     async def printer_access_code(self, printer_id: int) -> str | None:
         """The printer's LAN access code as Bambuddy holds it, or ``None`` when it is

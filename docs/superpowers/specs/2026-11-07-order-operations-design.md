@@ -230,6 +230,17 @@ maintenance ~0.24, wear ~0.14, power ~0.03, depreciation ~0.48.
   task, minutes per occurrence and consumables cost (new table
   `printer_maintenance_costs`, keyed by printer and Bambuddy task name).
 
+**As built (#5683):** the tasks are read per printer from
+`GET /api/v1/maintenance/printers/{id}` (scope Read Status), not from
+`/maintenance/overview`. The per-printer route answers one printer's tasks with each
+task's `interval_type` and `enabled`. Calendar and disabled tasks are listed and never
+counted. Shapes:
+[`backend/app/schemas/maintenance.py`](https://github.com/maziggy/bambuddy/blob/2f87192334f66bc4b27b84ba48c6a2d216dd8afc/backend/app/schemas/maintenance.py)
+at maziggy/bambuddy@2f87192. Each read keeps the intervals of the tasks it counted, to the
+tenth of an hour (an interval that rounds to nothing is not counted), and clears the
+rest, so the stored rate (Bambuddy unreachable, the money view) is the rate last read.
+Once the printer is unlinked, the intervals sent with its inputs are kept as typed.
+
 ### 6.2 The rate
 
 `rate = Σ tasks (minutes × labour rate / 60 + consumables) / interval_hours

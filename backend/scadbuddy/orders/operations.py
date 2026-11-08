@@ -72,6 +72,7 @@ from scadbuddy.orders.quote import (
     operation_quote_id,
     quote_check,
     quote_run,
+    support_check,
 )
 from scadbuddy.orders.spools import item_plan
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -462,9 +463,17 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         orders = components.get(ORDERS)
         body = SliceQuoteRequest.model_validate(request["request"])
         _, policy, _ = await asyncio.to_thread(orders.price_book.policy)
+        # The printer's own machine rate (#4625), stored: the book prices nothing only
+        # when that rate is 0 too.
+        rate = await asyncio.to_thread(
+            orders.machine_rates.check_rate, body.printer, body.printer_id
+        )
+        if rate is not None:
+            policy = policy.model_copy(update={"machine_rate_per_hour": rate})
         slots = await asyncio.to_thread(
             quote_check, orders.store, policy, request["order_id"], request["item_id"], body
         )
+        await asyncio.to_thread(support_check, orders.store, request["item_id"], body)
         await library_file_stands(request["item_id"])
         if body.printer is not None:
             # A registry printer the run would refuse (a disagreeing pair, a virtual
@@ -498,6 +507,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             refs=orders.refs,
             schema_of=lambda reference: reference_schema(core, reference),
             library=served_library(),
+            machine_rate=orders.machine_rates.for_quote,
         )
         try:
             quote = await quote_run(
