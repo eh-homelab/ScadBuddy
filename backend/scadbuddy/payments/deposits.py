@@ -183,6 +183,8 @@ async def sync_deposits(bank: BankLinks, bus: EventBus | None = None) -> int:
     except PlaidError as error:
         logger.warning("the deposit sync could not read Plaid: %s", error.code)
         await asyncio.to_thread(_failed, bank.store, linked.item_id, error.code)
+        if error.code == plaid.LOGIN_REQUIRED:
+            await asyncio.to_thread(bank.mark_login, linked.item_id, required=True)
         return 0
     suggested, told = await asyncio.to_thread(_store, bank.store, linked, start, first, read)
     for order_id in sorted(told):
@@ -234,7 +236,8 @@ def _store(
         loop = (first or "") if read.more else None
         conn.execute(
             "UPDATE bank_links SET sync_cursor = %s, sync_loop_cursor = %s,"
-            " synced_at = clock_timestamp(), sync_error = NULL WHERE item_id = %s",
+            " synced_at = clock_timestamp(), sync_error = NULL, login_required_at = NULL"
+            " WHERE item_id = %s",
             (read.cursor or None, loop, linked.item_id),
         )
     return suggested, told

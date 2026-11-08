@@ -22,6 +22,7 @@ from tests.api.test_order_payments import with_payments
 from tests.api.test_payment_webhooks import enforced_app
 from tests.auth.fake_oidc import FakeIssuer
 from tests.payments.test_bank import ACCESS, CHECKING, CREDIT, SANDBOX, payload, plaid_answers
+from tests.payments.test_bank_webhook import body_of, plaid_key, signed
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -53,6 +54,7 @@ def test_link_show_and_unlink(client: TestClient, plaid: respx.MockRouter) -> No
         "linked_at": None,
         "synced_at": None,
         "sync_error": None,
+        "login_required": False,
     }
     saved = client.put(f"{BANK}/keys", json=KEYS)
     assert saved.status_code == 200, saved.text
@@ -160,9 +162,70 @@ def test_an_agent_cannot_change_the_link(settings: Settings) -> None:
             client.post(f"{BANK}/link-token", headers=agent),
             client.post(f"{BANK}/link", json=LINK, headers=agent),
             client.delete(f"{BANK}/link", headers=agent),
+            client.post(f"{BANK}/reconnected", headers=agent),
         ):
             assert answer.status_code == 403, answer.text
             assert answer.json()["reason"] == "not_a_person"
         assert client.get(BANK, headers=agent).status_code == 200
         _sign_in(client)
         assert client.get(BANK, headers=HEADER).status_code == 200
+        # Plaid's webhook needs no session: an unsigned one is refused by its JWT check.
+        client.cookies.clear()
+        unsigned = client.post(f"{BANK}/webhook", content=b"{}")
+        assert unsigned.status_code == 400, unsigned.text
+        assert unsigned.json()["type"] == PROBLEMS + "bad_signature"
+
+
+def linked(client: TestClient) -> None:
+    assert client.put(f"{BANK}/keys", json=KEYS).status_code == 200
+    assert client.post(f"{BANK}/link", json=LINK).status_code == 200
+
+
+def test_login_required_shows_reconnect_until_update_mode_finishes(
+    client: TestClient, plaid: respx.MockRouter
+) -> None:
+    plaid_key(plaid)
+    linked(client)
+    body = body_of("webhook.item_login_required.json")
+    hook = client.post(f"{BANK}/webhook", content=body, headers=signed(body))
+    assert hook.status_code == 200, hook.text
+    assert hook.json() == {"outcome": "login_required"}
+    assert client.get(BANK).json()["login_required"] is True
+    token = client.post(f"{BANK}/link-token")
+    assert token.status_code == 200, token.text
+    assert client.post(f"{BANK}/reconnected").status_code == 204
+    assert client.get(BANK).json()["login_required"] is False
+
+
+def test_sync_updates_available_syncs_after_the_answer(
+    client: TestClient, plaid: respx.MockRouter
+) -> None:
+    plaid_key(plaid)
+    synced = plaid.post(f"{SANDBOX}/transactions/sync").mock(
+        return_value=httpx.Response(200, json=payload("transactions.sync.json"))
+    )
+    linked(client)
+    body = body_of("webhook.sync_updates_available.json")
+    hook = client.post(f"{BANK}/webhook", content=body, headers=signed(body))
+    assert hook.json() == {"outcome": "sync"}
+    assert synced.called
+    assert client.get(BANK).json()["synced_at"] is not None
+
+
+def test_a_bad_signature_or_a_missing_key_changes_nothing(
+    client: TestClient, plaid: respx.MockRouter
+) -> None:
+    linked(client)
+    body = body_of("webhook.item_login_required.json")
+    plaid.post(f"{SANDBOX}/webhook_verification_key/get").mock(
+        side_effect=httpx.ConnectError("down")
+    )
+    unavailable = client.post(f"{BANK}/webhook", content=body, headers=signed(body))
+    assert (unavailable.status_code, unavailable.json()["type"]) == (
+        503,
+        PROBLEMS + "provider_unavailable",
+    )
+    plaid_key(plaid)
+    forged = client.post(f"{BANK}/webhook", content=body, headers=signed(b"other"))
+    assert (forged.status_code, forged.json()["type"]) == (400, PROBLEMS + "bad_signature")
+    assert client.get(BANK).json()["login_required"] is False

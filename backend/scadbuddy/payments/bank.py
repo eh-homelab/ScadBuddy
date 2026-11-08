@@ -10,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,13 +24,19 @@ from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments import plaid
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
 from scadbuddy.payments.plaid import AccountSubtype, Environment, PlaidError, PlaidKeys
+from scadbuddy.payments.provider import BadSignatureError
 
 logger = logging.getLogger(__name__)
 
 _ROW = (
     "id, environment, secret_sealed, dek_sealed, kek_id, saved_at, item_id, account_id,"
-    " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error"
+    " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error,"
+    " login_required_at"
 )
+#: The verification keys kept in memory, by ``kid``; Plaid rotates them rarely.
+MAX_WEBHOOK_KEYS = 8
+
+WebhookOutcome = Literal["sync", "login_required", "login_repaired", "ignored"]
 
 #: The longest key, token or id a body takes.
 MAX_CHARS = 200
@@ -125,6 +132,8 @@ class BankStatus(BaseModel):
     #: last read failed (a fixed code, never Plaid's text).
     synced_at: datetime | None = None
     sync_error: str | None = None
+    #: Plaid says the bank needs the shop to sign in again: Settings shows "Reconnect".
+    login_required: bool = False
 
 
 class LinkToken(BaseModel):
@@ -156,6 +165,8 @@ class BankUnlinked(BaseModel):
     removed_at_plaid: bool
     #: What the shop must still do, when anything.
     note: str | None
+class BankWebhookAnswer(BaseModel):
+    outcome: WebhookOutcome
 
 
 @dataclass(frozen=True)
@@ -169,9 +180,18 @@ class LinkedAccess:
 
 
 class BankLinks:
-    def __init__(self, store: OrderStore, kek: Kek | None) -> None:
+    def __init__(
+        self,
+        store: OrderStore,
+        kek: Kek | None,
+        *,
+        webhook_url: Callable[[], str | None] = lambda: None,
+    ) -> None:
         self._store = store
         self._kek = kek
+        #: Where Plaid sends the Item's webhooks; read on each link token (live settings).
+        self._webhook_url = webhook_url
+        self._webhook_keys: dict[str, dict[str, Any]] = {}
 
     @property
     def store(self) -> OrderStore:
@@ -241,6 +261,7 @@ class BankLinks:
             linked_at=row["linked_at"],
             synced_at=row["synced_at"],
             sync_error=row["sync_error"],
+            login_required=row["item_id"] is not None and row["login_required_at"] is not None,
         )
 
     def access(self) -> LinkedAccess | None:
@@ -322,10 +343,72 @@ class BankLinks:
     # -- the link ---------------------------------------------------------------------
 
     async def link_token(self) -> str:
-        row, _, keys = self._keys(await asyncio.to_thread(self._read))
-        if row["item_id"] is not None:
-            raise BankLinkedError()
-        return await plaid.link_token(keys, user_id=str(row["id"]), webhook=None)
+        """A token for Link; once linked, for update mode ("Reconnect"), which signs the
+        shop in to its bank again and keeps the access token."""
+        row, secrets, keys = self._keys(await asyncio.to_thread(self._read))
+        return await plaid.link_token(
+            keys,
+            user_id=str(row["id"]),
+            webhook=self._webhook_url(),
+            access_token=secrets.get("access_token") if row["item_id"] is not None else None,
+        )
+
+    def reconnected(self) -> None:
+        """Link's update mode finished: the bank is signed in again."""
+        with self._store.transaction() as conn:
+            done = conn.execute(
+                "UPDATE bank_links SET login_required_at = NULL WHERE item_id IS NOT NULL"
+            )
+        if done.rowcount == 0:
+            raise BankNotLinkedError()
+
+    def mark_login(self, item_id: str, *, required: bool) -> None:
+        with self._store.transaction() as conn:
+            conn.execute(
+                "UPDATE bank_links SET login_required_at = "
+                + ("COALESCE(login_required_at, clock_timestamp())" if required else "NULL")
+                + " WHERE item_id = %s",
+                (item_id,),
+            )
+
+    # -- webhooks ---------------------------------------------------------------------
+
+    async def handle_webhook(
+        self, headers: Mapping[str, str], body: bytes, *, now: float | None = None
+    ) -> WebhookOutcome:
+        """Verify Plaid's webhook, then read it. ``sync``: the caller syncs the deposits
+        after answering. A `BadSignatureError` reads nothing; a `PlaidError` is the key
+        Plaid could not give."""
+        token, kid = plaid.webhook_key_id(headers)
+        linked = await asyncio.to_thread(self.access)
+        if linked is None:
+            # Nothing linked: no keys to ask Plaid with, and nothing to change.
+            raise BadSignatureError("no bank account is linked")
+        jwk = self._webhook_keys.get(kid)
+        if jwk is None:
+            jwk = await plaid.verification_key(linked.keys, kid)
+            if len(self._webhook_keys) >= MAX_WEBHOOK_KEYS:
+                self._webhook_keys.clear()
+            self._webhook_keys[kid] = jwk
+        plaid.verify_webhook(token, jwk, body, now=time.time() if now is None else now)
+        try:
+            event = json.loads(body)
+        except ValueError:
+            return "ignored"
+        if not isinstance(event, dict) or event.get("item_id") != linked.item_id:
+            return "ignored"
+        kind, code = event.get("webhook_type"), event.get("webhook_code")
+        if kind == "TRANSACTIONS" and code == "SYNC_UPDATES_AVAILABLE":
+            return "sync"
+        if kind == "ITEM" and code == "ERROR":
+            error = event.get("error")
+            if isinstance(error, dict) and error.get("error_code") == plaid.LOGIN_REQUIRED:
+                await asyncio.to_thread(self.mark_login, linked.item_id, required=True)
+                return "login_required"
+        if kind == "ITEM" and code == "LOGIN_REPAIRED":
+            await asyncio.to_thread(self.mark_login, linked.item_id, required=False)
+            return "login_repaired"
+        return "ignored"
 
     async def link(self, public_token: str, account_ids: Sequence[str]) -> BankStatus:
         """Exchange Link's public token and keep the one chosen account. No account or
@@ -441,7 +524,8 @@ class BankLinks:
                 "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s,"
                 " item_id = NULL, account_id = NULL, account_name = NULL, account_type ="
                 " NULL, account_mask = NULL, linked_at = NULL, sync_cursor = NULL,"
-                " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL WHERE id = %s",
+                " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL,"
+                " login_required_at = NULL WHERE id = %s",
                 (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id, row["id"]),
             )
             _drop_deposits(conn, item_id)

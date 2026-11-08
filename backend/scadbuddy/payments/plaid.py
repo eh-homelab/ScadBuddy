@@ -37,6 +37,21 @@ Plaid's documented behaviour this relies on:
   https://plaid.com/docs/errors/transactions/). A pending transaction that posts is
   removed, and the posted one is added with a new ``transaction_id``
   (https://plaid.com/docs/transactions/transactions-data/).
+- Update mode: ``/link/token/create`` with the Item's ``access_token`` and no
+  ``products``; its ``public_token`` needs no exchange, as the access token does not change
+  (https://plaid.com/docs/link/update-mode/).
+- A webhook carries a ``Plaid-Verification`` JWT: reject it unless ``alg`` is ``ES256``;
+  get its ``kid``'s JWK from ``/webhook_verification_key/get`` (``key_id``); verify the
+  signature; reject an ``iat`` more than 5 minutes old; compare ``request_body_sha256``
+  with the SHA-256 of the raw body in constant time
+  (https://plaid.com/docs/api/webhooks/webhook-verification/). A non-2xx answer, or none in
+  10 seconds, is retried for up to 24 hours, and webhooks may come twice or out of order
+  (https://plaid.com/docs/api/webhooks/).
+- ``SYNC_UPDATES_AVAILABLE`` (``webhook_type`` ``TRANSACTIONS``) says new transactions are
+  ready (https://plaid.com/docs/api/products/transactions/#sync_updates_available). An
+  ``ITEM`` ``ERROR`` webhook names ``error.error_code``, ``ITEM_LOGIN_REQUIRED`` when the
+  bank needs the shop to sign in again through update mode; ``LOGIN_REPAIRED`` says the
+  Item left that state (https://plaid.com/docs/api/items/#webhooks).
 - ``/item/remove`` invalidates the access token (https://plaid.com/docs/api/items/#itemremove);
   ``ITEM_NOT_FOUND`` is an Item already removed, and ``INVALID_ACCESS_TOKEN`` a token
   Plaid no longer knows (https://plaid.com/docs/errors/invalid-input/).
@@ -44,12 +59,20 @@ Plaid's documented behaviour this relies on:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 import httpx
+from joserfc import errors as jose_errors
+from joserfc import jws, jwt
+from joserfc.jwk import ECKey
 from pydantic import BaseModel, ValidationError
+
+from scadbuddy.payments.provider import BadSignatureError
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +93,12 @@ KEYS_REFUSED: Final = frozenset({"INVALID_API_KEYS", "UNAUTHORIZED_ENVIRONMENT"}
 SYNC_COUNT: Final = 500
 #: A page whose data changed under it: the whole loop starts again from its first cursor.
 SYNC_MUTATION: Final = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+#: The header a webhook's JWT comes in, lower-cased.
+VERIFICATION_HEADER: Final = "plaid-verification"
+#: The oldest ``iat`` a webhook may carry.
+WEBHOOK_MAX_AGE_SECONDS: Final = 300
+#: The bank needs the shop to sign in again (Link's update mode).
+LOGIN_REQUIRED: Final = "ITEM_LOGIN_REQUIRED"
 #: Error codes that mean the Item is already gone at Plaid.
 GONE: Final = frozenset({"ITEM_NOT_FOUND", "INVALID_ACCESS_TOKEN"})
 
@@ -148,16 +177,22 @@ async def _post(keys: PlaidKeys, path: str, body: dict[str, Any]) -> dict[str, A
     )
 
 
-async def link_token(keys: PlaidKeys, *, user_id: str, webhook: str | None) -> str:
-    """A token for Link that shows only checking and savings accounts."""
+async def link_token(
+    keys: PlaidKeys, *, user_id: str, webhook: str | None, access_token: str | None = None
+) -> str:
+    """A token for Link that shows only checking and savings accounts; with the Item's
+    ``access_token``, one for update mode, which asks for no products."""
     body: dict[str, Any] = {
         "client_name": CLIENT_NAME,
         "language": "en",
         "country_codes": ["US"],
         "user": {"client_user_id": user_id},
-        "products": ["transactions"],
-        "account_filters": {"depository": {"account_subtypes": list(ACCOUNT_SUBTYPES)}},
     }
+    if access_token is None:
+        body["products"] = ["transactions"]
+        body["account_filters"] = {"depository": {"account_subtypes": list(ACCOUNT_SUBTYPES)}}
+    else:
+        body["access_token"] = access_token
     if webhook is not None:
         body["webhook"] = webhook
     found = await _post(keys, "/link/token/create", body)
@@ -237,3 +272,44 @@ async def transactions_sync(keys: PlaidKeys, access_token: str, cursor: str | No
         next_cursor=next_cursor,
         has_more=found.get("has_more") is True,
     )
+
+
+def webhook_key_id(headers: Mapping[str, str]) -> tuple[str, str]:
+    """The webhook's JWT and its ``kid``, read without verifying anything yet. A
+    `BadSignatureError` unless the token is there and says ``ES256``."""
+    token = next((v for k, v in headers.items() if k.lower() == VERIFICATION_HEADER), "")
+    try:
+        header = jws.extract_compact(token.encode()).protected
+    except (jose_errors.JoseError, ValueError, TypeError):
+        raise BadSignatureError("the webhook carries no readable Plaid-Verification") from None
+    kid = header.get("kid")
+    if header.get("alg") != "ES256" or not isinstance(kid, str) or not kid:
+        raise BadSignatureError("the webhook's Plaid-Verification is not ES256 with a kid")
+    return token, kid
+
+
+async def verification_key(keys: PlaidKeys, key_id: str) -> dict[str, Any]:
+    """The JWK Plaid signs webhooks with under ``key_id``."""
+    found = await _post(keys, "/webhook_verification_key/get", {"key_id": key_id})
+    key = found.get("key")
+    if not isinstance(key, dict):
+        raise PlaidError("Plaid's answer held no verification key")
+    return key
+
+
+def verify_webhook(token: str, jwk: Mapping[str, Any], body: bytes, *, now: float) -> None:
+    """A `BadSignatureError` unless ``token`` is signed by ``jwk``, at most
+    ``WEBHOOK_MAX_AGE_SECONDS`` old, and names ``body``'s SHA-256."""
+    try:
+        key = ECKey.import_key({k: jwk[k] for k in ("kty", "crv", "x", "y")})
+        claims = jwt.decode(token, key, algorithms=["ES256"]).claims
+    except (jose_errors.JoseError, ValueError, TypeError, KeyError):
+        raise BadSignatureError("the webhook signature does not match") from None
+    iat = claims.get("iat")
+    if not isinstance(iat, int | float) or now - iat > WEBHOOK_MAX_AGE_SECONDS:
+        raise BadSignatureError("the webhook is too old")
+    digest = claims.get("request_body_sha256")
+    if not isinstance(digest, str) or not hmac.compare_digest(
+        digest.encode(), hashlib.sha256(body).hexdigest().encode()
+    ):
+        raise BadSignatureError("the webhook body is not the one signed")

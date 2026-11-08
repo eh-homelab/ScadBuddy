@@ -1,17 +1,20 @@
 """`/api/v1/payments/bank` (#4961): the shop's checking or savings account, linked through
 Plaid Link. Beside the payment providers, not one of them: Plaid opens no payment request.
-Every write is a person's own (``auth/routes.py`` ``PERSON_ENDPOINTS``). No answer carries
-a Plaid key or the access token, and no account number exists here to carry. Problem
-types are ``https://scadbuddy.dev/problems/payments/<slug>``.
+Every write is a person's own (``auth/routes.py`` ``PERSON_ENDPOINTS``), but Plaid's
+webhook, which is public (``PUBLIC_ENDPOINTS``): its ``Plaid-Verification`` JWT is its only
+credential. No answer carries a Plaid key or the access token, and no account number
+exists here to carry. Problem types are ``https://scadbuddy.dev/problems/payments/<slug>``.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
 """
 
 import asyncio
+import logging
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, BackgroundTasks, Request, Response, status
 
+from scadbuddy.api.payment_webhooks import read_body
 from scadbuddy.core.problems import ApiError
 from scadbuddy.payments.bank import (
     AccessTokenMissingError,
@@ -24,11 +27,16 @@ from scadbuddy.payments.bank import (
     BankNotLinkedError,
     BankStatus,
     BankUnlinked,
+    BankWebhookAnswer,
     LinkToken,
 )
 from scadbuddy.payments.component import PaymentsDep
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
+from scadbuddy.payments.deposits import sync_deposits
 from scadbuddy.payments.plaid import PlaidError, PlaidUnavailableError
+from scadbuddy.payments.provider import BadSignatureError
+
+logger = logging.getLogger(__name__)
 
 PROBLEMS = "https://scadbuddy.dev/problems/payments/"
 
@@ -119,7 +127,10 @@ async def delete_bank_keys(payments: PaymentsDep) -> Response:
     "/link-token",
     response_model=LinkToken,
     summary="A token that opens Plaid Link",
-    description="409 `bank_not_configured` before the keys are saved.",
+    description=(
+        'Once an account is linked, the token is for Link\'s update mode ("Reconnect").'
+        " 409 `bank_not_configured` before the keys are saved."
+    ),
 )
 async def create_bank_link_token(payments: PaymentsDep) -> LinkToken:
     try:
@@ -168,3 +179,70 @@ async def delete_bank_link(payments: PaymentsDep) -> BankUnlinked:
         return await payments.bank.unlink()
     except _REFUSALS as error:
         raise _problem(error) from None
+
+
+@router.post(
+    "/reconnected",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Link's update mode finished: the bank is signed in again",
+    description='Clears "Reconnect". 409 `bank_not_linked` with nothing linked.',
+)
+async def reconnect_bank_link(payments: PaymentsDep) -> Response:
+    try:
+        await asyncio.to_thread(payments.bank.reconnected)
+    except _REFUSALS as error:
+        raise _problem(error) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _sync_logged(payments: PaymentsDep) -> None:
+    try:
+        await sync_deposits(payments.bank)
+    except Exception:
+        logger.exception("the deposit sync a Plaid webhook asked for failed")
+
+
+@router.post(
+    "/webhook",
+    response_model=BankWebhookAnswer,
+    summary="Plaid's signed webhook for the linked Item",
+    description=(
+        "Public: the `Plaid-Verification` JWT is the credential. 400 when it does not"
+        " verify (nothing changes), 413 above 256 KiB, 503 `provider_unavailable` when"
+        " Plaid could not give its key (Plaid sends it again). `SYNC_UPDATES_AVAILABLE`"
+        " syncs the deposits once the answer is sent; an `ITEM` `ERROR` with"
+        ' `ITEM_LOGIN_REQUIRED` shows "Reconnect"; `LOGIN_REPAIRED` clears it.'
+    ),
+)
+async def receive_bank_webhook(
+    request: Request, payments: PaymentsDep, later: BackgroundTasks
+) -> BankWebhookAnswer:
+    body = await read_body(request)
+    headers = {name.lower(): value for name, value in request.headers.items()}
+    try:
+        outcome = await payments.bank.handle_webhook(headers, body)
+    except BadSignatureError:
+        raise ApiError(
+            status.HTTP_400_BAD_REQUEST,
+            "the webhook signature does not match",
+            type_=PROBLEMS + "bad_signature",
+        ) from None
+    except PlaidError as error:
+        logger.warning("a Plaid webhook was not read: %s", error.code)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Plaid did not give the webhook's key",
+            type_=PROBLEMS + "provider_unavailable",
+        ) from None
+    except (CredentialUnreadableError, KekMissingError) as error:
+        logger.warning("a Plaid webhook was not read: %s", error)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "the Plaid keys are unavailable",
+            type_=PROBLEMS + "credential_unreadable",
+        ) from None
+    if outcome == "sync":
+        # Plaid wants an answer within 10 seconds; the sync runs after it.
+        later.add_task(_sync_logged, payments)
+    return BankWebhookAnswer(outcome=outcome)

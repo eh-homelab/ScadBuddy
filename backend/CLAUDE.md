@@ -1263,3 +1263,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
   topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
   deposit whose amount it changed or that it removed, so an open order page reloads.
+  Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
+  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
+  `verify_webhook`: ES256 only, the key by `kid` kept in memory, `iat` at most 5 minutes
+  old, the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`); a bad one
+  is 400 and changes nothing, a key Plaid could not give is 503 (Plaid sends it again).
+  `SYNC_UPDATES_AVAILABLE` runs `sync_deposits` after the answer (`BackgroundTasks`), the
+  sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
+  `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`
+  and Settings shows "Reconnect": the link token is then for Link's update mode (the
+  Item's `access_token`, no `products`), and `POST …/reconnected` (person) clears it, as do
+  `LOGIN_REPAIRED` and any sync that reads Plaid. A webhook for another Item is `ignored`.

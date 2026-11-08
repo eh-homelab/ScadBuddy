@@ -47,8 +47,14 @@ class PaymentsComponent:
         provider."""
         if self._bank is None:
             kek = settings_kek(self.core.settings.secret_key_file)
-            self._bank = BankLinks(self.orders.store, kek)
+            self._bank = BankLinks(self.orders.store, kek, webhook_url=self._webhook_url)
         return self._bank
+
+    def _webhook_url(self) -> str | None:
+        """Where Plaid sends the linked Item's webhooks (#4961); none without a public URL.
+        Live (#322): read on each link token."""
+        public = self.core.settings.public_url
+        return f"{public.rstrip('/')}/api/v1/payments/bank/webhook" if public else None
 
 
 PAYMENTS: Key[PaymentsComponent] = Key("payments")

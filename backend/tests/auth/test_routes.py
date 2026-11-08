@@ -286,8 +286,10 @@ def test_no_header_is_needed_where_none_can_be_sent() -> None:
 
 def test_only_the_webhook_is_public_among_payments_routes() -> None:
     classes = {endpoint_name(r): route_class(r) for r in ROUTES if "payment" in r.path}
-    assert [n for n, c in classes.items() if c == "public"] == [
-        "scadbuddy.api.payment_webhooks.receive_webhook"
+    assert sorted(n for n, c in classes.items() if c == "public") == [
+        # #4961: Plaid's webhook for the linked bank account.
+        "scadbuddy.api.bank_link.receive_bank_webhook",
+        "scadbuddy.api.payment_webhooks.receive_webhook",
     ]
     assert {n for n, c in classes.items() if c == "person"} == {
         "scadbuddy.api.payments.connect_provider",
@@ -299,6 +301,7 @@ def test_only_the_webhook_is_public_among_payments_routes() -> None:
         "scadbuddy.api.bank_link.create_bank_link_token",
         "scadbuddy.api.bank_link.create_bank_link",
         "scadbuddy.api.bank_link.delete_bank_link",
+        "scadbuddy.api.bank_link.reconnect_bank_link",
     }
 
 

@@ -34,7 +34,7 @@ export function setMockKeysUnreadable(unreadable: boolean): void {
   keysUnreadable = unreadable
 }
 
-const EMPTY: BankStatus = { configured: false, environment: null, account: null, linked_at: null, synced_at: null, sync_error: null }
+const EMPTY: BankStatus = { configured: false, environment: null, account: null, linked_at: null, synced_at: null, sync_error: null, login_required: false }
 let bank: BankStatus = { ...EMPTY }
 
 export function reset(): void {
@@ -47,7 +47,17 @@ export function reset(): void {
  * Saved keys and, with `linked`, the sandbox checking account, for a test's setup; `synced`
  * says the deposit sync read Plaid, `syncError` that its last read failed with that code.
  */
-export function mockBankLink({ linked, synced = false, syncError = null }: { linked: boolean; synced?: boolean; syncError?: string | null }): void {
+export function mockBankLink({
+  linked,
+  synced = false,
+  syncError = null,
+  loginRequired = false,
+}: {
+  linked: boolean
+  synced?: boolean
+  syncError?: string | null
+  loginRequired?: boolean
+}): void {
   bank = {
     configured: true,
     environment: 'sandbox',
@@ -55,6 +65,7 @@ export function mockBankLink({ linked, synced = false, syncError = null }: { lin
     linked_at: linked ? now() : null,
     synced_at: linked && synced ? now() : null,
     sync_error: linked ? syncError : null,
+    login_required: linked && loginRequired,
   }
 }
 
@@ -78,8 +89,13 @@ export const handlers = [
   }),
   http.post('/api/v1/payments/bank/link-token', ({ request }) => {
     if (!bank.configured) return notConfigured(request)
-    if (bank.account) return linkedRefusal(request)
+    // Once linked, the token is for Link's update mode ("Reconnect").
     return HttpResponse.json({ link_token: MOCK_LINK_TOKEN })
+  }),
+  http.post('/api/v1/payments/bank/reconnected', ({ request }) => {
+    if (!bank.account) return problem(request, 409, 'no bank account is linked', PROBLEMS + 'bank_not_linked')
+    bank = { ...bank, login_required: false }
+    return new HttpResponse(null, { status: 204 })
   }),
   http.post('/api/v1/payments/bank/link', async ({ request }) => {
     if (!bank.configured) return notConfigured(request)
@@ -98,7 +114,7 @@ export const handlers = [
       bank = { ...EMPTY }
       return HttpResponse.json({ removed_at_plaid: false, note: MOCK_KEYS_UNREADABLE })
     }
-    bank = { ...bank, account: null, linked_at: null, synced_at: null, sync_error: null }
+    bank = { ...bank, account: null, linked_at: null, synced_at: null, sync_error: null, login_required: false }
     return HttpResponse.json(keysRefused ? { removed_at_plaid: false, note: MOCK_REMOVE_AT_PLAID } : { removed_at_plaid: true, note: null })
   }),
 ]
