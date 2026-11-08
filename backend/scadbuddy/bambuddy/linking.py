@@ -46,6 +46,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.print_library.ids import is_native_id
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,9 @@ _last_library_scan: dict[int, float] = {}
 LAN_LINK_WINDOW = SCAN_AFTER
 #: How many subjects with a LAN start no archive names yet one prints list reads at
 #: most, newest start first, and how many of them it scans at most, and how many at once.
+#: The read skips the subjects this process scanned within `LAN_SCAN_INTERVAL`
+#: (`recent_lan_scans`, #5749), so newer subjects whose prints never reached Bambuddy
+#: cannot fill it and keep an older one from its scan.
 LAN_PENDING_LIMIT = 50
 LAN_SCANS_PER_CALL = 4
 LAN_SCAN_CONCURRENCY = 2
@@ -160,10 +164,15 @@ async def owned_queue_items(
 async def _slice_hashes(
     client: BambuddyClient, uploads: BambuddyUploadStore, output_id: str
 ) -> set[str]:
-    """The hash of every sliced file of the output, read from Bambuddy once and kept."""
+    """The hash of every sliced file of the output in Bambuddy's library, read from
+    Bambuddy once and kept. A native slice's id (`is_native_id`) names no file there, so
+    Bambuddy is never asked for it (#5749): `BambuddyUploadStore.native_slice_hashes`
+    gives its hash."""
     hashes: set[str] = set()
     for copy in await uploads.for_output(output_id):
         for sliced in copy.sliced:
+            if is_native_id(sliced.id):
+                continue
             file_hash = sliced.file_hash
             if file_hash is None:
                 try:
@@ -304,6 +313,11 @@ async def scan_library_by_hash(
         logger.exception(
             "could not scan a library file's prints by hash", extra={"library_file_id": file_id}
         )
+
+
+def recent_lan_scans(now: float) -> list[str]:
+    """The subjects whose LAN scan this process claimed within `LAN_SCAN_INTERVAL`."""
+    return sorted(key for key, at in _last_lan_scan.items() if now - at < LAN_SCAN_INTERVAL)
 
 
 def claim_lan_scan(subject: str, now: float) -> bool:

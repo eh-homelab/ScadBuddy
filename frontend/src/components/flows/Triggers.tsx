@@ -219,6 +219,12 @@ function TriggerRow({ trigger, onChanged, compact }: { trigger: FlowTrigger; onC
           {trigger.kind === 'schedule' && !trigger.paused && next ? `Next ${when(next)}. ` : ''}
           {!compact && `Made by ${actorText(trigger.created_by)}, ${timeAgo(trigger.created_at)}.`}
         </p>
+        {/* #4673: e.g. a newer built-in version it was not moved to. */}
+        {trigger.notice && (
+          <p role="note" className="text-foreground">
+            {trigger.notice}
+          </p>
+        )}
         {fires.length > 0 && (
           <ul aria-label="Last fires" className="flex flex-col gap-0.5">
             {fires.map((fire) => (

@@ -259,6 +259,9 @@ class Trigger(BaseModel):
     created_at: datetime
     updated_by: dict[str, Any] | None = None
     updated_at: datetime | None = None
+    #: What a person should know about it (#4673): a newer built-in flow exists that it
+    #: was not moved to. Cleared when its version changes.
+    notice: str | None = None
 
 
 class StandingGrant(BaseModel):

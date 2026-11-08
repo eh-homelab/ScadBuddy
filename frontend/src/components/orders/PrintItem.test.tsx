@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
+import type { Problem } from '../../api/types'
+import { REQUOTE_HINT } from './PrintItem'
 import { resetMockState } from '../../mocks/handlers'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
@@ -89,8 +91,34 @@ describe('PrintItem', () => {
     const run = within(dialog).getByTestId('run-item-print')
     await waitFor(() => expect(run).toBeEnabled())
     await user.click(run)
-    expect(await within(dialog).findByTestId('quote-error')).toHaveTextContent('needs a new quote')
+    const error = await within(dialog).findByTestId('quote-error')
+    expect(error).toHaveTextContent('needs a new quote')
+    // Not a setup that differs: no hint (#5732 review).
+    expect(error).not.toHaveTextContent(REQUOTE_HINT)
     expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('approved')
+  })
+
+  // #4673: a print whose setup differs from the quote's says what to do on this page.
+  it('adds the hint to a refusal whose setup differs from the quote', async () => {
+    vi.spyOn(api, 'printItem').mockRejectedValue(
+      new ApiError({
+        type: 'https://scadbuddy.dev/problems/orders/requote_needed',
+        title: 'Conflict',
+        status: 409,
+        detail: "item i needs a new quote before it prints: its print sends choices the quote was not sliced with",
+        reason: 'setup_differs',
+        differs: ['choices'],
+      } as Problem),
+    )
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    const error = await within(dialog).findByTestId('quote-error')
+    expect(error).toHaveTextContent('not sliced with.')
+    expect(error).toHaveTextContent("Quote the item again, or ask the assistant to print it with the quote's setup.")
   })
 
   it('is not offered before the order is accepted', async () => {
