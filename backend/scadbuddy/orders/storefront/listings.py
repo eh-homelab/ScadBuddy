@@ -27,13 +27,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import sys
+import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+import psycopg
 from fastapi import status
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -41,6 +42,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.pg_pool import record_connection
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, declares_pipeline
@@ -81,12 +83,19 @@ if TYPE_CHECKING:
 
 #: The ``blob_refs`` holder kind of a published listing's snapshot and media.
 HOLDER: Final = "storefront_listing"
-#: Refused unless the store is S3: the public site serves listing media as presigned
-#: GETs, and a visitor's render reads the snapshot from the content store (plan).
-NEEDS_S3: Final = f"{STOREFRONT_PROBLEMS}storefront_needs_s3"
+#: Seconds to wait for the publish lock's own connection.
+PUBLISH_LOCK_CONNECT_TIMEOUT: Final = 5
+#: The most publishes one process runs at once, each holding one connection of its own
+#: for its lock; one more is refused (503 ``listing_publish_busy``).
+PUBLISH_LOCKS_MAX: Final = 2
+#: The advisory lock a create takes, so two creates never take the same position.
+POSITION_LOCK: Final = f"{HOLDER}:position"
+#: The publish locks' name in `core/pg_pool.py`'s registry and in ``pg_stat_activity``.
+PUBLISH_LOCKS_NAME: Final = "scadbuddy-storefront-publish"
 #: How long a listing media URL the public site gets works.
 PUBLIC_MEDIA_TTL: Final = timedelta(hours=1)
-#: The public routes log the operator's text of `NEEDS_S3` at most this often (seconds).
+#: The public routes log the operator's text of ``storefront_needs_s3`` at most this
+#: often (seconds).
 NEEDS_S3_WARN_EVERY: Final = 60.0
 #: When the public routes last logged it (`time.monotonic`), or None.
 _needs_s3_warned: float | None = None
@@ -137,13 +146,63 @@ def _drop_holds(conn: Connection[DictRow], listing_id: str, keep: Collection[str
     )
 
 
+def _check_choices(body: ListingInput) -> None:
+    """422 ``listing_choice_empty`` for a parameter offered with nothing to choose: a
+    colour parameter whose listing has no filament checked, most often."""
+    for name, bound in body.params.items():
+        if isinstance(bound, ChoiceBound) and not bound.choices:
+            raise problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "listing_choice_empty",
+                f"{name!r} is offered with nothing to choose; for a colour parameter,"
+                " choose at least one filament, or lock it",
+                name=name,
+            )
+
+
+class _PublishLocks:
+    """The publish locks' own connections: at most :data:`PUBLISH_LOCKS_MAX`, recorded in
+    `core/pg_pool.py`'s registry as a pool of that size."""
+
+    name = PUBLISH_LOCKS_NAME
+
+    def __init__(self, conninfo: str) -> None:
+        self.conninfo = conninfo
+        self._open = 0
+        self._lock = threading.Lock()
+        record_connection(self)
+
+    @property
+    def max_size(self) -> int:
+        return PUBLISH_LOCKS_MAX
+
+    def open_connections(self) -> int:
+        return self._open
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._open >= PUBLISH_LOCKS_MAX:
+                return False
+            self._open += 1
+            return True
+
+    def give_back(self) -> None:
+        with self._lock:
+            self._open -= 1
+
+
 class ListingStore:
     def __init__(self, pool: Pool) -> None:
         self.pool = pool
+        conninfo = pool.conninfo
+        self._publish_locks = _PublishLocks(conninfo if isinstance(conninfo, str) else "")
 
     def create(self, body: ListingInput) -> Listing:
-        """A new listing, unpublished, after every other one."""
-        with self.pool.connection() as conn:
+        """A new listing, unpublished, after every other one; 422
+        ``listing_choice_empty`` for a choice with nothing to choose."""
+        _check_choices(body)
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
             row = conn.execute(
                 "INSERT INTO storefront_listings"
                 " (slug, commit, title, description, position, params, fixed, colours, media_ids)"
@@ -173,7 +232,9 @@ class ListingStore:
         self, listing_id: str, body: ListingInput, *, expected_updated_at: datetime
     ) -> Listing:
         """The listing replaced by ``body``, and unpublished; 409 ``listing_changed``
-        when it changed after ``expected_updated_at`` was read, 404 when it is gone."""
+        when it changed after ``expected_updated_at`` was read, 404 when it is gone, 422
+        ``listing_choice_empty`` for a choice with nothing to choose."""
+        _check_choices(body)
         slug, commit, title, description, params, fixed, colours, media_ids = self._fields(body)
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
@@ -275,22 +336,21 @@ class ListingStore:
         self,
         listing_id: str,
         *,
-        fixed: Mapping[str, ParamValue],
         snapshot: ListingSnapshot,
         media: Sequence[ListingMedia],
         expected_updated_at: datetime,
     ) -> Listing:
-        """The listing published with what ``publish`` captured. Holds of the listing
+        """The listing published with what ``publish`` captured (its effective values in
+        ``snapshot.fixed``; the row's ``fixed`` is left as the shop set it). Holds of the listing
         on any blob other than the snapshot and ``media`` are dropped (a republish's
         old ones). 409 ``listing_changed`` when it changed after it was read."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "UPDATE storefront_listings SET fixed = %s, snapshot = %s, media = %s,"
+                "UPDATE storefront_listings SET snapshot = %s, media = %s,"
                 " published = true, published_at = clock_timestamp(),"
                 " updated_at = clock_timestamp()"
                 f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
                 (
-                    Jsonb(dict(fixed)),
                     Jsonb(snapshot.model_dump(mode="json")),
                     Jsonb([item.model_dump(mode="json") for item in media]),
                     listing_id,
@@ -337,29 +397,53 @@ class ListingStore:
         """Take the listing's publish lock, or 409 ``listing_publishing`` when another
         publish of it runs: publishes of one listing never overlap, so a failing one
         never drops the holds a running one took. The lock is a session advisory lock on
-        a pooled connection kept until the returned function is called."""
-        lease = self.pool.connection()
-        conn = lease.__enter__()
+        a connection of its own, never the rows pool's: a publish's git, schema build and
+        uploads take seconds, and publishes running at once would otherwise keep the
+        pooled connections every other route needs. At most :data:`PUBLISH_LOCKS_MAX`
+        such connections are open at once; one more publish is 503
+        ``listing_publish_busy``. The returned function unlocks and closes it; closing
+        the connection alone also ends the lock."""
+        locks = self._publish_locks
+        if not locks.take():
+            raise problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "listing_publish_busy",
+                f"{PUBLISH_LOCKS_MAX} listings are being published already;"
+                " try again when one is done",
+            )
+        try:
+            conninfo = self.pool.conninfo
+            conn = psycopg.connect(
+                conninfo() if callable(conninfo) else conninfo,
+                autocommit=True,
+                connect_timeout=PUBLISH_LOCK_CONNECT_TIMEOUT,
+                application_name=PUBLISH_LOCKS_NAME,
+            )
+        except BaseException:
+            locks.give_back()
+            raise
         key = (f"{HOLDER}:{listing_id}",)
         try:
             row = conn.execute(
-                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", key
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", key
             ).fetchone()
-            if row is None or not row["got"]:
+            if row is None or not row[0]:
                 raise problem(
                     status.HTTP_409_CONFLICT,
                     "listing_publishing",
                     f"listing {listing_id!r} is being published; try again when it is done",
                 )
         except BaseException:
-            lease.__exit__(*sys.exc_info())
+            conn.close()
+            locks.give_back()
             raise
 
         def end() -> None:
             try:
                 conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", key)
             finally:
-                lease.__exit__(None, None, None)
+                conn.close()
+                locks.give_back()
 
         return end
 
@@ -397,6 +481,12 @@ def _whole_multiple(step: float, of: float) -> bool:
     return times >= 1 - 1e-9 and abs(times - round(times)) < 1e-9
 
 
+def _on_grid(offset: float, step: float) -> bool:
+    """Whether ``offset`` is a whole number of ``step``s, to a float's rounding."""
+    times = offset / step
+    return abs(times - round(times)) < 1e-9
+
+
 def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> None:
     """``value`` as the colour of one of the listing's filaments, or 422."""
     if not isinstance(value, str) or value.casefold() not in {c.casefold() for c in colours}:
@@ -430,12 +520,14 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
             float(n).is_integer() for n in (bound.min, bound.max, bound.step or 1)
         ):
             raise outside
-        if (
-            parameter.step is not None
-            and bound.step is not None
-            and not _whole_multiple(bound.step, parameter.step)
-        ):
-            raise outside
+        # On a schema with a step, the customer's values stay on its grid: a step that
+        # is a whole number of the schema's, from a least value on the grid.
+        if parameter.step is not None and parameter.step > 0:
+            if bound.step is None or not _whole_multiple(bound.step, parameter.step):
+                raise outside
+            origin = parameter.min if parameter.min is not None else 0.0
+            if not _on_grid(bound.min - origin, parameter.step):
+                raise outside
         return
     if isinstance(bound, TextBound):
         if parameter.type != "string" or parameter.options:
@@ -454,8 +546,14 @@ def checked_fixed(
     colours: Mapping[str, str],
 ) -> dict[str, ParamValue]:
     """The listing checked against ``schema`` and the price book's ``colours`` (by
-    filament id), and its fixed values with every parameter it does not name at the
-    schema's default (plan point 13). Raises the 422 of the first fault."""
+    filament id), and every value a render of it uses that the customer does not choose:
+    its fixed values, and every parameter it does not name at the schema's default
+    (plan point 13). Raises the 422 of the first fault.
+
+    A colour a customer may pick, or one the shop locked or left at its default, must be
+    a listing filament's (plan point 12). A parameter in the source's hidden group is
+    never in ``schema`` (`render/schema.py` `build_schema` leaves it out), so it is
+    neither checked nor fixed here: a render takes it from the source."""
     for filament_id in body.colours:
         if filament_id not in colours:
             raise _unprocessable(
@@ -484,7 +582,6 @@ def checked_fixed(
             continue
         if parameter.initial is not None and _takes(parameter, parameter.initial):
             fixed[parameter.name] = parameter.initial
-    # A locked colour is printed in a listing filament, set or defaulted alike.
     for name, value in fixed.items():
         if by_name[name].type == "color":
             _check_colour(name, value, offered)
@@ -565,7 +662,8 @@ async def _copy_media(
                 "listing_media_unknown", f"the template has no media {media_id!r}"
             ) from None
         key = f"listing-media-{await asyncio.to_thread(_sha256, path)}"
-        with path.open("rb") as data:
+        data = await asyncio.to_thread(path.open, "rb")
+        try:
             await content.put(
                 "media",
                 data,
@@ -573,6 +671,8 @@ async def _copy_media(
                 scope=BlobScope(slug=listing.slug, title=title),
                 key=key,
             )
+        finally:
+            await asyncio.to_thread(data.close)
         await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
         copied.append(
             ListingMedia(
@@ -590,11 +690,14 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
     back; 409 ``listing_changed`` when it
     was edited while it was being published; 409 ``listing_publishing`` while another
-    publish of it runs (it is refused, not queued)."""
+    publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
+    :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise _not_found(listing_id)
     snapshots = core.store.snapshots
+    # The public site serves listing media as presigned GETs, and a visitor's render
+    # reads the snapshot from the content store (plan).
     if core.store.backend != "s3" or snapshots is None:
         raise needs_s3()
     end = await asyncio.to_thread(store.begin_publish, listing.id)
@@ -618,8 +721,7 @@ async def _publish(
         return await asyncio.to_thread(
             store.mark_published,
             listing.id,
-            fixed=fixed,
-            snapshot=facts.model_copy(update={"snapshot_key": key}),
+            snapshot=facts.model_copy(update={"snapshot_key": key, "fixed": fixed}),
             media=media,
             expected_updated_at=listing.updated_at,
         )

@@ -4,6 +4,7 @@ template's commit and the content store, is in ``tests/api/test_storefront_listi
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -13,8 +14,16 @@ import psycopg
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from scadbuddy.core.pg_pool import PoolUse, pools
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.storefront.listings import HOLDER, ListingStore, checked_fixed
+from scadbuddy.orders.storefront.listings import (
+    HOLDER,
+    POSITION_LOCK,
+    PUBLISH_LOCKS_MAX,
+    PUBLISH_LOCKS_NAME,
+    ListingStore,
+    checked_fixed,
+)
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
@@ -61,7 +70,6 @@ def published(store: ListingStore, refs: BlobRefs) -> Listing:
     refs.add(SNAPSHOT.snapshot_key, HOLDER, listing.id)
     return store.mark_published(
         listing.id,
-        fixed={"height": 5},
         snapshot=SNAPSHOT,
         media=[],
         expected_updated_at=listing.updated_at,
@@ -105,7 +113,7 @@ def test_only_published_listings_are_listed_as_published(
     assert [listing.id for listing in store.published()] == [published.id]
     assert published.published and published.published_at is not None
     assert published.snapshot == SNAPSHOT
-    assert published.fixed == {"height": 5}
+    assert published.fixed == {}
 
 
 def test_editing_a_published_listing_unpublishes_it(
@@ -118,6 +126,15 @@ def test_editing_a_published_listing_unpublishes_it(
     assert holders(pg_pool, SNAPSHOT.snapshot_key) == []
     with refused_as("listing_changed"):
         store.update(published.id, body(), expected_updated_at=published.updated_at)
+
+
+def test_a_choice_with_nothing_to_choose_is_refused(store: ListingStore) -> None:
+    empty = body(params={"colour": {"kind": "choice", "choices": []}})
+    with refused_as("listing_choice_empty", 422):
+        store.create(empty)
+    listing = store.create(body())
+    with refused_as("listing_choice_empty", 422):
+        store.update(listing.id, empty, expected_updated_at=listing.updated_at)
 
 
 def test_an_edit_of_a_listing_that_is_gone_is_404(store: ListingStore) -> None:
@@ -155,7 +172,6 @@ def test_a_publish_against_an_edited_listing_is_refused(
     with refused_as("listing_changed"):
         store.mark_published(
             edited.id,
-            fixed={},
             snapshot=SNAPSHOT,
             media=[],
             expected_updated_at=published.updated_at,
@@ -174,7 +190,6 @@ def test_the_table_refuses_a_published_row_without_a_snapshot(
     "bound",
     [
         {"kind": "text", "max_length": 201},
-        {"kind": "choice", "choices": []},
         {"kind": "number", "min": 1},
         {"kind": "colour"},
     ],
@@ -299,3 +314,91 @@ def test_one_publish_of_a_listing_at_a_time(store: ListingStore) -> None:
     finally:
         end()
     store.begin_publish(listing.id)()
+
+
+def test_a_running_publish_holds_no_pooled_connection(store: ListingStore, pg_pool: PgPool) -> None:
+    """The publish lock is on a connection of its own: a publish's git, schema build and
+    uploads never keep one of the rows pool's connections."""
+    listings = [store.create(body(title=f"L{n}")) for n in range(PUBLISH_LOCKS_MAX)]
+    before = pg_pool.get_stats().get("pool_size", 0) - pg_pool.get_stats().get("pool_available", 0)
+    ends = [store.begin_publish(listing.id) for listing in listings]
+    try:
+        stats = pg_pool.get_stats()
+        assert stats.get("pool_size", 0) - stats.get("pool_available", 0) == before
+    finally:
+        for end in ends:
+            end()
+
+
+def test_publishes_at_once_are_capped_and_counted(store: ListingStore, pg_pool: PgPool) -> None:
+    """The publish locks' own connections are few, and the pool registry counts them."""
+    listings = [store.create(body(title=f"L{n}")) for n in range(PUBLISH_LOCKS_MAX + 1)]
+
+    def counted() -> PoolUse:
+        [use] = [
+            use
+            for use in pools()
+            if use.name == PUBLISH_LOCKS_NAME and use.conninfo == pg_pool.conninfo
+        ]
+        return use
+
+    assert counted().max_size == PUBLISH_LOCKS_MAX
+    ends = [store.begin_publish(listing.id) for listing in listings[:PUBLISH_LOCKS_MAX]]
+    try:
+        assert counted().open == PUBLISH_LOCKS_MAX
+        with refused_as("listing_publish_busy", 503):
+            store.begin_publish(listings[-1].id)
+    finally:
+        for end in ends:
+            end()
+    assert counted().open == 0
+    store.begin_publish(listings[-1].id)()
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        # No step on a slider whose schema has one: a customer could pick 1.05.
+        {"kind": "number", "min": 1, "max": 8, "step": None},
+        # A least value off the schema's grid (1, 1.5, 2, ...).
+        {"kind": "number", "min": 1.25, "max": 8, "step": 0.5},
+    ],
+)
+def test_a_bound_off_the_schemas_step_is_refused(bound: dict[str, Any]) -> None:
+    schema = CustomizerSchema.model_validate(
+        {
+            "parameters": [
+                {
+                    "name": "width",
+                    "type": "slider",
+                    "group": "Size",
+                    "initial": 2,
+                    "min": 1,
+                    "max": 8,
+                    "step": 0.5,
+                }
+            ]
+        }
+    )
+    with refused_as("listing_bounds_outside_schema", 422):
+        checked_fixed(schema, body(params={"width": bound}), {})
+
+
+def test_creates_wait_for_the_position_lock(store: ListingStore, pg_pool: PgPool) -> None:
+    """A create takes the position lock, so two at once never share a position."""
+    made: list[Listing] = []
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
+        worker = threading.Thread(target=lambda: made.append(store.create(body())))
+        worker.start()
+        worker.join(0.5)
+        assert made == []
+    worker.join(5)
+    assert len(made) == 1
+    threads = [threading.Thread(target=lambda: made.append(store.create(body()))) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    positions = [listing.position for listing in made]
+    assert len(set(positions)) == len(positions) == 7

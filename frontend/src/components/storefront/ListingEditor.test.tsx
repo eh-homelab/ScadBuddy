@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
-import type { Filament } from '../../api/types'
+import type { CustomizerSchema, Filament, Param } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import { ListingEditor } from './ListingEditor'
 import { defaultsFor, emptyDraft, listingInput, type ListingDraft } from './listingDraft'
@@ -22,8 +22,8 @@ const PLA: Filament = {
   updated_at: '2026-11-01T00:00:00Z',
 }
 
-function Harness({ seen }: { seen: ListingDraft[] }) {
-  const [draft, setDraft] = useState<ListingDraft>({ ...emptyDraft('name-keychain', COMMIT), ...defaultsFor(keychainSchema) })
+function Harness({ seen, schema = keychainSchema }: { seen: ListingDraft[]; schema?: CustomizerSchema }) {
+  const [draft, setDraft] = useState<ListingDraft>({ ...emptyDraft('name-keychain', COMMIT), ...defaultsFor(schema) })
   return (
     <ListingEditor
       draft={draft}
@@ -33,7 +33,7 @@ function Harness({ seen }: { seen: ListingDraft[] }) {
       }}
       models={[]}
       versions={[]}
-      schema={keychainSchema}
+      schema={schema}
       filaments={[PLA]}
       media={[]}
     />
@@ -93,5 +93,39 @@ describe('ListingEditor (#5282)', () => {
       params: { body_color: { kind: 'choice', choices: [] } },
     }
     expect(listingInput(draft, keychainSchema, [PLA]).params).toEqual({ body_color: { kind: 'choice', choices: ['#FF0000'] } })
+  })
+
+  it('locks a numeric select at one of its options, as a number', async () => {
+    const user = userEvent.setup()
+    const seen: ListingDraft[] = []
+    const holeSide = (keychainSchema.parameters ?? []).find((p) => p.name === 'hole_side') as Param
+    const lines: Param = {
+      ...holeSide,
+      name: 'lines',
+      caption: 'Lines',
+      initial: 1,
+      options: [
+        { name: 'One', value: 1 },
+        { name: 'Two', value: 2 },
+      ],
+    }
+    render(<Harness seen={seen} schema={{ ...keychainSchema, parameters: [...(keychainSchema.parameters ?? []), lines] }} />)
+    const group = screen.getByRole('group', { name: /Lines/ })
+    await user.click(within(group).getByRole('radio', { name: 'Locked at 1' }))
+    await user.click(within(group).getByRole('combobox', { name: 'Locked value of Lines' }))
+    await user.click(await screen.findByRole('option', { name: 'Two' }))
+    expect(last(seen).fixed['lines']).toBe(2)
+  })
+
+  it('locks a switch on or off', async () => {
+    const user = userEvent.setup()
+    const seen: ListingDraft[] = []
+    render(<Harness seen={seen} />)
+    const group = screen.getByRole('group', { name: /Keyring hole/ })
+    await user.click(within(group).getByRole('radio', { name: 'Locked at on' }))
+    const value = within(group).getByRole('switch', { name: 'Locked value of Keyring hole' })
+    expect(value).toBeChecked()
+    await user.click(value)
+    expect(last(seen).fixed['keyring_hole']).toBe(false)
   })
 })

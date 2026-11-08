@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { emptyDraft, lockedValue, MAX_TEXT_LENGTH, offerable, schemaBound, shownParams, type ListingDraft } from './listingDraft'
 
@@ -34,9 +35,8 @@ function shown(value: ParamValue | undefined): string {
   return String(value)
 }
 
-/** What a locked value typed into its field is, for a parameter of `param`'s type. */
+/** What a locked value typed into its field is, for a number or free text parameter. */
 function parsed(param: Param, text: string): ParamValue {
-  if (param.type === 'boolean') return text === 'true' || text === 'on'
   if (param.type === 'number' || param.type === 'integer' || param.type === 'slider') {
     const number = Number(text)
     return text.trim() === '' || Number.isNaN(number) ? text : number
@@ -139,6 +139,38 @@ function BoundFields({
   )
 }
 
+/**
+ * The field a locked value is set in: a switch for a boolean, the options for a select
+ * (each kept as its option's own value, so a numeric select stays a number), else text.
+ */
+function LockedField({ id, param, label, value, onChange }: { id: string; param: Param; label: string; value: ParamValue | undefined; onChange: (value: ParamValue) => void }) {
+  if (param.type === 'boolean') {
+    return <Switch id={id} aria-label={`Locked value of ${label}`} checked={value === true} onCheckedChange={(on) => onChange(on)} />
+  }
+  const options = param.options ?? []
+  if (param.type === 'select' && options.length > 0) {
+    const at = options.findIndex((option) => option.value === value)
+    return (
+      <Select value={at < 0 ? undefined : String(at)} onValueChange={(index) => {
+        const option = options[Number(index)]
+        if (option) onChange(option.value)
+      }}>
+        <SelectTrigger id={id} aria-label={`Locked value of ${label}`} className="w-full">
+          <SelectValue placeholder="Choose" />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option, index) => (
+            <SelectItem key={index} value={String(index)}>
+              {option.name || String(option.value)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    )
+  }
+  return <Input id={id} aria-label={`Locked value of ${label}`} value={value === undefined ? '' : String(value)} onChange={(event) => onChange(parsed(param, event.target.value))} />
+}
+
 function ParamRow({
   param,
   draft,
@@ -187,12 +219,7 @@ function ParamRow({
           <Label htmlFor={`${id}-value`} className="text-xs font-normal">
             Value
           </Label>
-          <Input
-            id={`${id}-value`}
-            aria-label={`Locked value of ${label}`}
-            value={value === undefined ? '' : String(value)}
-            onChange={(event) => onChange({ ...draft, fixed: { ...draft.fixed, [param.name]: parsed(param, event.target.value) } })}
-          />
+          <LockedField id={`${id}-value`} param={param} label={label} value={value} onChange={(next) => onChange({ ...draft, fixed: { ...draft.fixed, [param.name]: next } })} />
         </div>
       )}
     </fieldset>

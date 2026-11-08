@@ -3,7 +3,7 @@ import { ArrowDownIcon, ArrowUpIcon, GripVerticalIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
-import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, startingValues, type ListingDraft } from '../components/storefront/listingDraft'
+import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, startingValues, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
 import { useAsync } from '../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
@@ -13,22 +13,31 @@ import { Switch } from '@/components/ui/switch'
 
 /** The listing open in the editor: a saved one (its id and the `updated_at` it was read at) or a new one. */
 interface Open {
+  /**
+   * Which opening of a listing this is: kept through its edits, saves and publishes,
+   * new each time a listing is opened. An answer is applied only while its opening is
+   * still the open one, so a slow publish never puts back a listing the user left.
+   */
+  key: symbol
   id: string | null
   updatedAt: string | null
   published: boolean
   draft: ListingDraft
-  /** What was last saved, to tell whether the draft needs saving before a publish. */
+  /** What was last saved (`savedKey`), to tell whether the draft needs saving before a publish. */
   saved: string | null
 }
 
 function fresh(): Open {
-  return { id: null, updatedAt: null, published: false, draft: emptyDraft(), saved: null }
+  return { key: Symbol('listing'), id: null, updatedAt: null, published: false, draft: emptyDraft(), saved: null }
 }
 
-function opened(listing: StorefrontListing): Open {
+function opened(listing: StorefrontListing, key: symbol = Symbol('listing')): Open {
   const draft = draftOf(listing)
-  return { id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: null }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing) }
 }
+
+/** What page-wide actions (the order, the design-request switch) are busy and refused under. */
+const PAGE = Symbol('page')
 
 function message(error: unknown): string {
   return error instanceof ApiError || error instanceof Error ? error.message : String(error)
@@ -56,8 +65,10 @@ export function StorefrontPage() {
   const settings = useAsync(() => api.getSettings(), [])
   const [order, setOrder] = useState<StorefrontListing[] | null>(null)
   const [open, setOpen] = useState<Open | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  /** Whose actions run: the open listing's key, another listing's, or `PAGE`. */
+  const [busy, setBusy] = useState<ReadonlySet<symbol>>(new Set())
+  /** The last refusal, and whose it is: shown only on that listing (or page-wide). */
+  const [error, setError] = useState<{ key: symbol; text: string } | null>(null)
   const [requests, setRequests] = useState<boolean | null>(null)
   const [dragging, setDragging] = useState<number | null>(null)
   const [values, setValues] = useState<ParamValues | null>(null)
@@ -87,12 +98,29 @@ export function StorefrontPage() {
     if (current) setOpen({ ...open, draft: { ...open.draft, commit: current.commit } })
   }, [open, versions.data])
   useEffect(() => {
-    if (!open || !schema.data) return
+    if (!open || open.id !== null || !schema.data) return
     const { params, fixed } = open.draft
     if (Object.keys(params).length > 0 || Object.keys(fixed).length > 0) return
     const defaults = defaultsFor(schema.data)
     if (Object.keys(defaults.params).length === 0 && Object.keys(defaults.fixed).length === 0) return
     setOpen({ ...open, draft: { ...open.draft, ...defaults } })
+  }, [open, schema.data])
+
+  // A version without some of the listing's parameters: they go, or the editor could
+  // neither show nor unlock them and publish would refuse the listing.
+  useEffect(() => {
+    if (!open || !schema.data) return
+    const names = new Set((schema.data.parameters ?? []).map((param) => param.name))
+    const { params, fixed } = open.draft
+    if (Object.keys(params).every((name) => names.has(name)) && Object.keys(fixed).every((name) => names.has(name))) return
+    setOpen({
+      ...open,
+      draft: {
+        ...open.draft,
+        params: Object.fromEntries(Object.entries(params).filter(([name]) => names.has(name))),
+        fixed: Object.fromEntries(Object.entries(fixed).filter(([name]) => names.has(name))),
+      },
+    })
   }, [open, schema.data])
 
   const preview = useMemo(
@@ -106,28 +134,40 @@ export function StorefrontPage() {
     setOpen({ ...open, draft: next })
   }
 
-  async function act(run: () => Promise<void>) {
-    setBusy(true)
+  /** `run` as `key`'s action: busy while it runs, and its refusal kept as `key`'s. */
+  async function act(key: symbol, run: () => Promise<void>) {
+    setBusy((cur) => new Set(cur).add(key))
     setError(null)
     try {
       await run()
     } catch (caught) {
-      setError(message(caught))
+      setError({ key, text: message(caught) })
     } finally {
-      setBusy(false)
+      setBusy((cur) => {
+        const next = new Set(cur)
+        next.delete(key)
+        return next
+      })
     }
   }
 
-  /** The open listing saved if it changed; the saved listing. */
+  /** `next(cur)` applied while `key`'s opening is still the open listing; otherwise the open one is left alone. */
+  function whileOpen(key: symbol, next: (cur: Open) => Open | null) {
+    setOpen((cur) => (cur?.key === key ? next(cur) : cur))
+  }
+
+  /** The open listing saved if it changed; the saved listing, or null when nothing changed. */
   async function save(current: Open): Promise<StorefrontListing | null> {
     const body: StorefrontListingInput = listingInput(current.draft, schema.data, filaments)
-    const text = JSON.stringify(body)
+    const text = savedKey(body)
     if (current.id !== null && current.saved === text) return null
+    const why = unsaveable(body)
+    if (why) throw new Error(why)
     const saved =
       current.id === null || current.updatedAt === null
         ? await api.createStorefrontListing(body)
         : await api.updateStorefrontListing(current.id, body, current.updatedAt)
-    setOpen({ ...opened(saved), draft: current.draft, saved: text })
+    whileOpen(current.key, (cur) => ({ ...opened(saved, cur.key), draft: cur.draft, saved: text }))
     return saved
   }
 
@@ -138,40 +178,44 @@ export function StorefrontPage() {
 
   async function onSave() {
     if (!open) return
-    await act(async () => {
-      await save(open)
+    const current = open
+    await act(current.key, async () => {
+      await save(current)
       refresh()
     })
   }
 
   async function onPublish() {
     if (!open) return
-    await act(async () => {
-      const saved = await save(open)
-      const id = saved?.id ?? open.id
+    const current = open
+    await act(current.key, async () => {
+      const saved = await save(current)
+      const id = saved?.id ?? current.id
       if (id === null) return
       const published = await api.publishStorefrontListing(id)
-      setOpen({ ...opened(published), draft: open.draft, saved: JSON.stringify(listingInput(open.draft, schema.data, filaments)) })
+      // The row as published: its `fixed` keeps only the shop's locks (the defaults it
+      // filled are the snapshot's), so it is the body that was saved.
+      whileOpen(current.key, (cur) => ({ ...opened(published, cur.key), draft: cur.draft, saved: storedKey(published) }))
       refresh()
     })
   }
 
   async function onUnpublish() {
     if (!open?.id) return
-    const id = open.id
-    await act(async () => {
+    const { id, key } = open
+    await act(key, async () => {
       const unpublished = await api.unpublishStorefrontListing(id)
-      setOpen({ ...opened(unpublished), draft: open.draft, saved: open.saved })
+      whileOpen(key, (cur) => ({ ...opened(unpublished, key), draft: cur.draft, saved: cur.saved }))
       refresh()
     })
   }
 
   async function onDelete() {
     if (!open?.id) return
-    const id = open.id
-    await act(async () => {
+    const { id, key } = open
+    await act(key, async () => {
       await api.deleteStorefrontListing(id)
-      setOpen(null)
+      whileOpen(key, () => null)
       refresh()
     })
   }
@@ -179,20 +223,38 @@ export function StorefrontPage() {
   async function reorder(ids: string[]) {
     const byId = new Map(rows.map((row) => [row.id, row]))
     setOrder(ids.flatMap((id) => byId.get(id) ?? []))
-    await act(async () => {
-      setOrder(await api.orderStorefrontListings(ids))
+    await act(PAGE, async () => {
+      try {
+        setOrder(await api.orderStorefrontListings(ids))
+      } catch (caught) {
+        // The server's list again: a refused order (a listing added or removed
+        // elsewhere) must not stay on screen, nor make every later move refused too.
+        refresh()
+        throw caught
+      }
     })
   }
 
   async function setRequestsEnabled(on: boolean) {
     setRequests(on)
-    await act(async () => {
-      const next = await api.putSettings({ storefront_requests_enabled: on })
-      setRequests(next.storefront_requests_enabled)
+    await act(PAGE, async () => {
+      try {
+        const next = await api.putSettings({ storefront_requests_enabled: on })
+        setRequests(next.storefront_requests_enabled)
+      } catch (caught) {
+        // The stored value again, not the one that was refused.
+        setRequests(null)
+        throw caught
+      }
     })
   }
 
   const ids = rows.map((row) => row.id)
+  /** Whether the open listing's own action runs. */
+  const openBusy = open !== null && busy.has(open.key)
+  /** Whether any action runs: the order is not moved meanwhile. */
+  const anyBusy = busy.size > 0
+  const shownError = error && (error.key === PAGE || error.key === open?.key) ? error.text : null
   const requestsOn = requests ?? settings.data?.storefront_requests_enabled ?? false
 
   return (
@@ -218,9 +280,9 @@ export function StorefrontPage() {
             </Button>
           </div>
         </div>
-        {error && (
+        {shownError && (
           <p role="alert" className="text-[13px] text-warn">
-            {error}
+            {shownError}
           </p>
         )}
         <div className="grid gap-4 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)_minmax(0,20rem)]">
@@ -235,11 +297,13 @@ export function StorefrontPage() {
               {rows.map((row, index) => (
                 <li
                   key={row.id}
-                  draggable
-                  onDragStart={() => setDragging(index)}
+                  draggable={!anyBusy}
+                  onDragStart={() => {
+                    if (!anyBusy) setDragging(index)
+                  }}
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={() => {
-                    if (dragging !== null && dragging !== index) void reorder(moved(ids, dragging, index))
+                    if (!anyBusy && dragging !== null && dragging !== index) void reorder(moved(ids, dragging, index))
                     setDragging(null)
                   }}
                   onDragEnd={() => setDragging(null)}
@@ -261,14 +325,14 @@ export function StorefrontPage() {
                     <span className="w-full truncate font-medium">{row.title}</span>
                     {row.published ? <Badge>Published</Badge> : <Badge variant="outline">Not published</Badge>}
                   </button>
-                  <Button variant="ghost" size="icon-sm" aria-label={`Move ${row.title} up`} disabled={busy || index === 0} onClick={() => void reorder(moved(ids, index, index - 1))}>
+                  <Button variant="ghost" size="icon-sm" aria-label={`Move ${row.title} up`} disabled={anyBusy || index === 0} onClick={() => void reorder(moved(ids, index, index - 1))}>
                     <ArrowUpIcon />
                   </Button>
                   <Button
                     variant="ghost"
                     size="icon-sm"
                     aria-label={`Move ${row.title} down`}
-                    disabled={busy || index === rows.length - 1}
+                    disabled={anyBusy || index === rows.length - 1}
                     onClick={() => void reorder(moved(ids, index, index + 1))}
                   >
                     <ArrowDownIcon />
@@ -291,19 +355,19 @@ export function StorefrontPage() {
                   media={media}
                 />
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" disabled={busy || !draft.title || !draft.commit} onClick={() => void onSave()}>
+                  <Button variant="outline" disabled={openBusy || !draft.title || !draft.commit} onClick={() => void onSave()}>
                     Save
                   </Button>
-                  <Button disabled={busy || !draft.title || !draft.commit} onClick={() => void onPublish()}>
+                  <Button disabled={openBusy || !draft.title || !draft.commit} onClick={() => void onPublish()}>
                     Publish
                   </Button>
                   {open.published && (
-                    <Button variant="outline" disabled={busy} onClick={() => void onUnpublish()}>
+                    <Button variant="outline" disabled={openBusy} onClick={() => void onUnpublish()}>
                       Unpublish
                     </Button>
                   )}
                   {open.id !== null && !open.published && (
-                    <Button variant="destructive" disabled={busy} onClick={() => void onDelete()}>
+                    <Button variant="destructive" disabled={openBusy} onClick={() => void onDelete()}>
                       Delete
                     </Button>
                   )}

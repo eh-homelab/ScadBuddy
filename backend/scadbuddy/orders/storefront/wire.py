@@ -4,7 +4,10 @@ view of a published listing (`PublicListing`).
 
 A listing offers one commit of a template. Each parameter a customer may change has a
 bound (``ParamBound``) inside the schema's own; every other parameter is fixed. Publish
-fixes the parameters the listing does not name at the schema's defaults (plan point 13).
+fixes the parameters the listing does not name at the schema's defaults (plan point 13):
+the row's ``fixed`` keeps only the shop's own locks, and the published snapshot's
+``fixed`` holds every value a render uses, so a republish at another commit takes that
+commit's defaults.
 """
 
 from __future__ import annotations
@@ -39,12 +42,13 @@ class NumberBound(BaseModel):
 
 class ChoiceBound(BaseModel):
     """One of ``choices``. For a ``// color`` parameter, each choice is the colour of one
-    of the listing's filaments."""
+    of the listing's filaments. An empty list is refused when the listing is saved (422
+    ``listing_choice_empty``), with a sentence that names the parameter."""
 
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["choice"]
-    choices: list[ParamValue] = Field(min_length=1)
+    choices: list[ParamValue]
 
 
 class TextBound(BaseModel):
@@ -62,7 +66,8 @@ ParamBound = Annotated[NumberBound | ChoiceBound | TextBound, Field(discriminato
 class ListingSnapshot(BaseModel):
     """What publish read from the commit, so a visitor's render needs no git (plan
     point 2): the schema, whether the template is a pipeline, its name, its library
-    pins, and the key of its source snapshot in the content store."""
+    pins, the key of its source snapshot in the content store, and every value a render
+    of the listing uses that the customer does not choose."""
 
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
 
@@ -72,6 +77,10 @@ class ListingSnapshot(BaseModel):
     template_name: str
     libraries: list[ModelLibrary]
     snapshot_key: str
+    #: Every parameter the listing does not offer: the shop's locks, and each other one
+    #: at this commit's default (plan point 13). Read this, never the row's ``fixed``,
+    #: for what a published listing renders with.
+    fixed: dict[str, ParamValue] = Field(default_factory=dict)
 
 
 class ListingMedia(BaseModel):

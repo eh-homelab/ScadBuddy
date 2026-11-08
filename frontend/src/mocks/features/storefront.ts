@@ -42,7 +42,15 @@ function stamp(): string {
 }
 
 function refused(status: number, slug: string, detail: string) {
-  return problem(status, status === 404 ? 'Not Found' : 'Conflict', detail, { type: PROBLEMS + slug })
+  const title = status === 404 ? 'Not Found' : status === 422 ? 'Unprocessable Content' : 'Conflict'
+  return problem(status, title, detail, { type: PROBLEMS + slug })
+}
+
+/** The backend's 422 `listing_choice_empty` (`orders/storefront/listings.py` `_check_choices`), or null. */
+function emptyChoice(body: StorefrontListingInput) {
+  const name = Object.entries(body.params ?? {}).find(([, bound]) => bound.kind === 'choice' && bound.choices.length === 0)?.[0]
+  if (name === undefined) return null
+  return refused(422, 'listing_choice_empty', `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`)
 }
 
 function sorted(): StorefrontListing[] {
@@ -76,6 +84,8 @@ export const handlers = [
 
   http.post(base, async ({ request }) => {
     const body = (await request.json()) as StorefrontListingInput
+    const empty = emptyChoice(body)
+    if (empty) return empty
     const at = stamp()
     const listing: StorefrontListing = {
       ...fields(body),
@@ -104,6 +114,8 @@ export const handlers = [
   http.put(`${base}/:id`, async ({ params, request }) => {
     const id = String(params['id'])
     const { listing: body, updated_at } = (await request.json()) as { listing: StorefrontListingInput; updated_at: string }
+    const empty = emptyChoice(body)
+    if (empty) return empty
     const found = listings.find((l) => l.id === id)
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
     if (found.updated_at !== updated_at) return refused(409, 'listing_changed', `listing '${id}' changed since it was read`)
@@ -129,6 +141,8 @@ export const handlers = [
         template_name: found.slug,
         libraries: [],
         snapshot_key: `src-${found.slug}-${found.commit}`,
+        // The backend fills every unnamed parameter's default in here; the mock has no schema.
+        fixed: { ...found.fixed },
       },
     }
     listings = listings.map((l) => (l.id === id ? published : l))
