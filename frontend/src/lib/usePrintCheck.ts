@@ -60,7 +60,8 @@ function processKey(request: string | null): string | null {
  * has read them for this source and `processKey` (#5686): a settled edit of
  * `part_settings` alone does not read the preset again. A check that asked and got none
  * (`process_part_settings: null`: the preset could not be read, or the check refused
- * first) does not count, so the next check asks again.
+ * first) does not count, so the next check asks again. A dialog that stops asking
+ * (it closed) drops what was read, so it reads the preset again when it opens again.
  */
 export function usePrintCheck(
   source: PrintSource | undefined,
@@ -74,6 +75,10 @@ export function usePrintCheck(
   // The newest answer to a check that asked for the process's values (#5686). Read
   // through a ref, so its arrival does not start another check.
   const [read, setRead] = useState<Answer | null>(null)
+  // #5698: no values are asked for while the dialog is closed (its controls are not
+  // shown), so what was read is dropped then, and the dialog reads the preset again
+  // when it opens again: a preset edited in Bambuddy meanwhile is picked up.
+  if (!processValues && read !== null) setRead(null)
   const readNow = useLatest(read)
   const state = useAsync<Answer | null>(async () => {
     const current = latest.current
