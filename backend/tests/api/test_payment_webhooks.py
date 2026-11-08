@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -267,24 +267,19 @@ def test_a_provider_that_does_not_answer_is_provider_unavailable(
     assert _webhook_error(client) == ("provider_unavailable", True)
 
 
-def test_a_success_clears_the_failure_whatever_this_process_clock_says(
+def test_a_success_takes_its_start_from_the_credentials_clock(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The success's start is the database's time too: a replica whose clock runs behind
-    still clears a failure written before it began."""
+    """The success's start is ``PaymentCredentials.now`` (the database's clock, which
+    ``test_credentials.py`` pins), never this process's: a start read there as before the
+    failure leaves the failure standing."""
     _, req = linked_request(client)
     body, headers = signed_event("wrong", paid(req))
     assert client.post(HOOK, content=body, headers=headers).status_code == 400
-
-    class Behind(datetime):
-        @classmethod
-        def now(cls, tz: tzinfo | None = None) -> Behind:
-            return cls(1999, 1, 1, tzinfo=UTC)
-
-    monkeypatch.setattr("scadbuddy.payments.service.datetime", Behind)
+    monkeypatch.setattr(PaymentCredentials, "now", lambda self: datetime(1999, 1, 1, tzinfo=UTC))
     body, headers = signed_event("s3cret", paid(req))
     assert client.post(HOOK, content=body, headers=headers).status_code == 200
-    assert _webhook_error(client) == (None, False)
+    assert _webhook_error(client) == ("signature", True)
 
 
 def test_a_failure_to_keep_the_category_keeps_the_original_answer(
