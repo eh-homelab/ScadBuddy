@@ -80,8 +80,8 @@ def form(request: httpx.Request) -> dict[str, list[str]]:
 
 def test_the_registry_offers_stripe() -> None:
     assert providers(fake=False)["stripe"] is STRIPE
-    assert set(providers(fake=False)) == {"stripe", "paypal"}
-    assert set(providers(fake=True)) == {"stripe", "paypal", "fake"}
+    assert set(providers(fake=False)) == {"stripe", "paypal", "square"}
+    assert set(providers(fake=True)) == {"stripe", "paypal", "square", "fake"}
 
 
 def test_stripe_asks_for_two_secrets() -> None:

@@ -553,6 +553,35 @@ PayPal if it is not wanted. ScadBuddy captures only orders it made (a request id
 `custom_id`), but use a REST app of its own all the same. A chargeback or reversal
 (`PAYMENT.CAPTURE.REVERSED`) is not tracked: the request stays paid.
 
+#### Square (#5666)
+
+In the Square Developer Console, open the application, choose Sandbox or Production, and
+add a webhook subscription with the notification URL
+`https://<public host>/api/v1/payments/webhooks/square` and the events `payment.created`,
+`payment.updated`, `refund.created` and `refund.updated`
+([webhooks](https://developer.squareup.com/docs/webhooks/overview)). Then, in
+Settings → Payments, connect Square with the environment (`sandbox` or `production`), the
+location ID that takes the payments, the notification URL exactly as the subscription
+has it, the access token and the subscription's signature key. Square signs each webhook
+over that URL and the body, so a URL that differs by one character refuses every webhook
+([validate notifications](https://developer.squareup.com/docs/webhooks/step3validate)).
+The access token needs `ORDERS_READ`, `ORDERS_WRITE`, `PAYMENTS_READ`, `PAYMENTS_WRITE`
+and `MERCHANT_PROFILE_READ`
+([permissions](https://developer.squareup.com/docs/oauth-api/square-permissions)).
+ScadBuddy checks that the location is active. The page then shows
+"Connected as Square location … (sandbox)" or "(production)". Each payment request is a
+Square payment link for the request's amount, named for the order, with the request in
+its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).
+A completed payment is recorded on the request, tip included; a bank (ACH) payment shows
+as `pending` until it completes, and as `failed` when it does not. A declined card leaves
+the request open: the customer can try again on the same link. The Square fee comes from the
+payment's processing fee, which Square may add in a later `payment.updated`, and is
+recorded on the order's costs once. Each refund is recorded once, for its own amount,
+when Square says it completed; one that is then rejected or fails gets a payment that
+cancels it. A cancelled request's payment link is deleted, which cancels its Square
+order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
+Cash needs no provider: record it as a manual payment.
+
 ### Authentication on the deployment (#4975)
 
 What signing in is and what each `SCADBUDDY_AUTH_MODE` does is under "Signing in"

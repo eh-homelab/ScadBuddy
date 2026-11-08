@@ -1,0 +1,14 @@
+{
+  "order": {
+    "id": "o4b7saqp4HzhNttf5AJxC0Srjd4F",
+    "location_id": "L88917AVBK2S5",
+    "state": "COMPLETED",
+    "version": 4,
+    "total_money": {
+      "amount": 700,
+      "currency": "USD"
+    },
+    "created_at": "2026-11-08T15:00:01.000Z",
+    "updated_at": "2026-11-08T17:10:00.000Z"
+  }
+}
