@@ -219,8 +219,7 @@ def set_request_link(
         " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END,"
         " pay_token_hash = CASE WHEN %s THEN %s ELSE pay_token_hash END"
         f" WHERE id = %s RETURNING {_VIEW}",
-        (provider_ref, hosted_url, link_error, close_pending, new_link, pay_token_hash,
-         request_id),
+        (provider_ref, hosted_url, link_error, close_pending, new_link, pay_token_hash, request_id),
     ).fetchone()
     assert row is not None
     return PaymentRequestView.model_validate(row)

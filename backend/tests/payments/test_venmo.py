@@ -296,5 +296,5 @@ async def test_connect_refuses_venmo_on_without_the_storefront_url(shop: PayShop
     payments = service(shop, storefront=None)
     body = ProviderConnect(settings=dict(SETTINGS), secrets={"client_secret": "s"})
     with pytest.raises(FieldError) as refused:
-        await payments.connect("paypal", body)
+        await payments.connect("paypal", body, shop_currency="USD")
     assert refused.value.loc == ("settings", "venmo")
