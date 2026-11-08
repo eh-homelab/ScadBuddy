@@ -69,6 +69,15 @@ if RELEASE_ASSET_CURL="$work/curl" "$script" "$work/drift" >"$work/out"; then
 fi
 grep -q 'Bambu Studio: .*assets/10 serves' "$work/out" || fail "names the drifted pin: $(cat "$work/out")"
 
+# temporal.download serving another archive than the pinned amd64 sha256.
+make_root "$work/temporal" 10 "$(sha 10)"
+sed -i "s/^ARG TEMPORAL_CLI_SHA256_AMD64=.*/ARG TEMPORAL_CLI_SHA256_AMD64=$(sha 98)/" "$work/temporal/Dockerfile"
+if RELEASE_ASSET_CURL="$work/curl" "$script" "$work/temporal" >"$work/out"; then
+  fail "a temporal.download archive that drifted should fail"
+fi
+grep -q 'Temporal CLI amd64 (temporal.download): https://temporal.download/.* serves sha256' "$work/out" ||
+  fail "names the temporal.download drift: $(cat "$work/out")"
+
 make_root "$work/gone" 404 "$(sha 404)"
 if RELEASE_ASSET_CURL="$work/curl" "$script" "$work/gone" >"$work/out"; then
   fail "an asset that cannot be fetched should fail"
@@ -93,5 +102,6 @@ fi
 # The repo's own Dockerfile and ci.yml: every pin is found.
 RELEASE_ASSET_CURL="$work/nocurl" "$script" --resolve "$here/../.." >"$work/out" ||
   fail "the repo's pins should resolve: $(cat "$work/out")"
+[[ "$(grep -c '^found:' "$work/out")" == 6 ]] || fail "six of the repo's pins found: $(cat "$work/out")"
 
 echo "release-asset-pins: all tests passed"
