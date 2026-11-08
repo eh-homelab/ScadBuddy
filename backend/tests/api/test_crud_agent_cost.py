@@ -53,7 +53,8 @@ def test_the_agent_reports_a_sessions_spend_once(client: TestClient) -> None:
         50,
         f"ai_session:{SESSION}",
     )
-    assert entry["created_by"] == {"kind": "agent", "principal": "person:owner", "session": SESSION}
+    by = entry["created_by"]
+    assert (by["kind"], by["principal"], by["session"]) == ("agent", "person:owner", SESSION)
     assert again.json() == {"entry": entry, "written": False}
     costs = client.get(f"/api/v1/orders/{order_id}/costs").json()
     (line,) = costs["items"]

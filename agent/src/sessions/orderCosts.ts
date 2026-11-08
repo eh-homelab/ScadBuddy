@@ -1,4 +1,4 @@
-import type { Sql } from 'postgres'
+import type { ReservedSql, Sql } from 'postgres'
 import type { TouchedCall, TouchedSink } from './touched.js'
 
 // The assistant's spend on an order (#5330, job cost spec 2026-11-05 §4.4). A session works
@@ -14,16 +14,19 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // The spend since the last report is split equally between the orders still to report; an
 // order with one revised item gets the entry on that item, one with several on the order.
 // The backend writes one entry per order and session, so an order already reported in this
-// session records nothing more. A report the route refuses for good (404 the order gone,
-// 409 a currency no rate reaches, 422 a body it cannot take) is dropped and carried none of
-// the spend, which the next order's report gets. Any other failure (no credential yet or a
+// session records nothing more. A report the route refuses for good (404 the order gone, since
+// an item gone falls back to the order; 409 a currency no rate reaches; 422 a body it cannot
+// take) is dropped, and its share is counted as carried: no other order's entry takes it, so
+// it is in no entry. Any other failure (no credential yet or a
 // dead one, 401 and 403; 429; a 5xx; the backend out of reach) keeps it, with the share it
 // sent (`attempted_usd`), and the next report sends that same share again: an answer lost
 // after the backend wrote the entry loses no spend. A share the backend found under one minor
 // unit of the order's currency (it answers no entry) stays to report, with the next turn's
 // spend. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it leaves waits
-// for the next turn's end. The finish activity does not wait for `report`, and a session runs
-// one report at a time in this process.
+// for the next turn's end. The finish activity does not wait for `report`. A session runs one
+// report at a time across replicas (a session-level advisory lock on a reserved connection,
+// freed with it if the process dies). `sweep` (at start and hourly, main.ts) reports what a
+// session's last turn left, for a session no turn is running.
 // Neither `record` nor `report` ever throws: a cost report never fails a call or a turn.
 
 export const REVISION_TOOLS: ReadonlySet<string> = new Set(['order_item_revision_add', 'order_item_revision_add_after_acceptance'])
@@ -52,8 +55,12 @@ export const ASSISTANT_COST_PATH = (orderId: string) => `/api/v1/internal/crud/a
 export const REPORT_TIMEOUT_MS = 5_000
 /** How long all of one turn's reports may take. */
 export const REPORT_DEADLINE_MS = 15_000
-/** The route's refusals that no later try mends: the order gone, its currency, the body. */
+/** The route's refusals that no later try mends: the order gone (an item gone falls back to the order), its currency, the body. */
 const FINAL_REFUSALS: ReadonlySet<number> = new Set([404, 409, 422])
+/** The advisory lock a session's report holds, by `hashtextextended` of this plus the session id. */
+const LOCK_PREFIX = 'ai_session_order_costs:'
+/** How long a row waits before the sweep reports it: past any turn that could still report it. */
+export const SWEEP_AFTER = '15 minutes'
 /** Less time left than this, and the rest wait for the next turn's end. */
 const MIN_POST_MS = 1_000
 
@@ -100,8 +107,6 @@ export class OrderCosts implements TouchedSink {
   private readonly post: PostCost
   private readonly onError: ((err: unknown) => void) | undefined
   private readonly now: () => number
-  /** The sessions with a report running in this process. */
-  private readonly running = new Set<string>()
 
   constructor(sql: Sql, post: PostCost, onError?: (err: unknown) => void, options: { now?: () => number } = {}) {
     this.sql = sql
@@ -133,26 +138,46 @@ export class OrderCosts implements TouchedSink {
    * answer for, else an equal part of the session's spend not yet carried or sent. Never throws.
    */
   async report(sessionId: string): Promise<void> {
-    // A report already running for the session sends what this one would; what it leaves
-    // waits for the next turn's end.
-    if (this.running.has(sessionId)) return
-    this.running.add(sessionId)
+    let conn: ReservedSql | undefined
     try {
-      await this.send(sessionId)
+      conn = await this.sql.reserve()
+      const key = `${LOCK_PREFIX}${sessionId}`
+      const [lock] = await conn<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`
+      // A report already running for the session (here or on another replica) sends what
+      // this one would; what it leaves waits for the next turn's end or the sweep.
+      if (!lock?.locked) return
+      try {
+        await this.send(conn, sessionId)
+      } finally {
+        await conn`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+      }
     } catch (err) {
       this.onError?.(err)
     } finally {
-      this.running.delete(sessionId)
+      conn?.release()
     }
   }
 
-  private async send(sessionId: string): Promise<void> {
+  /** Reports every session no turn is running that has orders left to report for SWEEP_AFTER. Never throws. */
+  async sweep(): Promise<void> {
+    try {
+      const sessions = await this.sql<{ session_id: string }[]>`
+        SELECT DISTINCT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
+        WHERE c.reported_at IS NULL AND c.at < now() - ${SWEEP_AFTER}::interval
+          AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')`
+      for (const { session_id } of sessions) await this.report(session_id)
+    } catch (err) {
+      this.onError?.(err)
+    }
+  }
+
+  private async send(sql: ReservedSql, sessionId: string): Promise<void> {
     const deadline = this.now() + REPORT_DEADLINE_MS
-    const pending = await this.sql<Pending[]>`
+    const pending = await sql<Pending[]>`
       SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs
       WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
     if (pending.length === 0) return
-    const [row] = await this.sql<{ cost: number; carried: number; principal: string }[]>`
+    const [row] = await sql<{ cost: number; carried: number; principal: string }[]>`
       SELECT s.cost_usd AS cost, s.owner_id AS principal,
              (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
               FROM ai_session_order_costs WHERE session_id = s.id) AS carried
@@ -176,7 +201,7 @@ export class OrderCosts implements TouchedSink {
       if (left < MIN_POST_MS) return
       const amount = order.attempted ?? share
       if (order.attempted === null) {
-        await this.sql`
+        await sql`
           UPDATE ai_session_order_costs SET attempted_usd = ${amount / order.items.length}
           WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
       }
@@ -192,14 +217,14 @@ export class OrderCosts implements TouchedSink {
       )
       if (answer === 'failed') continue
       if (answer === 'deferred') {
-        await this.sql`
+        await sql`
           UPDATE ai_session_order_costs SET attempted_usd = NULL
           WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
         continue
       }
-      await this.sql`
+      await sql`
         UPDATE ai_session_order_costs
-        SET reported_at = now(), reported_usd = ${answer === 'recorded' ? this.sql`COALESCE(attempted_usd, 0)` : 0}, attempted_usd = NULL
+        SET reported_at = now(), reported_usd = COALESCE(attempted_usd, 0), attempted_usd = NULL
         WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
     }
   }

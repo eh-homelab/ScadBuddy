@@ -1319,12 +1319,17 @@ class Lifecycle:
         """The assistant's spend in one session (§4.4, #5330): one ``assistant`` entry,
         source ``ai_session:<id>``, in the order's currency at ``usd_rate`` (converted
         under the order's lock, as a time entry's rate is), its note keeping the USD
-        figure. A second report of the session returns the first entry and writes
-        nothing, whatever its amount; a first report under one minor unit writes nothing
+        figure. An item that is gone or not the order's puts the entry on the order. A
+        second report of the session returns the first entry and writes nothing, whatever
+        its amount; a first report under one minor unit writes nothing
         and answers ``None``, so the agent keeps it to report with more spend."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            items = self._entry_item(conn, order, order_item_id)
+            # The item the session revised may be gone by now (a draft item deleted before
+            # the report landed): the spend still counts, on the order.
+            found = None if order_item_id is None else self.store.item(order_item_id, conn=conn)
+            items = [found] if found is not None and found.order_id == order.id else []
+            order_item_id = items[0].id if items else None
             factor = usd_rate.factor(order.currency)
             if factor is None:
                 raise LifecycleError(

@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { crudCostPoster, type AssistantCostReport } from '../src/sessions/orderCosts.js'
+import { http, HttpResponse } from 'msw'
+import { setupServer } from 'msw/node'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { tiersUpTo } from '../src/auth/principal.js'
+import type { TouchedCall } from '../src/sessions/touched.js'
+import { crudCostPoster, REVISION_TOOLS, type AssistantCostReport } from '../src/sessions/orderCosts.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
+import { runToolWithOutcome } from '../src/tools/registry.js'
+import { BACKEND, services } from './helpers/mcp.js'
 
 // The assistant-cost report's client (#5330): the CRUD route's own 4xx is final, anything
 // else (a 5xx, a proxy's answer, an older API without the route, no answer) is sent again.
@@ -44,5 +51,32 @@ describe('crudCostPoster', () => {
       throw new TypeError('fetch failed')
     }
     expect(await crudCostPoster('http://api', down)(REPORT, 1_000)).toBe('failed')
+  })
+})
+
+const server = setupServer()
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
+
+describe('the revision tools as OrderCosts sees them', () => {
+  it.each([...REVISION_TOOLS])('%s reports a backend refusal as a failed call', async (name) => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/:order/items/:item/revisions*`, () =>
+        HttpResponse.json({ type: 'https://scadbuddy.dev/problems/orders/item_locked', title: 'locked', status: 409 }, { status: 409 }),
+      ),
+    )
+    const seen: TouchedCall[] = []
+    const tool = ALL_TOOLS.find((t) => t.name === name)!
+    const run = await runToolWithOutcome(tool, { order_id: 'o1', item_id: 'i1', output_id: 'out1' }, {
+      ...services({ touched: { record: async (call) => void seen.push(call) } }),
+      principal: { id: 'test', kind: 'browser', tiers: tiersUpTo('outward') },
+      session: '0b0e3c55-6f1e-4a39-9d0e-8a1c2b3d4e5f',
+      gate: 'workflow',
+      progress: async () => {},
+      signal: new AbortController().signal,
+    })
+    expect(run.outcome).toBe('error')
+    expect(seen.map((c) => [c.tool.name, c.ok])).toEqual([[name, false]])
   })
 })

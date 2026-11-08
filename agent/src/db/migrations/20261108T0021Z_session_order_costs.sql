@@ -3,7 +3,8 @@
 -- backend as one `assistant` cost entry per order (src/sessions/orderCosts.ts). Written by
 -- the tool call that made the revision; `reported_at` is set once the backend recorded the
 -- entry (or refused it for good), and `reported_usd` is the part of the session's
--- `cost_usd` that report carried, so the next report carries only the spend since.
+-- `cost_usd` that report carried (a refused share too, which is then in no entry), so the
+-- next report carries only the spend since.
 -- `attempted_usd` is the share a report sent and has no answer for yet: the next report
 -- sends that same share again, so an answer lost after the backend wrote it loses no spend.
 CREATE TABLE ai_session_order_costs (

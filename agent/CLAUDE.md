@@ -35,8 +35,10 @@ assistant's spend on an order. A session's successful `order_item_revision_add` 
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
 turn) reports the session's `cost_usd` since its last report, split equally between its
 orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s
-for the turn's reports in all, one report per session at a time in a process). Only the
-route's own 404, 409 or 422 drops that order's report. Anything else (401 or 403 while there
+for the turn's reports in all, one report per session at a time across replicas, by an
+advisory lock; `sweep` at start and hourly reports what a session's last turn left). Only the
+route's own 404 (the order gone: an item gone falls back to the order), 409 or 422 drops
+that order's report, its share in no entry. Anything else (401 or 403 while there
 is no live credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the
 share it sent (`attempted_usd`), sent again as it was at the next turn's end, so a lost
 answer loses no spend; an answer with no entry (under one minor unit) or the deadline keeps

@@ -399,6 +399,12 @@ const orderCosts = database
       (err) => console.error('order costs: could not record or report:', (err as Error).message),
     )
   : undefined
+if (database && orderCosts && role.http) {
+  // What a session's last turn left to report (#5330), at start and hourly.
+  const sweep = () => void database.ready().then((ok) => (ok ? orderCosts.sweep() : undefined))
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 if (database && orderCosts) {
   toolServices.touched = touchedSinks(
     new SessionResources(database.sql, (err) => console.error('session resources: could not record a call:', (err as Error).message)),

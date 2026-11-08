@@ -92,7 +92,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     expect(posted).toEqual([{ orderId: 'c', orderItemId: 'c1', sessionId: id, principal: 'person:owner', costUsd: '0.50000000' }])
   })
 
-  it('keeps a report that failed for the next, and drops one refused for good', async () => {
+  it('keeps a report that failed for the next, and leaves a refused share unattributed', async () => {
     const id = await session(1)
     await revise(id, 'a', 'a1')
     answer = 'failed'
@@ -108,9 +108,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     await spend(id, 1.25)
     answer = 'refused'
     await costs.report(id)
-    // A refused order carried none of the spend: the next order gets it.
+    // The refused share is no other order's: the next order gets only the spend since.
     answer = 'recorded'
     await revise(id, 'c', 'c1')
+    await spend(id, 1.5)
     await costs.report(id)
     expect(posted.map((p) => [p.orderId, p.costUsd])).toEqual([
       ['gone', '0.25000000'],
@@ -137,7 +138,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     expect(Number(row!.total)).toBeCloseTo(3)
   })
 
-  it('runs one report of a session at a time', async () => {
+  it('runs one report of a session at a time, across replicas', async () => {
     const id = await session(1)
     await revise(id, 'a', 'a1')
     let release!: () => void
@@ -148,10 +149,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
       return 'recorded'
     })
     const first = slow.report(id)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    await slow.report(id)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    // Another replica's OrderCosts finds the session's lock taken and sends nothing.
+    await costs.report(id)
     release()
     await first
+    expect(posted.map((p) => p.orderId)).toEqual(['a'])
+    await costs.report(id)
+    expect(posted.map((p) => p.orderId)).toEqual(['a'])
+  })
+
+  it('sweeps the orders left to report of a session no turn is running', async () => {
+    const idle = await session(1)
+    const busy = await session(1)
+    const fresh = await session(1)
+    await revise(idle, 'a', 'a1')
+    await revise(busy, 'b', 'b1')
+    await revise(fresh, 'c', 'c1')
+    await db.sql`UPDATE ai_session_order_costs SET at = now() - interval '1 hour' WHERE session_id IN (${idle}, ${busy})`
+    await db.sql`UPDATE ai_sessions SET status = 'running' WHERE id = ${busy}`
+    await costs.sweep()
     expect(posted.map((p) => p.orderId)).toEqual(['a'])
   })
 

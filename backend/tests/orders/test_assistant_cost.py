@@ -13,11 +13,12 @@ from scadbuddy.orders.models import Actor
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import Shop
+from tests.orders.test_lifecycle import BY, Shop
 
 pytestmark = pytest.mark.requires_postgres
 
 SESSION = "0b0e3c55-6f1e-4a39-9d0e-8a1c2b3d4e5f"
+OTHER_SESSION = "1c1f4d66-7a2f-4b4a-8e1f-9b2d3c4e5f60"
 AGENT = Actor(kind="agent", principal="person:owner", session=SESSION)
 
 
@@ -137,15 +138,30 @@ def test_a_repeat_report_under_one_minor_unit_returns_the_first_entry(shop: Shop
     assert (again, written) == (first, False)
 
 
-def test_an_item_of_another_order_is_refused(shop: Shop) -> None:
-    order, _ = shop.accepted()
+def test_an_item_gone_or_of_another_order_puts_the_entry_on_the_order(shop: Shop) -> None:
+    """The item the session revised was deleted before the report landed (a draft item),
+    or is not this order's: the spend still counts, on the order."""
+    order = shop.order()
+    item = shop.item(order)
+    shop.lifecycle.delete_item(order.id, item.id, BY)
     _, other = shop.accepted()
-    with pytest.raises(LifecycleError):
-        shop.lifecycle.add_assistant_cost(
-            order.id,
-            session_id=SESSION,
-            order_item_id=other.id,
-            cost_usd=Decimal("1"),
-            usd_rate=UsdRate(Decimal("1"), "USD"),
-            by=AGENT,
-        )
+    rate = UsdRate(Decimal("1"), "USD")
+    gone, _ = shop.lifecycle.add_assistant_cost(
+        order.id,
+        session_id=SESSION,
+        order_item_id=item.id,
+        cost_usd=Decimal("1"),
+        usd_rate=rate,
+        by=AGENT,
+    )
+    assert gone is not None and (gone.order_item_id, gone.amount_minor) == (None, 100)
+    elsewhere, _ = shop.lifecycle.add_assistant_cost(
+        order.id,
+        session_id=OTHER_SESSION,
+        order_item_id=other.id,
+        cost_usd=Decimal("1"),
+        usd_rate=rate,
+        by=AGENT,
+    )
+    assert elsewhere is not None and elsewhere.order_item_id is None
+    assert shop.rows.cost_entries(other.order_id) == []
