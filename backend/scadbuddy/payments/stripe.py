@@ -31,17 +31,18 @@ Stripe's documented behaviour this relies on:
   (https://docs.stripe.com/api/events/object#event_object-data-previous_attributes).
   A Refund is recorded once it is ``succeeded``, under the event id ``refund:<id>``, so
   its ``refund.created`` and a later ``refund.updated`` record it once.
-- A refund can fail after it succeeded: the bank returns the money, Stripe adds it back to
-  the balance, the Refund's status moves to ``failed``, and Stripe sends ``refund.failed``
-  (https://docs.stripe.com/refunds#failed-refunds). Such a Refund carries a
-  ``failure_balance_transaction``, the adjustment that reverses the initial balance
-  transaction (https://docs.stripe.com/api/refunds/object#refund_object-failure_balance_transaction).
-  Only that, ``failed`` with a ``failure_balance_transaction``, from ``refund.failed`` or
-  ``refund.updated``, is one ``refund_failed`` event, ``refund-failed:<id>``, naming the
-  refund's own event id (``reverses``), so it reverses once (#5681). A Refund that failed
-  with none took no money, and a ``canceled`` one never reached the customer
-  (https://docs.stripe.com/refunds#cancel-refund): both are ``other``, so no event waits
-  for a refund that was never recorded.
+- A refund can fail: the bank returns the money, Stripe adds it back to the balance, the
+  Refund's status moves to ``failed``, and Stripe sends ``refund.failed``
+  (https://docs.stripe.com/refunds#failed-refunds). It can fail without ever succeeding
+  (``insufficient_funds`` past the pending window), and a refund that succeeded can come
+  back (``requires_action``) and then be ``canceled``, which is a kind of failure too
+  (https://docs.stripe.com/refunds#refunds-that-require-action,
+  https://docs.stripe.com/refunds#cancel-refund). So ``failure_balance_transaction`` does
+  not tell whether ScadBuddy recorded the refund: every ``failed`` or ``canceled`` Refund,
+  from ``refund.failed`` or ``refund.updated``, is one ``refund_failed`` event,
+  ``refund-failed:<id>``, naming the refund's own event id (``reverses``). The lifecycle
+  reverses the refund when it was recorded, and otherwise keeps the failure so the refund
+  told later writes nothing (#5681).
 - Events can arrive in any order (https://docs.stripe.com/webhooks#event-ordering), and a
   non-2xx answer makes Stripe send the event again
   (https://docs.stripe.com/webhooks#automatic-retries).
@@ -395,11 +396,11 @@ class StripeProvider:
         credential: Credential,
         refund: dict[str, Any],
     ) -> ProviderEvent | None:
-        """A succeeded Refund, keyed by its own id, for its own amount; or one that took
-        money and failed (``failure_balance_transaction`` set), which reverses it."""
+        """A succeeded Refund, keyed by its own id, for its own amount; or a failed or
+        cancelled one, which reverses it."""
         status = refund.get("status")
         refund_key = f"refund:{_path_id(refund['id'])}"
-        if status == "failed" and refund.get("failure_balance_transaction"):
+        if status in ("failed", "canceled"):
             return ProviderEvent(
                 event_id=f"refund-failed:{_path_id(refund['id'])}",
                 kind="refund_failed",

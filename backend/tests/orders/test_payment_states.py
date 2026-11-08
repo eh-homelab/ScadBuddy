@@ -287,53 +287,41 @@ def test_a_failed_refund_told_again_is_replayed(shop: PayShop) -> None:
     assert _provider_payments(shop, order) == [700, -200, 200]
 
 
-def test_a_failed_refund_before_its_refund_is_too_early_and_leaves_no_row(
+def test_a_failure_before_its_refund_is_recorded_at_once_and_the_late_refund_writes_nothing(
     shop: PayShop,
 ) -> None:
-    """Stripe does not keep event order: the failure can arrive before the refund. While
-    the event is young it is refused with nothing written, so the provider sends it again,
-    and the retry after the refund reverses it."""
+    """Stripe does not keep event order, and a refund that never succeeded fails too. The
+    failure is recorded at once with no payment and no retry; a succeeded snapshot of the
+    same refund told after it writes nothing, so the two cancel out."""
     order, _ = shop.linked()
     shop.lifecycle.record_provider_event("fake", SETTLED)
-    with pytest.raises(EventTooEarlyError):
-        shop.lifecycle.record_provider_event("fake", REFUND_FAILED)
-    assert _outcomes(shop) == ["recorded"]
-    shop.lifecycle.record_provider_event("fake", REFUND)
     assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "recorded"
-    assert _provider_payments(shop, order) == [700, -200, 200]
-
-
-@pytest.mark.parametrize("created_at", [timedelta(hours=25), None])
-def test_a_failed_refund_never_recorded_is_ignored_once_old(
-    shop: PayShop, created_at: timedelta | None
-) -> None:
-    """A refund still pending when it failed wrote no row, so there is nothing to cancel;
-    once the event is past the retry window (or tells no time) it is recorded as ignored,
-    so a poison event is not answered 503 for ever."""
-    order, _ = shop.linked()
-    shop.lifecycle.record_provider_event("fake", SETTLED)
-    old = REFUND_FAILED.model_copy(
-        update={"created_at": None if created_at is None else datetime.now(UTC) - created_at}
-    )
-    assert shop.lifecycle.record_provider_event("fake", old) == "ignored"
     assert _provider_payments(shop, order) == [700]
+    assert shop.lifecycle.record_provider_event("fake", REFUND) == "ignored"
+    assert _provider_payments(shop, order) == [700]
+    assert _outcomes(shop) == ["recorded", "recorded", "ignored"]
+
+
+def test_a_failure_for_a_refund_never_told_needs_no_time_or_open_request(
+    shop: PayShop,
+) -> None:
+    """No window: an old event, one with no time, or one on an ended request is recorded
+    at once, never refused for a retry."""
+    order, req = shop.linked()
+    shop.lifecycle.cancel_payment_request(order.id, req.id, BY)
+    old = REFUND_FAILED.model_copy(update={"created_at": None})
+    assert shop.lifecycle.record_provider_event("fake", old) == "recorded"
+    assert _provider_payments(shop, order) == []
 
 
 def test_a_failed_refund_of_a_refund_told_but_not_recorded_is_ignored(shop: PayShop) -> None:
-    """The refund's event came and wrote no money (no amount): nothing to wait for."""
+    """The refund's event came and wrote no money (no amount): nothing to reverse."""
     order, _ = shop.linked()
     shop.lifecycle.record_provider_event("fake", SETTLED)
     bare = REFUND.model_copy(update={"amount_minor": None})
     assert shop.lifecycle.record_provider_event("fake", bare) == "ignored"
     assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
     assert _provider_payments(shop, order) == [700]
-
-
-def test_a_failed_refund_on_an_ended_request_is_ignored(shop: PayShop) -> None:
-    """A cancelled request was never paid by this provider, so no refund is coming."""
-    order, req = shop.linked()
-    shop.lifecycle.cancel_payment_request(order.id, req.id, BY)
-    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
 
 
 def test_a_failed_refund_takes_its_amount_and_currency_from_the_refund(

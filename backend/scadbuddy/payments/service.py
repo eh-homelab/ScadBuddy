@@ -313,15 +313,21 @@ class Payments:
         except ProviderNotFoundError:
             raise
         except EventTooEarlyError as early:
-            await asyncio.to_thread(self._credentials.set_webhook_error, provider, "out_of_order")
+            await self._note_webhook_error(provider, "out_of_order")
             raise ProviderUnavailableError(str(early)) from None
         except Exception as failed:
-            await asyncio.to_thread(
-                self._credentials.set_webhook_error, provider, _webhook_error(failed)
-            )
+            await self._note_webhook_error(provider, _webhook_error(failed))
             raise
         await asyncio.to_thread(self._credentials.clear_webhook_error, provider, since=began)
         return outcome
+
+    async def _note_webhook_error(self, provider: str, error: WebhookError) -> None:
+        """Keep the category; a failure to keep it is logged, never raised over the
+        webhook's own failure, so the route still answers for that one."""
+        try:
+            await asyncio.to_thread(self._credentials.set_webhook_error, provider, error)
+        except Exception:
+            logger.exception("could not keep the webhook failure of %s (%s)", provider, error)
 
     async def _handle_webhook(
         self, provider: str, headers: Mapping[str, str], body: bytes

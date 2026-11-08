@@ -971,13 +971,18 @@ class Lifecycle:
         if event.kind == "fee":
             return self._late_fee(conn, order, found, provider, event, by)
         if event.kind == "refund_failed":
-            return self._reverse_refund(conn, order, found, provider, event, by)
+            return self._reverse_refund(conn, order, provider, event, by)
         if event.kind not in ("paid", "refunded"):
             return "ignored", None
         if event.currency != order.currency:
             return "currency_mismatch", None
         if event.kind == "refunded" and event.amount_minor is None:
             # No amount: a guess at a full refund could be wrong, so nothing is written.
+            return "ignored", None
+        if event.kind == "refunded" and payments.reversed_by_failure(
+            conn, provider, event.event_id
+        ):
+            # #5681: the refund's own failure was told first, so the money never left.
             return "ignored", None
         if event.kind == "paid" and self._paid_by(conn, order, found, provider):
             # A hosted page is paid once: this is the same money told again.
@@ -1015,36 +1020,22 @@ class Lifecycle:
         return "recorded", payment
 
     def _reverse_refund(
-        self,
-        conn: Conn,
-        order: Order,
-        found: PaymentRequestView,
-        provider: str,
-        event: ProviderEvent,
-        by: Actor,
+        self, conn: Conn, order: Order, provider: str, event: ProviderEvent, by: Actor
     ) -> tuple[EventOutcome, Payment | None]:
-        """#5681: a refund the provider recorded and then could not pay out. A positive
-        payment cancels the refund's negative one, with its amount, provider, request and
+        """#5681: a refund that failed or was cancelled. When the refund was recorded, a
+        positive payment cancels its negative one, with its amount, provider, request and
         reference taken from the refund's own row (in the order's currency), never from the
         event, so the customer's page can pair them. A refund closes no request, so this
-        opens or closes none, and the balance follows from the payments sum. The provider
-        sends this only for a refund that took money (Stripe: ``failed`` with a
-        ``failure_balance_transaction``); a refund told without money (no amount) has
-        nothing to reverse and is ignored. Events come in any order, so a failure whose
-        refund was not told yet is `EventTooEarlyError`, as `_late_fee`'s: nothing is
-        written and the provider sends it again, while the request is open, pending or
-        paid and the event is younger than `FEE_RETRY_WINDOW`; after that it is ignored."""
+        opens or closes none, and the balance follows from the payments sum. A refund not
+        told yet (it never succeeded, or its event comes later: the provider does not keep
+        order) is recorded at once with no payment and no retry; the event's row names the
+        refund (``payment_events.reverses``), so the refund told after it writes nothing
+        (``_apply_event``). A refund told without money (no amount) is ignored."""
         if event.reverses is None:
             return "ignored", None
         told, refund_id = payments.told_event(conn, provider, event.reverses)
         if not told:
-            young = (
-                event.created_at is not None
-                and datetime.now(UTC) - event.created_at < FEE_RETRY_WINDOW
-            )
-            if found.status not in ("open", "pending", "paid") or not young:
-                return "ignored", None
-            raise EventTooEarlyError(f"the {provider} refund this failure reverses is not told yet")
+            return "recorded", None
         refund = next(
             (p for p in self.store.payments(order.id, conn=conn) if p.id == refund_id), None
         )

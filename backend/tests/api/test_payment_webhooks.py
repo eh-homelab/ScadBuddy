@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.payments.credentials import PaymentCredentials
 from scadbuddy.payments.fake import FAKE, signed_event
 from scadbuddy.payments.provider import ProviderUnavailableError
 from tests.api.test_auth_enforce import ENABLED, HEADER, PUBLIC, _app, _sign_in
@@ -264,6 +265,24 @@ def test_a_provider_that_does_not_answer_is_provider_unavailable(
     body, headers = signed_event("s3cret", paid(req))
     assert client.post(HOOK, content=body, headers=headers).status_code == 503
     assert _webhook_error(client) == ("provider_unavailable", True)
+
+
+def test_a_failure_to_keep_the_category_keeps_the_original_answer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The category is a note: when writing it fails, the webhook still answers for the
+    original failure, and the write's failure is logged."""
+    _, req = linked_request(client)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(PaymentCredentials, "set_webhook_error", broken)
+    body, headers = signed_event("wrong", paid(req))
+    refused = client.post(HOOK, content=body, headers=headers)
+    assert refused.status_code == 400
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/payments/bad_signature"
+    assert "could not keep the webhook failure" in caplog.text
 
 
 def test_a_fee_before_its_payment_is_out_of_order(client: TestClient) -> None:

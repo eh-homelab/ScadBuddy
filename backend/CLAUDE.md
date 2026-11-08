@@ -864,14 +864,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
   manual payment, and a disconnect is refused while one is pending. A `refund_failed`
-  event (#5681; Stripe sends it only for a Refund `failed` with a
-  `failure_balance_transaction`, one that took money, and maps any other failed or
-  `canceled` Refund to `other`) names the refund's event id (`ProviderEvent.reverses`)
-  and writes a positive payment that cancels that refund's row, with the amount,
-  provider, request and reference of that row, never the event's
-  (`Lifecycle._reverse_refund`); a refund told without money is `ignored`, one not told
-  yet is `EventTooEarlyError` (503) while the request is open, pending or paid and the
-  event is younger than `FEE_RETRY_WINDOW`, then `ignored`; no request's status changes. `parse_webhook` is
+  event (#5681; Stripe sends it for every `failed` or `canceled` Refund) names the
+  refund's event id (`ProviderEvent.reverses`, kept on its `payment_events` row). When
+  that refund was recorded, it writes a positive payment that cancels the refund's row,
+  with the amount, provider, request and reference of that row, never the event's
+  (`Lifecycle._reverse_refund`). When the refund was not told yet, the failure is
+  recorded at once with no payment and no retry, and the refund told after it is
+  `ignored` (`payments.reversed_by_failure`), so the two cancel out in either order. A
+  refund told without money is `ignored`; no request's status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
@@ -880,7 +880,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
   `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
   (`last_webhook_error`: `signature`, `provider_unavailable`, `out_of_order` (an
-  `EventTooEarlyError`) or `handler_error`, and `last_webhook_error_at`; #5684), never a
+  `EventTooEarlyError`, today the late fee's) or `handler_error`, and
+  `last_webhook_error_at`; #5684; a failure to write it is logged, never raised over the
+  webhook's own), never a
   provider's text; the next success clears it only when the failure is older than that
   success's start (`clear_webhook_error`), and a reconnect clears it; Settings shows it
   (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.
