@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { PartSettings, PrintCheck, PrintRunRequest } from '../api/types'
+import type { PartSettings, PartSettingsMap, PrintCheck, PrintRunRequest } from '../api/types'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { ANALYSIS_DEBOUNCE_MS } from './useAnalysis'
 import { useAsync } from './useAsync'
@@ -32,6 +32,11 @@ export interface PrintCheckState {
   processValuesRead: boolean
   /** #5627 — the process's part settings, only while `processValuesRead`; else `null`. */
   processPartSettings: PartSettings | null
+  /**
+   * #5627, #5626 — per slot a template sets, the process's values with the template's
+   * laid over them (`slot_part_settings`), only while `processValuesRead`; else `null`.
+   */
+  slotPartSettings: PartSettingsMap | null
 }
 
 /** The request without its `part_settings`: what decides the process's values. */
@@ -80,5 +85,6 @@ export function usePrintCheck(
     reload: state.reload,
     processValuesRead: processRead,
     processPartSettings: processRead ? (answer?.verdict.process_part_settings ?? null) : null,
+    slotPartSettings: processRead ? ((answer?.verdict.slot_part_settings as PartSettingsMap | null | undefined) ?? null) : null,
   }
 }

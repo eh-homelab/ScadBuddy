@@ -63,6 +63,41 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     )
   })
 
+  it("opens a slot the template sets on the template's value, and sends the process's when chosen (#5626)", async () => {
+    const real = api.checkPrint.bind(api)
+    vi.spyOn(api, 'checkPrint').mockImplementation(async (outputId, body, processValues) => {
+      const answer = await real(outputId, body, processValues)
+      if (!processValues) return answer
+      const process = { ...answer.process_part_settings, top_shell_layers: 3 }
+      return { ...answer, process_part_settings: process, slot_part_settings: { '2': { ...process, top_shell_layers: 5 } } }
+    })
+    const run = vi.spyOn(api, 'runPrint')
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const slot = await openSlot(2)
+    const top = within(slot).getByLabelText(/Top shell layers/)
+    // What prints with nothing sent: the template's 5, not the process's 3.
+    await waitFor(() => expect(top).toHaveValue(5))
+
+    fireEvent.change(top, { target: { value: '3' } })
+    expect(screen.getByTestId('part-settings-toggle-2')).toHaveTextContent('(1 changed)')
+    await waitFor(() => expect(printButton()).toBeEnabled())
+    fireEvent.click(printButton())
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '2': { top_shell_layers: 3 } } })
+  })
+
+  it('says a number out of range was kept within the bounds', async () => {
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const slot = await openSlot(1)
+    const density = within(slot).getByLabelText(/Sparse infill density/)
+    fireEvent.focus(density)
+    fireEvent.change(density, { target: { value: '150' } })
+    expect(density).toHaveAttribute('aria-invalid', 'true')
+    expect(within(slot).getByRole('status')).toHaveTextContent('Kept within 0–100.')
+  })
+
   it('sends no field when nothing is changed, and the check sees what Print sends', async () => {
     const run = vi.spyOn(api, 'runPrint')
     const check = vi.spyOn(api, 'checkPrint')

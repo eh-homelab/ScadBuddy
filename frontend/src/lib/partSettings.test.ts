@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changedCount, samePartSettings, sentPartSettings, withSetting, withoutProcessValues } from './partSettings'
+import { changedCount, samePartSettings, sentPartSettings, slotBaseline, withSetting, withoutDefaults } from './partSettings'
 
 describe('partSettings (#5627)', () => {
   it('sends only the slots and settings that are set, in slot order', () => {
@@ -25,13 +25,20 @@ describe('partSettings (#5627)', () => {
     expect(samePartSettings({ '1': { wall_loops: 3 } }, null)).toBe(false)
   })
 
-  it("drops the settings equal to the process's own", () => {
+  it("drops the settings equal to the slot's default: the process's, or the template's for the slot", () => {
     expect(
-      withoutProcessValues(
+      withoutDefaults(
         { '1': { top_shell_layers: 5, wall_loops: 4 }, '2': { wall_loops: 2 } },
         { top_shell_layers: 5, wall_loops: 2 },
       ),
     ).toEqual({ '1': { wall_loops: 4 } })
-    expect(withoutProcessValues({ '1': { wall_loops: 4 } }, null)).toEqual({ '1': { wall_loops: 4 } })
+    expect(withoutDefaults({ '1': { wall_loops: 4 } }, null)).toEqual({ '1': { wall_loops: 4 } })
+    // The template sets slot 2's top shell layers to 5 over the process's 3: a 3 there is a
+    // change (it prints the process's), and a 5 is none.
+    const process = { top_shell_layers: 3 }
+    const slots = { '2': { top_shell_layers: 5 } }
+    expect(withoutDefaults({ '2': { top_shell_layers: 3 } }, process, slots)).toEqual({ '2': { top_shell_layers: 3 } })
+    expect(withoutDefaults({ '2': { top_shell_layers: 5 } }, process, slots)).toEqual({})
+    expect(slotBaseline('1', process, slots)).toEqual(process)
   })
 })

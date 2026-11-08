@@ -121,6 +121,45 @@ def test_the_requests_settings_win_per_key(
 
 
 @respx.mock
+def test_the_check_gives_each_slots_baseline_with_the_templates_settings(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#5627 review: the dialog's controls open on what a slot prints with when the request
+    sets nothing: the template's settings laid over the process's values."""
+    output_id = prepared(client, model)
+    declare(client, paths, model, output_id)
+    routes()
+    preset_values({"top_shell_layers": "3", "wall_loops": "2", "bottom_shell_layers": "4"})
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check?process_values=true", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["process_part_settings"] == {
+        "top_shell_layers": 3,
+        "wall_loops": 2,
+        "bottom_shell_layers": 4,
+    }
+    assert check.json()["slot_part_settings"] == {
+        "1": {"top_shell_layers": 8, "wall_loops": 3, "bottom_shell_layers": 4}
+    }
+
+
+@respx.mock
+def test_the_processs_value_sent_for_a_slot_the_template_sets_prints(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#5627 review: the template sets slot 1's top shell layers to 8, the process has 3.
+    Choosing 3 sends 3, and the copy prints 3, not the template's 8."""
+    output_id = prepared(client, model)
+    declare(client, paths, model, output_id)
+    request = {**body(), "part_settings": {"1": {"top_shell_layers": 3}}}
+
+    settings = uploaded_settings(client, output_id, request)
+
+    assert '<metadata key="top_shell_layers" value="3"/>' in settings
+
+
+@respx.mock
 def test_a_colour_the_output_does_not_print_sets_nothing(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

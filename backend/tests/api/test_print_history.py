@@ -1048,10 +1048,10 @@ def test_a_failed_part_settings_read_still_gives_the_print(
     respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
     mock_bambuddy_lists()
 
-    async def broken(subject: PrintSubject) -> list[PrintSend]:
+    async def broken(queue_item_id: int) -> PrintSend | None:
         raise psycopg.OperationalError("the database went away")
 
-    monkeypatch.setattr(state(client).print_links, "sends_for", broken)
+    monkeypatch.setattr(state(client).print_links, "send", broken)
 
     response = client.get("/api/v1/prints/35")
 

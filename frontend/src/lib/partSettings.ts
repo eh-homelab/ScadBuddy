@@ -77,24 +77,39 @@ export function sentPartSettings(value: PartSettingsMap | null | undefined): Par
 }
 
 /**
- * `value` without the settings that equal the process's own (`process`, the check's
- * `process_part_settings`): such a setting changes nothing, so a remembered or quoted one
- * is not counted as changed. Each slot keeps only what it sets.
+ * What slot `slot` prints with when a request sets nothing (#5627, #5626): the check's
+ * `slot_part_settings` for it (the template's settings laid over the process's values),
+ * else the process's own (`process_part_settings`); `null` while they are unknown.
  */
-export function withoutProcessValues(
+export function slotBaseline(
+  slot: string,
+  process: PartSettings | null | undefined,
+  slots: PartSettingsMap | null | undefined,
+): PartSettings | null {
+  return slots?.[slot] ?? process ?? null
+}
+
+/**
+ * `value` without the settings that equal their slot's default (`slotBaseline`): such a
+ * setting changes nothing, so a remembered or quoted one is not counted as changed. Each
+ * slot keeps only what it sets. A value equal to the process's but not to the template's
+ * for that slot stays: it is what makes the slot print the process's.
+ */
+export function withoutDefaults(
   value: PartSettingsMap | null | undefined,
   process: PartSettings | null | undefined,
+  slots?: PartSettingsMap | null,
 ): PartSettingsMap {
   const kept = Object.entries(sentPartSettings(value) ?? {})
-    .map(
-      ([slot, settings]) =>
-        [
-          slot,
-          Object.fromEntries(
-            Object.entries(settings).filter(([key, setting]) => process?.[key as PartSettingKey] !== setting),
-          ) as PartSettings,
-        ] as const,
-    )
+    .map(([slot, settings]) => {
+      const baseline = slotBaseline(slot, process, slots)
+      return [
+        slot,
+        Object.fromEntries(
+          Object.entries(settings).filter(([key, setting]) => baseline?.[key as PartSettingKey] !== setting),
+        ) as PartSettings,
+      ] as const
+    })
     .filter(([, settings]) => Object.keys(settings).length > 0)
   return Object.fromEntries(kept)
 }
@@ -115,17 +130,18 @@ function sortedKeys(value: PartSettingsMap | null): unknown {
 }
 
 /**
- * `settings` with `key` set to `value`. A value of `null`, or the process's own, is
- * unset: only a setting changed from the process is sent.
+ * `settings` with `key` set to `value`. A value of `null`, or the slot's default (`baseline`,
+ * from `slotBaseline`: the process's value, or the template's for the slot), is
+ * unset: only a setting changed from what the slot would print with is sent.
  */
 export function withSetting<K extends PartSettingKey>(
   settings: PartSettings | undefined,
   key: K,
   value: PartSettings[K] | null,
-  processValue: PartSettings[K] | null | undefined,
+  baseline: PartSettings[K] | null | undefined,
 ): PartSettings {
   const next = { ...setOnly(settings) }
-  if (value === null || value === undefined || value === processValue) delete next[key]
+  if (value === null || value === undefined || value === baseline) delete next[key]
   else next[key] = value
   return next
 }

@@ -107,7 +107,7 @@ export function usePrintChoices(
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
   /**
    * #5627 — the slicer settings per filament slot, by slot id: only what is changed from
-   * the process. An output or a library file (#5628) takes them, and its open seeds them
+   * the slot's default (the process's value, or a template's for the slot). An output or a library file (#5628) takes them, and its open seeds them
    * from the quote's or the remembered ones. A sliced file prints as it was sliced, so it
    * takes none and the dialog shows no controls for it.
    */
@@ -260,7 +260,7 @@ export function usePrintChoices(
     defaulted.current = false
   }
 
-  /** #5627 — one slot's settings, only what is changed from the process. */
+  /** #5627 — one slot's settings, only what is changed from the slot's default. */
   const setSlotPartSettings = useCallback((slotId: number, settings: PartSettings) => {
     setPartSettings((current) => ({ ...current, [String(slotId)]: settings }))
   }, [])

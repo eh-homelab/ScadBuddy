@@ -831,23 +831,30 @@ async def _part_slots(source: PrintSource, client: BambuddyClient | None) -> set
     return None if payload is None else await asyncio.to_thread(part_settings_slots, payload)
 
 
+async def template_part_settings(
+    source: PrintSource, client: BambuddyClient | None
+) -> PartSettingsMap | None:
+    """The template's settings per slot (#5626, ``OutputSource.part_settings``) that the
+    run's copy carries: only an output whose 3MF is laid out (not ``as_is``), on the slots
+    a printed part is made in. Elsewhere they set nothing, so a template's settings never
+    refuse a run."""
+    template = source.part_settings if isinstance(source, OutputSource) else None
+    if template is None:
+        return None
+    try:
+        slots = await _part_slots(source, client) or set()
+    except PartSettingsUnwritableError:
+        slots = set()  # a template's settings never refuse a run
+    return normalised({slot: value for slot, value in template.items() if slot in slots})
+
+
 async def run_part_settings(
     source: PrintSource, request: PrintRunRequest, client: BambuddyClient | None
 ) -> PartSettingsMap | None:
-    """The settings per slot the run's copy carries: the template's (#5626,
-    ``OutputSource.part_settings``) with the request's ``part_settings`` over them, per
-    key. The template's go only where a copy can carry them: an output whose 3MF is laid
-    out (not ``as_is``), on the slots a printed part is made in. Elsewhere they set
-    nothing, so a template's settings never refuse a run; the request's were judged by
-    :func:`part_settings_refusal`."""
-    template = source.part_settings if isinstance(source, OutputSource) else None
-    if template is not None:
-        try:
-            slots = await _part_slots(source, client) or set()
-        except PartSettingsUnwritableError:
-            slots = set()  # a template's settings never refuse a run
-        template = {slot: value for slot, value in template.items() if slot in slots}
-    return laid_under(template, request.part_settings)
+    """The settings per slot the run's copy carries: the template's
+    (:func:`template_part_settings`) with the request's ``part_settings`` over them, per
+    key. The request's were judged by :func:`part_settings_refusal`."""
+    return laid_under(await template_part_settings(source, client), request.part_settings)
 
 
 class PrintCheck(BaseModel):
@@ -872,9 +879,18 @@ class PrintCheck(BaseModel):
     #: (``process_values``), a sliced file, which takes no part settings, or a preset
     #: whose values cannot be read.
     process_part_settings: PartSettings | None = None
+    #: What a slot prints with when the request sets nothing (#5627, #5626): for each slot
+    #: a template's ``part_print_settings`` set (:func:`template_part_settings`), the
+    #: process's values with the template's laid over them, per key, as
+    #: :func:`run_part_settings` lays the request over the template's. A slot not listed
+    #: prints with ``process_part_settings``. ``None`` when that is ``None``, or when the
+    #: template sets nothing.
+    slot_part_settings: PartSettingsMap | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
-        lambda self, handler: parts_set_only(handler(self), single=("process_part_settings",))
+        lambda self, handler: parts_set_only(
+            handler(self), maps=("slot_part_settings",), single=("process_part_settings",)
+        )
     )
 
 
@@ -1375,9 +1391,7 @@ async def check_print(
         rack=rack_view,
         nozzle_plan=nozzle_plan,
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
-        process_part_settings=(
-            await _process_part_settings(source, process, read) if process_values else None
-        ),
+        **(await _part_baselines(source, process, read, client) if process_values else {}),
     )
 
 
@@ -1504,10 +1518,33 @@ async def _native_check(
         rack=rack_view,
         nozzle_plan=nozzle_plan,
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
-        process_part_settings=(
-            await _process_part_settings(source, process, read) if process_values else None
-        ),
+        **(await _part_baselines(source, process, read, None) if process_values else {}),
     )
+
+
+async def _part_baselines(
+    source: PrintSource,
+    process: PresetRef | None,
+    read: ReadPresetValues,
+    client: BambuddyClient | None,
+) -> dict[str, Any]:
+    """``PrintCheck.process_part_settings`` and ``slot_part_settings`` (#5627): what each
+    slot prints with when the request sets nothing, which the dialog's controls open on
+    and compare against."""
+    process_parts = await _process_part_settings(source, process, read)
+    template = await template_part_settings(source, client) if process_parts else None
+    under = process_parts.model_dump(exclude_none=True) if process_parts else {}
+    return {
+        "process_part_settings": process_parts,
+        "slot_part_settings": (
+            {
+                slot: PartSettings(**{**under, **settings.model_dump(exclude_none=True)})
+                for slot, settings in template.items()
+            }
+            if template
+            else None
+        ),
+    }
 
 
 async def _process_part_settings(
@@ -1876,11 +1913,13 @@ async def check_for_output(
     profiles: Profiles | None = None,
     native: NativeCopies | None = None,
     process_values: bool = False,
+    part_settings: PartSettingsMap | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered, with its template's
     ``print_settings`` as the run reads them, so a template that prints by object is
     checked by object (#2976). ``native`` is the native library a native run's folder is
-    checked in (D6)."""
+    checked in (D6). ``part_settings`` are the template's per slot (#5626), which the
+    slots' defaults hold (``PrintCheck.slot_part_settings``)."""
     return await check_print(
         client,
         OutputSource(
@@ -1889,6 +1928,7 @@ async def check_for_output(
             uploads=uploads,
             settings=settings,
             print_settings=print_settings or {},
+            part_settings=part_settings,
             native=native,
         ),
         settings,

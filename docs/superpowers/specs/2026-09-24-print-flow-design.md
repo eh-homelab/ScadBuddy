@@ -324,13 +324,23 @@ older run keeps its key.
 The dialog sets them (#5627). In the filament step, each slot row of an output or a
 library file (#5628) has a "Settings for this colour" disclosure
 (`components/print/PartSettingsDisclosure.tsx`). A sliced file has none. Each control
-opens on the process's value. Once a slot's disclosure is open, the dialog's check asks for
-it (`?process_values=true` on `POST …/check`), and the check reads it with the preset's
-other values (`PrintCheck.process_part_settings`, `part_settings.process_part_settings`).
-A check that does not ask reads nothing more, since the read can be one more Bambuddy call.
-The value is `None` when the preset cannot be read; the controls are then empty. They stay
-off until a check that asked has answered. A value set back to the process's, or reset, is
-unset, and only what is set is sent (`lib/partSettings.ts` `sentPartSettings`). The check,
+opens on the slot's default: what the slot prints with when the request sets nothing.
+That is the process's value, with a template's `part_print_settings` for the slot (#5626)
+laid over it, per key, as the run lays the request over the template's
+(`run_part_settings`). Once a slot's disclosure is open, the dialog's check asks for them
+(`?process_values=true` on `POST …/check`). The check reads the process's values with the
+preset's other values (`PrintCheck.process_part_settings`,
+`part_settings.process_part_settings`; a fractional density is rounded to a whole
+percent), and gives, for each slot the template sets on the copy
+(`template_part_settings`), the process's values with the template's over them
+(`PrintCheck.slot_part_settings`). A check that does not ask reads nothing more, since the
+read can be one more Bambuddy call. The values are `None` when the preset cannot be read;
+the controls are then empty. They stay off until a check that asked for the choices as they
+stand has answered. A value set back to the slot's default, or reset, is unset, and only
+what is set is sent (`lib/partSettings.ts` `sentPartSettings`, `withSetting`,
+`slotBaseline`). So on a slot whose template sets 5 top shell layers over the process's 3,
+choosing 3 sends 3. A remembered or quoted value equal to the slot's default is dropped once
+the defaults are read (`withoutDefaults`). The check,
 the background slice, the run, a batch step and the quote send the same field
 (`sliceOverrides`), so the check lists a slot the file lacks. A print remembers them with
 the model's or file's other choices (`ModelPrintChoices.part_settings`, left out of the
@@ -432,9 +442,10 @@ copy carries, so a change to them makes a new copy. A slice quote records only t
 request's settings (`order_item_quotes.part_settings`); a print reads the template's as
 they are at that time, as with `print_settings`.
 
-The print dialog's controls (#5627, above) open on the process's values, not the
-template's, and send only what the user changes. The template's still lie under that
-request in `run_part_settings`. A run records only the request's settings
+The print dialog's controls (#5627, above) open on each slot's default, the template's
+settings laid over the process's values (`PrintCheck.slot_part_settings`), and send only
+what the user changes from it. The template's still lie under that request in
+`run_part_settings`. A run records only the request's settings
 (`PrintRunResult.part_settings`).
 
 ### The two warnings

@@ -45,7 +45,7 @@ import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, single
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
-import { samePartSettings, sentPartSettings, withoutProcessValues } from '../lib/partSettings'
+import { samePartSettings, sentPartSettings, slotBaseline, withoutDefaults } from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
@@ -1149,29 +1149,31 @@ export function PrintPicker({
       : null
   const check = usePrintCheck(source, checkRequest, takesParts && partsOpened)
   const processParts = check.processPartSettings
+  const slotParts = check.slotPartSettings
   /**
    * #5627 — an item's print with settings other than its accepted quote's. A setting equal
-   * to the process's changes nothing, so it is left out on both sides.
+   * to its slot's default changes nothing, so it is left out on both sides.
    */
   const partsUnquoted =
     itemPrint !== undefined &&
     takesParts &&
     !samePartSettings(
-      withoutProcessValues(picker.partSettings, processParts),
-      withoutProcessValues(itemPrint.quoted, processParts),
+      withoutDefaults(picker.partSettings, processParts, slotParts),
+      withoutDefaults(itemPrint.quoted, processParts, slotParts),
     )
   /**
    * #5627 — once the process's values are read, a remembered or quoted setting equal to
-   * the process's own is dropped: it changes nothing, so it is not shown as changed.
+   * its slot's default (the process's value, or the template's for the slot, #5626) is
+   * dropped: it changes nothing, so it is not shown as changed.
    */
   const { setPartSettings: dropProcessValues } = picker
   useEffect(() => {
     if (processParts === null) return
     dropProcessValues((current) => {
-      const next = withoutProcessValues(current, processParts)
+      const next = withoutDefaults(current, processParts, slotParts)
       return samePartSettings(next, current) ? current : next
     })
-  }, [processParts, dropProcessValues])
+  }, [processParts, slotParts, dropProcessValues])
   /**
    * #2169 — the choices on screen, sliced in the background once the check finds nothing
    * the run would refuse. A run of the same choices queues that slice.
@@ -1853,7 +1855,7 @@ export function PrintPicker({
                               <PartSettingsDisclosure
                                 slotId={slotId}
                                 value={picker.partSettings[String(slotId)]}
-                                process={check.processPartSettings}
+                                baseline={slotBaseline(String(slotId), processParts, slotParts)}
                                 // Until a check has read the process's values, a value typed
                                 // could not be told from the process's own.
                                 disabled={!check.processValuesRead}

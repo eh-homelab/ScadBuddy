@@ -1381,7 +1381,11 @@ async def post_check(
     # 409 for a model.json that refuses them, from the reads the run's naming makes
     # (#5649, #5653, #5662); with a refusal the rest of the check judges the request
     # alone.
-    print_settings, refusal = await LocalOutputs(outputs, library_catalogue).print_settings(meta)
+    reader = LocalOutputs(outputs, library_catalogue)
+    print_settings, refusal = await reader.print_settings(meta)
+    # The template's settings per slot (#5626), only for a check that asks for the slots'
+    # defaults (#5627): the read needs the output's params and colours.
+    part_settings = await reader.part_settings(meta) if process_values else None
     # The path first (D2): a native run's check builds no client (D3), so it answers
     # with no Bambuddy configured at all (AC2).
     route = await dialog_route(
@@ -1417,6 +1421,7 @@ async def post_check(
             profiles=slicing.profiles,
             native=await library.serving_native(),
             process_values=process_values,
+            part_settings=part_settings,
         )
     if refusal is not None:
         check.errors.insert(0, refusal)

@@ -510,20 +510,14 @@ async def _part_settings(
 async def _read_part_settings(
     links: PrintLinkStore, runs: PrintRunStore, link: LinkedPrint
 ) -> PartSettingsMap | None:
+    # A link found by content hash (a reprint made inside Bambuddy, a LAN print) names no
+    # queue item (`PrintLink.queue_item_id` is optional), so no send.
     if link.queue_item_id is None:
         return None
-    sends = await links.sends_for(PrintSubject.parse(link.subject))
-    run_id = next(
-        (
-            send.run_id
-            for send in sends
-            if send.queue_item_id == link.queue_item_id and send.run_id is not None
-        ),
-        None,
-    )
-    if run_id is None:
+    send = await links.send(link.queue_item_id)
+    if send is None or send.run_id is None:
         return None
-    run = await runs.get(run_id)
+    run = await runs.get(send.run_id)
     return run.result.part_settings if run is not None and run.result is not None else None
 
 
