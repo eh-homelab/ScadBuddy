@@ -301,6 +301,30 @@ def test_a_replay_of_an_ignored_approval_captures_nothing(
     assert calls == ["ap1"]
 
 
+def test_a_replay_of_an_older_approval_captures_nothing_while_a_newer_one_is_unsettled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ap1`` was declined; ``ap2`` moved the request to ``pending`` and its capture got no
+    answer. A late copy of ``ap1`` finds the request ``pending`` but captures nothing: only
+    the approval that moved it there does, under its own key."""
+    _, req = linked(client)
+    answers: dict[str, CaptureOutcome] = {"ap1": "declined"}
+
+    def capture(ref: str, event: str) -> CaptureOutcome:
+        if event in answers:
+            return answers[event]
+        raise ProviderUnavailableError("PayPal did not answer")
+
+    calls = answer_with(monkeypatch, capture)
+    assert post(client, approved(req, "ap1")).json() == {"outcome": "recorded"}
+    assert post(client, approved(req, "ap2")).status_code == 503
+    assert post(client, approved(req, "ap1")).json() == {"outcome": "replayed"}
+    assert calls == ["ap1", "ap2"]
+    # ``ap2``'s own retry still captures (PayPal still does not answer here).
+    assert post(client, approved(req, "ap2")).status_code == 503
+    assert calls == ["ap1", "ap2", "ap2"]
+
+
 def test_a_disconnect_is_refused_while_a_failed_request_can_be_approved(
     client: TestClient,
 ) -> None:

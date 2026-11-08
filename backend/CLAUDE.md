@@ -985,7 +985,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   lock held; a capture PayPal refused or declined puts the request back to `failed` in a
   second transaction (`Lifecycle.capture_failed`), and one whose outcome is unknown (no
   answer) leaves it `pending` and keeps the event's row, so PayPal's retry reads `replayed`
-  and captures again under the same key, only for an approval recorded (not `ignored`) and
+  and captures again under the same key, only for the approval that last moved it to `pending` (named on that audit row,
+  `Lifecycle.approval_pending`) and
   never on an order ended since. The capture's events record the money. Each
   webhook is checked by PayPal's verify-webhook-signature call with the raw body; the
   OAuth token is cached in memory, never stored; a cancel ends open and failed requests

@@ -502,8 +502,9 @@ class Payments:
         request back to ``failed``. One whose outcome is unknown (no answer, a timeout)
         leaves it ``pending``, so a cancel or a manual payment is refused until the
         provider's capture event or its retried approval settles it. Only the approval
-        that moved the request (its event recorded, not ``ignored``) captures, and never on
-        an order that has ended or is a cart since."""
+        that moved the request to ``pending`` last (its event recorded, not ``ignored``, and
+        named on that audit row) captures, and never on an order that has ended or is a
+        cart since."""
         assert event.provider_ref is not None
 
         def pending() -> PaymentRequestView | None:
@@ -520,6 +521,10 @@ class Payments:
 
         found = await asyncio.to_thread(pending)
         if found is None:
+            return
+        if not await asyncio.to_thread(
+            self._orders.lifecycle.approval_pending, found.id, event.event_id
+        ):
             return
 
         def failed() -> Awaitable[None]:

@@ -1109,7 +1109,8 @@ class Lifecycle:
     def cancel_payment_request(
         self, order_id: str, request_id: str, by: Actor, reason: str | None = None
     ) -> PaymentRequestView:
-        """An open request cancelled, with the person's ``reason`` on the audit row when
+        """An open or failed request cancelled (a pending one is refused,
+        `payment_request_not_open`), with the person's ``reason`` on the audit row when
         given. Cancelling the `balance` request lifts `balance_unpaid` (gap 2), so the
         reason says why the order may ship unpaid."""
         with self.store.transaction() as conn:
@@ -1521,6 +1522,23 @@ class Lifecycle:
             self._told(change)
         return outcome
 
+    def approval_pending(self, request_id: str, event_id: str) -> bool:
+        """#4959: whether ``event_id`` is the approval that last moved the request to
+        ``pending`` (its audit row names it), so a replay of an older approval captures
+        nothing. A row written before the id was kept names none, and counts."""
+        with self.store.transaction() as conn:
+            found = payments.request(conn, request_id)
+            if found is None:
+                return False
+            moved = [
+                e.detail
+                for e in self.store.events(found.order_id, conn=conn)
+                if e.kind == "payment_request.pending"
+                and e.detail.get("request_id") == request_id
+                and e.detail.get("approved")
+            ]
+        return bool(moved) and moved[-1].get("event_id", event_id) == event_id
+
     def capture_failed(self, provider: str, request_id: str) -> None:
         """#4959: the provider refused or declined the capture after an ``approved``
         event. A request still ``pending`` goes back to ``failed``, which the shop sees."""
@@ -1598,7 +1616,13 @@ class Lifecycle:
                 return "ignored", None
             payments.set_request_status(conn, found.id, "pending")
             self._event(
-                conn, order, by, "payment_request.pending", request_id=found.id, approved=True
+                conn,
+                order,
+                by,
+                "payment_request.pending",
+                request_id=found.id,
+                approved=True,
+                event_id=event.event_id,
             )
             return "recorded", None
         if event.kind == "fee":

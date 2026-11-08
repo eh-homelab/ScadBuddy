@@ -1314,7 +1314,8 @@ def _ensured(task: asyncio.Task[Any], number: str) -> None:
 async def cancel_order(
     order_id: str, orders: OrdersDep, service: PaymentsDep, body: CancelBody | None = None
 ) -> Order:
-    """The open payment requests end with the order; their pages close after the commit."""
+    """The open and failed payment requests end with the order (a pending one refuses the
+    cancel, `payment_in_flight`); their pages close after the commit."""
     check_path(order_id)
     by = current_actor()
     reason = body.reason if body else None
