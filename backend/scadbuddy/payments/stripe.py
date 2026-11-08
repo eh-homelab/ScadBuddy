@@ -31,7 +31,7 @@ Stripe's documented behaviour this relies on:
   (https://docs.stripe.com/api/events/object#event_object-data-previous_attributes).
   A Refund is recorded once it is ``succeeded``, under the event id ``refund:<id>``, so
   its ``refund.created`` and a later ``refund.updated`` record it once. A refund that
-  fails after it succeeded (``refund.failed``, rare) is not reversed here.
+  fails after it succeeded (``refund.failed``, rare) is not reversed yet (#5681).
 - Events can arrive in any order (https://docs.stripe.com/webhooks#event-ordering), and a
   non-2xx answer makes Stripe send the event again
   (https://docs.stripe.com/webhooks#automatic-retries).
