@@ -6,12 +6,13 @@ backend's one table) half up, once, at the line
 (https://docs.python.org/3/library/decimal.html#rounding-modes), and the totals add the
 rounded lines. The lines are, in order: one ``filament`` line per slot (its grams summed
 over every plate, times the record's cost per kilogram), one ``machine_time`` line (every
-plate's seconds), one ``setup`` line per plate, one ``labour`` line, one ``markup`` line (a
-percentage of the lines above it) and, under ``to_major``, a ``rounding`` line that takes
-the unit price up to the next whole currency unit (0 when it is whole already), so the
-lines always add to the unit price. A policy rate of 0 adds no line. Each line carries the
-rate it was priced at in its label (and a setup line its fee as ``unit_minor``), so a later
-change to the book never moves a recorded quote (§5.1).
+plate's seconds; an estimate, which knows no seconds, has none), one ``setup`` line per
+plate, one ``labour`` line, one ``markup`` line (a percentage of the lines above it)
+and, under ``to_major``, a ``rounding`` line that takes the unit price up to the next
+whole currency unit (0 when it is whole already), so the lines always add to the unit
+price. A policy rate of 0 adds no line. Each line carries the rate it was priced at in its
+label (and a setup line its fee as ``unit_minor``), so a later change to the book never
+moves a recorded quote (§5.1).
 """
 
 from __future__ import annotations
@@ -106,12 +107,15 @@ def price(
     *,
     currency: str,
     quantity: int,
+    estimated: bool = False,
 ) -> Priced:
     """The lines and totals of ``plates`` priced under ``policy`` with the slot's
     ``filaments`` (keyed by the plates' slot numbers). :class:`PricingError` for a
-    slot no record covers, or a plate with no seconds."""
+    slot no record covers, or a plate with no seconds. ``estimated`` (the storefront's
+    rough estimate, which slices nothing) takes plates with no seconds and gives no
+    machine time line."""
     for plate in plates:
-        if plate.print_seconds <= 0:
+        if plate.print_seconds <= 0 and not estimated:
             raise PricingError(f"plate {plate.index}'s print time is unknown", plate=plate.index)
     grams: dict[int, Decimal] = {}
     for plate in plates:
@@ -128,7 +132,7 @@ def price(
         lines.append(_line("filament", label, amount))
 
     machine_rate = Decimal(policy.machine_rate_per_hour)
-    if machine_rate:
+    if machine_rate and not estimated:
         hours = Decimal(sum(plate.print_seconds for plate in plates)) / SECONDS_PER_HOUR
         label = f"Machine time, {_text(hours)} h at {policy.machine_rate_per_hour} per hour"
         lines.append(_line("machine_time", label, to_minor(hours * machine_rate, currency)))

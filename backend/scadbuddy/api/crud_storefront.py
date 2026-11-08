@@ -15,24 +15,53 @@ each media file as a presigned GET of an hour. An unpublished or unknown listing
 ``…/storefront/listing_not_found``; any store but S3 is 503
 ``…/storefront/storefront_needs_s3`` with reason ``not_configured`` and a text a visitor
 may read (the edge shows it).
+
+Area ``renders`` (`orders/storefront/renders.py`): ``POST …/renders`` (``Idempotency-Key``
+required, 428 without) checks the values against the listing, counts the render against
+the visitor's and the client's limits and renders it; ``GET …/renders/{job_id}``, its
+``preview.glb`` (streamed from the render's cached piece) and its ``estimate`` answer only
+the visitor who asked for that render, and 404 ``render_not_found`` for any other. A body
+that is not a render is 422 ``render_body_invalid``: every refusal a visitor can cause is a
+storefront problem, which the edge passes on.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import re
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
-from fastapi import Depends, Request
+from fastapi import Depends, Query, Request, Response, status
+from pydantic import ValidationError
 
-from scadbuddy.api.deps import StateDep
+from scadbuddy.api.deps import PathsDep, ReadBudgetDep, StateDep
+from scadbuddy.api.jobs import GLB_MEDIA_TYPE, get_job_preview
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
+from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
-from scadbuddy.orders.storefront.listings import public_content, public_listing, published_listing
-from scadbuddy.orders.storefront.wire import PublicListing, PublicListings
+from scadbuddy.orders.storefront.listings import (
+    problem,
+    public_content,
+    public_listing,
+    published_listing,
+)
+from scadbuddy.orders.storefront.renders import (
+    owned_job,
+    render_estimate,
+    start_render,
+    store_render,
+)
+from scadbuddy.orders.storefront.wire import (
+    PublicListing,
+    PublicListings,
+    RenderBody,
+    StoreRender,
+)
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
     STORE_CLIENT_PROBLEM,
@@ -106,3 +135,90 @@ async def listing(
     found = await asyncio.to_thread(published_listing, orders.listings, listing_id)
     filaments = await asyncio.to_thread(_filaments, orders)
     return await public_listing(content, found, filaments)
+
+
+async def _render_body(request: Request) -> RenderBody:
+    """The request's `RenderBody`; 422 ``render_body_invalid`` for any other body. Read
+    with `json.loads`, so a number no float holds reaches `listing_values`, which refuses
+    it as ``input_outside_listing``."""
+    try:
+        raw: Any = json.loads(await request.body())
+        return RenderBody.model_validate(raw)
+    except (ValueError, ValidationError):
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "render_body_invalid",
+            "This request is not a render of a listing.",
+        ) from None
+
+
+@router.post(
+    "/renders",
+    name="crud_storefront_render",
+    status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": RenderBody.model_json_schema()}},
+        }
+    },
+)
+async def render(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> StoreRender:
+    """The visitor's render of a listing (`orders/storefront/renders.py` `start_render`)."""
+    key = required_key(idempotency_key)
+    body = await _render_body(request)
+    return await start_render(state, visitor, client, key, body)
+
+
+@router.get("/renders/{job_id}", name="crud_storefront_render_status")
+async def render_status(
+    job_id: str, state: StateDep, visitor: Visitor, _client: StoreClient
+) -> StoreRender:
+    """The visitor's render; 404 ``render_not_found`` unless the visitor asked for it."""
+    _, job = await owned_job(state, visitor, job_id)
+    return store_render(job)
+
+
+@router.get(
+    "/renders/{job_id}/preview.glb",
+    name="crud_storefront_render_preview",
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+)
+async def render_preview(
+    job_id: str,
+    state: StateDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    plate: Annotated[int | None, Query(ge=1, le=1000)] = None,
+) -> Response:
+    """The visitor's render's preview mesh, streamed from its cached piece; with
+    ``plate``, that plate alone. 404 ``render_not_found`` unless the visitor asked for
+    the render and its preview is there."""
+    _, job = await owned_job(state, visitor, job_id)
+    if job.state != "done" or job.result is None:
+        raise problem(
+            status.HTTP_404_NOT_FOUND, "render_not_found", "This render has no preview yet."
+        )
+    try:
+        return await get_job_preview(job_id, state.render, paths, state, budget, plate)
+    except ApiError:
+        raise problem(
+            status.HTTP_404_NOT_FOUND, "render_not_found", "This render has no preview to show."
+        ) from None
+
+
+@router.get("/renders/{job_id}/estimate", name="crud_storefront_render_estimate")
+async def render_estimate_route(
+    job_id: str, state: StateDep, visitor: Visitor, _client: StoreClient
+) -> StoreEstimate:
+    """The rough price of the visitor's done render: "about $X, confirmed after we check
+    it", never a quote."""
+    return await render_estimate(state, visitor, job_id)

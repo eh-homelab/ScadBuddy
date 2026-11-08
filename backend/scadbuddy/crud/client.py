@@ -24,7 +24,12 @@ module imports no database code (`crud/wire.py`, `auth/service_auth.py`).
   callers.
 - Every retry sends the same ``Idempotency-Key``; `activity_key` builds a key that is
   the same on every attempt of one Temporal activity.
-- ``headers`` on a request are sent with it (the storefront's visitor and client).
+- ``headers`` on a request are sent with it (the storefront's visitor and client), and
+  ``content`` in place of ``json`` is a body sent as it is (the storefront relays a
+  visitor's JSON unread, so a number no float holds reaches the CRUD side's check).
+- `CrudClient.stream` answers a response whose body is not read yet (`CrudStream`): the
+  storefront relays a render's preview without holding it whole. A refusal and a retry
+  are judged as `request` judges them, from the status and the headers.
 - ``timeout`` on a request replaces the client's per-request timeout for a route that
   answers later by design (a flow Reset waits on Temporal under the run's lock).
   ``budget`` replaces ``unavailable_budget`` for a call that must end inside a bound of
@@ -235,12 +240,19 @@ class _Base:
 
     @staticmethod
     def _kwargs(
-        json: Any, key: str | None, timeout: float | None, headers: Mapping[str, str] | None
+        json: Any,
+        key: str | None,
+        timeout: float | None,
+        headers: Mapping[str, str] | None,
+        content: bytes | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
+        sent = dict(headers or {})
         if json is not None:
             kwargs["json"] = json
-        sent = dict(headers or {})
+        if content is not None:
+            kwargs["content"] = content
+            sent["Content-Type"] = "application/json"
         if key is not None:
             sent[IDEMPOTENCY_HEADER] = key
         if sent:
@@ -248,6 +260,20 @@ class _Base:
         if timeout is not None:
             kwargs["timeout"] = timeout
         return kwargs
+
+
+class CrudStream:
+    """A response whose body is still to be read (`CrudClient.stream`): read it with
+    ``response.aiter_bytes()``, then `aclose` it."""
+
+    def __init__(self, response: httpx.Response, own: httpx.AsyncClient | None) -> None:
+        self.response = response
+        self._own = own
+
+    async def aclose(self) -> None:
+        await self.response.aclose()
+        if self._own is not None:
+            await self._own.aclose()
 
 
 class CrudClient(_Base):
@@ -306,6 +332,7 @@ class CrudClient(_Base):
         timeout: float | None = None,
         budget: float | None = None,
         headers: Mapping[str, str] | None = None,
+        content: bytes | None = None,
     ) -> httpx.Response:
         call = _Call(self, path, budget)
         while True:
@@ -313,7 +340,9 @@ class CrudClient(_Base):
             fresh = self._build() if call.take_fresh_connection() else None
             try:
                 response = await (fresh or self._http).request(
-                    method, path, **self._kwargs(json, idempotency_key, timeout, headers)
+                    method,
+                    path,
+                    **self._kwargs(json, idempotency_key, timeout, headers, content),
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)
@@ -324,6 +353,47 @@ class CrudClient(_Base):
                     await fresh.aclose()
             if call.judge(response, started) == "done":
                 return response
+            if call.refresh:
+                call.refresh = False
+                self._auth.refresh(response.request)
+            await self._sleep(call.delay())
+
+    async def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        budget: float | None = None,
+    ) -> CrudStream:
+        """``request``'s retries and refusals, with the body of a success still unread."""
+        call = _Call(self, path, budget)
+        while True:
+            started = time.perf_counter()
+            fresh = self._build() if call.take_fresh_connection() else None
+            http = fresh or self._http
+            try:
+                sent = http.build_request(
+                    method, path, params=params, **self._kwargs(None, None, None, headers)
+                )
+                response = await http.send(sent, stream=True)
+            except httpx.TransportError as error:
+                if fresh is not None:
+                    await fresh.aclose()
+                call.failed(error, started)
+                await self._sleep(call.delay())
+                continue
+            opened = CrudStream(response, fresh)
+            if response.status_code < 400 and CRUD_HEADER in response.headers:
+                call.judge(response, started)
+                return opened
+            try:
+                # A refusal or a retry is judged from its problem, which is small.
+                await response.aread()
+                call.judge(response, started)
+            finally:
+                await opened.aclose()
             if call.refresh:
                 call.refresh = False
                 self._auth.refresh(response.request)

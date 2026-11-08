@@ -67,7 +67,7 @@ from scadbuddy.orders.costs import (
     order_costs,
     order_margins,
 )
-from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
@@ -120,7 +120,6 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
-from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
@@ -846,35 +845,6 @@ async def import_spools(orders: OrdersDep) -> SpoolImport:
 # -- the rough estimate (§5.3, #4250 Ruling 9) ---------------------------------------------------
 
 
-class EstimatedPart(BaseModel):
-    """One part of one plate: its enclosed volume, or ``None`` when it is not checked
-    and closed (``render/geometry.py`` measures only those), and so not counted."""
-
-    plate: int
-    part: int
-    name: str
-    colour: str
-    volume_mm3: float | None
-
-
-class OrderEstimate(BaseModel):
-    """A rough estimate (§5.3): never a quote, never stored, never accepted."""
-
-    #: Always true: this is an estimate.
-    estimate: bool = True
-    #: Decimal string, to the hundredth of a gram.
-    grams: str
-    #: The grams at the filament's cost per kilogram, rounded as a quote line is.
-    filament_minor: Money
-    currency: str
-    minor_exponent: int
-    #: ``rough_estimate_factor`` as it stood.
-    factor: str
-    parts: list[EstimatedPart]
-    #: How many parts have no volume and are left out of ``grams``.
-    unknown_parts: int
-
-
 @router.get("/estimate", response_model=OrderEstimate, summary="A rough estimate of an output")
 async def estimate(
     output_id: str, filament_id: str, orders: OrdersDep, outputs: OutputsDep
@@ -925,20 +895,7 @@ async def estimate(
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
     currency, _, factor = await asyncio.to_thread(orders.price_book.policy)
-    grams = estimate_grams(
-        [part.volume_mm3 for part in parts if part.volume_mm3 is not None],
-        record.density_g_cm3,
-        factor,
-    )
-    return OrderEstimate(
-        grams=format(grams, "f"),
-        filament_minor=to_minor(grams * Decimal(record.cost_per_kg) / 1000, currency),
-        currency=currency,
-        minor_exponent=minor_exponent(currency),
-        factor=factor,
-        parts=parts,
-        unknown_parts=sum(1 for part in parts if part.volume_mm3 is None),
-    )
+    return filament_estimate(parts, record, currency=currency, factor=factor)
 
 
 @router.get(

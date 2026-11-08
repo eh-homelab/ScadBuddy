@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 
 #: A commit of the models repository, whole: a listing never pins a short id.
@@ -194,3 +196,38 @@ class PublicListings(BaseModel):
     listings: list[PublicListing]
     #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
     requests_enabled: bool
+
+
+# -- a visitor's renders (Task 7) ------------------------------------------------------
+
+
+class RenderBody(BaseModel):
+    """``POST …/storefront/renders``: the visitor's values for the listing as it read it.
+    The CRUD side checks every value against the listing (`inputs.py` `listing_values`),
+    never only against the schema."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    listing_id: str = Field(max_length=64)
+    #: The listing's ``updated_at`` as the page read it: another is 409 ``listing_changed``.
+    listing_updated_at: datetime
+    values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
+    #: The listing filament the visitor chose for each colour slot of the render.
+    colours: dict[int, str] = Field(default_factory=dict, max_length=64)
+
+
+class StoreRender(BaseModel):
+    """A visitor's render: the fields of the back office's job that ``Preview.tsx`` reads.
+    ``error`` is a fixed text, never the render's log: the visitor never sees a path or a
+    stack."""
+
+    id: str
+    status: JobState
+    #: The step the render is in while it runs, as ``job.progress`` names it.
+    stage: str | None
+    plates: list[PlateInfo]
+    bbox_mm: BoundingBox | None
+    colors: list[str] | None
+    #: The edge's path of the preview, once the render is done.
+    preview_url: str | None
+    error: str | None

@@ -5,9 +5,11 @@ per-client request limit."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+import uuid
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi import FastAPI
@@ -29,6 +31,7 @@ from scadbuddy.storefront.ratelimit import (
     RequestLimit,
     client_key,
 )
+from scadbuddy.storefront.routes import MAX_RENDER_BODY
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
@@ -397,3 +400,152 @@ def test_a_client_that_only_reads_has_no_write_history() -> None:
     limit = RequestLimit(_ok, prefix="/api/store/v1", trusted=(), clock=clock)  # type: ignore[arg-type]
     limit.note("198.51.100.1", write=False)
     assert limit.history("198.51.100.1") == (1, None)
+
+
+# -- renders (Task 7) ---------------------------------------------------------------------
+
+JOB = "0123456789abcdef0123456789abcdef"
+RENDERS = "/api/v1/internal/crud/storefront/renders"
+LIMITED = {
+    "type": f"{STOREFRONT_PROBLEMS}render_limited",
+    "title": "Too Many Requests",
+    "status": 429,
+    "detail": "You have made a lot of renders. Wait a moment, then try again.",
+    "limit": "per_minute",
+}
+BODY = {
+    "listing_id": LISTING_ID,
+    "listing_updated_at": "2026-11-08T00:00:00Z",
+    "values": {"width": 40},
+    "colours": {},
+}
+RENDER: dict[str, Any] = {
+    "id": JOB,
+    "status": "pending",
+    "stage": None,
+    "plates": [],
+    "bbox_mm": None,
+    "colors": None,
+    "preview_url": None,
+    "error": None,
+}
+
+
+def test_the_edge_passes_a_429_through(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
+    crud_mock["renders"].respond(429, headers={"Retry-After": "42", **CRUD}, json=LIMITED)
+    r = edge.post("/api/store/v1/renders", json=BODY, headers={"Origin": PUBLIC_URL})
+    assert (r.status_code, r.headers["retry-after"]) == (429, "42")
+    assert r.json()["type"] == LIMITED["type"]
+    assert r.json()["instance"] == "/api/store/v1/renders"
+
+
+def test_a_render_is_forwarded_as_sent_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock["renders"].respond(202, json=RENDER, headers=CRUD)
+    # A number no float holds reaches the CRUD side as the visitor sent it, which refuses it.
+    raw = '{"listing_id": "x", "values": {"width": 1' + "0" * 400 + "}}"
+    r = edge.post(
+        "/api/store/v1/renders",
+        content=raw,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 202 and r.json() == RENDER
+    sent = route.calls.last.request
+    assert sent.content == raw.encode()
+    assert sent.headers["content-type"] == "application/json"
+    assert uuid.UUID(sent.headers["idempotency-key"]).version == 4
+    edge.post("/api/store/v1/renders", json=BODY, headers={"Origin": PUBLIC_URL})
+    assert route.calls.last.request.headers["idempotency-key"] != sent.headers["idempotency-key"]
+
+
+def test_a_render_body_too_large_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock["renders"]
+    r = edge.post(
+        "/api/store/v1/renders",
+        content=b"{" + b" " * (MAX_RENDER_BODY + 1) + b"}",
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}render_body_invalid"
+    assert route.call_count == 0
+
+
+def test_a_render_and_its_estimate_are_forwarded(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    status = crud_mock.get(f"{RENDERS}/{JOB}").respond(200, json=RENDER, headers=CRUD)
+    estimate = crud_mock.get(f"{RENDERS}/{JOB}/estimate").respond(
+        200, json={"estimate": True, "price_minor": 500}, headers=CRUD
+    )
+    assert edge.get(f"/api/store/v1/renders/{JOB}").json() == RENDER
+    assert edge.get(f"/api/store/v1/renders/{JOB}/estimate").json()["price_minor"] == 500
+    for route in (status, estimate):
+        assert len(route.calls.last.request.headers[VISITOR_HEADER]) == 43
+
+
+def test_another_visitors_render_passes_through_as_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    missing = {
+        "type": f"{STOREFRONT_PROBLEMS}render_not_found",
+        "title": "Not Found",
+        "status": 404,
+        "detail": "There is no such render.",
+    }
+    crud_mock.get(f"{RENDERS}/{JOB}").respond(404, json=missing, headers=CRUD)
+    r = edge.get(f"/api/store/v1/renders/{JOB}")
+    assert r.status_code == 404 and r.json()["type"] == missing["type"]
+
+
+@pytest.mark.parametrize("job_id", ["..", "not-a-job", "0" * 31, "A" * 32])
+@pytest.mark.parametrize("tail", ["", "/preview.glb", "/estimate"])
+def test_a_job_id_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    job_id: str,
+    tail: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.get(f"/api/store/v1/renders/{job_id}{tail}")
+    assert r.status_code == 404
+    assert len(crud_mock.calls) == before
+
+
+def test_the_preview_is_streamed(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
+    chunks = [b"glTF", b"\x02\x00\x00\x00", b"x" * 100_000]
+    closed: list[bool] = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                yield chunk
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    route = crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").mock(
+        return_value=httpx.Response(
+            200, headers={**CRUD, "Content-Type": "model/gltf-binary"}, stream=Body()
+        )
+    )
+    r = edge.get(f"/api/store/v1/renders/{JOB}/preview.glb?plate=2")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "model/gltf-binary"
+    assert r.content == b"".join(chunks)
+    assert route.calls.last.request.url.params["plate"] == "2"
+    # The edge reads it as a stream and closes it, never as one body.
+    assert closed == [True]
+
+
+def test_a_preview_refusal_passes_through(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
+    missing = {"type": f"{STOREFRONT_PROBLEMS}render_not_found", "status": 404}
+    crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").respond(404, json=missing, headers=CRUD)
+    r = edge.get(f"/api/store/v1/renders/{JOB}/preview.glb")
+    assert r.status_code == 404 and r.json()["type"] == missing["type"]
