@@ -22,6 +22,16 @@ Stripe's documented behaviour this relies on:
 - The fee is on the Charge's balance transaction, which Stripe may create after the
   payment succeeds; ``charge.updated`` tells when it is there
   (https://docs.stripe.com/expand/use-cases#see-the-stripe-fee-for-a-given-payment).
+- A refund is read from the Refund's own events, ``refund.created`` and
+  ``refund.updated``: a Refund carries its own ``amount``, ``payment_intent`` and
+  ``status`` (``pending``, ``requires_action``, ``succeeded``, ``failed``, ``canceled``)
+  (https://docs.stripe.com/api/refunds/object, https://docs.stripe.com/refunds#refund-events).
+  ``charge.refunded`` is not read: its Charge holds only the running ``amount_refunded``,
+  and ``data.previous_attributes`` is documented only for ``*.updated`` events
+  (https://docs.stripe.com/api/events/object#event_object-data-previous_attributes).
+  A Refund is recorded once it is ``succeeded``, under the event id ``refund:<id>``, so
+  its ``refund.created`` and a later ``refund.updated`` record it once. A refund that
+  fails after it succeeded (``refund.failed``, rare) is not reversed here.
 - Events can arrive in any order (https://docs.stripe.com/webhooks#event-ordering), and a
   non-2xx answer makes Stripe send the event again
   (https://docs.stripe.com/webhooks#automatic-retries).
@@ -32,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -53,6 +64,8 @@ from scadbuddy.payments.provider import (
     ProviderField,
     ProviderUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 API: Final = "https://api.stripe.com"
 #: The API version every call asks for, so a response's shape does not follow the
@@ -106,8 +119,8 @@ def verify_signature(secret: str, header: str, body: bytes, *, now: float) -> No
     digest = expected.hexdigest().encode()
     if not any(hmac.compare_digest(digest, s.encode()) for s in signatures):
         raise BadSignatureError("the signature does not match")
-    if timestamp < now - SIGNATURE_TOLERANCE_SECONDS:
-        raise BadSignatureError("the signature is too old")
+    if abs(now - timestamp) > SIGNATURE_TOLERANCE_SECONDS:
+        raise BadSignatureError("the signature is too old or too far ahead")
 
 
 class StripeProvider:
@@ -177,8 +190,13 @@ class StripeProvider:
         `ProviderUnavailableError`, so nothing is recorded and Stripe sends it again."""
         try:
             return await self._call(credential, "GET", path, params=params)
-        except (_NoAnswerError, _RefusedError):
-            raise ProviderUnavailableError("Stripe did not answer a read the event needs") from None
+        except _NoAnswerError:
+            logger.warning("Stripe did not answer GET %s", path)
+        except _RefusedError as refused:
+            # The status says why Stripe keeps failing it (a 404, a missing permission);
+            # it goes to the log only, never to the caller.
+            logger.warning("Stripe answered %s to GET %s", refused.status, path)
+        raise ProviderUnavailableError("Stripe did not answer a read the event needs")
 
     # -- the seam ---------------------------------------------------------------------
 
@@ -282,8 +300,8 @@ class StripeProvider:
         other = ProviderEvent(event_id=event_id, kind="other")
         if kind.startswith("checkout.session."):
             return await self._session_event(credential, event_id, kind, obj) or other
-        if kind == "charge.refunded":
-            return await self._refund(credential, event_id, obj, previous) or other
+        if kind in ("refund.created", "refund.updated"):
+            return await self._refund(credential, obj) or other
         if kind == "charge.updated":
             return await self._late_fee(credential, event_id, obj, previous) or other
         return other
@@ -355,22 +373,17 @@ class StripeProvider:
     async def _refund(
         self,
         credential: Credential,
-        event_id: str,
-        charge: dict[str, Any],
-        previous: dict[str, Any],
+        refund: dict[str, Any],
     ) -> ProviderEvent | None:
-        if not _ours(charge):
-            return None
-        # ``amount_refunded`` is the running total: this event's refund is the change.
-        amount = int(charge["amount_refunded"]) - int(previous.get("amount_refunded") or 0)
-        if amount < 1:
+        """A succeeded Refund, keyed by its own id, for its own amount."""
+        if refund.get("status") != "succeeded":
             return None
         return ProviderEvent(
-            event_id=event_id,
+            event_id=f"refund:{_path_id(refund['id'])}",
             kind="refunded",
-            provider_ref=await self._session_of(credential, charge.get("payment_intent")),
-            amount_minor=amount,
-            currency=str(charge["currency"]).upper(),
+            provider_ref=await self._session_of(credential, refund.get("payment_intent")),
+            amount_minor=int(refund["amount"]),
+            currency=str(refund["currency"]).upper(),
         )
 
     async def _late_fee(

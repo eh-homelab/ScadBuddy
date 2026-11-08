@@ -111,8 +111,10 @@ def test_a_card_payment_a_late_fee_and_two_part_refunds(
     assert fees(pg_conninfo) == [(50, f"payment:{paid['id']}")]
     assert send(client, "charge.updated.balance_transaction.json").json() == {"outcome": "replayed"}
 
-    assert send(client, "charge.refunded.json").json() == {"outcome": "recorded"}
-    assert send(client, "charge.refunded.second.json").json() == {"outcome": "recorded"}
+    assert send(client, "refund.created.json").json() == {"outcome": "recorded"}
+    assert send(client, "refund.created.second.json").json() == {"outcome": "recorded"}
+    # The same Refund told again by refund.updated records nothing more.
+    assert send(client, "refund.updated.metadata.json").json() == {"outcome": "replayed"}
     payments = client.get(f"/api/v1/orders/{order_id}").json()["payments"]
     assert [p["amount_minor"] for p in payments] == [700, -400, -300]
     assert fees(pg_conninfo) == [(50, f"payment:{paid['id']}")]

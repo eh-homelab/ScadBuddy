@@ -252,6 +252,13 @@ async def test_an_old_timestamp_is_refused() -> None:
         await STRIPE.parse_webhook(CRED, signed(body, at=old), body)
 
 
+async def test_a_timestamp_far_in_the_future_is_refused() -> None:
+    body = (PAYLOADS / "checkout.session.expired.json").read_bytes()
+    ahead = int(time.time()) + SIGNATURE_TOLERANCE_SECONDS + 5
+    with pytest.raises(BadSignatureError):
+        await STRIPE.parse_webhook(CRED, signed(body, at=ahead), body)
+
+
 async def test_one_matching_v1_among_several_is_enough_and_v0_is_ignored() -> None:
     """While a rolled secret is still active Stripe signs with each
     (https://docs.stripe.com/webhooks#verify-manually)."""
@@ -308,10 +315,17 @@ async def test_a_fee_in_another_currency_is_not_recorded() -> None:
 
 
 @respx.mock
-async def test_stripe_not_answering_for_the_fee_is_unavailable() -> None:
-    respx.get(f"{API}/v1/payment_intents/{PI}").mock(return_value=httpx.Response(500, json={}))
-    with pytest.raises(ProviderUnavailableError):
+async def test_stripe_not_answering_for_the_fee_is_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The log says why (Stripe's status); the reply to the caller does not."""
+    respx.get(f"{API}/v1/payment_intents/{PI}").mock(
+        return_value=httpx.Response(404, json={"error": {"message": "No such payment_intent"}})
+    )
+    with caplog.at_level("WARNING"), pytest.raises(ProviderUnavailableError) as down:
         await parse("checkout.session.completed.card.json")
+    assert "404" not in str(down.value)
+    assert any("404" in r.getMessage() for r in caplog.records)
 
 
 async def test_a_bank_debit_is_pending_then_paid_or_failed() -> None:
@@ -338,39 +352,64 @@ async def test_an_expired_session_expires_the_request() -> None:
 
 
 @respx.mock
-async def test_a_refund_finds_its_session_and_counts_each_part_once() -> None:
+async def test_each_refund_is_recorded_once_for_its_own_amount() -> None:
+    """A Refund carries its own ``amount`` (https://docs.stripe.com/api/refunds/object),
+    so two part refunds are 400 and 300; the event id is the Refund's, so its
+    ``refund.created`` and ``refund.updated`` record it once."""
     listed = respx.get(f"{API}/v1/checkout/sessions").mock(
         return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.json"))
     )
-    first = await parse("charge.refunded.json")
+    first = await parse("refund.created.json")
     assert first == ProviderEvent(
-        event_id="evt_1ref", kind="refunded", provider_ref=CS, amount_minor=400, currency="USD"
-    )
+        event_id="refund:re_1first", kind="refunded", provider_ref=CS, amount_minor=400,
+        currency="USD",
+    )  # fmt: skip
     assert listed.calls.last.request.url.params["payment_intent"] == PI
-    second = await parse("charge.refunded.second.json")
-    assert (second.amount_minor, second.provider_ref) == (300, CS)
+    second = await parse("refund.created.second.json")
+    assert (second.event_id, second.amount_minor, second.provider_ref) == (
+        "refund:re_2second", 300, CS,
+    )  # fmt: skip
+    again = await parse("refund.updated.metadata.json")
+    assert (again.event_id, again.amount_minor) == ("refund:re_1first", 400)
 
 
 @respx.mock
-async def test_a_refund_with_no_session_is_unmatched() -> None:
+async def test_a_pending_refund_is_recorded_when_it_succeeds() -> None:
+    respx.get(f"{API}/v1/checkout/sessions").mock(
+        return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.json"))
+    )
+    pending = await parse("refund.created.pending.json")
+    assert (pending.event_id, pending.kind) == ("evt_3ref", "other")
+    settled = await parse("refund.updated.succeeded.json")
+    assert (settled.event_id, settled.kind, settled.amount_minor) == (
+        "refund:re_3bank", "refunded", 700,
+    )  # fmt: skip
+
+
+@respx.mock
+async def test_a_refund_of_a_sale_outside_scadbuddy_is_unmatched() -> None:
     respx.get(f"{API}/v1/checkout/sessions").mock(
         return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.empty.json"))
     )
-    event = await parse("charge.refunded.json")
+    event = await parse("refund.created.outside.json")
     assert (event.kind, event.provider_ref) == ("refunded", None)
 
 
-async def test_a_charge_made_outside_scadbuddy_is_other_with_no_call() -> None:
+async def test_charge_refunded_is_not_read() -> None:
+    """Its running ``amount_refunded`` cannot tell this refund's amount; the Refund's own
+    events are read instead."""
+    body = json.dumps(
+        {"id": "evt_c", "type": "charge.refunded", "data": {"object": {"id": "ch_1"}}}
+    ).encode()
     with respx.mock:
-        event = await parse("charge.refunded.outside.json")
-    assert (event.kind, event.provider_ref) == ("other", None)
+        assert (await STRIPE.parse_webhook(CRED, signed(body), body)).kind == "other"
 
 
 @respx.mock
 async def test_stripe_not_answering_for_a_refund_is_unavailable() -> None:
     respx.get(f"{API}/v1/checkout/sessions").mock(side_effect=httpx.ReadTimeout("slow"))
     with pytest.raises(ProviderUnavailableError):
-        await parse("charge.refunded.json")
+        await parse("refund.created.json")
 
 
 @respx.mock

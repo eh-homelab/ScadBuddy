@@ -502,8 +502,10 @@ sealed with that key.
 In the Stripe Dashboard, add a webhook endpoint with the URL
 `https://<public host>/api/v1/payments/webhooks/stripe` and these events:
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-`checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`
-and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks)). Then, in
+`checkout.session.async_payment_failed`, `checkout.session.expired`, `refund.created`,
+`refund.updated` and `charge.updated` ([webhooks](https://docs.stripe.com/webhooks),
+[refund events](https://docs.stripe.com/refunds#refund-events)). Each refund is recorded
+once, for its own amount, when Stripe says it succeeded. Then, in
 Settings → Payments, connect Stripe with a secret key (`sk_…`) or a restricted key
 (`rk_…`) and the endpoint's signing secret (`whsec_…`). A restricted key needs write
 access to Checkout Sessions and read access to PaymentIntents and balance transactions

@@ -1,27 +1,24 @@
 {
-  "id": "evt_1out",
+  "id": "evt_4ref",
   "object": "event",
   "api_version": "2026-10-28.endive",
-  "created": 1762560000,
+  "created": 1762560100,
   "data": {
     "object": {
-      "id": "ch_3MtwBwLkdIwHu7ix2KhxTz3v",
-      "object": "charge",
+      "id": "re_3bank",
+      "object": "refund",
       "amount": 700,
-      "amount_captured": 700,
-      "amount_refunded": 700,
-      "balance_transaction": "txn_3MtwBwLkdIwHu7ix2rw9Uyaf",
-      "captured": true,
+      "balance_transaction": null,
+      "charge": "ch_3MtwBwLkdIwHu7ix2KhxTz3v",
+      "created": 1762560100,
       "currency": "usd",
-      "livemode": false,
       "metadata": {},
-      "paid": true,
       "payment_intent": "pi_3MtwBwLkdIwHu7ix28a3tqPa",
-      "refunded": false,
+      "reason": null,
       "status": "succeeded"
     },
     "previous_attributes": {
-      "amount_refunded": 0
+      "status": "pending"
     }
   },
   "livemode": false,
@@ -30,5 +27,5 @@
     "id": null,
     "idempotency_key": null
   },
-  "type": "charge.refunded"
+  "type": "refund.updated"
 }
