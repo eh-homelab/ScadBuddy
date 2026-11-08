@@ -9,9 +9,10 @@ from decimal import Decimal
 
 import pytest
 
-from scadbuddy.orders.lifecycle import LifecycleError
+from scadbuddy.orders.lifecycle import LifecycleError, ManualQuoteInput
 from scadbuddy.orders.models import Order, OrderItem, Revision
 from scadbuddy.orders.money import DepositRule, OrderRules
+from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -247,8 +248,9 @@ def test_the_policy_sets_the_largest_deposit_that_applies(
     order = _setup(shop, setup)
     order = shop.lifecycle.apply_deposit_policy(order.id, BY)
     assert order.deposit_minor == want
-    [event] = [e for e in shop.rows.events(order.id) if e.kind == "deposit.set"]
-    assert event.detail == {"amount_minor": want, "policy": True}
+    # No deposit asked of an order with none is no change: nothing is written.
+    sets = [e.detail for e in shop.rows.events(order.id) if e.kind == "deposit.set"]
+    assert sets == ([{"amount_minor": want, "policy": True}] if want else [])
     assert [r.amount_minor for r in requests_for(shop, order)] == ([want] if want else [])
 
 
@@ -259,3 +261,75 @@ def test_the_policy_ignores_a_cancelled_request_item(rows: OrderStore, pool: PgP
     request = shop.lifecycle.add_request_item(order.id, BY, title="A bracket", quantity=1)
     shop.lifecycle.cancel_item(order.id, request.id, BY)
     assert shop.lifecycle.apply_deposit_policy(order.id, BY).deposit_minor is None
+
+
+# -- an unchanged deposit writes nothing ------------------------------------------------------
+
+
+def _writes(shop: Shop, order: Order) -> tuple[int, list[tuple[str, str]]]:
+    return len(shop.rows.events(order.id)), [(r.id, r.status) for r in requests_for(shop, order)]
+
+
+def test_the_same_deposit_again_writes_nothing(shop: Shop) -> None:
+    order = shop.order()
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=500, method="cash")
+    shop.lifecycle.set_deposit(order.id, BY, 2000)
+    before = _writes(shop, order)
+    again = shop.lifecycle.set_deposit(order.id, BY, 2000)
+    assert again.deposit_minor == 2000 and _writes(shop, order) == before
+    shop.lifecycle.set_deposit(order.id, BY, 2500)
+    assert [(r.amount_minor, r.status) for r in requests_for(shop, order)] == [
+        (1500, "cancelled"),
+        (2000, "open"),
+    ]
+
+
+def test_the_same_deposit_after_a_payment_asks_again_for_the_rest(shop: Shop) -> None:
+    order = shop.order()
+    shop.lifecycle.set_deposit(order.id, BY, 2000)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=500, method="cash")
+    shop.lifecycle.set_deposit(order.id, BY, 2000)
+    assert [(r.amount_minor, r.status) for r in requests_for(shop, order)] == [
+        (2000, "cancelled"),
+        (1500, "open"),
+    ]
+
+
+def test_the_same_policy_deposit_again_writes_nothing(rows: OrderStore, pool: PgPool) -> None:
+    shop = RulesShop(rows, BlobRefs(pool), _policy(FIRST_ORDER_25PCT))
+    order = _setup(shop, "first_order_quoted_1000")
+    shop.lifecycle.apply_deposit_policy(order.id, BY)
+    before = _writes(shop, order)
+    assert shop.lifecycle.apply_deposit_policy(order.id, BY).deposit_minor == 250
+    assert _writes(shop, order) == before
+
+
+def test_no_deposit_cleared_or_waived_writes_nothing(shop: Shop) -> None:
+    order = shop.order()
+    before = _writes(shop, order)
+    assert shop.lifecycle.set_deposit(order.id, BY, None).deposit_minor is None
+    waived = shop.lifecycle.waive_deposit(order.id, BY, "no need")
+    assert waived.deposit_waived_reason is None and _writes(shop, order) == before
+
+
+def test_a_refund_after_acceptance_brings_the_rule_back_until_waived(shop: Shop) -> None:
+    order, item, rev = requested(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.answer_revision(
+        order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+    )
+    quote = shop.lifecycle.record_manual_quote(
+        order.id, item.id, ManualQuoteInput(unit_price_minor=5000, label="typed"), BY
+    )
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    shop.lifecycle.set_deposit(order.id, BY, 2000)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=2000, method="cash")
+    shop.lifecycle.accept_order(order.id, BY)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=-500, method="cash")
+
+    assert _slug(lambda: _test_print(shop, order, item, rev, "trial")).slug == "deposit_unpaid"
+    assert _slug(lambda: shop.lifecycle.set_deposit(order.id, BY, 1500)).slug == (
+        "order_not_editable"
+    )
+    shop.lifecycle.waive_deposit(order.id, BY, "refunded a part by mistake")
+    _test_print(shop, order, item, rev, "trial")

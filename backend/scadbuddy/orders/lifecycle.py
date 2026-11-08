@@ -967,16 +967,26 @@ class Lifecycle:
         self, conn: Conn, order: Order, by: Actor, amount: Money | None, **audit: Any
     ) -> Order:
         """Cancels the open deposit requests, sets the deposit, clears its waiver, and asks
-        for what of it is not paid yet, on the default provider."""
-        for found in payments.requests_for_order(conn, order.id):
-            if found.kind == "deposit" and found.status == "open":
-                payments.set_request_status(conn, found.id, "cancelled")
-                self._event(conn, order, by, "payment_request.cancelled", request_id=found.id)
+        for what of it is not paid yet, on the default provider. The same deposit whose
+        open request already asks for the rest (or none, with nothing due) writes
+        nothing: the order is returned as it is."""
+        due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
+        asking = [
+            found
+            for found in payments.requests_for_order(conn, order.id)
+            if found.kind == "deposit" and found.status == "open"
+        ]
+        if amount == order.deposit_minor and [r.amount_minor for r in asking] == (
+            [due] if due > 0 else []
+        ):
+            return order
+        for found in asking:
+            payments.set_request_status(conn, found.id, "cancelled")
+            self._event(conn, order, by, "payment_request.cancelled", request_id=found.id)
         updated = self.store.set_deposit_fields(
             conn, order.id, deposit_minor=amount, deposit_waived_reason=None
         )
         self._event(conn, order, by, "deposit.set", amount_minor=amount, **audit)
-        due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
         if due > 0:
             opened = payments.insert_request(
                 conn,
@@ -999,7 +1009,8 @@ class Lifecycle:
     def set_deposit(self, order_id: str, by: Actor, amount_minor: Money | None) -> Order:
         """The order's deposit, or None for none, while `draft` or `quoted`
         (`order_not_editable` past it). It cancels the open `deposit` request and clears
-        a waiver; a deposit above what is paid opens a `deposit` request for the rest."""
+        a waiver; a deposit above what is paid opens a `deposit` request for the rest.
+        The same deposit, already asked for, writes nothing."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
@@ -1030,13 +1041,16 @@ class Lifecycle:
 
     def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
-        1 to 500 characters). The open deposit request stays open."""
+        1 to 500 characters). The open deposit request stays open. An order with no
+        deposit has nothing to waive: it is returned as it is, nothing written."""
         reason = reason.strip()
         if not 1 <= len(reason) <= 500:
             raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
+            if order.deposit_minor is None:
+                return order
             order = self.store.set_deposit_fields(conn, order.id, deposit_waived_reason=reason)
             self._event(conn, order, by, "deposit.waived", reason=reason)
         self._told(_Change(order))
