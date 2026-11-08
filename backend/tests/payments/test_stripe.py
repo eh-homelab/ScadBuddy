@@ -402,3 +402,30 @@ async def test_an_event_stripe_sends_that_scadbuddy_does_not_read_is_other() -> 
 
 def test_the_secrets_never_show_in_the_adapter() -> None:
     assert KEY not in repr(StripeProvider()) and WHSEC not in repr(CRED)
+
+
+@respx.mock
+async def test_a_key_without_a_permission_never_repeats_the_key() -> None:
+    """Stripe's permission error quotes the key's prefix and last digits."""
+    message = "The provided key 'rk_test_****1234' does not have the required permissions"
+    respx.get(f"{API}/v1/checkout/sessions").mock(
+        return_value=httpx.Response(403, json={"error": {"message": message}})
+    )
+    with pytest.raises(ProviderError) as refused:
+        await STRIPE.verify(CRED)
+    assert str(refused.value) == "the Stripe key lacks a permission ScadBuddy needs"
+
+
+async def test_an_id_that_is_not_a_stripe_id_is_never_put_in_a_path() -> None:
+    # Nothing is routed: a request would fail the test.
+    with respx.mock, pytest.raises(ProviderError):
+        await STRIPE.cancel_request(CRED, "../v1/charges")
+    session = {
+        "id": CS, "currency": "usd", "amount_total": 700, "payment_status": "paid",
+        "payment_intent": "../v1/x",
+    }  # fmt: skip
+    body = json.dumps(
+        {"id": "evt_x", "type": "checkout.session.completed", "data": {"object": session}}
+    ).encode()
+    with respx.mock, pytest.raises(ProviderError):
+        await STRIPE.parse_webhook(CRED, signed(body), body)

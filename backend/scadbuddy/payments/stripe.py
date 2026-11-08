@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
@@ -67,6 +68,8 @@ TIMEOUT: Final = httpx.Timeout(20.0)
 ORDER_NUMBER: Final = "scadbuddy_order_number"
 ORDER_ID: Final = "scadbuddy_order_id"
 REQUEST_ID: Final = "scadbuddy_payment_request_id"
+#: A Stripe object id (``cs_…``, ``pi_…``, ``txn_…``); nothing else goes in a path.
+_STRIPE_ID: Final = re.compile(r"[A-Za-z0-9_]{1,255}")
 
 
 class _RefusedError(Exception):
@@ -162,9 +165,11 @@ class StripeProvider:
         except _NoAnswerError:
             raise ProviderError("Stripe did not answer") from None
         except _RefusedError as refused:
+            # Stripe's text for these two quotes part of the key.
             if refused.status == 401:
-                # Stripe's text repeats part of the key.
                 raise ProviderError("Stripe refused the secret key") from None
+            if refused.status == 403:
+                raise ProviderError("the Stripe key lacks a permission ScadBuddy needs") from None
             raise ProviderError(f"Stripe refused: {refused.message}") from None
 
     async def _read(self, credential: Credential, path: str, params: Mapping[str, str]) -> Any:
@@ -229,7 +234,7 @@ class StripeProvider:
             raise ProviderError("Stripe's answer named no Checkout Session page") from None
 
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
-        path = f"/v1/checkout/sessions/{provider_ref}"
+        path = f"/v1/checkout/sessions/{_path_id(provider_ref)}"
         try:
             await self._call(credential, "POST", f"{path}/expire")
             return
@@ -328,7 +333,7 @@ class StripeProvider:
             return None
         intent = await self._read(
             credential,
-            f"/v1/payment_intents/{payment_intent}",
+            f"/v1/payment_intents/{_path_id(payment_intent)}",
             {"expand[]": "latest_charge.balance_transaction"},
         )
         charge = intent.get("latest_charge")
@@ -383,7 +388,7 @@ class StripeProvider:
         ):
             return None
         currency = str(charge["currency"]).upper()
-        txn = await self._read(credential, f"/v1/balance_transactions/{txn_id}", {})
+        txn = await self._read(credential, f"/v1/balance_transactions/{_path_id(txn_id)}", {})
         fee = _fee(txn, currency)
         if fee is None:
             return None
@@ -394,6 +399,12 @@ class StripeProvider:
             currency=currency,
             fee_minor=fee,
         )
+
+
+def _path_id(value: str) -> str:
+    if not _STRIPE_ID.fullmatch(value):
+        raise ProviderError("that is not a Stripe id")
+    return value
 
 
 def _ours(charge: Mapping[str, Any]) -> bool:
