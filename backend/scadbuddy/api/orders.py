@@ -104,6 +104,7 @@ from scadbuddy.orders.models import (
     OrderFilter,
     OrderItem,
     OrderProject,
+    OrderSource,
     OrderStatus,
     Payment,
     PriceBook,
@@ -172,6 +173,8 @@ LIST_PARAMS = frozenset(
         "currency",
         "product",
         "margin_state",
+        "source",
+        "unsubmitted",
         "cursor",
         "limit",
     }
@@ -577,6 +580,8 @@ async def list_orders(
     currency: Annotated[str | None, Query(pattern=r"^[A-Z]{3}$")] = None,
     product: Annotated[str | None, Query(min_length=1, max_length=210)] = None,
     margin_state: Annotated[list[MarginState] | None, Query()] = None,
+    source: OrderSource | None = None,
+    unsubmitted: bool = False,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
@@ -590,7 +595,10 @@ async def list_orders(
     a bounded number of orders, so its page can be short or empty while ``next_cursor``
     remains: follow the cursor until it is null. ``accepted_from`` (inclusive),
     ``accepted_to`` (exclusive), ``currency`` and ``product`` (``model:<slug>``,
-    ``sku:<sku>`` or ``custom``) are a profit report row's orders (job cost spec §6.4)."""
+    ``sku:<sku>`` or ``custom``) are a profit report row's orders (job cost spec §6.4).
+    ``source`` is where an order was made: ``back_office`` or ``storefront`` (#5282).
+    The storefront's unsubmitted carts are left out; ``unsubmitted=true`` lists only
+    them. A cart has no ``number`` and no ``customer_id`` (both null)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     try:
@@ -611,6 +619,8 @@ async def list_orders(
         accepted_until=accepted_to,
         currency=currency,
         product=wanted,
+        source=source,
+        unsubmitted=unsubmitted,
     )
     if cursor is not None:
         try:
@@ -1202,7 +1212,8 @@ async def accept_order(order_id: str, orders: OrdersDep) -> Order:
     # leave it unrecorded, and the next ensure would make a second of the same name.
     ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
     _ENSURING.add(ensuring)
-    ensuring.add_done_callback(lambda task: _ensured(task, accepted.number))
+    # An accepted order is never a cart (#5282), so it has its number.
+    ensuring.add_done_callback(lambda task: _ensured(task, accepted.number or accepted.id))
     await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
     return accepted
 

@@ -720,9 +720,12 @@ def test_a_bad_activity_setting_is_refused(client: TestClient, patch: dict[str, 
         ("storefront_renders_per_day", 0),
         ("storefront_render_concurrency", 0),
         ("storefront_draft_ttl_days", 0),
+        ("storefront_renders_per_minute", 61),
     ],
 )
-def test_a_storefront_limit_below_one_is_refused(client: TestClient, name: str, value: int) -> None:
+def test_a_storefront_limit_out_of_bounds_is_refused(
+    client: TestClient, name: str, value: int
+) -> None:
     assert client.put("/api/v1/settings", json={name: value}).status_code == 422
 
 

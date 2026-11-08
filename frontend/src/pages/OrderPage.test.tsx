@@ -110,7 +110,7 @@ describe('OrderPage (#4249)', () => {
   it('adds an item from the order page while the order is open, and only then (#4251)', async () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     const { user } = render(order.id)
-    await screen.findByRole('heading', { name: order.number })
+    await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText(/Add one with Add item above/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Add item' }))
     const dialog = await screen.findByRole('dialog', { name: 'Add item' })
@@ -127,7 +127,7 @@ describe('OrderPage (#4249)', () => {
     const row = state.orders.find((o) => o.id === order.id)
     if (row) row.status = 'accepted'
     render(order.id)
-    await screen.findByRole('heading', { name: order.number })
+    await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText('No items yet. Add one with Add item above, or type a custom item below.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add item' })).toBeInTheDocument()
     // The custom row adds on the after-acceptance route, after a confirm.
@@ -139,7 +139,7 @@ describe('OrderPage (#4249)', () => {
     const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
     await api.cancelOrder(order.id)
     render(order.id)
-    await screen.findByRole('heading', { name: order.number })
+    await screen.findByRole('heading', { name: order.number! })
     expect(screen.getByText('No items.')).toBeInTheDocument()
     expect(screen.queryByText(/Add one with Add item above/)).not.toBeInTheDocument()
   })

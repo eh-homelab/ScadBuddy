@@ -78,6 +78,7 @@ from scadbuddy.orders.lifecycle import (
     ClaimRefusedError,
     Lifecycle,
     LifecycleError,
+    check_submitted,
 )
 from scadbuddy.orders.models import Actor, Fulfilment, Order, OrderItem, Quote, Reference
 from scadbuddy.orders.problems import PROBLEMS, refused
@@ -158,7 +159,8 @@ async def print_check(
     part_settings: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
-    unknown order or item; 409 ``order_<status>`` for an ended order,
+    unknown order or item; 409 ``order_not_submitted`` for a storefront cart (#5282),
+    ``order_<status>`` for an ended order,
     ``order_not_accepted`` before it is accepted, ``order_on_hold``, ``item_custom``,
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
     `failed` (one already printing among them), ``print_in_flight`` while a test print of
@@ -222,7 +224,8 @@ async def test_print_check(
 ) -> dict[str, Any]:
     """A test print's refusals (storefront spec §4.4), writing nothing: one copy of the
     item's output, on an order accepted or not and an item in any open state. 404 for an
-    unknown order, item or revision (``revision_not_found``); 409 ``order_<status>`` for
+    unknown order, item or revision (``revision_not_found``); 409 ``order_not_submitted``
+    for a storefront cart (#5282), ``order_<status>`` for
     an ended order, ``order_on_hold``, ``item_custom`` and ``item_has_no_design``,
     ``item_not_open`` for a settled item, ``print_in_flight`` while a print of the item,
     of either purpose, is open, ``revision_not_newest`` for a revision that is
@@ -307,9 +310,15 @@ async def _none_in_flight(store: OrderStore, item: OrderItem) -> None:
 async def _order_and_item(
     store: OrderStore, order_id: str, item_id: str
 ) -> tuple[Order, OrderItem]:
+    """The order and its item; 409 ``order_not_submitted`` for a storefront cart (#5282),
+    which the shop never prints."""
     order = await asyncio.to_thread(store.order, order_id)
     if order is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
     item = await asyncio.to_thread(store.item, item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")

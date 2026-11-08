@@ -137,7 +137,8 @@ _ADDRESS = (
 _ORDER = (
     "id, number, customer_id, status, currency, on_hold, shipping_address_id,"
     " billing_address_id, shipping_address, billing_address, notes, due_at, accepted_at,"
-    " closed_at, cancelled_at, created_at, updated_at, created_by"
+    " closed_at, cancelled_at, created_at, updated_at, created_by, source, submitted_at,"
+    " storefront_visitor_id"
 )
 _ITEM = (
     "id, order_id, position, status, quantity, title, notes, kind, requires_printing, sku,"
@@ -811,6 +812,30 @@ class OrderStore:
         assert row is not None
         return Order.model_validate(row)
 
+    def insert_storefront_draft(
+        self, conn: Conn, *, visitor_id: str, currency: str, created_by: Actor
+    ) -> Order:
+        """The visitor's cart (#5282): a `draft` with no number and no customer, so it
+        takes no number from the year's counter. The unique index
+        ``orders_one_draft_per_visitor`` refuses a second one (``UniqueViolation``)."""
+        row = conn.execute(
+            "INSERT INTO orders (source, storefront_visitor_id, currency, created_by)"
+            f" VALUES ('storefront', %s, %s, %s) RETURNING {_ORDER}",
+            (visitor_id, currency, Jsonb(created_by.model_dump(mode="json"))),
+        ).fetchone()
+        assert row is not None
+        return Order.model_validate(row)
+
+    def draft_of(self, visitor_id: str, *, conn: Conn | None = None) -> Order | None:
+        """The visitor's unsubmitted cart, if it has one."""
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_ORDER} FROM orders WHERE storefront_visitor_id = %s"
+                " AND source = 'storefront' AND submitted_at IS NULL",
+                (visitor_id,),
+            ).fetchone()
+        return None if row is None else Order.model_validate(row)
+
     def order(self, order_id: str, *, conn: Conn | None = None) -> Order | None:
         with self._read(conn) as c:
             row = c.execute(f"SELECT {_ORDER} FROM orders WHERE id = %s", (order_id,)).fetchone()
@@ -836,6 +861,13 @@ class OrderStore:
             where.append(sql.SQL(clause))
             params.extend(values)
 
+        # The storefront's unsubmitted carts (#5282) are left out unless asked for.
+        if filters.unsubmitted:
+            add("o.source = 'storefront' AND o.submitted_at IS NULL")
+        else:
+            add("NOT (o.source = 'storefront' AND o.submitted_at IS NULL)")
+        if filters.source is not None:
+            add("o.source = %s", filters.source)
         if filters.status:
             add("o.status = ANY(%s)", list(filters.status))
         if filters.customer_id is not None:

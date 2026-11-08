@@ -447,6 +447,15 @@ def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
     return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
 
 
+def check_submitted(order: Order) -> None:
+    """``order_not_submitted`` for a storefront draft (#5282, storefront spec §6.3): the
+    visitor's cart, which the shop may read but never quote, accept or print."""
+    if order.unsubmitted:
+        raise LifecycleError(
+            "order_not_submitted", f"order {order.id} is a storefront cart not yet submitted"
+        )
+
+
 class Lifecycle:
     def __init__(self, store: OrderStore, bus: EventBus | None, refs: BlobRefs | None = None):
         self.store = store
@@ -597,6 +606,28 @@ class Lifecycle:
                 billing_address_id=billing,
             )
             self._event(conn, order, by, "order.created")
+        self._told(_Change(order))
+        return order
+
+    def ensure_draft(self, visitor_id: str, by: Actor, *, currency: str) -> Order:
+        """The visitor's storefront cart (#5282), made when it has none, with the
+        `order.created` audit row (``source: storefront``). Two calls at once both
+        insert; the unique index refuses the later one, which then reads the winner."""
+        found = self.store.draft_of(visitor_id)
+        if found is not None:
+            return found
+        try:
+            with self.store.transaction() as conn:
+                order = self.store.insert_storefront_draft(
+                    conn, visitor_id=visitor_id, currency=currency, created_by=by
+                )
+                self._event(conn, order, by, "order.created", source="storefront")
+        except errors.UniqueViolation:
+            winner = self.store.draft_of(visitor_id)
+            if winner is None:
+                # The winner was swept away meanwhile: make one again.
+                return self.ensure_draft(visitor_id, by, currency=currency)
+            return winner
         self._told(_Change(order))
         return order
 
@@ -1144,6 +1175,7 @@ class Lifecycle:
         copied (Ruling 11); `accepted_at` is stamped."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             if order.status not in OPEN_FOR_EDITS:
                 raise LifecycleError(
                     "order_not_acceptable", f"order {order.number} is {order.status}"
@@ -2314,6 +2346,7 @@ class Lifecycle:
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")

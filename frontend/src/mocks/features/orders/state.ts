@@ -182,6 +182,9 @@ function order(id: string, number: string, customerId: string, status: Order['st
     created_at: at,
     updated_at: at,
     created_by: BROWSER,
+    source: 'back_office',
+    submitted_at: null,
+    storefront_visitor_id: null,
     ...extra,
   }
 }
@@ -392,4 +395,19 @@ export function reset(): void {
 /** `GET /orders` filters and the pages' tests seed from here. */
 export function seedOrders(next: Partial<State>): void {
   state = { ...state, ...next }
+}
+
+/** #5282: a storefront visitor's cart, with no number and no customer until it is submitted. */
+export function seedCart(): Order {
+  const at = now()
+  const cart: Order = {
+    ...order(newId('o'), '', '', 'draft', at),
+    number: null,
+    customer_id: null,
+    source: 'storefront',
+    storefront_visitor_id: newId('v'),
+    created_by: { kind: 'visitor', principal: 'storefront_visitor:v', session: null },
+  }
+  state.orders.push(cart)
+  return cart
 }

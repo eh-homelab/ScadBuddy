@@ -69,7 +69,9 @@ export function OrderPage() {
   // #4953 — `orders_allow_unfulfil`; on until the settings answer, as the backend's default.
   const unfulfilAllowed = useAsync(() => api.getSettings(), []).data?.orders_allow_unfulfil ?? true
   const detail = view.data
-  const customer = useAsync(() => (detail ? api.customer(detail.order.customer_id) : Promise.resolve(undefined)), [detail?.order.customer_id])
+  // #5282: a storefront cart has no customer until it is submitted.
+  const customerId = detail?.order.customer_id
+  const customer = useAsync(() => (customerId ? api.customer(customerId) : Promise.resolve(undefined)), [customerId])
   const [refusal, setRefusal] = useState<{ text: string; items: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useSearchParams()
@@ -169,14 +171,18 @@ export function OrderPage() {
     <div className="h-full overflow-y-auto" data-testid="order-page">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">{order.number}</h1>
+          <h1 className="text-xl font-semibold tracking-tight">{order.number ?? 'Cart'}</h1>
           <OrderStatusBadge status={order.status} onHold={order.on_hold} />
           <MarginBadge state={costs.data?.order_id === order.id ? costs.data.margin_state : null} />
           <span className="text-sm text-muted-foreground">
             for{' '}
-            <Link to={`/customers/${order.customer_id}`} className="text-primary underline-offset-4 hover:underline">
-              {customer.data?.display_name ?? 'the customer'}
-            </Link>
+            {order.customer_id ? (
+              <Link to={`/customers/${order.customer_id}`} className="text-primary underline-offset-4 hover:underline">
+                {customer.data?.display_name ?? 'the customer'}
+              </Link>
+            ) : (
+              'a storefront visitor'
+            )}
             , made {timeAgo(order.created_at)}
           </span>
           {orderProject && <BambuddyProject projectId={orderProject.project_id} label="Bambuddy project" />}
@@ -237,7 +243,7 @@ export function OrderPage() {
             }}
           >
             <div className="flex flex-col gap-1">
-              <Label htmlFor="cancel-reason">Why cancel {order.number}?</Label>
+              <Label htmlFor="cancel-reason">Why cancel {order.number ?? 'this cart'}?</Label>
               <Input id="cancel-reason" className="w-64" value={reason} onChange={(e) => setReason(e.target.value)} />
             </div>
             <Button type="submit" variant="destructive" size="sm">
@@ -264,7 +270,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
-          addTo={adds && { mode: adds, number: order.number }}
+          addTo={adds && { mode: adds, number: order.number ?? 'Cart' }}
           selected={current?.id ?? null}
           quoting={slices.runs}
           onHold={order.on_hold}

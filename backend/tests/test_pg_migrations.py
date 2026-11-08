@@ -536,3 +536,34 @@ def test_the_payments_seam_migration(pg_conninfo: str) -> None:
         conn.execute(cred, ("one",))
         with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
             conn.execute(cred, ("two",))
+
+
+@pytest.mark.requires_postgres
+def test_the_storefront_drafts_migration_keeps_every_order_a_back_office_one(
+    pg_conninfo: str,
+) -> None:
+    # #5282: an order made before it is a back-office order, never submitted through the
+    # storefront, and it passes the new customer-and-number check.
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("storefront_drafts")])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[_index("storefront_drafts")].id
+        assert conn.execute(
+            "SELECT source, submitted_at, storefront_visitor_id FROM orders"
+        ).fetchall() == [("back_office", None, None)]
+        conn.execute("UPDATE orders SET notes = 'still valid' WHERE id = 'o'")
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute("UPDATE orders SET customer_id = NULL WHERE id = 'o'")
+        conn.execute("INSERT INTO storefront_visitors (id, token_sha256) VALUES ('v', 'h')")
+        conn.execute(
+            "INSERT INTO orders (id, currency, created_by, source, storefront_visitor_id)"
+            " VALUES ('d', 'USD', '{}', 'storefront', 'v')"
+        )
+        conn.execute("DELETE FROM storefront_visitors")
+        assert conn.execute(
+            "SELECT storefront_visitor_id FROM orders WHERE id = 'd'"
+        ).fetchone() == (None,)

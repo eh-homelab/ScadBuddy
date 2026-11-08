@@ -55,6 +55,7 @@ from scadbuddy.orders.lifecycle import (
     SETTLED,
     Lifecycle,
     LifecycleError,
+    check_submitted,
     requote_open,
 )
 from scadbuddy.orders.models import (
@@ -221,11 +222,16 @@ def quote_check(
     acceptance, #5350), 409 ``item_not_open``
     for a settled item, 422 ``filaments`` for a slot the item lacks, a slot with no
     filament once the body's are applied, or one unknown or archived, and 422
-    ``price_book`` when nothing would price the item. Blocking; writes nothing. The
-    merged slots, which the run writes first."""
+    ``price_book`` when nothing would price the item, and 409 ``order_not_submitted`` for
+    a storefront cart (#5282). Blocking; writes nothing. The merged slots, which the run
+    writes first."""
     order = store.order(order_id)
     if order is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}")
