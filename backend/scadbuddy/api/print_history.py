@@ -516,9 +516,13 @@ async def _part_settings(
     recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
     under another name) or the run is pruned. A failed read of them is logged and gives
     None, so the print record still loads."""
-    archive, named = await asyncio.gather(
-        cache.archive(client, link.archive_id), _guarded(_named_run(links, runs, link), link)
-    )
+    fetch = asyncio.ensure_future(cache.archive(client, link.archive_id))
+    try:
+        archive, named = await asyncio.gather(fetch, _guarded(_named_run(links, runs, link), link))
+    finally:
+        # A read `_guarded` does not catch fails the request; the fetch then stops rather
+        # than run past the request's client (#5733).
+        fetch.cancel()
     run: PrintRun | None = (
         await _guarded(_run_by_file(links, runs, link, archive), link)
         if isinstance(named, _ByFile)

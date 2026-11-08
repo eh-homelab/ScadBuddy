@@ -1340,6 +1340,46 @@ def test_the_part_settings_read_runs_beside_the_archive_fetch(
     assert read_before_fetch[:1] == [True]
 
 
+def test_a_read_that_raises_cancels_the_archive_fetch(client: TestClient, model: str) -> None:
+    """#5733: a read `_guarded` does not catch fails the request, and the archive's fetch
+    is cancelled then, not left running past the request's Bambuddy client."""
+    output_id = make_output(client, model)
+    hash_link(client, output_id, 40)
+    links = state(client).print_links
+    linked = asyncio.run(links.linked(40))
+    assert linked is not None
+    seen: list[str] = []
+
+    class Cache:
+        async def archive(self, client: Any, archive_id: int) -> ArchiveDetail | None:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                seen.append("cancelled")
+                raise
+            return None
+
+    class Links:
+        async def lan_start(self, archive_id: int) -> LanArchiveLink | None:
+            await asyncio.sleep(0)
+            raise RuntimeError("a read nothing catches")
+
+    async def read() -> None:
+        with pytest.raises(RuntimeError, match="nothing catches"):
+            await print_history._part_settings(
+                Cache(),  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+                Links(),  # type: ignore[arg-type]
+                state(client).print_runs.store,
+                linked,
+            )
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert seen == ["cancelled"]
+
+    asyncio.run(read())
+
+
 @respx.mock
 def test_a_recorded_lan_start_of_another_subject_s_run_is_not_followed(
     client: TestClient, model: str
