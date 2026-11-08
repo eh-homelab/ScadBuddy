@@ -924,12 +924,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
-  most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
+  most 256 KiB, a bad signature 400 with no event or money written, the actor `provider`
   `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
   (`last_webhook_error`: `signature`, `provider_unavailable` or `handler_error`, and
   `last_webhook_error_at`; #5684; a failure to write it is logged, never raised over the
   webhook's own), never a
-  provider's text. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
+  provider's text; the same category stamped within `WEBHOOK_ERROR_QUIET` (60 s) is not
+  written again (one conditional UPDATE), so a flood of unsigned POSTs writes once a
+  minute. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
   bounded wait, not a failure, and keeps none. The next success clears it only when the
   failure is older than that success's start; both times are the database's
   `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
