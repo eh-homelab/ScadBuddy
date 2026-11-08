@@ -129,33 +129,23 @@ def test_an_open_request_reads_what_the_pay_page_needs(shop: PayShop) -> None:
     )
 
 
-def test_a_pending_request_still_reads(shop: PayShop) -> None:
-    _, req, token = tokened(shop)
-    with shop.rows.transaction() as conn:
-        payments_store.set_request_status(conn, req.id, "pending")
-    assert checkout(shop, token) is not None
-
-
 @pytest.mark.parametrize("token", ["", "x" * 43, "not a token", "a" * 5000])
 def test_an_unknown_token_reads_nothing(shop: PayShop, token: str) -> None:
     tokened(shop)
     assert checkout(shop, token) is None
 
 
-@pytest.mark.parametrize("status", ["paid", "cancelled", "expired"])
-def test_a_closed_request_reads_nothing_and_drops_its_token(shop: PayShop, status: Any) -> None:
+@pytest.mark.parametrize("status", ["pending", "paid", "cancelled", "expired", "failed"])
+def test_a_request_that_leaves_open_reads_nothing_and_drops_its_token(
+    shop: PayShop, status: Any
+) -> None:
+    """A token is spent once its request leaves ``open``: the storefront's ``/pay/{token}``
+    answers 404 for it, whatever the request does next."""
     _, req, token = tokened(shop)
     with shop.rows.transaction() as conn:
         payments_store.set_request_status(conn, req.id, status)
     assert checkout(shop, token) is None
     assert stored_hash(shop, req.id) is None
-
-
-def test_a_failed_request_reads_nothing(shop: PayShop) -> None:
-    _, req, token = tokened(shop)
-    with shop.rows.transaction() as conn:
-        payments_store.set_request_status(conn, req.id, "failed")
-    assert checkout(shop, token) is None
 
 
 def test_a_cancel_through_the_lifecycle_drops_the_token(shop: PayShop) -> None:

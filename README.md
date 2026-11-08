@@ -621,7 +621,8 @@ to `on` in PayPal's connect form. ScadBuddy refuses that while the API has no
 edge reads; set it on the API's Deployment too). Then each USD PayPal request links to
 the storefront's pay page, `/pay/<token>`, which offers PayPal and Venmo for the same
 PayPal order. The token is 32 random bytes. ScadBuddy keeps only its sha256 and drops it
-when the request is paid, cancelled or expired, or linked again without one. Turning
+as soon as the request leaves open (approved, paid, cancelled, expired or failed), or is
+linked again without one; a spent token never opens the page again. Turning
 Venmo off ends every pay link at once. Any other request keeps PayPal's own link. A
 payment funded by Venmo is recorded with method `venmo` and shows as "Paid by Venmo via
 PayPal". A Venmo payment to the shop's own username has no merchant API, so record it

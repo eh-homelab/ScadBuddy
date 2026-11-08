@@ -83,9 +83,10 @@ def pay_link(storefront_url: str, token: str) -> str:
 
 
 def venmo_checkout(conn: Conn, token: str) -> VenmoCheckout | None:
-    """The pay page's request by its token: None for an unknown token, a request that is
-    not open or pending, one whose provider is not PayPal, or a shop whose Venmo toggle is
-    off (turning it off ends every pay link at once)."""
+    """The pay page's request by its token: None for an unknown token (a request that left
+    ``open`` dropped its token), a request that is not open, one whose provider is not
+    PayPal, or a shop whose Venmo toggle is off (turning it off ends every pay link at
+    once)."""
     if not _TOKEN.fullmatch(token):
         return None
     row = conn.execute(
@@ -95,7 +96,7 @@ def venmo_checkout(conn: Conn, token: str) -> VenmoCheckout | None:
         " FROM payment_requests r"
         " JOIN orders o ON o.id = r.order_id"
         " JOIN payment_credentials c ON c.provider = r.provider"
-        " WHERE r.pay_token_hash = %s AND r.provider = %s AND r.status IN ('open', 'pending')"
+        " WHERE r.pay_token_hash = %s AND r.provider = %s AND r.status = 'open'"
         " AND r.provider_ref IS NOT NULL AND c.settings->>%s = 'on'",
         (token_hash(token), PROVIDER, SETTING),
     ).fetchone()
