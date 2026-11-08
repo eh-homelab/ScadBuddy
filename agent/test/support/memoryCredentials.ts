@@ -7,6 +7,7 @@ import {
   type CredentialStatus,
   type CredentialTransition,
   type CredentialUpdate,
+  normaliseCredentialName,
   openCredential,
   planPut,
   MAX_CREDENTIALS,
@@ -127,12 +128,14 @@ export class MemoryCredentials implements CredentialRepo {
     if (update.secret === undefined) throw new CredentialError('secret is required for a new credential', 400)
     if (this.rows.length >= MAX_CREDENTIALS) throw new CredentialError(TOO_MANY_MESSAGE, 409)
     const id = randomUUID()
+    const name = normaliseCredentialName(update.name)
     const plan = planPut(update, undefined, kek, id)
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
     const { kind, baseUrl, envelope, last4 } = plan.write
     this.rows.push({
       id,
       kind,
+      name,
       base_url: baseUrl,
       last4,
       updated_at: new Date().toISOString(),
@@ -168,6 +171,13 @@ export class MemoryCredentials implements CredentialRepo {
     const row = this.find(id)
     if (!row) return undefined
     Object.assign(row, { status: 'active', cooldownUntil: null, last_error: null, last_error_at: null, epoch: row.epoch + 1 })
+    return this.get(id)
+  }
+
+  async rename(id: string, name: string | null): Promise<StoredCredential | undefined> {
+    const row = this.find(id)
+    if (!row) return undefined
+    row.name = normaliseCredentialName(name)
     return this.get(id)
   }
 

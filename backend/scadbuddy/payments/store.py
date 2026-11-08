@@ -248,6 +248,15 @@ def told_event(conn: Conn, provider: str, event_id: str) -> tuple[bool, str | No
     return True, row["payment_id"] if row["outcome"] == "recorded" else None
 
 
+def event_outcome(conn: Conn, provider: str, event_id: str) -> str | None:
+    """The outcome a provider's event was recorded with, or None when it was never told."""
+    row = conn.execute(
+        "SELECT outcome FROM payment_events WHERE provider = %s AND event_id = %s",
+        (provider, event_id),
+    ).fetchone()
+    return None if row is None else str(row["outcome"])
+
+
 def finish_event(
     conn: Conn,
     event_row: int,
@@ -286,10 +295,12 @@ def hold_provider(conn: Conn, provider: str) -> bool:
 
 
 def has_open_requests(conn: Conn, provider: str) -> bool:
-    """An open request, or a pending one: its settling event still needs the credential."""
+    """An open request, a pending one (its settling event still needs the credential), or
+    a failed one: it holds its provider until it is cancelled (#4959; PayPal's page of a
+    failed request can still be approved, and only a connected provider captures it)."""
     row = conn.execute(
         "SELECT EXISTS (SELECT 1 FROM payment_requests WHERE provider = %s"
-        " AND status IN ('open', 'pending'))"
+        " AND status IN ('open', 'pending', 'failed'))"
         " AS found",
         (provider,),
     ).fetchone()

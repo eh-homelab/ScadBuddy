@@ -543,21 +543,37 @@ client ID and secret, and the webhook's ID. ScadBuddy checks the credentials and
 webhook sends those events. The page then shows "Connected as PayPal app … (sandbox)" or
 "(live)". Each payment request is a PayPal order for the request's amount. The customer
 pays with a PayPal balance or a card on PayPal's page. When the customer approves the
-payment, ScadBuddy captures it. PayPal then says whether the capture completed, is
-pending, or was declined. Every webhook is checked with PayPal's verify-webhook-signature
-call before ScadBuddy reads it
+payment, ScadBuddy decides whether to capture it. It captures only while the request is
+open (or failed, after a declined method) and the order still takes money. The request
+then reads pending, and PayPal says whether the capture completed, is pending, or was
+declined. A method PayPal declines at capture leaves the request failed, and the customer
+can approve the same page again with another method. A capture PayPal does not answer
+(an error, or no reply in time) may still have landed, so the request stays pending, and
+a cancel or a manual payment is refused, until PayPal's capture event or its retry of the
+approval settles it. Every webhook is checked with
+PayPal's verify-webhook-signature call before ScadBuddy reads it
 ([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
-is recorded once, for its own amount, when PayPal says it completed. PayPal has no call
-that voids an order. A cancel therefore marks the order so that ScadBuddy will not
-capture a later approval of it. The mark is set right after the cancel. When PayPal
-cannot be reached then, the failure is logged and the housekeeping sweep tries the mark
-again with a backoff: 5 minutes first, the wait doubling after each failed try, at most a
-day. Until a try lands, a later approval is still captured. That capture, and one that completed or was already under
-way before the cancel, is recorded as a payment on the cancelled request: refund it in
-PayPal if it is not wanted. ScadBuddy captures only orders it made (a request id in
-`custom_id`), but use a REST app of its own all the same. A chargeback or reversal
-(`PAYMENT.CAPTURE.REVERSED`) is not tracked: the request stays paid.
+is recorded once, for its own amount, when PayPal says it completed. A refund that is
+still pending when PayPal sends `PAYMENT.CAPTURE.REFUNDED` is read again once; PayPal
+names no event for a pending refund that completes later
+([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)), so one still
+pending then is not recorded: record it by hand when PayPal shows it completed. PayPal
+has no call that voids an order. A cancel ends the request (open or failed; a pending one
+is refused, because money is on its way, and so is the cancel of its order), and
+ScadBuddy never captures a later approval of a cancelled request. As defence in depth,
+the cancel also marks the order's `custom_id`; PayPal takes that mark only on an order
+the customer has approved
+([PATCH](https://developer.paypal.com/docs/api/orders/v2/#orders_patch)). When PayPal
+cannot be reached then, the housekeeping sweep tries the mark again with a backoff: 5
+minutes first, the wait doubling after each failed try, at most a day. A capture that
+completed or was already under way before the cancel is recorded as a payment on the
+cancelled request: refund it in PayPal if it is not wanted. ScadBuddy captures only orders
+it made (a request id in `custom_id`), but use a REST app of its own all the same.
+Disconnecting PayPal is refused while a request is open, pending or failed, since a failed
+request's page can still be approved: cancel it first. A
+chargeback or reversal (`PAYMENT.CAPTURE.REVERSED`) is not tracked: the request stays
+paid.
 
 #### Square (#5666)
 

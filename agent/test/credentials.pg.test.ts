@@ -1,7 +1,14 @@
 import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
-import { CredentialError, CredentialStore, credentialAad, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
+import {
+  CREDENTIAL_NAME_MAX,
+  CredentialError,
+  CredentialStore,
+  credentialAad,
+  MAX_CREDENTIALS,
+  TOO_MANY_MESSAGE,
+} from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { migrate, MIGRATIONS } from '../src/db/migrations.js'
 import { CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
@@ -195,6 +202,29 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await store.record(a.id, a.epoch, { kind: 'cooling_down', until: later, reason: 'HTTP 429' })
         await store.record(a.id, a.epoch, { kind: 'cooling_down', until: sooner, reason: 'HTTP 429', replacing: provisional })
         expect(await store.get(a.id)).toMatchObject({ cooldown_until: later.toISOString() })
+      })
+
+      it('stores a name with a credential and renames it, leaving the secret, health and epoch (#3710)', async () => {
+        const a = await store.create({ kind: 'claude_oauth_token', secret: KEY_A, name: ' Personal Max ' }, kek)
+        expect(a.name).toBe('Personal Max')
+        await store.record(a.id, a.epoch, { kind: 'disabled', reason: 'HTTP 401' })
+        const renamed = await store.rename(a.id, 'Work')
+        expect(renamed).toMatchObject({ name: 'Work', status: 'disabled', epoch: a.epoch, updated_at: a.updated_at })
+        expect(await store.reveal(kek, a.id)).toEqual({ kind: 'claude_oauth_token', secret: KEY_A })
+        expect((await store.rename(a.id, '  '))?.name).toBeNull()
+        expect(await store.rename('nope', 'x')).toBeUndefined()
+        expect((await store.create({ kind: 'anthropic_api_key', secret: KEY_B }, kek)).name).toBeNull()
+        await expect(store.rename(a.id, 'n'.repeat(CREDENTIAL_NAME_MAX + 1))).rejects.toMatchObject({ status: 400 })
+      })
+
+      it('refuses, in the table itself, a name that is too long, padded, empty or holds a control character (#3710)', async () => {
+        const a = await store.create({ kind: 'anthropic_api_key', secret: KEY_A }, kek)
+        for (const name of ['n'.repeat(CREDENTIAL_NAME_MAX + 1), ' padded', '', 'two\nlines']) {
+          await expect(db.sql`UPDATE ai_credentials SET name = ${name} WHERE id = ${a.id}`, JSON.stringify(name)).rejects.toThrow(
+            /ai_credentials_name_check/,
+          )
+        }
+        await db.sql`UPDATE ai_credentials SET name = ${'n'.repeat(CREDENTIAL_NAME_MAX)} WHERE id = ${a.id}`
       })
 
       it('refuses a credential past MAX_CREDENTIALS', async () => {

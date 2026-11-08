@@ -406,15 +406,29 @@ async def test_cancel_of_an_order_already_closed_is_no_error(
     await paypal.cancel_request(CRED, ORDER)
 
 
-async def test_cancel_that_leaves_the_order_payable_is_an_error(
+async def test_cancel_of_an_order_awaiting_the_payer_is_no_error(
     paypal: PayPalProvider, pp: Any
 ) -> None:
+    """PATCH "Updates an order with a CREATED or APPROVED status"
+    (https://developer.paypal.com/docs/api/orders/v2/#orders_patch), and a new order is
+    PAYER_ACTION_REQUIRED until the customer approves it. The mark is only defence in
+    depth: ScadBuddy captures an approval only while its request is open or failed."""
     pp.patch(f"/v2/checkout/orders/{ORDER}").respond(
         422, json=payload("api.error.order_not_patchable.json")
     )
     pp.get(f"/v2/checkout/orders/{ORDER}").respond(
         json=payload("api.order.payer_action_required.json")
     )
+    await paypal.cancel_request(CRED, ORDER)
+
+
+async def test_cancel_that_leaves_an_approved_order_unmarked_is_an_error(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    pp.patch(f"/v2/checkout/orders/{ORDER}").respond(
+        422, json=payload("api.error.order_not_patchable.json")
+    )
+    pp.get(f"/v2/checkout/orders/{ORDER}").respond(json=payload("api.order.approved.json"))
     with pytest.raises(ProviderError):
         await paypal.cancel_request(CRED, ORDER)
 
@@ -530,44 +544,38 @@ async def test_a_signed_body_that_is_not_an_event_is_a_provider_error(
 # -- events ----------------------------------------------------------------------------------
 
 
-async def test_an_approved_order_is_captured_and_records_nothing_itself(
+async def test_an_approved_order_is_approved_and_not_captured_here(
     paypal: PayPalProvider, pp: Any
 ) -> None:
-    captured = pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(
-        201, json=payload("api.order.captured.json")
-    )
+    """ScadBuddy decides whether to capture (``capture_request``), after it has checked the
+    request under the order lock; reading the event captures nothing."""
+    # No capture route: a capture call would fail the test.
     event = await parse(paypal, "checkout.order.approved.json")
     assert event == ProviderEvent(
-        event_id="WH-1AP12345AB678901C-2BC34567DE890123F", kind="other", provider_ref=ORDER,
+        event_id="WH-1AP12345AB678901C-2BC34567DE890123F", kind="approved", provider_ref=ORDER,
         created_at=datetime(2026, 11, 7, 10, 0, tzinfo=UTC),
     )  # fmt: skip
-    request = captured.calls.last.request
-    # Keyed on the approval event: a retry of it captures once, and a new approval after a
-    # decline is a new capture (ORDER_ALREADY_CAPTURED still stops a second one).
-    assert request.headers["paypal-request-id"] == "capture-WH-1AP12345AB678901C-2BC34567DE890123F"
-    assert request.headers["content-type"] == "application/json"
+    assert pp["order"].called
 
 
-async def test_a_cancelled_order_is_never_captured(paypal: PayPalProvider, pp: Any) -> None:
+async def test_a_cancelled_order_is_never_approved(paypal: PayPalProvider, pp: Any) -> None:
     pp["order"].respond(json=payload("api.order.approved.cancelled.json"))
-    # No capture route: a capture call would fail the test.
     event = await parse(paypal, "checkout.order.approved.cancelled.json")
     assert (event.kind, event.provider_ref) == ("other", ORDER)
 
 
-async def test_an_approval_sent_before_the_cancel_is_never_captured(
+async def test_an_approval_sent_before_the_cancel_is_never_approved(
     paypal: PayPalProvider, pp: Any
 ) -> None:
     """The event is a snapshot: a retry of an approval PayPal sent before the cancel
-    carries no mark. The order read just before the capture has it."""
+    carries no mark. The order read again has it."""
     pp["order"].respond(json=payload("api.order.approved.cancelled.json"))
-    # No capture route: a capture call would fail the test.
     event = await parse(paypal, "checkout.order.approved.json")
     assert (event.kind, event.provider_ref) == ("other", ORDER)
     assert pp["order"].called
 
 
-async def test_an_order_scadbuddy_did_not_make_is_not_captured(
+async def test_an_order_scadbuddy_did_not_make_is_not_approved(
     paypal: PayPalProvider, pp: Any
 ) -> None:
     """Another integration on the same REST app: its order has no request id in
@@ -575,16 +583,22 @@ async def test_an_order_scadbuddy_did_not_make_is_not_captured(
     order = payload("api.order.approved.json")
     order["purchase_units"][0] |= {"custom_id": "other-shop-77", "invoice_id": "INV-9"}
     pp["order"].respond(json=order)
-    # No capture route: a capture call would fail the test.
     event = await parse(paypal, "checkout.order.approved.json")
     assert (event.kind, event.provider_ref) == ("other", ORDER)
 
 
 @pytest.mark.parametrize("status", ["COMPLETED", "VOIDED", "PAYER_ACTION_REQUIRED"])
-async def test_an_order_no_longer_approved_is_not_captured(
+async def test_an_order_no_longer_approved_is_not_approved(
     paypal: PayPalProvider, pp: Any, status: str
 ) -> None:
     pp["order"].respond(json=payload("api.order.approved.json") | {"status": status})
+    event = await parse(paypal, "checkout.order.approved.json")
+    assert (event.kind, event.provider_ref) == ("other", ORDER)
+
+
+async def test_an_order_paypal_no_longer_has_is_other(paypal: PayPalProvider, pp: Any) -> None:
+    """Nothing to capture: a 503 would only make PayPal send it 25 times more."""
+    pp["order"].respond(404, json=payload("api.error.order_not_found.json"))
     event = await parse(paypal, "checkout.order.approved.json")
     assert (event.kind, event.provider_ref) == ("other", ORDER)
 
@@ -597,28 +611,83 @@ async def test_paypal_not_answering_the_order_read_is_unavailable(
         await parse(paypal, "checkout.order.approved.json")
 
 
-@pytest.mark.parametrize(
-    "error", ["api.error.order_already_captured.json", "api.error.instrument_declined.json"]
-)
-async def test_a_capture_paypal_refuses_records_nothing(
-    paypal: PayPalProvider, pp: Any, error: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Already captured: its own events tell. Declined: the customer can approve the same
-    link again with another method."""
-    pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(422, json=payload(error))
-    with caplog.at_level("WARNING"):
-        event = await parse(paypal, "checkout.order.approved.json")
-    assert (event.kind, event.provider_ref) == ("other", ORDER)
-    if "declined" in error:
-        assert any("INSTRUMENT_DECLINED" in r.getMessage() for r in caplog.records)
+# -- capture_request -------------------------------------------------------------------------
+
+EVENT_ID = "WH-1AP12345AB678901C-2BC34567DE890123F"
 
 
-async def test_a_capture_paypal_does_not_answer_is_unavailable(
+async def test_capture_request_captures_keyed_on_the_approval(
     paypal: PayPalProvider, pp: Any
 ) -> None:
-    pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(503, json={})
+    captured = pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(
+        201, json=payload("api.order.captured.json")
+    )
+    assert await paypal.capture_request(CRED, ORDER, EVENT_ID) == "captured"
+    request = captured.calls.last.request
+    # Keyed on the approval event: a retry of it captures once, and a new approval after a
+    # decline is a new capture (ORDER_ALREADY_CAPTURED still stops a second one).
+    assert request.headers["paypal-request-id"] == f"capture-{EVENT_ID}"
+    assert request.headers["content-type"] == "application/json"
+
+
+async def test_an_order_already_captured_counts_as_captured(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(
+        422, json=payload("api.error.order_already_captured.json")
+    )
+    assert await paypal.capture_request(CRED, ORDER, EVENT_ID) == "captured"
+
+
+@pytest.mark.parametrize(
+    "error", ["api.error.instrument_declined.json", "api.error.transaction_refused.json"]
+)
+async def test_a_declined_capture_is_declined(paypal: PayPalProvider, pp: Any, error: str) -> None:
+    """The request then reads ``failed``, which the shop sees. PayPal's capture reference
+    lists these as the capture's own 422 answers
+    (https://developer.paypal.com/api/rest/reference/orders/v2/errors/); no PayPal source
+    says a ``PAYMENT.CAPTURE.DECLINED`` event follows one, so ScadBuddy does not wait for
+    it. If one does come, it finds the request failed already and is ignored."""
+    pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(422, json=payload(error))
+    assert await paypal.capture_request(CRED, ORDER, EVENT_ID) == "declined"
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (400, "api.error.invalid_request.json"),
+        (403, "api.error.not_authorized.json"),
+        (404, "api.error.order_not_found.json"),
+        (422, "api.error.order_not_patchable.json"),
+    ],
+)
+async def test_a_capture_paypal_refuses_for_good_is_a_logged_provider_error(
+    paypal: PayPalProvider,
+    pp: Any,
+    status: int,
+    error: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A retry would get the same answer: no 503, so PayPal does not send it 25 times."""
+    pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(status, json=payload(error))
+    with caplog.at_level("WARNING"), pytest.raises(ProviderError):
+        await paypal.capture_request(CRED, ORDER, EVENT_ID)
+    assert any(str(status) in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("status", [401, 500, 503])
+async def test_a_capture_paypal_does_not_answer_is_unavailable(
+    paypal: PayPalProvider, pp: Any, status: int
+) -> None:
+    pp.post(f"/v2/checkout/orders/{ORDER}/capture").respond(status, json={})
     with pytest.raises(ProviderUnavailableError):
-        await parse(paypal, "checkout.order.approved.json")
+        await paypal.capture_request(CRED, ORDER, EVENT_ID)
+
+
+async def test_a_capture_with_no_answer_is_unavailable(paypal: PayPalProvider, pp: Any) -> None:
+    pp.post(f"/v2/checkout/orders/{ORDER}/capture").mock(side_effect=httpx.ConnectError("x"))
+    with pytest.raises(ProviderUnavailableError):
+        await paypal.capture_request(CRED, ORDER, EVENT_ID)
 
 
 async def test_a_completed_capture_is_paid_with_its_fee(paypal: PayPalProvider, pp: Any) -> None:
@@ -666,11 +735,52 @@ async def test_each_refund_is_recorded_once_for_its_own_amount(
     assert (second.event_id, second.amount_minor) == ("refund:2KV19013892702522", 300)
 
 
-async def test_a_refund_not_completed_is_other_with_no_read(
+async def test_a_refund_still_pending_is_read_again_and_other_while_pending(
     paypal: PayPalProvider, pp: Any
 ) -> None:
+    """PayPal documents ``PAYMENT.REFUND.PENDING`` and ``PAYMENT.REFUND.FAILED`` but no
+    event for a pending refund that completes
+    (https://developer.paypal.com/api/rest/webhooks/event-names/), so the refund is read
+    again: one completed by then is recorded; one still pending is not (the README says
+    to record it by hand)."""
+    refund = pp.get("/v2/payments/refunds/3LW20124903813633").respond(
+        json=payload("api.refund.pending.json")
+    )
     event = await parse(paypal, "payment.capture.refunded.pending.json")
     assert (event.event_id, event.kind) == ("WH-8RE12345AB678901C-2BC34567DE890123F", "other")
+    assert refund.called
+
+
+async def test_a_refund_completed_by_the_time_it_is_read_is_recorded(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    pp.get("/v2/payments/refunds/3LW20124903813633").respond(
+        json=payload("api.refund.completed.json")
+    )
+    pp.get(f"/v2/payments/captures/{CAPTURE}").respond(json=payload("api.capture.json"))
+    event = await parse(paypal, "payment.capture.refunded.pending.json")
+    assert (event.event_id, event.kind, event.provider_ref, event.amount_minor) == (
+        "refund:3LW20124903813633", "refunded", ORDER, 700,
+    )  # fmt: skip
+
+
+async def test_a_pending_refund_paypal_no_longer_has_is_other(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    """A retry would find nothing either: no 503."""
+    pp.get("/v2/payments/refunds/3LW20124903813633").respond(
+        404, json=payload("api.error.order_not_found.json")
+    )
+    event = await parse(paypal, "payment.capture.refunded.pending.json")
+    assert event.kind == "other"
+
+
+async def test_a_pending_refund_with_no_id_is_other(paypal: PayPalProvider, pp: Any) -> None:
+    """Nothing to read again and nothing to key it by: ``other``, never a 500."""
+    found = payload("payment.capture.refunded.pending.json")
+    del found["resource"]["id"]
+    event = await paypal.parse_webhook(CRED, HEADERS, json.dumps(found).encode())
+    assert event.kind == "other"
 
 
 async def test_a_refund_of_a_sale_outside_scadbuddy_names_its_own_order(

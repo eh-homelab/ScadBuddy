@@ -212,6 +212,16 @@ export function PaymentRequests({
                   </Button>
                 </div>
               )}
+              {r.status === 'failed' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {(providers ?? []).find((p) => p.id === r.provider)?.reapprovable && (
+                    <span className="text-xs text-muted-foreground">The customer can still pay this link. Cancel it to stop that.</span>
+                  )}
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => api.cancelPaymentRequest(order.id, r.id))}>
+                    Cancel
+                  </Button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

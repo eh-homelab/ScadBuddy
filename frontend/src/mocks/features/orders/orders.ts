@@ -309,17 +309,27 @@ export function settleRequest(request: PaymentRequestView, status: PaymentReques
   }
 }
 
-/** `Lifecycle._close_balance`: a balance at zero or below closes the open balance requests. */
+/** `Lifecycle._close_balance`: a balance at zero or below closes the open and failed balance requests. */
 export function closeBalance(order: Order, payment: Payment) {
   if (balanceOf(order) > 0) return
   for (const open of state.paymentRequests) {
-    if (open.order_id === order.id && open.status === 'open' && open.kind === 'balance') settleRequest(open, 'paid', payment.id)
+    if (open.order_id === order.id && CANCELLABLE.has(open.status) && open.kind === 'balance') settleRequest(open, 'paid', payment.id)
   }
 }
 
 function requestOf(order: Order, requestId: string): PaymentRequestView {
   const found = state.paymentRequests.find((r) => r.id === requestId && r.order_id === order.id)
   if (!found) throw new Refused('payment_request_not_found', `no payment request ${requestId} of order ${order.number}`, [], true)
+  return found
+}
+
+/** `Lifecycle.CAPTURABLE`: the requests a cancel ends (#4959). A pending one is refused. */
+const CANCELLABLE: ReadonlySet<PaymentRequestView['status']> = new Set(['open', 'failed'])
+
+/** `Lifecycle._cancellable_request`: an open or failed request of the order. */
+function cancellableRequestOf(order: Order, requestId: string): PaymentRequestView {
+  const found = requestOf(order, requestId)
+  if (!CANCELLABLE.has(found.status)) throw new Refused('payment_request_not_open', `payment request ${requestId} is ${found.status}`)
   return found
 }
 
@@ -1115,6 +1125,10 @@ export const handlers = [
     return transition(request, () => {
       const order = lock(String(params.id))
       if (order.status === 'shipped' || ENDED.has(order.status)) throw new Refused('order_not_cancellable', `order ${order.number} is ${order.status}`)
+      // A pending request is money on its way (#4959).
+      if (state.paymentRequests.some((r) => r.order_id === order.id && r.status === 'pending')) {
+        throw new Refused('payment_in_flight', `order ${order.number} has a payment in flight; wait until it settles`)
+      }
       const cancelled: string[] = []
       for (const i of itemsOf(order.id)) {
         if (!SETTLED.has(i.status)) {
@@ -1123,8 +1137,9 @@ export const handlers = [
         }
       }
       // As `Lifecycle.cancel_order` records it: what it was, and the items it took.
-      // No one pays a cancelled order: its open requests end with it.
-      for (const open of state.paymentRequests.filter((r) => r.order_id === order.id && r.status === 'open')) {
+      // No one pays a cancelled order: its open and failed requests end with it (#4959:
+      // a failed one's page can still be approved again).
+      for (const open of state.paymentRequests.filter((r) => r.order_id === order.id && CANCELLABLE.has(r.status))) {
         settleRequest(open, 'cancelled')
         event(order, 'payment_request.cancelled', { request_id: open.id })
       }
@@ -1271,7 +1286,7 @@ export const handlers = [
   http.post('/api/v1/orders/:id/payment-requests/:request/cancel', ({ request, params }) =>
     transition(request, () => {
       const order = lock(String(params.id))
-      const open = openRequestOf(order, String(params.request))
+      const open = cancellableRequestOf(order, String(params.request))
       settleRequest(open, 'cancelled')
       event(order, 'payment_request.cancelled', { request_id: open.id })
       return open

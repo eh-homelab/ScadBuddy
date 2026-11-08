@@ -187,7 +187,7 @@ def test_a_reconnect_that_names_no_currency_keeps_the_row(
     """#5752 review: a provider whose account takes one currency, reconnected to an
     account that names none, is refused before anything is written; the row keeps its
     label and its stored currency."""
-    monkeypatch.setattr(FAKE, "reports_currency", True, raising=False)
+    monkeypatch.setattr(FAKE, "reports_currency", True)
 
     async def in_dollars(*args: object) -> Verified:
         return Verified(account_label="Fake account a", currency="USD")
@@ -233,6 +233,13 @@ def test_disconnect_with_an_open_request_is_409(client: TestClient) -> None:
     client.post(f"/api/v1/orders/{order['id']}/payment-requests/{req['id']}/cancel")
     assert client.delete(PROVIDER).status_code == 204
     assert fake_status(client)["connected"] is False
+
+
+def test_a_provider_says_whether_a_failed_page_can_be_approved_again(client: TestClient) -> None:
+    """#4959: only a provider that captures an approval (PayPal, and the fake) keeps a
+    failed request's page payable; the order page says so only for those."""
+    found = {s["id"]: s["reapprovable"] for s in client.get("/api/v1/payments/providers").json()}
+    assert found == {"fake": True, "paypal": True, "square": False, "stripe": False}
 
 
 def test_the_default_is_chosen(client: TestClient) -> None:

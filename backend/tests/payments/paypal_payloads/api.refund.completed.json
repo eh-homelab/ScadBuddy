@@ -1,0 +1,38 @@
+{
+  "id": "3LW20124903813633",
+  "amount": {
+    "currency_code": "USD",
+    "value": "7.00"
+  },
+  "status": "COMPLETED",
+  "seller_payable_breakdown": {
+    "gross_amount": {
+      "currency_code": "USD",
+      "value": "7.00"
+    },
+    "net_amount": {
+      "currency_code": "USD",
+      "value": "7.00"
+    },
+    "total_refunded_amount": {
+      "currency_code": "USD",
+      "value": "7.00"
+    }
+  },
+  "invoice_id": "ORD-2026-7-req-1",
+  "custom_id": "req-1",
+  "create_time": "2026-11-07T11:00:00Z",
+  "update_time": "2026-11-07T11:00:00Z",
+  "links": [
+    {
+      "rel": "self",
+      "method": "GET",
+      "href": "https://api-m.sandbox.paypal.com/v2/payments/refunds/3LW20124903813633"
+    },
+    {
+      "rel": "up",
+      "method": "GET",
+      "href": "https://api-m.sandbox.paypal.com/v2/payments/captures/3C679366HH908993F"
+    }
+  ]
+}

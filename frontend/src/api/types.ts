@@ -486,6 +486,17 @@ export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
 export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
+/** #4625 (order operations spec 2026-11-07 §6) — a registry printer's machine rate: its
+ * inputs (null with no profile) and the rate they give now, with each part of the sum. */
+export type MachineRateView = Schemas['MachineRateView']
+export type MachineRateBreakdown = Schemas['MachineRateBreakdown']
+export type MaintenancePart = Schemas['MaintenancePart']
+/** The inputs as sent: a field with a default may be left out. Decimals are strings. */
+export type MachineRateInputs = {
+  profile: Partial<Schemas['CostProfile']>
+  wear_parts: Schemas['WearPart'][]
+  maintenance: Defaulted<Schemas['MaintenanceCost'], 'minutes' | 'consumables'>[]
+}
 /** #5282 (spec 2026-11-02 §5.3) — a storefront listing, as the back office's Storefront page edits it. */
 /** Every field is always sent: the ones the spec marks optional have defaults. */
 export type StorefrontListing = Required<Schemas['Listing']>
