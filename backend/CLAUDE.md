@@ -1044,6 +1044,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and `FAILED` move the request, a declined card leaves it open, and a payment or refund
   with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
   link, are its docstring),
+  `venmo.py` (#4960: a USD PayPal request from a shop with the `venmo` setting on links to the
+  storefront's `/pay/<token>`; only the token's sha256 is kept, in `payment_requests.pay_token_hash`,
+  dropped when the request closes or is linked again without one; `venmo_checkout` is what the
+  edge's CRUD route reads; a Venmo-funded capture is `ProviderEvent.method` `venmo`),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409

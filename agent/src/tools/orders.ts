@@ -569,7 +569,8 @@ export const orderTools: Tool[] = [
     description:
       'One order whole: its status, number and addresses, its line items with their quotes, design `revisions` ' +
       'and fulfilment attempts (every attempt has a `purpose`: `production`, or `test` for a revision\'s test print), ' +
-      'charges, payments, shipments and totals.',
+      'charges, payments, shipments and totals. A payment\'s `method` says how it was paid: a provider id, ' +
+      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand.',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}'],
@@ -970,7 +971,10 @@ export const orderTools: Tool[] = [
       payment: z
         .object({
           amount_minor: money,
-          method: z.string().optional(),
+          method: z
+            .string()
+            .optional()
+            .describe('How it was paid: cash, check, bank_transfer, venmo, zelle, or other text (#4960)'),
           reference: z.string().optional(),
           received_at: datetime.optional(),
           notes: z.string().default(''),

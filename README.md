@@ -539,7 +539,7 @@ with the URL `https://<public host>/api/v1/payments/webhooks/paypal` and these e
 `PAYMENT.CAPTURE.DECLINED` and `PAYMENT.CAPTURE.REFUNDED`
 ([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)). Then, in
 Settings → Payments, connect PayPal with the environment (`sandbox` or `live`), the app's
-client ID and secret, and the webhook's ID. ScadBuddy checks the credentials and that the
+client ID and secret, the webhook's ID, and Venmo `off` or `on` (below). ScadBuddy checks the credentials and that the
 webhook sends those events. The page then shows "Connected as PayPal app … (sandbox)" or
 "(live)". Each payment request is a PayPal order for the request's amount. The customer
 pays with a PayPal balance or a card on PayPal's page. When the customer approves the
@@ -610,6 +610,23 @@ when Square says it completed; one that is then rejected or fails gets a payment
 cancels it. A cancelled request's payment link is deleted, which cancels its Square
 order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
 Cash needs no provider: record it as a manual payment.
+
+#### Venmo (#4960)
+
+Venmo is a funding source of PayPal, for US buyers paying in USD. Only PayPal's
+JavaScript SDK offers it, and PayPal's own approval link never does
+([Pay with Venmo](https://developer.paypal.com/docs/checkout/pay-with-venmo/)). Set Venmo
+to `on` in PayPal's connect form. ScadBuddy refuses that while the API has no
+`SCADBUDDY_STOREFRONT_PUBLIC_URL` (the storefront edge's origin, the same variable the
+edge reads; set it on the API's Deployment too). Then each USD PayPal request links to
+the storefront's pay page, `/pay/<token>`, which offers PayPal and Venmo for the same
+PayPal order. The token is 32 random bytes. ScadBuddy keeps only its sha256 and drops it
+when the request is paid, cancelled or expired, or linked again without one. Turning
+Venmo off ends every pay link at once. Any other request keeps PayPal's own link. A
+payment funded by Venmo is recorded with method `venmo` and shows as "Paid by Venmo via
+PayPal". A Venmo payment to the shop's own username has no merchant API, so record it
+by hand: the payment form's method list has Cash, Check, Bank transfer, Venmo, Zelle and
+Other.
 
 ### Authentication on the deployment (#4975)
 
