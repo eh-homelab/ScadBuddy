@@ -41,7 +41,7 @@ lock connection is out; `sweep` at start and hourly reports what a session's las
 20 sessions at most, the ones tried longest ago, `tried_at`, first; a share under one minor
 unit is closed out with nothing carried once its session is over: `done`, `failed`, or `idle`
 with no session activity, `updated_at`, for an hour, `IDLE_OVER_AFTER`; if it works again,
-that spend folds into its next turn's share). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
+that spend folds into its next turn's share, split equally across the orders that turn revises). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
 route's own 400 or 422 (a path or body it cannot take), 404 (the order gone: an item gone
 falls back to the order) or 409 (a currency no rate reaches, a visitor's unsubmitted cart) drops
 that order's report, its share in no entry. Anything else (401 or 403 while there
