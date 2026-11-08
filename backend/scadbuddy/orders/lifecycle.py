@@ -1028,14 +1028,15 @@ class Lifecycle:
         event, so the customer's page can pair them. A refund closes no request, so this
         opens or closes none, and the balance follows from the payments sum. A refund not
         told yet (it never succeeded, or its event comes later: the provider does not keep
-        order) is recorded at once with no payment and no retry; the event's row names the
-        refund (``payment_events.reverses``), so the refund told after it writes nothing
-        (``_apply_event``). A refund told without money (no amount) is ignored."""
+        order) is kept at once as ``ignored``: no payment, no retry and no order change
+        told, since nothing on the order moved. The event's row names the refund
+        (``payment_events.reverses``), so the refund told after it writes nothing
+        (``_apply_event``). A refund told without money (no amount) is ignored too."""
         if event.reverses is None:
             return "ignored", None
         told, refund_id = payments.told_event(conn, provider, event.reverses)
         if not told:
-            return "recorded", None
+            return "ignored", None
         refund = next(
             (p for p in self.store.payments(order.id, conn=conn) if p.id == refund_id), None
         )

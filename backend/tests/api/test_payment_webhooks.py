@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -267,6 +267,26 @@ def test_a_provider_that_does_not_answer_is_provider_unavailable(
     assert _webhook_error(client) == ("provider_unavailable", True)
 
 
+def test_a_success_clears_the_failure_whatever_this_process_clock_says(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The success's start is the database's time too: a replica whose clock runs behind
+    still clears a failure written before it began."""
+    _, req = linked_request(client)
+    body, headers = signed_event("wrong", paid(req))
+    assert client.post(HOOK, content=body, headers=headers).status_code == 400
+
+    class Behind(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Behind:
+            return cls(1999, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr("scadbuddy.payments.service.datetime", Behind)
+    body, headers = signed_event("s3cret", paid(req))
+    assert client.post(HOOK, content=body, headers=headers).status_code == 200
+    assert _webhook_error(client) == (None, False)
+
+
 def test_a_failure_to_keep_the_category_keeps_the_original_answer(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -285,8 +305,9 @@ def test_a_failure_to_keep_the_category_keeps_the_original_answer(
     assert "could not keep the webhook failure" in caplog.text
 
 
-def test_a_fee_before_its_payment_is_out_of_order(client: TestClient) -> None:
-    """The event is sent back for a retry (``EventTooEarlyError``): the provider answered."""
+def test_a_fee_before_its_payment_shows_no_failure(client: TestClient) -> None:
+    """The event is sent back for a retry (``EventTooEarlyError``) within a bounded window:
+    an ordinary wait, not a failure, so Settings shows nothing."""
     _, req = linked_request(client)
     fee = {
         "id": "f1", "type": "fee", "provider_ref": req["provider_ref"], "fee_minor": 31,
@@ -294,7 +315,7 @@ def test_a_fee_before_its_payment_is_out_of_order(client: TestClient) -> None:
     }  # fmt: skip
     body, headers = signed_event("s3cret", fee)
     assert client.post(HOOK, content=body, headers=headers).status_code == 503
-    assert _webhook_error(client) == ("out_of_order", True)
+    assert _webhook_error(client) == (None, False)
 
 
 # -- enforce ------------------------------------------------------------------------------

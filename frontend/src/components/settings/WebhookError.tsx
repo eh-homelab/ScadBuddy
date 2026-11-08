@@ -5,7 +5,6 @@ import { When } from '../orders/When'
 const TEXT: Record<NonNullable<ProviderStatus['last_webhook_error']>, string> = {
   signature: 'a request with a bad signature arrived — if this repeats, check the signing secret.',
   provider_unavailable: 'the provider did not answer. The provider sends the event again.',
-  out_of_order: 'an event arrived before one it depends on; the provider sends it again.',
   handler_error: 'ScadBuddy could not record it. Check the API log.',
 }
 

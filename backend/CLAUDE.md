@@ -868,8 +868,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   refund's event id (`ProviderEvent.reverses`, kept on its `payment_events` row). When
   that refund was recorded, it writes a positive payment that cancels the refund's row,
   with the amount, provider, request and reference of that row, never the event's
-  (`Lifecycle._reverse_refund`). When the refund was not told yet, the failure is
-  recorded at once with no payment and no retry, and the refund told after it is
+  (`Lifecycle._reverse_refund`). When the refund was not told yet, the failure is kept
+  at once as `ignored` (no payment, no retry, no `OrderChanged`), and the refund told after it is
   `ignored` (`payments.reversed_by_failure`), so the two cancel out in either order. A
   refund told without money is `ignored`; no request's status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
@@ -879,10 +879,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
   most 256 KiB, a bad signature 400 with nothing recorded, the actor `provider`
   `payment:<id>`). A failed webhook keeps only a fixed category on its credential row
-  (`last_webhook_error`: `signature`, `provider_unavailable`, `out_of_order` (an
-  `EventTooEarlyError`, today the late fee's) or `handler_error`, and
+  (`last_webhook_error`: `signature`, `provider_unavailable` or `handler_error`, and
   `last_webhook_error_at`; #5684; a failure to write it is logged, never raised over the
   webhook's own), never a
-  provider's text; the next success clears it only when the failure is older than that
-  success's start (`clear_webhook_error`), and a reconnect clears it; Settings shows it
+  provider's text. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
+  bounded wait, not a failure, and keeps none. The next success clears it only when the
+  failure is older than that success's start; both times are the database's
+  `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
+  clears it; Settings shows it
   (`components/settings/WebhookError.tsx`). No route, log, problem or audit row carries a secret.

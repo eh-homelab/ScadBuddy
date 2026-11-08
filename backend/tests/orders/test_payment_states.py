@@ -291,15 +291,18 @@ def test_a_failure_before_its_refund_is_recorded_at_once_and_the_late_refund_wri
     shop: PayShop,
 ) -> None:
     """Stripe does not keep event order, and a refund that never succeeded fails too. The
-    failure is recorded at once with no payment and no retry; a succeeded snapshot of the
-    same refund told after it writes nothing, so the two cancel out."""
+    failure is kept at once (``ignored``: no payment, no retry, no order change told); a
+    succeeded snapshot of the same refund told after it writes nothing, so the two cancel
+    out."""
     order, _ = shop.linked()
     shop.lifecycle.record_provider_event("fake", SETTLED)
-    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "recorded"
+    told = len(shop.events)
+    assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
+    assert len(shop.events) == told
     assert _provider_payments(shop, order) == [700]
     assert shop.lifecycle.record_provider_event("fake", REFUND) == "ignored"
     assert _provider_payments(shop, order) == [700]
-    assert _outcomes(shop) == ["recorded", "recorded", "ignored"]
+    assert _outcomes(shop) == ["recorded", "ignored", "ignored"]
 
 
 def test_a_failure_for_a_refund_never_told_needs_no_time_or_open_request(
@@ -310,7 +313,7 @@ def test_a_failure_for_a_refund_never_told_needs_no_time_or_open_request(
     order, req = shop.linked()
     shop.lifecycle.cancel_payment_request(order.id, req.id, BY)
     old = REFUND_FAILED.model_copy(update={"created_at": None})
-    assert shop.lifecycle.record_provider_event("fake", old) == "recorded"
+    assert shop.lifecycle.record_provider_event("fake", old) == "ignored"
     assert _provider_payments(shop, order) == []
 
 

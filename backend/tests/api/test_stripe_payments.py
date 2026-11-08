@@ -278,14 +278,14 @@ def test_a_refund_returned_by_the_bank_and_then_cancelled_is_reversed(
 def test_a_refund_that_failed_while_pending_answers_200_and_a_late_success_writes_nothing(
     client: TestClient, stripe: respx.MockRouter, kind: str, status: str, failure_txn: str | None
 ) -> None:
-    """A refund that never succeeded (pending, then failed or cancelled) is recorded at once
+    """A refund that never succeeded (pending, then failed or cancelled) is kept at once
     with no payment, never a 503. A succeeded snapshot of it told later writes nothing."""
     order_id, _ = stripe_request(client)
     send(client, "checkout.session.completed.card.json")
     assert send(client, "refund.created.pending.json").status_code == 200
     answer = send_refund(client, kind, status=status, failure_balance_transaction=failure_txn)
     assert answer.status_code == 200, answer.text
-    assert answer.json() == {"outcome": "recorded"}
+    assert answer.json() == {"outcome": "ignored"}
     assert send(client, "refund.updated.succeeded.json").json() == {"outcome": "ignored"}
     payments = client.get(f"/api/v1/orders/{order_id}").json()["payments"]
     assert [p["amount_minor"] for p in payments] == [700]
