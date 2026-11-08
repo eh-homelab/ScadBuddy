@@ -28,7 +28,7 @@ const keys = (o: Order, i: OrderItemDetail, shipments: Shipment[] = [], unfulfil
 
 describe('itemActions (#4955)', () => {
   it('offers a draft item details, a slice quote and its delete', () => {
-    expect(keys(order(), item())).toEqual(['open', 'quote', 'delete'])
+    expect(keys(order(), item())).toEqual(['open', 'quote', 'duplicate', 'delete'])
   })
 
   it("refuses a slice quote, with the drawer's reason, for an item with nothing rendered to slice", () => {
@@ -40,16 +40,16 @@ describe('itemActions (#4955)', () => {
   })
 
   it('offers no slice quote for a custom item', () => {
-    expect(keys(order(), item({ kind: 'custom' }))).toEqual(['open', 'delete'])
+    expect(keys(order(), item({ kind: 'custom' }))).toEqual(['open', 'duplicate', 'delete'])
   })
 
   it('cancels a quoted item rather than deleting it', () => {
-    expect(keys(order({ status: 'quoted' }), item({ status: 'quoted', quotes: [quote()] }))).toEqual(['open', 'quote', 'cancel'])
+    expect(keys(order({ status: 'quoted' }), item({ status: 'quoted', quotes: [quote()] }))).toEqual(['open', 'quote', 'duplicate', 'cancel'])
   })
 
   it('offers print and fulfil on an accepted order, and no quote of a priced item', () => {
     const priced = item({ status: 'approved', quotes: [quote({ accepted: true })] })
-    expect(keys(order({ status: 'accepted' }), priced)).toEqual(['open', 'print', 'fulfil', 'cancel'])
+    expect(keys(order({ status: 'accepted' }), priced)).toEqual(['open', 'print', 'fulfil', 'duplicate', 'cancel'])
   })
 
   it('says why print and fulfil are refused while the order is on hold', () => {
@@ -63,15 +63,28 @@ describe('itemActions (#4955)', () => {
 
   it('offers Unfulfil on a fulfilled item, refused when the setting is off', () => {
     const done = item({ status: 'fulfilled', quotes: [quote({ accepted: true })] })
-    expect(keys(order({ status: 'ready' }), done)).toEqual(['open', 'unfulfil'])
+    expect(keys(order({ status: 'ready' }), done)).toEqual(['open', 'unfulfil', 'duplicate'])
     const off = itemActions(order({ status: 'ready' }), done, { shipments: [], unfulfilAllowed: false })
     expect(off.find((a) => a.key === 'unfulfil')?.blocked).toMatch(/Settings/)
   })
 
   it('reopens a cancelled item, and says why a shipped order takes back no unpriced one', () => {
-    expect(keys(order({ status: 'quoted' }), item({ status: 'cancelled' }))).toEqual(['open', 'reopen'])
+    expect(keys(order({ status: 'quoted' }), item({ status: 'cancelled' }))).toEqual(['open', 'reopen', 'duplicate'])
     const shipped = itemActions(order({ status: 'shipped' }), item({ status: 'cancelled' }), { shipments: [], unfulfilAllowed: true })
     expect(shipped.find((a) => a.key === 'reopen')?.blocked).toMatch(/no accepted price/)
+  })
+
+  it("refuses a custom item's duplicate on an open order on hold: its price is accepted as it is copied", () => {
+    const blocked = (i: OrderItemDetail) => itemActions(order({ status: 'draft', on_hold: true }), i, { shipments: [], unfulfilAllowed: true }).find((a) => a.key === 'duplicate')?.blocked
+    expect(blocked(item({ kind: 'custom', reference: null, output_id: null }))).toMatch(/on hold/)
+    expect(blocked(item())).toBeNull()
+  })
+
+  it('duplicates on an open or accepted order, refused on hold, and not once shipped', () => {
+    const priced = item({ status: 'approved', quotes: [quote({ accepted: true })] })
+    const held = itemActions(order({ status: 'in_production', on_hold: true }), priced, { shipments: [], unfulfilAllowed: true })
+    expect(held.find((a) => a.key === 'duplicate')?.blocked).toMatch(/on hold/)
+    expect(keys(order({ status: 'shipped' }), item({ status: 'fulfilled', quotes: [quote({ accepted: true })] }))).not.toContain('duplicate')
   })
 
   it("offers only details on a visitor's cart (#5282)", () => {

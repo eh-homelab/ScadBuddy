@@ -40,4 +40,23 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     const [after] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
     expect(after).toEqual({ status: 'idle', durable_turn_id: null })
   })
+
+  it("reports the session's order costs once its end is written, and on a retry (#5330)", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'order work' })
+    const reported: string[] = []
+    // A report that never ends holds up neither the turn's end nor the next turn.
+    const finish = sessionFinishActivities(db.sql, m.events, {
+      report: (id) => {
+        reported.push(id)
+        return new Promise<void>(() => {})
+      },
+    })[SESSION_FINISH_ACTIVITY]
+    const turn = randomUUID()
+    await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${turn} WHERE id = ${session.id}`
+    expect(await finish({ sessionId: session.id, turnId: turn, outcome: 'done' })).toBe(true)
+    // A retried finish writes nothing, but a report that failed the first time is sent again.
+    expect(await finish({ sessionId: session.id, turnId: turn, outcome: 'done' })).toBe(false)
+    expect(reported).toEqual([session.id, session.id])
+  })
 })

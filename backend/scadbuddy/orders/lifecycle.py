@@ -301,6 +301,22 @@ class LabourRate:
     currency: str
 
 
+@dataclass(frozen=True)
+class UsdRate:
+    """``pricing_usd_rate`` (one USD in the shop's currency) and the shop's
+    ``orders_currency`` it is in (job cost spec §4.4)."""
+
+    per_usd: Decimal
+    currency: str
+
+    def factor(self, currency: str) -> Decimal | None:
+        """One USD in ``currency``: 1 for USD, the rate for the shop's currency, else
+        ``None``, since no stored rate reaches a third currency."""
+        if currency == "USD":
+            return Decimal(1)
+        return self.per_usd if currency == self.currency else None
+
+
 @dataclass(frozen=True, kw_only=True)
 class NewItem:
     """One item to add (`Lifecycle.add_items`): what every kind has."""
@@ -1706,6 +1722,65 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             items = self._entry_item(conn, order, body.order_item_id)
+            entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
+            if not written:
+                return entry, False
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry, True
+
+    def add_assistant_cost(
+        self,
+        order_id: str,
+        *,
+        session_id: str,
+        order_item_id: str | None,
+        cost_usd: Decimal,
+        usd_rate: UsdRate,
+        by: Actor,
+    ) -> tuple[CostEntry | None, bool]:
+        """The assistant's spend in one session (§4.4, #5330): one ``assistant`` entry,
+        source ``ai_session:<id>``, in the order's currency at ``usd_rate`` (converted
+        under the order's lock, as a time entry's rate is), its note keeping the USD
+        figure. An item that is gone or not the order's puts the entry on the order. A
+        second report of the session returns the first entry and writes nothing, whatever
+        its amount; a first report under one minor unit writes nothing
+        and answers ``None``, so the agent keeps it to report with more spend."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            # A visitor's cart is no job yet: nothing is spent on it (storefront spec §6.3).
+            check_submitted(order)
+            # The item the session revised may be gone by now (a draft item deleted before
+            # the report landed): the spend still counts, on the order.
+            found = None if order_item_id is None else self.store.item(order_item_id, conn=conn)
+            items = [found] if found is not None and found.order_id == order.id else []
+            order_item_id = items[0].id if items else None
+            factor = usd_rate.factor(order.currency)
+            if factor is None:
+                raise LifecycleError(
+                    "currency_unconvertible",
+                    f"{order.label} is in {order.currency}; the USD rate is in {usd_rate.currency}",
+                )
+            amount = to_minor(cost_usd * factor, order.currency)
+            source = f"ai_session:{session_id}"
+            if amount < 1:
+                return self.store.cost_entry_of_source(conn, order.id, "assistant", source), False
+            body = CostEntryInput(
+                order_item_id=order_item_id,
+                kind="assistant",
+                amount_minor=amount,
+                note=f"assistant session {session_id}: {cost_usd} USD",
+                source=source,
+            )
             entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
             if not written:
                 return entry, False

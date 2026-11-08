@@ -2352,15 +2352,23 @@ class OrderStore:
             ),
         ).fetchone()
         if row is None:
-            existing = conn.execute(
-                f"SELECT {_COST_ENTRY} FROM order_cost_entries"
-                " WHERE order_id = %s AND kind = %s AND source = %s",
-                (order_id, body.kind, body.source),
-            ).fetchone()
+            assert body.source is not None
+            existing = self.cost_entry_of_source(conn, order_id, body.kind, body.source)
             assert existing is not None
-            return CostEntry.model_validate(existing), False
+            return existing, False
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
         return CostEntry.model_validate(row), True
+
+    def cost_entry_of_source(
+        self, conn: Conn, order_id: str, kind: str, source: str
+    ) -> CostEntry | None:
+        """The order's entry of ``kind`` that ``source`` wrote, if there is one."""
+        row = conn.execute(
+            f"SELECT {_COST_ENTRY} FROM order_cost_entries"
+            " WHERE order_id = %s AND kind = %s AND source = %s",
+            (order_id, kind, source),
+        ).fetchone()
+        return None if row is None else CostEntry.model_validate(row)
 
     def delete_cost_entry(self, conn: Conn, order_id: str, entry_id: str) -> CostEntry | None:
         row = conn.execute(
