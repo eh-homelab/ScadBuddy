@@ -866,8 +866,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   manual payment, and a disconnect is refused while one is pending. A `refund_failed`
   event (#5681, Stripe's `refund.failed`) names the refund's event id (`ProviderEvent.reverses`)
   and writes a positive payment that cancels that refund's row, with its provider, request
-  and reference (`Lifecycle._reverse_refund`); a refund never recorded is `ignored`, and
-  no request's status changes. `parse_webhook` is
+  and reference (`Lifecycle._reverse_refund`); a refund told without money is `ignored`,
+  one not told yet is `EventTooEarlyError` (503) while the request is open, pending or
+  paid and the event is younger than `FEE_RETRY_WINDOW`, then `ignored`; no request's
+  status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
   (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
