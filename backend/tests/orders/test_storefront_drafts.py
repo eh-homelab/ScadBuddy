@@ -270,6 +270,10 @@ ACTS: dict[str, Callable[[Shop, Order], object]] = {
     "price_custom_item": lambda shop, order: shop.lifecycle.update_item(
         order.id, _custom_on_cart(shop, order), BY, unit_price_minor=700
     ),
+    "payment": lambda shop, order: shop.lifecycle.add_payment(order.id, BY, amount_minor=500),
+    "payment_request": lambda shop, order: shop.lifecycle.open_payment_request(
+        order.id, BY, kind="deposit", amount_minor=500, provider=None
+    ),
     "cancel": lambda shop, order: shop.lifecycle.cancel_order(order.id, BY),
     "hold": lambda shop, order: shop.lifecycle.hold(order.id, BY),
 }
@@ -288,6 +292,12 @@ def test_the_shop_cannot_act_on_an_unsubmitted_draft(
     # The refusal wrote nothing: no quote, no audit row, no repaired revision.
     items = shop.rows.items(draft_with_item.id)
     assert all(shop.rows.quotes(i.id) == [] for i in items)
+    assert shop.rows.payments(draft_with_item.id) == []
+    with shop.rows.transaction() as conn:
+        requests = conn.execute(
+            "SELECT count(*) AS n FROM payment_requests WHERE order_id = %s", (draft_with_item.id,)
+        ).fetchone()
+    assert requests is not None and requests["n"] == 0
     assert shop.kinds(draft_with_item) == events
     assert [shop.rows.revisions(i.id) for i in items][: len(revisions)] == revisions
     after = shop.get(draft_with_item)

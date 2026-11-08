@@ -175,8 +175,8 @@ class Payments:
             return found
         order = await asyncio.to_thread(self._orders.store.order, found.order_id)
         # The request's foreign key keeps its order; the number goes in the provider's
-        # metadata (#4958).
-        assert order is not None
+        # metadata (#4958). A cart has no number, but it never holds a request (#5282).
+        assert order is not None and order.number is not None
         hosted: HostedRequest | None = None
         error: str | None = None
         try:
@@ -186,7 +186,7 @@ class Payments:
                 found,
                 return_url=self._return_url(found.order_id),
                 idempotency_key=found.id,
-                order_number=order.label,
+                order_number=order.number,
             )
         except (
             ProviderNotFoundError,

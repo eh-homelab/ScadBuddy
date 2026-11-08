@@ -773,9 +773,10 @@ class Lifecycle:
         payment that names an open request of this order closes it. Named or not, a
         payment that brings the balance to zero or below closes the open ``balance``
         requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
-        provider's event does."""
+        provider's event does. A cart (#5282) takes no money: ``order_not_submitted``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             if order.status == "cancelled":
                 raise LifecycleError("order_cancelled", f"order {order.label} is cancelled")
             named = None
@@ -853,9 +854,11 @@ class Lifecycle:
     ) -> PaymentRequestView:
         """A request for ``amount_minor`` (the balance now when None), through
         ``provider`` (the default provider when unset and still offered; None collects by
-        hand). A named provider that is not connected is refused as 422 ``provider``."""
+        hand). A named provider that is not connected is refused as 422 ``provider``. A
+        cart (#5282) takes no money: ``order_not_submitted``, before any provider."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             amount = (
                 totals_of(self.store, conn, order.id).balance_minor
