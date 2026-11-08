@@ -1,22 +1,16 @@
-import { readFileSync } from 'node:fs'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { Order, OrderItemDetail, Quote } from '../../api/types'
 import { ItemsBulk, MAX_BULK_FULFIL } from './ItemsBulk'
+import { readSpec } from '../../test/spec'
 
 // #4955 — the bulk fulfil route takes at most 50 lines (`api/orders.py` `MAX_BATCH_ITEMS`):
 // past that the bar refuses, and says why.
 
 /** `FulfilBody.items.maxItems` from the exported spec, so the bar's limit follows the route's (#4502's way). */
 function specFulfilMax(): number {
-  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch (cause) {
-    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
-  }
-  const spec = JSON.parse(text) as { components?: { schemas?: { FulfilBody?: { properties?: { items?: { maxItems?: unknown } } } } } }
+  const { json, path } = readSpec()
+  const spec = json as { components?: { schemas?: { FulfilBody?: { properties?: { items?: { maxItems?: unknown } } } } } }
   const max = spec.components?.schemas?.FulfilBody?.properties?.items?.maxItems
   if (typeof max !== 'number') throw new Error(`FulfilBody.items.maxItems not in the spec at ${path}`)
   return max

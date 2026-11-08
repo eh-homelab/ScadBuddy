@@ -1,19 +1,13 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { MAX_QUANTITY, parseQuantity } from './quantity'
+import { readSpec } from '../../test/spec'
 
 /** `ItemCreate.quantity`'s and `ItemPatch.quantity`'s `maximum` in the spec `pnpm gen:api`
  * (run before `pnpm test`) exported: the backend's bound, read rather than restated. */
 function specQuantityMax(schema: 'ItemCreate' | 'ItemPatch'): number {
-  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch (cause) {
-    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
-  }
+  const { json, path } = readSpec()
   type Quantity = { maximum?: unknown; anyOf?: { maximum?: unknown }[] }
-  const spec = JSON.parse(text) as { components?: { schemas?: Record<string, { properties?: { quantity?: Quantity } }> } }
+  const spec = json as { components?: { schemas?: Record<string, { properties?: { quantity?: Quantity } }> } }
   const quantity = spec.components?.schemas?.[schema]?.properties?.quantity
   // ItemPatch's is optional, so its bound sits in the `anyOf` beside `null`.
   const max = quantity?.maximum ?? quantity?.anyOf?.find((each) => each.maximum !== undefined)?.maximum
