@@ -139,6 +139,27 @@ async def test_a_deleted_built_in_is_not_brought_back(definitions: FlowDefinitio
     assert len(definitions.history.versions(NAME)) == 1
 
 
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_a_built_in_deleted_after_the_check_stays_deleted(
+    definitions: FlowDefinitions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5732 security review: a person deletes the flow after `_upgraded` read it as
+    not deleted; the upgrade's locked write refuses, so the delete stands."""
+    await _registered_old(definitions)
+    checked = check_script
+
+    async def check_then_delete(*args: Any, **kwargs: Any) -> Any:
+        problems = await checked(*args, **kwargs)
+        await definitions.delete(NAME, {"kind": "browser"})
+        return problems
+
+    monkeypatch.setattr(builtin_flow, "check_script", check_then_delete)
+    assert await ensure_builtin_flow(definitions) is False
+    assert definitions.states.state(NAME).deleted_at is not None
+    assert len(definitions.history.versions(NAME)) == 1
+
+
 @pytest.mark.parametrize(
     ("switch", "flows", "registered"),
     [(True, "defs", True), (False, "defs", False), (True, None, False)],

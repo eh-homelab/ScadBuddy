@@ -266,8 +266,9 @@ class FlowHistory(GitRepo):
         has any version, deleted or not, checked under the same lock (#4252). ``builtin``
         names the built-in registering it, in the commit's ``BUILTIN_TRAILER``. With
         ``expect_head`` (a commit), :class:`FlowExistsError` unless it is still the
-        newest version of ``name``, checked under the same lock (#4673: a built-in's
-        upgrade, once from replicas starting together)."""
+        newest version of ``name`` and the flow is not deleted, checked under the same
+        lock (#4673: a built-in's upgrade, once from replicas starting together, and
+        never over a delete that landed after the caller read it)."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
@@ -277,6 +278,9 @@ class FlowHistory(GitRepo):
                 newest = self.versions(name)
                 if not newest or newest[0].commit != expect_head:
                     raise FlowExistsError(f"{name!r} has a newer version than {expect_head}")
+                # A delete commits under this lock and is not a version: the tree says it.
+                if not self._tracked(name):
+                    raise FlowExistsError(f"{name!r} is deleted")
             found = self.register_locked(
                 name,
                 version_id,

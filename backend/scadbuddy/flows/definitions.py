@@ -165,9 +165,10 @@ class FlowDefinitions:
         message: str,
     ) -> Definition | None:
         """A new version of a built-in flow (#4673) over its unedited ``head`` (the
-        built-in's own commit), or None when ``head`` is no longer the newest version:
-        another replica upgraded it first, or a person's version came after. The flow's
-        details stay as they are."""
+        built-in's own commit), or None when ``head`` is no longer the newest version
+        (another replica upgraded it first, or a person's version came after) or the flow
+        is deleted, both checked under the history's write lock. The flow's details stay
+        as they are."""
         try:
             return await asyncio.to_thread(
                 self._write,
