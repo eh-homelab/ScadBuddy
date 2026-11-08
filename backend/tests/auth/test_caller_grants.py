@@ -1,6 +1,6 @@
 """#5210: each caller's own role holds exactly its list (`auth/caller_grants.py`), and a
-worker on such a role waits for the API rather than migrating, as the render worker does
-(`tests/test_render_worker_role.py`)."""
+worker on such a role (the print worker's) waits for the API rather than migrating
+(`render/worker_role.py` `wait_until_ready`)."""
 
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ from scadbuddy.render.worker_role import (
     grant_role,
     missing_privileges,
     owns_schema,
+    pending_migrations,
+    wait_until_ready,
 )
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
@@ -194,6 +196,37 @@ def test_a_worker_on_a_role_without_its_grants_waits(
             open_for_caller(store, "print", stopping=stopping)
     finally:
         store.close()
+
+
+def test_the_print_worker_waits_for_migrations_then_grants(pg_conninfo: str, role: str) -> None:
+    """Unmigrated: it waits. Migrated, but the ledger not granted yet: a missing grant,
+    waited for, never an error. Granted: it returns."""
+    grants, print_role = GRANTS["print"], ROLES["print"]
+    with psycopg.connect(pg_conninfo, autocommit=True, row_factory=dict_row) as conn:
+        conn.execute(
+            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                sql.Identifier(_schema(conn)), sql.Identifier(role)
+            )
+        )
+    pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
+    try:
+        with pool.connection() as conn:
+            assert pending_migrations(conn)  # nothing migrated yet
+        with pytest.raises(WorkerStoppedError):
+            wait_until_ready(pool, stopping=lambda: True, poll=0.01, grants=grants, role=print_role)
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            migrate(conn)
+        with pool.connection() as conn:
+            assert "scadbuddy_migrations: SELECT" in missing_privileges(conn, grants)
+        with pytest.raises(WorkerStoppedError):
+            wait_until_ready(pool, stopping=lambda: True, poll=0.01, grants=grants, role=print_role)
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            assert grant_role(conn, role, grants, sequences=SEQUENCES.get("print", ()))
+        with pool.connection() as conn:
+            assert pending_migrations(conn) == []
+        wait_until_ready(pool, stopping=lambda: True, poll=0.01, grants=grants, role=print_role)
+    finally:
+        pool.close()
 
 
 def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path: Path) -> None:

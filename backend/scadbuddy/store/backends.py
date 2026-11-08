@@ -35,7 +35,7 @@ def build_backend(
     backend: StoreBackend,
     current: RenderStoreSettings,
     source: StoreSettingsSource,
-    pool: Pool,
+    pool: Pool | None,
     index: IndexesBlobs | None = None,
     folders: KeepsFolders | None = None,
 ) -> RemoteBackend:
@@ -51,19 +51,21 @@ def build_backend(
             raise StoreNotReadyError(
                 "store_backend is bambuddy, but the Bambuddy store needs a Bambuddy URL and a"
                 " library folder (its inbox). To start on the local store, run"
-                f" {RECOVER_LOCAL_SQL} in ScadBuddy's database, in the schema its"
-                " SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
+                f" {RECOVER_LOCAL_SQL} in the API's database, in the schema the"
+                " API's SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
                 " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
-                ' See README, "Recovering an unready blob store".'
+                " A render worker refuses the local store (#5298 plan D11): keep its"
+                ' Deployments down. See README, "Recovering an unready blob store".'
             )
         return BambuddyContentBackend(source.target, pool, index=index, folders=folders)
     if current.s3 is None or not current.s3.prefix:
         raise StoreNotReadyError(
             "store_backend is s3, but the S3 store needs an endpoint, a bucket, a prefix,"
             " an access key id and a secret access key. To start on the local store, run"
-            f" {RECOVER_LOCAL_SQL} in ScadBuddy's database, in the schema its"
-            " SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
+            f" {RECOVER_LOCAL_SQL} in the API's database, in the schema the"
+            " API's SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
             " stored, set SCADBUDDY_STORE_BACKEND=local), then set them in Settings."
-            ' See README, "Recovering an unready blob store".'
+            " A render worker refuses the local store (#5298 plan D11): keep its"
+            ' Deployments down. See README, "Recovering an unready blob store".'
         )
     return S3ContentBackend(current.s3)

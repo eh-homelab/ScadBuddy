@@ -63,7 +63,7 @@ def build_store(
     current: RenderStoreSettings,
     config: Config,
     paths: DataPaths,
-    pool: Pool,
+    pool: Pool | None,
     index: IndexesBlobs,
     source: StoreSettingsSource,
     history: ModelHistory | None,
@@ -79,7 +79,8 @@ def build_store(
     `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
     folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
     ``drop_asset_copy`` drops an upload's unreadable copy: the render worker's
-    `RemoteAssetRows.drop_copy`, None on the API (`RemoteAssets`)."""
+    `RemoteAssetRows.drop_copy`, None on the API (`RemoteAssets`). ``pool`` is None on the
+    render worker, which holds no database."""
     local = LocalBlobStore(paths.blobs)
     downloads = (
         DownloadCache(

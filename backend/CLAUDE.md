@@ -10,14 +10,16 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The render and print workers
-each connect as a role of their own, with the grant lists in `render/worker_role.py`
-(`RENDER_GRANTS`) and `auth/caller_grants.py` (`PRINT_GRANTS`, and `AGENT_GRANTS` for
-the agent). The projects worker has no database client (#5298): it reaches flows,
-operations and payload keys through CRUD routes, and has no grant list; the API and the
-agent revoke what its old role `scadbuddy_projects` held at every start (`auth/revoke.py`,
-`agent/src/db/grants.ts` `revokeRole`). Template `pipeline/` Python runs in
-the render worker's pod, and openscad and `openscad-lsp` run in the API's pod.
+database owner and runs SQL on the agent's `ai_*` tables. The print worker connects as a
+role of its own, with the grant list in `auth/caller_grants.py` (`PRINT_GRANTS`, and
+`AGENT_GRANTS` for the agent). The projects and render workers have no database client
+(#5298): they reach their data through CRUD routes. The projects worker has no grant
+list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
+every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
+(`render/worker_role.py`) is empty until #5298 Task 22 revokes its role. The render
+worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
+Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
+pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
 nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
@@ -33,7 +35,7 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
-(the projects worker, #5298) takes `exchange_source` instead: the exchange only, with no
+(the projects and render workers, #5298) takes `exchange_source` instead: the exchange only, with no
 view, and no proof refuses its start. `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
@@ -148,12 +150,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
   backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, everything the
-  render worker's own role `scadbuddy_render` may touch, granted by the API at start;
-  a change to what the worker reads or writes changes it, and
-  `tests/test_render_worker_role.py` renders as that role; the worker never migrates
-  and reads the store settings and writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it; that role is today's state,
-  superseded by #5295, which moves the worker's SQL behind CRUD routes, #5298). The legacy in-process queue, its file and Postgres stores
+  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, now empty, which the
+  API grants the unused role `scadbuddy_render` at start until #5298 Task 22 revokes it,
+  and `grant_role`, which every caller's list goes through; the render worker holds no
+  database, #5298, `tests/test_render_worker_nodb.py`: it reads the store settings and
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -445,7 +446,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
-  pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
+  pinned workflows on SIGTERM. No database and no KEK (#5298, `NoDatabaseSettings`): it
+  waits for its CRUD areas (`RENDER_CRUD_AREAS`), gets its credential from
+  `exchange_source`, and refuses the local store (`LocalStoreRefusedError`, plan D11). `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
   volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its

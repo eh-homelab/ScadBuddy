@@ -47,7 +47,7 @@ of them (`pg_tables`). Connected roles on 2026-11-05: `scadbuddy` (68 connection
 | Process | Code | Database secret (clusters manifest) | Tables it may touch | SQL into the other service's tables |
 |---|---|---|---|---|
 | API, 3 replicas | `backend/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:376-379`) | all | reads and writes 8 `ai_*` tables (`agent/src/db/grants.ts:18-27` `API_AI_GRANTS`) |
-| render worker, 2 replicas | `backend/` | `scadbuddy-render-db` as `PGPASSWORD` (`scadbuddy-render.yaml:163-168`) | 1 in its list, the migrations ledger (`backend/scadbuddy/render/worker_role.py:34` `RENDER_GRANTS`; the store settings, the job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, the Bambuddy store's folders, the uploads' `assets` rows and the library leases, pin holds and install slots go through CRUD routes, #5298), but an existing role still holds the `render_settings` view, `render_jobs`, `events`, `activity`, `blob_refs`, `piece_geometry`, `store_blobs`, `store_folders`, `assets`, `library_leases`, `library_pin_holds` and `library_install_slots` it held before, until the revoke in #5298 Task 22: 13 | none |
+| render worker, 2 replicas | `backend/` | `scadbuddy-render-db` as `PGPASSWORD` (`scadbuddy-render.yaml:163-168`), still set; the worker has no database client and ignores it (#5298) | 0 in its list (`backend/scadbuddy/render/worker_role.py:35` `RENDER_GRANTS`; the store settings, the job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, the Bambuddy store's folders, the uploads' `assets` rows and the library leases, pin holds and install slots go through CRUD routes, and it waits for the API's CRUD areas, not its migrations, #5298), but an existing role still holds the migrations ledger, the `render_settings` view, `render_jobs`, `events`, `activity`, `blob_refs`, `piece_geometry`, `store_blobs`, `store_folders`, `assets`, `library_leases`, `library_pin_holds` and `library_install_slots` it held before, until the revoke in #5298 Task 22: 13 | none |
 | print worker, 1 replica | `backend/` | `scadbuddy-print-db` (`scadbuddy-print.yaml:140-145`) | 33 in its list (`backend/scadbuddy/auth/caller_grants.py:46` `PRINT_GRANTS`; the settings go through a CRUD route, #5298), but an existing role still holds `model_print_choices`, which it held before, until the revoke: 34 | none |
 | projects worker, 1 replica | `backend/` | `scadbuddy-projects-db` (`scadbuddy-projects.yaml:132-137`), still set until eh-homelab/clusters removes it (plan 2026-11-06 Task 10); the worker has no database client and ignores it (#5298) | 0: it has no grant list (flow runs, decisions, grants, operations and payload keys go through CRUD routes, and it has no event bus, #5298), and at every start the API revokes every grant it made the role `scadbuddy_projects` and drops its row policies (`backend/scadbuddy/auth/revoke.py` `revoke_retired`) | 0: at every start the agent revokes every `ai_*` grant it made that role (`agent/src/db/grants.ts` `revokeRole`) |
 | agent sidecar (in the API pod) | `agent/` | `scadbuddy-db-app`, the owner (`scadbuddy.yaml:549-552`) | all | 6 backend tables (`caller_grants.py:106-113` `AGENT_GRANTS`): it reads `events`, `workflow_runs`, `workflow_run_decisions` and `flow_grant_uses`, reads and updates `flow_grants`, and a trigger reads, inserts and deletes `blob_refs` |
@@ -66,7 +66,7 @@ controls.
 
 | Untrusted code | Where it runs | Its guard | Can it reach SQL? |
 |---|---|---|---|
-| A template's `pipeline/` Python | the render worker pod, a child of the worker, same uid 10001 (`scadbuddy-render.yaml:121`) | an environment allowlist (`backend/scadbuddy/workflows/template_process.py:107`), its own process group (`:138`), a kill on timeout (`:149`, `:51`). No seccomp, Landlock or network rule. | **Likely; not tested.** The worker's environment holds `PGPASSWORD` (`scadbuddy-render.yaml:165-168`). A process with the same uid can usually read `/proc/<ppid>/environ`. No NetworkPolicy selects the render pod. #5296 tests and fixes this. |
+| A template's `pipeline/` Python | the render worker pod, a child of the worker, same uid 10001 (`scadbuddy-render.yaml:121`) | an environment allowlist (`backend/scadbuddy/workflows/template_process.py:107`), its own process group (`:138`), a kill on timeout (`:149`, `:51`). No seccomp, Landlock or network rule. | **Likely; not tested.** The worker's environment holds `PGPASSWORD` (`scadbuddy-render.yaml:165-168`). The worker no longer uses it (#5298), but the Deployment sets it until #5298 Task 21. A process with the same uid can usually read `/proc/<ppid>/environ`. No NetworkPolicy selects the render pod. #5296 tests and fixes this. |
 | OpenSCAD source | the render worker pod; the API pod (the editor's parse check, the schema export, preset writes) | a Landlock filesystem ruleset (`backend/scadbuddy/render/confinement.py:3-17`, `render/sandbox.py`). No network rule. | Low. The language has no socket call. It runs with the uid of a process that holds a database secret. |
 | `openscad-lsp` | the API pod (`backend/scadbuddy/library/lsp.py`) | seccomp: no socket except `AF_UNIX` (`backend/scadbuddy/editor/nonet.py:3-6`) | No TCP. It shares a uid with the API, which holds the owner secret. |
 | Claude Code and its tools | the agent worker pods, a child of the agent | tiers in `canUseTool` and a `PreToolUse` hook; file tools confined to the session directory, except that `Read` and `Grep` may also reach the session's own `tool-results` directory in the Claude Code config dir (#5542) (`agent/src/harness/confine.ts`); Bash and PowerShell `off` (`agent/src/access/nativeBuiltins.ts:9-15`); the model credential behind a loopback gateway (`agent/src/gateway/server.ts`) | Only with Bash on. The agent's environment holds the owner database URL and the KEK path (`scadbuddy-agent-worker.yaml:102-121`). |
@@ -95,7 +95,7 @@ From the clusters manifests at `3618296a`; replicas and policies checked live.
 |---|---|---|---|---|---|
 | API and agent sidecar, 3 | yes (`scadbuddy.yaml:440-452`, `:605-640`) | owner, in both containers | yes (`scadbuddy.yaml:342-351`) | none | API no (`:515`), agent yes (`:746`) |
 | agent worker, 3 | yes | owner | no | public 443 and 80, the gateway VIP, Postgres, Temporal, the API (`networkpolicy-agent-worker.yaml`) | yes |
-| render, 2 | yes (`scadbuddy-render.yaml:223-229`) | `scadbuddy_render` | no | **none** | no |
+| render, 2 | yes (`scadbuddy-render.yaml:223-229`), unused: the worker reads no KEK (#5298) | `scadbuddy_render`, unused: the worker has no database client (#5298) | no | **none** | no |
 | print, 1 | yes | `scadbuddy_print` | yes (`scadbuddy-print.yaml:166-172`) | an allowlist (`networkpolicy-print.yaml`) | no |
 | projects, 1 | yes | `scadbuddy_projects`, unused and granted nothing: the worker has no database client (#5298); eh-homelab/clusters removes the secret (plan 2026-11-06 Task 10) and then the role | no | an allowlist (`networkpolicy-projects.yaml`) | no |
 | agent-durable, 0 | yes | owner | no | Postgres and public 443 (`networkpolicy-agent-durable.yaml`) | yes |
@@ -111,8 +111,9 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
 1. Seven processes in six Deployments hold a Postgres secret (the table above); six in five
    once eh-homelab/clusters drops the projects worker's (plan 2026-11-06 Task 10). Four of
    the processes (the API, the agent sidecar, the agent worker, agent-durable) use the owner.
-   The projects worker ignores its secret: it has no database client, and the API and the
-   agent revoke its role `scadbuddy_projects` at every start (#5298).
+   The projects and render workers ignore their secrets: they have no database client
+   (#5298). The API and the agent revoke the projects worker's role `scadbuddy_projects`
+   at every start; the render pod still mounts its secret and the KEK until #5298 Task 21.
 2. The agent and the API run SQL on each other's tables, through cross grants.
 3. Template Python shares a pod and a uid with a database secret and has no network rule
    (not tested).
@@ -129,12 +130,12 @@ its pod. Every other process calls it over HTTP with a short-lived service crede
 Untrusted code runs in a pod that holds no secret and has no route to Postgres.
 
 Today (each line into Postgres is a connection; the dotted ones cross into the other
-service's tables; the projects worker calls the API over HTTP, #5298):
+service's tables; the projects and render workers call the API over HTTP, #5298):
 
 ```mermaid
 flowchart LR
   API[API<br/>owner role] --> DB[(Postgres<br/>91 backend + 46 ai_* tables)]
-  R[render worker<br/>scadbuddy_render] --> DB
+  R[render worker<br/>no database client] -- HTTP + credential --> API
   P[print worker<br/>scadbuddy_print] --> DB
   J[projects worker<br/>no database client] -- HTTP + credential --> API
   A[agent sidecar + worker<br/>owner role] --> DB
@@ -163,7 +164,7 @@ What changes:
 
 | Process | Today | Target |
 |---|---|---|
-| render worker | 1 table over SQL in its list, the migrations ledger (read only); the store settings, the job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, the Bambuddy store's folders (which the API finds in Bambuddy itself), the uploads' `assets` rows and the library leases, pin holds and install slots through CRUD routes (#5298). An existing role keeps the `render_settings` view, `render_jobs`, `events`, `activity`, `blob_refs`, `piece_geometry`, `store_blobs`, `store_folders`, `assets`, `library_leases`, `library_pin_holds` and `library_install_slots` until the revoke in #5298 Task 22; template Python and openscad in the same pod | render jobs, blob refs and assets through CRUD routes; template Python and openscad in a sandbox pod with no secret |
+| render worker | no database client, so no table over SQL; the store settings, the job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, the Bambuddy store's folders (which the API finds in Bambuddy itself), the uploads' `assets` rows and the library leases, pin holds and install slots through CRUD routes, and only on a remote store (#5298). An existing role keeps the migrations ledger, the `render_settings` view, `render_jobs`, `events`, `activity`, `blob_refs`, `piece_geometry`, `store_blobs`, `store_folders`, `assets`, `library_leases`, `library_pin_holds` and `library_install_slots` until the revoke in #5298 Task 22; template Python and openscad in the same pod | render jobs, blob refs and assets through CRUD routes; template Python and openscad in a sandbox pod with no secret |
 | print worker | 33 tables over SQL in its list; the settings, the Bambuddy key among them, through a CRUD route (#5298). An existing role keeps `model_print_choices` until the revoke | print runs, outcomes, slices and printer state through CRUD routes (it already reads outputs through `/api/v1/internal/outputs`) |
 | projects worker | no database client, so no table over SQL; flow runs, decisions, grants, operations and payload keys (sealed) through CRUD routes, and no event bus (#5298). At every start the API and the agent revoke every grant they made its old role `scadbuddy_projects` (#5298 Task 11). Its service credential is exchanged only: the API mints it no sealed one and revokes any left (`ServiceCredentialStore.revoke_retired_legacy`). It holds `flow.host` and `crud.projects`, not `api`: in `enforce` it reaches only the 11 public routes its flow host functions, grant checks and `flow_decide`'s printer read call (`backend/scadbuddy/auth/routes.py` `FLOW_HOST_ENDPOINTS`) | flow runs, decisions, grants and payload keys through CRUD routes |
 | agent services | the owner role; 46 `ai_*` tables and 6 backend tables | sessions, transcripts, approvals and credentials through CRUD routes; Claude Code and plugins in a sandbox pod; no database secret |

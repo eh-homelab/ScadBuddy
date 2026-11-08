@@ -10,7 +10,8 @@ routes (#5298 Task 19, inventory R22-R24): `RemoteCheckoutLeases` and
   route answers a 423 ``removal-running`` after `LEASE_LOCK_WAIT`, and the client sends
   it again.
 - A renew or release names its token; a slot held by another token is a 409
-  ``not-holder``, a lease or hold with no row a 404, never a silent success. ``ttl_s``
+  ``not-holder``, a lease or hold with no row a 404, never a silent success. The
+  worker's release of a slot another token holds is released: its own lapsed. ``ttl_s``
   is at most `LEASE_TTL_MAX`.
 """
 
@@ -18,8 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
-import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +38,7 @@ from scadbuddy.library.libraries import (
     CheckoutLeases,
     InstallPermits,
 )
+from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
 from scadbuddy.store.index import Pool
 from tests.crud.crud_support import threaded_render_crud
 from tests.support.store import store_pool
@@ -329,10 +329,14 @@ def test_a_slot_is_renewed_and_released_only_by_its_token(client: CrudSyncClient
     mine, theirs = uuid.uuid4(), uuid.uuid4()
     slot = slots.claim(mine)
     assert slot is not None
-    for call in (slots.renew, slots.drop):
-        with pytest.raises(CrudRefusedError) as refused:
-            call(slot, theirs)
-        assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
+    with pytest.raises(CrudRefusedError) as refused:
+        slots.renew(slot, theirs)
+    assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
+    with pytest.raises(CrudRefusedError) as refused:
+        client.request("DELETE", f"{BASE}/install-slots/{slot}?token={theirs}")
+    assert (refused.value.status, refused.value.problem.get("reason")) == (409, "not-holder")
+    # The worker's release of a slot another token holds: its own lapsed, so released.
+    slots.drop(slot, theirs)
     slots.renew(slot, mine)
     slots.drop(slot, mine)
     slots.drop(slot, mine)  # sent again: the slot is free, nothing of anyone's taken
@@ -344,18 +348,21 @@ async def test_installs_are_capped_across_the_worker_and_the_api(
 ) -> None:
     worker = InstallPermits(1, slots=RemoteInstallSlots(client), poll=0.05)
     api = InstallPermits(2, pool)
-    entered = 0
-    both = threading.Event()
+    inside = peak = done = 0
 
     async def install(permits: InstallPermits) -> None:
-        nonlocal entered
+        nonlocal inside, peak, done
         async with permits.permit():
-            entered += 1
-            if entered == 2:
-                both.set()
+            inside += 1
+            peak = max(peak, inside)
             await asyncio.sleep(0.5)
+            inside -= 1
+            done += 1
 
-    started = time.monotonic()
     # The API's limit is 2: a third waits for one of the first two.
     await asyncio.wait_for(asyncio.gather(install(worker), install(api), install(api)), 20)
-    assert both.is_set() and time.monotonic() - started >= 1.0
+    assert (peak, done) == (2, 3)
+
+
+def test_a_takes_wait_covers_the_routes_lock_wait() -> None:
+    assert crud_module.TAKE_TIMEOUT == crud_render.LEASE_LOCK_WAIT + PROJECT_POOL_TIMEOUT
