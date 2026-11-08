@@ -454,7 +454,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
   settings, the Bambuddy key among them, come from the API's CRUD route
   (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
-  every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; every
+  every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; its print
+  runs, their outcomes, its operations and the events it publishes go through the same
+  routes (`RemotePrintRunStore`, `RemoteOutcomes`, `crud/operations.py`
+  `RemoteOperationStore`, `RemoteEvents`; the API writes each with its event and
+  activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), and it
+  does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
   behavior), so an `Operation` moves to the current build, which #4139's deferral
