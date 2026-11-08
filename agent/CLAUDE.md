@@ -36,7 +36,9 @@ assistant's spend on an order. A session's successful `order_item_revision_add` 
 turn) reports the session's `cost_usd` since its last report, split equally between its
 orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s
 for the turn's reports in all, one report per session at a time across replicas, by an
-advisory lock; `sweep` at start and hourly reports what a session's last turn left). Only the
+advisory lock on a `database.locks` connection, never the stores' pool, and none while every
+lock connection is out; `sweep` at start and hourly reports what a session's last turn left,
+20 sessions at most). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
 route's own 404 (the order gone: an item gone falls back to the order), 409 (a currency no
 rate reaches, a visitor's unsubmitted cart) or 422 drops
 that order's report, its share in no entry. Anything else (401 or 403 while there

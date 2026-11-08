@@ -1,4 +1,6 @@
-import type { ReservedSql, Sql } from 'postgres'
+import type { Sql } from 'postgres'
+import type { LockClient, LockLease } from '../db.js'
+import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import type { TouchedCall, TouchedSink } from './touched.js'
 
 // The assistant's spend on an order (#5330, job cost spec 2026-11-05 §4.4). A session works
@@ -24,9 +26,11 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // unit of the order's currency (it answers no entry) stays to report, with the next turn's
 // spend. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it leaves waits
 // for the next turn's end. The finish activity does not wait for `report`. A session runs one
-// report at a time across replicas (a session-level advisory lock on a reserved connection,
-// freed with it if the process dies). `sweep` (at start and hourly, main.ts) reports what a
-// session's last turn left, for a session no turn is running.
+// report at a time across replicas (a session-level advisory lock on a connection of the lock
+// client, never one of the stores', freed with it if the process dies). `record` waits at
+// most RECORD_WAIT_MS for its row, so a revision call never waits on it. `sweep` (at start
+// and hourly, main.ts) reports what a session's last turn left, for a session no turn is
+// running, SWEEP_LIMIT sessions at most.
 // Neither `record` nor `report` ever throws: a cost report never fails a call or a turn.
 
 export const REVISION_TOOLS: ReadonlySet<string> = new Set(['order_item_revision_add', 'order_item_revision_add_after_acceptance'])
@@ -61,6 +65,8 @@ const FINAL_REFUSALS: ReadonlySet<number> = new Set([404, 409, 422])
 const LOCK_PREFIX = 'ai_session_order_costs:'
 /** How long a row waits before the sweep reports it: past any turn that could still report it. */
 export const SWEEP_AFTER = '15 minutes'
+/** The most sessions one sweep reports: each may take up to REPORT_DEADLINE_MS. */
+export const SWEEP_LIMIT = 20
 /** Less time left than this, and the rest wait for the next turn's end. */
 const MIN_POST_MS = 1_000
 
@@ -102,31 +108,58 @@ function text(value: unknown): string | null {
 type Pending = { order_id: string; order_item_id: string; attempted_usd: number | null }
 type Order = { id: string; items: string[]; attempted: number | null }
 
+export type OrderCostsOptions = {
+  /** The stores' pool: short queries only, never held across a post. */
+  sql: Sql
+  /** The lock client's own connections, which hold a session's report lock across its posts. */
+  locks: LockClient
+  post: PostCost
+  onError?: (err: unknown) => void
+  now?: () => number
+  /** How long `record` holds a revision call up (db/bounded.ts, #1076). */
+  waitMs?: number
+  /** The most sessions one sweep reports. */
+  sweepLimit?: number
+}
+
 export class OrderCosts implements TouchedSink {
   private readonly sql: Sql
+  private readonly locks: LockClient
   private readonly post: PostCost
   private readonly onError: ((err: unknown) => void) | undefined
   private readonly now: () => number
+  private readonly waitMs: number
+  private readonly sweepLimit: number
 
-  constructor(sql: Sql, post: PostCost, onError?: (err: unknown) => void, options: { now?: () => number } = {}) {
-    this.sql = sql
-    this.post = post
-    this.onError = onError
+  constructor(options: OrderCostsOptions) {
+    this.sql = options.sql
+    this.locks = options.locks
+    this.post = options.post
+    this.onError = options.onError
     this.now = options.now ?? Date.now
+    this.waitMs = options.waitMs ?? RECORD_WAIT_MS
+    this.sweepLimit = options.sweepLimit ?? SWEEP_LIMIT
   }
 
-  /** A revision that succeeded, unless its order was already reported in this session. Never throws. */
+  /**
+   * A revision that succeeded, unless its order was already reported in this session. Waits at
+   * most `waitMs` for its row (#1076): a late write is reported and the call goes on. Never throws.
+   */
   async record(call: TouchedCall): Promise<void> {
     if (!REVISION_TOOLS.has(call.tool.name) || call.ok === false) return
     const order = text(call.input.order_id)
     const item = text(call.input.item_id)
     if (!order || !item) return
+    await waitAtMost(this.insert(call.sessionId, order, item), this.waitMs, 'the order cost row', (err) => this.onError?.(err))
+  }
+
+  private async insert(sessionId: string, order: string, item: string): Promise<void> {
     try {
       await this.sql`
         INSERT INTO ai_session_order_costs (session_id, order_id, order_item_id)
-        SELECT ${call.sessionId}::uuid, ${order}, ${item}
+        SELECT ${sessionId}::uuid, ${order}, ${item}
         WHERE NOT EXISTS (SELECT 1 FROM ai_session_order_costs
-                          WHERE session_id = ${call.sessionId}::uuid AND order_id = ${order} AND reported_at IS NOT NULL)
+                          WHERE session_id = ${sessionId}::uuid AND order_id = ${order} AND reported_at IS NOT NULL)
         ON CONFLICT DO NOTHING`
     } catch (err) {
       this.onError?.(err)
@@ -135,43 +168,58 @@ export class OrderCosts implements TouchedSink {
 
   /**
    * Sends each order still to report its share: the share an earlier report sent and heard no
-   * answer for, else an equal part of the session's spend not yet carried or sent. Never throws.
+   * answer for, else an equal part of the session's spend not yet carried or sent. The session's
+   * lock is held on a lock-client connection (db.ts `createLockClient`), never one of the stores';
+   * with every lock connection out, nothing is sent now and the next turn's end or the sweep
+   * reports it. Never throws.
    */
   async report(sessionId: string): Promise<void> {
-    let conn: ReservedSql | undefined
+    let lease: LockLease | undefined
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
     try {
-      conn = await this.sql.reserve()
+      lease = await this.locks.take()
+      if (!lease) return
       const key = `${LOCK_PREFIX}${sessionId}`
-      const [lock] = await conn<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`
+      const [lock] = await lease.sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`
       // A report already running for the session (here or on another replica) sends what
       // this one would; what it leaves waits for the next turn's end or the sweep.
-      if (!lock?.locked) return
+      if (!lock?.locked) {
+        healthy = true
+        return
+      }
       try {
-        await this.send(conn, sessionId)
+        await this.send(sessionId)
       } finally {
-        await conn`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+        healthy = true
       }
     } catch (err) {
       this.onError?.(err)
     } finally {
-      conn?.release()
+      lease?.done(healthy)
     }
   }
 
-  /** Reports every session no turn is running that has orders left to report for SWEEP_AFTER. Never throws. */
+  /**
+   * Reports the sessions no turn is running that have had orders left to report for
+   * SWEEP_AFTER, oldest first, at most `sweepLimit` of them. Never throws.
+   */
   async sweep(): Promise<void> {
     try {
       const sessions = await this.sql<{ session_id: string }[]>`
-        SELECT DISTINCT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
+        SELECT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
         WHERE c.reported_at IS NULL AND c.at < now() - ${SWEEP_AFTER}::interval
-          AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')`
+          AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')
+        GROUP BY c.session_id ORDER BY min(c.at) LIMIT ${this.sweepLimit}`
       for (const { session_id } of sessions) await this.report(session_id)
     } catch (err) {
       this.onError?.(err)
     }
   }
 
-  private async send(sql: ReservedSql, sessionId: string): Promise<void> {
+  private async send(sessionId: string): Promise<void> {
+    const sql = this.sql
     const deadline = this.now() + REPORT_DEADLINE_MS
     const pending = await sql<Pending[]>`
       SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs

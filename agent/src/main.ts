@@ -393,11 +393,13 @@ toolServices.browser = tabs
 // items it revised, whose spend each turn's end reports to the backend's CRUD route with the
 // service credential (#5330, sessions/orderCosts.ts).
 const orderCosts = database
-  ? new OrderCosts(
-      database.sql,
-      crudCostPoster(config.backendUrl, serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch),
-      (err) => console.error('order costs: could not record or report:', (err as Error).message),
-    )
+  ? new OrderCosts({
+      sql: database.sql,
+      // The session's report lock is held across its posts on the lock client's own connections.
+      locks: database.locks,
+      post: crudCostPoster(config.backendUrl, serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch),
+      onError: (err) => console.error('order costs: could not record or report:', (err as Error).message),
+    })
   : undefined
 if (database && orderCosts && role.http) {
   // What a session's last turn left to report (#5330), at start and hourly.
