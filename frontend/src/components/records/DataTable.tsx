@@ -61,7 +61,9 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
           {toolbar}
         </div>
       )}
-      <div className="overflow-x-auto">
+      {/* Relative, so a header's sr-only text (absolutely positioned) stays inside the scroll box
+          rather than widening the page past a narrow screen (#4955). */}
+      <div className="relative overflow-x-auto">
         <table className="w-full text-left text-[13px]" aria-label={label}>
           <thead className="bg-muted/50 text-xs text-muted-foreground">
             <tr>
