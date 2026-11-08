@@ -150,8 +150,9 @@ async def print_item(order, item):
             # No output (a manual quote), one gone since, or the print choices not read
             # (review of #5682): a person's to fix, never the run's end.
             question = (
-                f"{item['title']}'s print choices could not be read ({error}): its output "
-                "may be gone or missing. Fix it, then answer print, or skip."
+                f"{item['title']}'s print choices could not be read ({error}). Its output "
+                "may be gone or missing, or the error says what else went wrong. Fix it, "
+                "then answer print, or skip."
             )
             if await ask(question) != "print":
                 return False
@@ -289,4 +290,8 @@ async def ensure_builtin_flow(definitions: FlowDefinitions) -> bool:
     except Exception:
         logger.exception("could not register the built-in %s flow", NAME)
         return False
-    return made is not None
+    if made is None:
+        # "Why is the built-in not in my list" answers from the logs (review of #5682).
+        logger.info("the built-in %s flow was not registered: the name has versions", NAME)
+        return False
+    return True

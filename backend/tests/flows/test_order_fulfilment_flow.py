@@ -42,6 +42,7 @@ def definitions(tmp_path: Path, jobs: JobProjection) -> FlowDefinitions:
 @pytest.mark.requires_git
 async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     definitions: FlowDefinitions,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     await definitions.start()
     assert await ensure_builtin_flow(definitions) is True
@@ -53,8 +54,10 @@ async def test_it_is_registered_once_and_never_over_an_edit_or_a_delete(
     [listed] = await definitions.versions(NAME, limit=1)
     assert listed.created_by == {"kind": "builtin", "name": NAME}
     assert created_by(first.agent, first.builtin) == {"kind": "builtin", "name": NAME}
-    # A second start, or a second replica, registers nothing.
-    assert await ensure_builtin_flow(definitions) is False
+    # A second start, or a second replica, registers nothing, and says so in the log.
+    with caplog.at_level("INFO", logger="scadbuddy.orders.builtin_flow"):
+        assert await ensure_builtin_flow(definitions) is False
+    assert "not registered: the name has versions" in caplog.text
     # The shop's version 2 stands.
     await definitions.register(NAME, "return 'mine'", {"kind": "browser"}, approval_timeout_s=None)
     assert await ensure_builtin_flow(definitions) is False
@@ -269,6 +272,8 @@ def test_print_choices_that_cannot_be_read_ask_a_person_and_the_next_item_prints
     result = host.run()
     assert host.printed == ["b"] and result["skipped"] == ["a"]
     assert "could not be read" in host.questions[0]
+    # The error may be other than a gone output (review of #5682): never claimed as one.
+    assert "or the error says what else went wrong" in host.questions[0]
 
 
 def test_a_lan_only_printer_the_model_remembers_is_named() -> None:
