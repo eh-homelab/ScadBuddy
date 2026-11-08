@@ -53,6 +53,63 @@ import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, w
 
 const ID = z.string().min(1).max(100)
 const orderId = ID.describe('An order id, as order_list or order_create returns it')
+
+/** The messages `order_notify_customer` composes (#4252, orders spec §7.3). */
+const NOTIFY_TEMPLATES = ['quoted', 'accepted', 'ready', 'shipped'] as const
+type NotifyTemplate = (typeof NOTIFY_TEMPLATES)[number]
+
+interface NoticeOrder {
+  order: { number: string; currency: string; minor_exponent: number }
+  totals: { total_minor: number }
+}
+interface NoticeCustomer {
+  display_name: string
+  contacts: { kind: string; value: string; primary?: boolean }[]
+}
+
+/** `minor` integer units as a major amount with `exponent` places, from the integer's
+ *  digits: a division through a float misplaces the last digit of a large total
+ *  (review of #5682). */
+function majorText(minor: number, exponent: number): string {
+  const sign = minor < 0 ? '-' : ''
+  const digits = String(Math.abs(minor)).padStart(exponent + 1, '0')
+  if (exponent === 0) return `${sign}${digits}`
+  return `${sign}${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`
+}
+
+/** The message for `template`, addressed to the customer's primary contacts (every
+ *  contact when none is primary). Plain text, never sent from here. */
+export function composeNotice(
+  template: NotifyTemplate,
+  detail: NoticeOrder,
+  customer: NoticeCustomer,
+  note?: string,
+): {
+  template: NotifyTemplate
+  to: { kind: string; value: string }[]
+  subject: string
+  text: string
+  sent: false
+  warning?: string
+} {
+  const { number, currency, minor_exponent } = detail.order
+  const total = `${majorText(detail.totals.total_minor, minor_exponent)} ${currency}`
+  const lines: Record<NotifyTemplate, [string, string]> = {
+    quoted: [`Your quote for order ${number}`, `Your quote for order ${number} is ready: ${total}. Reply to accept it.`],
+    accepted: [`Order ${number} accepted`, `We have accepted order ${number} (${total}) and will start on it.`],
+    ready: [`Order ${number} is ready`, `Order ${number} is ready.`],
+    shipped: [`Order ${number} has shipped`, `Order ${number} has shipped.`],
+  }
+  const [subject, body] = lines[template]
+  const primary = customer.contacts.filter((c) => c.primary)
+  const to = (primary.length > 0 ? primary : customer.contacts).map(({ kind, value }) => ({ kind, value }))
+  const text = [`Hello ${customer.display_name},`, '', body, ...(note ? ['', note] : [])].join('\n')
+  // Review of #5682: an unaddressed message says so, so a sender (#5660) never sends it blind.
+  if (to.length === 0) {
+    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no contacts to send it to.` }
+  }
+  return { template, to, subject, text, sent: false }
+}
 const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
@@ -656,6 +713,40 @@ export const orderTools: Tool[] = [
           `set the shipping option of order ${order_id}`,
         ),
       ),
+  }),
+  defineTool({
+    name: 'order_notify_customer',
+    label: 'Write a message to an order’s customer',
+    description:
+      "Compose a message to an order's customer from a template (`quoted`, `accepted`, `ready`, `shipped`), " +
+      "addressed to the customer's primary contacts, with an optional `note` added. It sends nothing: the " +
+      'answer is the text (`sent: false`) for a person to send. Sending through a messaging plugin is a ' +
+      'later change (#5660).',
+    input: z.object({
+      order_id: orderId,
+      template: z.enum(NOTIFY_TEMPLATES),
+      note: z.string().min(1).max(2000).optional().describe('A line added after the template’s text'),
+    }),
+    // It composes text and changes nothing; the person who sends it decides.
+    risk: 'read',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: ['GET /api/v1/orders/{order_id}', 'GET /api/v1/customers/{customer_id}'],
+    handler: async ({ order_id, template, note }, { backend }) => {
+      const detail = await ok(
+        backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }),
+        `get order ${order_id}`,
+      )
+      const { customer_id, number } = detail.order
+      // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
+      if (customer_id == null || number == null) {
+        throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+      }
+      const customer = await ok(
+        backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
+        `get customer ${customer_id}`,
+      )
+      return json(composeNotice(template, { order: { ...detail.order, number }, totals: detail.totals }, customer, note))
+    },
   }),
   defineTool({
     name: 'order_costs',

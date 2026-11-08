@@ -310,7 +310,8 @@ class Payments:
         self, provider: str, headers: Mapping[str, str], body: bytes
     ) -> EventOutcome:
         """Check the signature, then record the event. ``BadSignatureError`` leaves
-        before anything is written; ``ProviderError`` is a signed body it cannot read;
+        before any event or money is written (only its category, below);
+        ``ProviderError`` is a signed body it cannot read;
         ``ProviderUnavailableError`` is a provider call the reading needed that failed,
         and also leaves before anything is written. An event that came before one it
         depends on (``EventTooEarlyError``, a late fee within ``FEE_RETRY_WINDOW``) writes

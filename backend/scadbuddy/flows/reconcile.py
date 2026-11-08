@@ -25,8 +25,11 @@ from scadbuddy.flows.store import FlowStore
 logger = logging.getLogger(__name__)
 
 
-def created_by(agent: AgentAuthor | None) -> dict[str, Any]:
-    """Who made a version, from its commit's author trailers."""
+def created_by(agent: AgentAuthor | None, builtin: str | None = None) -> dict[str, Any]:
+    """Who made a version, from its commit's author trailers: the build for a built-in's
+    (`BUILTIN_TRAILER`, #4252), the agent for its own, else the browser."""
+    if builtin is not None:
+        return {"kind": "builtin", "name": builtin}
     if agent is None:
         return {"kind": "browser"}
     return {"kind": "agent", "principal": agent.principal, "session": agent.session}
@@ -60,7 +63,7 @@ def reconcile_locked(history: FlowHistory, store: FlowStore) -> list[FlowCommit]
                 orphan.name,
                 orphan.version,
                 orphan.commit,
-                created_by(orphan.agent),
+                created_by(orphan.agent, orphan.builtin),
                 approval_timeout_s=None,
                 created_at=orphan.date,
                 # A register or restore after a delete that committed but never inserted:

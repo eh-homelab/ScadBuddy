@@ -76,7 +76,9 @@ test.describe('orders', () => {
     await expect(page.getByTestId('order-totals')).toContainText('25.00')
     await page.getByRole('button', { name: 'Accept order' }).click()
     await expect(unit).toHaveCount(0)
-    await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
+    await expect(items.getByText('$12.50', { exact: true })).toBeVisible()
+    // #4955: the accepted price is pinned, and the row says why.
+    await expect(items.getByText(/^Locked: the customer accepted this price/)).toBeVisible()
   })
 
   // #4954 — a custom item, typed in the row under the items: priced and accepted on Enter.
@@ -178,7 +180,7 @@ test.describe('orders', () => {
     await expect(dialog.getByTestId('order-estimate')).toContainText(/An estimate: about [\d.]+ g/)
   })
 
-  // #4251 — "Add item" on the order page: an output of a template, then a template's
+  // #4251 — "Add product" on the order page (its dialog is "Add item"): an output of a template, then a template's
   // current version with its defaults, without leaving the order.
   test('adds items from the order page', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
@@ -188,7 +190,7 @@ test.describe('orders', () => {
     const rows = page.getByRole('table', { name: 'Line items' }).getByRole('row')
     await expect(rows).toHaveCount(3)
 
-    await page.getByRole('button', { name: 'Add item' }).click()
+    await page.getByRole('button', { name: 'Add product' }).click()
     let dialog = page.getByRole('dialog', { name: 'Add item' })
     await dialog.getByLabel('Template').fill('keychain')
     await dialog.getByRole('button', { name: /Name Keychain/ }).click()
@@ -199,7 +201,7 @@ test.describe('orders', () => {
     await expect(dialog).toBeHidden()
     await expect(rows).toHaveCount(4)
 
-    await page.getByRole('button', { name: 'Add item' }).click()
+    await page.getByRole('button', { name: 'Add product' }).click()
     dialog = page.getByRole('dialog', { name: 'Add item' })
     await dialog.getByLabel('Template').fill('maze')
     await dialog.getByRole('button', { name: /Ball Maze/ }).click()
@@ -216,7 +218,7 @@ test.describe('orders', () => {
     await page.goto('/orders')
     await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'ORD-2026-3', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Add item' }).click()
+    await page.getByRole('button', { name: 'Add product' }).click()
     const add = page.getByRole('dialog', { name: 'Add item' })
     await add.getByRole('button', { name: 'Design request' }).click()
     await add.getByLabel('Title').fill('A dragon')

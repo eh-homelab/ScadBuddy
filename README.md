@@ -157,6 +157,13 @@ on shutdown.
   are missing or stale, which after the first pass is none. `false` deletes it; a
   Schedule paused in the Temporal UI stays paused across restarts. Its id ends in the
   library queue's name, like the housekeeping ones);
+  `SCADBUDDY_ORDERS_BUILTIN_FLOW` (default `true`: at start the API registers the
+  built-in `order-fulfilment` flow as version 1 when no flow of that name ever had a
+  version; a person's edit or delete stands, and nothing runs until a person makes its
+  trigger and approves its grant; `false` registers nothing; read from the environment
+  only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
+  are the request's, each print is refused and the flow asks a person to print the item
+  from the order's page);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -488,8 +495,8 @@ The front door (Pomerium and the LAN gateway) stays in front of every route but 
 payment provider must reach `POST /api/v1/payments/webhooks/<provider>` from the
 internet, so route only the path prefix `/api/v1/payments/webhooks/` from the public
 host to the API Service, and no other path. That route takes no session: the
-provider's signature is its credential, a bad signature is a `400` that records
-nothing, and a body above 256 KiB is a `413`. Enter the webhook URL
+provider's signature is its credential, a bad signature is a `400` that records no
+event or money, and a body above 256 KiB is a `413`. Enter the webhook URL
 `https://<public host>/api/v1/payments/webhooks/<provider>` in the provider's own
 dashboard, where its webhooks are set up. Connecting a provider
 (`PUT /api/v1/payments/providers/<provider>`, by a person signed in) needs

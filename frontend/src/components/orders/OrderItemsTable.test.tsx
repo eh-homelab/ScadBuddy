@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -9,6 +9,8 @@ import { seedOperation } from '../../mocks/features/operations'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
+import { LOCKED_TEXT, REVISED_TEXT } from './itemActions'
+import { QUANTITY_HINT } from './quantity'
 
 function render(id: string) {
   return renderPage(
@@ -415,6 +417,312 @@ describe('OrderItemsTable · row menu', () => {
 
   it('offers Unfulfil, not disabled, when nothing is in the way', async () => {
     expect(await openMenu()).not.toHaveAttribute('data-disabled')
+  })
+})
+
+// #4955, spec 2026-11-07 §4.1 — one card: its header adds items, a row names its source, and
+// every row's ⋯ menu holds the actions allowed now.
+describe('OrderItemsTable · the items card (#4955)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
+
+  it('adds items from the card header', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const card = screen.getByRole('region', { name: 'Items' })
+    await user.click(within(card).getByRole('button', { name: 'Add product' }))
+    expect(await screen.findByRole('dialog', { name: 'Add item' })).toBeInTheDocument()
+  })
+
+  it('focuses the custom item row from the card header', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(screen.getByRole('region', { name: 'Items' })).getByRole('button', { name: 'Add custom item' }))
+    expect(screen.getByRole('textbox', { name: 'Custom item title' })).toHaveFocus()
+  })
+
+  it("shows a row's loss badge from the money view, and pads the custom item row to match", async () => {
+    const real = await api.orderCosts(ORDER_DRAFT)
+    const base = real.items[0] ?? { item_id: ITEM_DRAFT }
+    vi.spyOn(api, 'orderCosts').mockResolvedValue({ ...real, items: [{ ...base, item_id: ITEM_DRAFT, margin_state: 'loss' }] } as typeof real)
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getByText('Loss')).toBeInTheDocument())
+    const body = within(row(ITEM_DRAFT)).getAllByRole('cell').length
+    expect(within(screen.getByTestId('custom-item-row')).getAllByRole('cell')).toHaveLength(body)
+  })
+
+  it('names where each item came from', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { library_file_id: 120, quantity: 1, title: 'Drawer label' })
+    render(ORDER_DRAFT)
+    expect(await screen.findByTestId(`item-source-${added.id}`)).toHaveTextContent('file')
+    expect(screen.getByTestId(`item-source-${ITEM_DRAFT}`)).toHaveTextContent(/^(model|output)$/)
+  })
+
+  it("offers a draft item's actions, and opens the drawer at its quote", async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    const names = (await screen.findAllByRole('menuitem')).map((m) => m.textContent)
+    expect(names).toEqual(['Open details', 'Quote from a slice…', 'Delete item'])
+    await user.click(screen.getByRole('menuitem', { name: 'Quote from a slice…' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('item-section-quote')).toBeInTheDocument()
+  })
+
+  describe('the section a menu action opens the drawer at', () => {
+    const scrolled: string[] = []
+    const original = Element.prototype.scrollIntoView
+    beforeEach(() => {
+      scrolled.length = 0
+      // jsdom has no scrollIntoView: record which element each call scrolls.
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push(this.id)
+      }
+    })
+    afterEach(() => {
+      Element.prototype.scrollIntoView = original
+    })
+
+    it('scrolls the drawer to the quote, and not for Open details', async () => {
+      const { user } = render(ORDER_DRAFT)
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Quote from a slice…' }))
+      await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await waitFor(() => expect(scrolled).toContain('item-section-quote'))
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Name Keychain' })).toBeNull())
+      scrolled.length = 0
+      await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Open details' }))
+      await screen.findByRole('dialog', { name: 'Name Keychain' })
+      expect(scrolled.filter((id) => id.startsWith('item-section-'))).toEqual([])
+    })
+
+    it('scrolls again to a second section of the item already open', async () => {
+      state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+      const { user } = render(ORDER_ACCEPTED)
+      await screen.findByRole('heading', { name: 'ORD-2026-2' })
+      await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+      await user.click(await screen.findByRole('menuitem', { name: /^Print/ }))
+      await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await waitFor(() => expect(scrolled).toContain('item-section-print'))
+      scrolled.length = 0
+      // Beside the assistant the drawer is not modal (#798): the row's menu stays reachable.
+      const trigger = within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions', hidden: true })
+      fireEvent.keyDown(trigger, { key: 'Enter' })
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Fulfil…', hidden: true }))
+      await waitFor(() => expect(scrolled).toContain('item-section-fulfil'))
+    })
+
+    it('does not carry the section to the next item opened from its title', async () => {
+      const other = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+      const { user } = render(ORDER_DRAFT)
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Quote from a slice…' }))
+      await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await waitFor(() => expect(scrolled).toContain('item-section-quote'))
+      scrolled.length = 0
+      // Beside the assistant the drawer is not modal (#798): the next row's title is clickable.
+      fireEvent.click(within(row(other.id)).getByRole('button', { name: 'Rush fee', hidden: true }))
+      await screen.findByRole('dialog', { name: 'Rush fee' })
+      expect(scrolled.filter((id) => id.startsWith('item-section-'))).toEqual([])
+    })
+  })
+
+  it("offers an accepted item's print and fulfil, both refused with the reason on hold", async () => {
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+    expect(await screen.findByRole('menuitem', { name: 'Fulfil…' })).toHaveAttribute('data-disabled')
+    expect(screen.getByRole('menuitem', { name: /^Print/ })).toHaveAttribute('data-disabled')
+    expect(screen.getAllByText('The order is on hold. Release it first.')).toHaveLength(2)
+  })
+
+  it('turns the header and menu writes off while a write runs', async () => {
+    let finish: () => void = () => undefined
+    vi.spyOn(api, 'deleteOrderItem').mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)))
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).getByRole('button', { name: 'Delete item' }))
+    const card = screen.getByRole('region', { name: 'Items' })
+    await waitFor(() => expect(within(card).getByRole('button', { name: 'Add product' })).toBeDisabled())
+    expect(within(card).getByRole('button', { name: 'Add custom item' })).toBeDisabled()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    expect(await screen.findByRole('menuitem', { name: 'Delete item' })).toHaveAttribute('data-disabled')
+    await user.keyboard('{Escape}')
+    await act(async () => finish())
+    await waitFor(() => expect(within(card).getByRole('button', { name: 'Add product' })).toBeEnabled())
+  })
+
+  it('deletes a draft item from its menu after a confirm, and keeps it on Keep', async () => {
+    const deleted = vi.spyOn(api, 'deleteOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).getByRole('button', { name: 'Keep' }))
+    expect(deleted).not.toHaveBeenCalled()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete item' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).getByRole('button', { name: 'Delete item' }))
+    await waitFor(() => expect(screen.queryByTestId(`order-item-${ITEM_DRAFT}`)).not.toBeInTheDocument())
+  })
+
+  it('cancels a quoted item from its menu after a confirm', async () => {
+    const cancelled = vi.spyOn(api, 'cancelOrderItem')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Cancel item' }))
+    const confirm = await screen.findByRole('alertdialog', { name: /^Cancel .*\?$/ })
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel item' }))
+    await waitFor(() => expect(cancelled).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED))
+  })
+})
+
+// #4955 step 2, spec 2026-11-07 §4.1 — inline edit of quantity, price and title: Enter saves,
+// Escape cancels, Tab moves along the row. Past `quoted` the quantity and price are read-only
+// with the reason shown; the title stays editable while the item is open.
+describe('OrderItemsTable · inline edit (#4955)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
+  const draftItem = () => state.items.find((i) => i.id === ITEM_DRAFT)!
+
+  it('saves a typed quantity on Enter', async () => {
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    expect(input).toHaveValue('2')
+    await user.clear(input)
+    await user.type(input, '5{Enter}')
+    await waitFor(() => expect(draftItem().quantity).toBe(5))
+    expect(updated).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, { quantity: 5 })
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })).toHaveValue('5'))
+  })
+
+  it('puts the quantity back on Escape, and refuses one that is not a whole number', async () => {
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '2.5{Enter}')
+    expect(within(row(ITEM_DRAFT)).getByRole('alert')).toHaveTextContent(QUANTITY_HINT)
+    await user.keyboard('{Escape}')
+    expect(input).toHaveValue('2')
+    expect(within(row(ITEM_DRAFT)).queryByRole('alert')).toBeNull()
+    expect(updated).not.toHaveBeenCalled()
+  })
+
+  it('moves from the quantity to the unit price with Tab', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(screen.getByRole('textbox', { name: 'Quantity for Name Keychain' }))
+    await user.tab()
+    expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveFocus()
+  })
+
+  it('renames an item on Enter, and keeps its title on Escape', async () => {
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Edit title' }))
+    const title = screen.getByRole('textbox', { name: 'Title for Name Keychain' })
+    expect(title).toHaveFocus()
+    await user.clear(title)
+    await user.type(title, 'Ignored{Escape}')
+    expect(screen.queryByRole('textbox', { name: /^Title for/ })).toBeNull()
+    expect(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' })).toBeInTheDocument()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Edit title' }))
+    const again = screen.getByRole('textbox', { name: 'Title for Name Keychain' })
+    await user.clear(again)
+    await user.type(again, 'Tag for Sam{Enter}')
+    await waitFor(() => expect(draftItem().title).toBe('Tag for Sam'))
+    expect(updated).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, { title: 'Tag for Sam' })
+    expect(await within(row(ITEM_DRAFT)).findByRole('button', { name: 'Tag for Sam' })).toBeInTheDocument()
+  })
+
+  it("locks an accepted item's quantity and price with the reason, and keeps its title editable", async () => {
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByRole('textbox', { name: /^Quantity for/ })).toBeNull()
+    expect(screen.queryByRole('textbox', { name: /^Unit price for/ })).toBeNull()
+    expect(screen.getByTestId(`item-locked-${ITEM_APPROVED}`)).toHaveTextContent(LOCKED_TEXT)
+    expect(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Edit title' })).toBeInTheDocument()
+  })
+
+  it('re-quotes an item revised after acceptance, its quantity still locked (#5350)', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.revised_after_acceptance = true
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByRole('textbox', { name: /^Quantity for/ })).toBeNull()
+    expect(within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })).toBeInTheDocument()
+    expect(screen.getByTestId(`item-locked-${ITEM_APPROVED}`)).toHaveTextContent(REVISED_TEXT)
+  })
+
+  it("prices a revised item's new design from empty, even at the old price, and says it is not accepted (#5350)", async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.revised_after_acceptance = true
+    const quoted = vi.spyOn(api, 'quoteOrderItem')
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const input = within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })
+    expect(input).toHaveValue('')
+    expect(within(row(ITEM_APPROVED)).getByText('not accepted')).toBeInTheDocument()
+    await user.type(input, '15.00{Enter}')
+    await waitFor(() => expect(accepted).toHaveBeenCalled())
+    expect(quoted).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1500 })
+  })
+
+  it("accepts a revised item's pending quote of the new design at its own price, recording nothing (#5350)", async () => {
+    const found = state.items.find((i) => i.id === ITEM_APPROVED)!
+    found.revised_after_acceptance = true
+    const old = state.quotes.find((q) => q.order_item_id === ITEM_APPROVED && q.accepted)!
+    state.quotes.push({ ...old, id: 'q-new-design', accepted: false, unit_price_minor: 1500, revision_id: found.current_revision_id, created_at: '2026-11-08T10:00:00Z' })
+    const quoted = vi.spyOn(api, 'quoteOrderItem')
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const input = within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })
+    expect(input).toHaveValue('15.00')
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Accept unit price' }))
+    await waitFor(() => expect(accepted).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED, 'q-new-design'))
+    expect(quoted).not.toHaveBeenCalled()
+  })
+
+  it('keeps the quantity focused after Enter, so Tab goes on from it', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '4{Enter}')
+    await waitFor(() => expect(draftItem().quantity).toBe(4))
+    expect(screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })).toHaveFocus()
+  })
+
+  it('waits for a running page write before it saves a quantity', async () => {
+    let finish: () => void = () => undefined
+    vi.spyOn(api, 'cancelOrderItem').mockImplementation(() => new Promise((resolve) => (finish = () => resolve({} as never))))
+    const custom = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(custom.id)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Cancel item' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel item' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add product' })).toBeDisabled())
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '6{Enter}')
+    expect(updated).not.toHaveBeenCalled()
+    await act(async () => finish())
   })
 })
 

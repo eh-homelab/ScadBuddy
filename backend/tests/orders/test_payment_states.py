@@ -336,3 +336,25 @@ def test_a_failed_refund_takes_its_amount_and_currency_from_the_refund(
     other = REFUND_FAILED.model_copy(update={"currency": "EUR", "amount_minor": 999})
     assert shop.lifecycle.record_provider_event("fake", other) == "recorded"
     assert _provider_payments(shop, order) == [700, -200, 200]
+
+
+def test_a_refund_and_its_failure_at_once_cancel_out(shop: PayShop) -> None:
+    """The two events serialize on the order's lock: whichever runs second sees the
+    first's committed row, so the order nets no refund in either order."""
+    order, _ = shop.linked()
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    start = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def send(event: ProviderEvent) -> None:
+        start.wait()
+        outcomes.append(shop.lifecycle.record_provider_event("fake", event))
+
+    workers = [threading.Thread(target=send, args=(e,)) for e in (REFUND, REFUND_FAILED)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=10)
+    assert len(outcomes) == 2
+    assert sum(_provider_payments(shop, order)) == 700
+    assert _provider_payments(shop, order) in ([700], [700, -200, 200])
