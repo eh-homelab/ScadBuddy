@@ -13,8 +13,9 @@ grams are priced at that quote's own price per gram (its filament lines over its
 else at the price book's ``cost_per_kg`` of the item's colour slots' filaments, weighted by
 the quote's grams per slot when known and equally otherwise, marked ``estimated``. Its seconds
 (``actual_seconds``, else the quote's seconds times the units, ``estimated``) are priced at
-the quote's ``machine_time`` line over its seconds, else at today's
-``pricing_machine_rate_per_hour``, ``estimated``. A figure with no source is left out and
+the quote's ``machine_time`` line over its seconds, else at today's machine rate of the
+printer it printed on (#4625), else today's ``pricing_machine_rate_per_hour``,
+``estimated``. A figure with no source is left out and
 the attempt is ``unknown``.
 
 **Labour** (§4.3). Each time entry's minutes at the rate it copied. An item with no entries
@@ -98,6 +99,10 @@ class CostRates(BaseModel):
 
     shop_currency: str
     machine_rate_per_hour: str = "0"
+    #: Each registry printer's machine rate where it has a profile (#4625, from its
+    #: stored intervals): an attempt printed on one is priced at it instead of
+    #: ``machine_rate_per_hour``.
+    printer_rates: dict[str, str] = {}
     labour_per_item: str = "0"
     thin_margin_percent: str = "15"
 
@@ -371,7 +376,10 @@ class _Item:
         if seconds is not None:
             per_second = unit.per_second if unit is not None else None
             if per_second is None:
-                hourly = self.today_minor(self.rates.machine_rate_per_hour)
+                rate = self.rates.printer_rates.get(
+                    attempt.printer or "", self.rates.machine_rate_per_hour
+                )
+                hourly = self.today_minor(rate)
                 if hourly is not None:
                     per_second = hourly / SECONDS_PER_HOUR
                     estimated.append("machine")

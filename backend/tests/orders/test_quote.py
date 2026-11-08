@@ -24,6 +24,7 @@ from scadbuddy.orders.models import (
     ColourSlot,
     FilamentInput,
     FilamentPatch,
+    MachineRateBreakdown,
     Order,
     OrderItem,
     PricingPolicy,
@@ -43,6 +44,7 @@ from scadbuddy.orders.quote import (
     quote_run,
     read_plate,
     reference_of,
+    support_check,
     unsliced_slots,
 )
 from scadbuddy.orders.reference import ResolvedReference
@@ -243,6 +245,7 @@ def run_of(shop: Shop, tmp_path: Path, files: Mapping[int, bytes], **extra: Any)
         blobs=LocalBlobStore(tmp_path / "blobs"),
         refs=shop.refs,
         follow_every=0.0,
+        machine_rate=extra.pop("machine_rate", None),
     )
 
 
@@ -943,3 +946,113 @@ async def test_an_output_of_the_operations_id_that_does_not_match_is_left_alone(
     assert found != keyed and outputs.created == [found]
     assert outputs.metas[keyed].slug == "other"
     assert shop.get_item().output_id == found
+
+
+# -- the machine rate of the printer it sliced for (#4625, ops spec §6.2) ----------------------
+
+
+class FakeMachineRate:
+    def __init__(self, rate: MachineRateBreakdown | None) -> None:
+        self.rate = rate
+        self.asked: list[tuple[str | None, int | None]] = []
+
+    async def __call__(
+        self, printer: str | None, printer_id: int | None
+    ) -> MachineRateBreakdown | None:
+        self.asked.append((printer, printer_id))
+        return self.rate
+
+
+async def test_a_quote_is_priced_at_its_printers_machine_rate(shop: Shop, tmp_path: Path) -> None:
+    rate = MachineRateBreakdown(
+        printer="p-1",
+        printer_name="H2C",
+        source="profile",
+        rate_per_hour="0.89",
+        currency="USD",
+        depreciation_per_hour="0.89",
+        intervals="typed",
+    )
+    machine = FakeMachineRate(rate)
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 7200, [10.0, 5.0])}, machine_rate=machine)
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    assert machine.asked == [(None, 1)]
+    line = next(line for line in quote.lines if line.kind == "machine_time")
+    assert (line.label, line.amount_minor) == ("Machine time, 2 h at 0.89 per hour", 178)
+    assert quote.printer == "p-1"
+    assert quote.machine_rate_breakdown == rate
+    again = shop.rows.quote(quote.id)
+    assert again is not None
+    assert (again.printer, again.machine_rate_breakdown) == ("p-1", rate)
+
+
+async def test_a_quote_for_no_printer_keeps_the_books_rate(shop: Shop, tmp_path: Path) -> None:
+    run = run_of(
+        shop, tmp_path, {1: sliced_plate(1, 3600, [10.0, 5.0])}, machine_rate=FakeMachineRate(None)
+    )
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    line = next(line for line in quote.lines if line.kind == "machine_time")
+    assert line.label == "Machine time, 1 h at 1.5 per hour"
+    assert (quote.printer, quote.machine_rate_breakdown) == (None, None)
+
+
+# -- support material (ops spec §6.3) ----------------------------------------------------------
+
+
+async def test_a_support_slot_is_priced_as_its_own_filament_line(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """The slice's third slot is the support interface, not a colour slot of the item:
+    priced with the price-book filament the dialog mapped it to, from its grams."""
+    files = {1: sliced_plate(1, 3600, [10.0, 5.0, 2.0])}
+    request = shop.request(s0=shop.pla, s1=shop.pla).model_copy(
+        update={"support_filaments": {2: shop.petg}}
+    )
+    quote = await quote_run(run_of(shop, tmp_path, files), shop.order.id, shop.item.id, request, BY)
+    filament = [(line.label, line.amount_minor) for line in quote.lines if line.kind == "filament"]
+    assert filament == [
+        ("PLA, 10 g at 20 per kg", 20),
+        ("PLA, 5 g at 20 per kg", 10),
+        ("Support, PETG, 2 g at 30 per kg", 6),
+    ]
+    # The support slot is no colour slot of the item.
+    assert [slot.slot for slot in shop.get_item().colours] == [0, 1]
+
+
+async def test_an_unmapped_support_slot_refuses_the_quote(shop: Shop, tmp_path: Path) -> None:
+    files = {1: sliced_plate(1, 3600, [10.0, 5.0, 2.0])}
+    with pytest.raises(ApiError) as refused:
+        await quote_run(
+            run_of(shop, tmp_path, files),
+            shop.order.id,
+            shop.item.id,
+            shop.request(s0=shop.pla, s1=shop.pla),
+            BY,
+        )
+    assert refused.value.status == 422
+    assert "slot 2" in refused.value.detail
+
+
+def test_the_support_check_refuses_a_colour_slot_or_an_unknown_filament(shop: Shop) -> None:
+    def refused(support: dict[int, str]) -> str:
+        request = shop.request(s0=shop.pla, s1=shop.pla).model_copy(
+            update={"support_filaments": support}
+        )
+        with pytest.raises(ApiError) as caught:
+            support_check(shop.rows, shop.item.id, request)
+        assert caught.value.status == 422
+        return caught.value.detail
+
+    assert "colour slot 1" in refused({1: shop.petg})
+    assert "nobody" in refused({2: "nobody"})
+    shop.rows.archive_filament(shop.petg)
+    assert "archived" in refused({2: shop.petg})
+    shop.rows.unarchive_filament(shop.petg)
+    request = shop.request(s0=shop.pla, s1=shop.pla).model_copy(
+        update={"support_filaments": {2: shop.petg}}
+    )
+    support_check(shop.rows, shop.item.id, request)

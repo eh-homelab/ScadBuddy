@@ -233,6 +233,12 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     # #4971: the printer a rack hotend was last seen on, and a pick's.
     PrinterReference("rack_nozzle_seen", "printer"),
     PrinterReference("rack_nozzle_picks", "printer"),
+    # #4625: the machine rate's inputs. `unique` drops every row of the gone printer
+    # when the kept one has any, so the kept printer's own profile, parts and tasks win
+    # whole, never a mix of the two.
+    PrinterReference("printer_cost_profiles", "printer", unique=True),
+    PrinterReference("printer_wear_parts", "printer", unique=True),
+    PrinterReference("printer_maintenance_costs", "printer", unique=True),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries.
     _repoint_settings,

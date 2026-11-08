@@ -56,6 +56,7 @@ from scadbuddy.orders.models import (
     FulfilmentPurpose,
     ItemStatus,
     LibraryFileRef,
+    MachineRateBreakdown,
     Money,
     Order,
     OrderItem,
@@ -2715,6 +2716,8 @@ class Lifecycle:
         revision_id: str | None,
         quote_id: str | None = None,
         part_settings: dict[str, dict[str, Any]] | None = None,
+        printer: str | None = None,
+        machine_rate_breakdown: MachineRateBreakdown | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
         it, with the plates it read and the sliced file it read them from, under the id
@@ -2769,6 +2772,8 @@ class Lifecycle:
                 quote_id=quote_id,
                 revision_id=revision_id,
                 part_settings=part_settings,
+                printer=printer,
+                machine_rate_breakdown=machine_rate_breakdown,
             )
             self._hold(conn, [quote])
             change = self._recorded(conn, order, item, quote, by)

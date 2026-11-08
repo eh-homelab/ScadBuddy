@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
     ArchiveDetail,
     LibraryFile,
+    PrinterMaintenanceOverview,
     SliceJob,
     Spool,
 )
@@ -39,6 +40,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     ArchiveSlot,
     CopiedMedia,
+    MaintenanceTask,
     MediaTooLargeError,
     ShelfSpool,
     SpoolGroup,
@@ -128,6 +130,19 @@ def _file_name(archive: ArchiveDetail) -> str:
     """The printed file's own name, without any folder Bambuddy archived it under."""
     name = PurePosixPath((archive.filename or "").replace("\\", "/")).name
     return name or f"archive-{archive.id}.3mf"
+
+
+def maintenance_tasks(overview: PrinterMaintenanceOverview) -> list[MaintenanceTask]:
+    """A printer's maintenance tasks in orders' own shape (#4625)."""
+    return [
+        MaintenanceTask(
+            task=item.maintenance_type_name,
+            interval_hours=item.interval_hours,
+            interval_type=item.interval_type,
+            enabled=item.enabled,
+        )
+        for item in overview.maintenance_items
+    ]
 
 
 def _timelapse_name(archive: ArchiveDetail) -> str:
@@ -241,6 +256,13 @@ class BambuddyIntegrations:
                 target.unlink(missing_ok=True)
                 raise
         return CopiedMedia(filename=filename, sha256=digest.hexdigest(), size=size)
+
+    async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        """``GET /maintenance/printers/{id}``: one printer's, never the overview of
+        every printer, as a machine rate prices one printer."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            return maintenance_tasks(await client.printer_maintenance(printer_id))
 
     async def project_exists(self, project_id: int) -> bool:
         """``GET /projects/{id}``: false only on a 404, a project deleted in Bambuddy."""
