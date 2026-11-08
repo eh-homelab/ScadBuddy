@@ -393,7 +393,9 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 #
 # Bambu Studio is pinned by version and the AppImage's sha256, bumped
 # deliberately as OPENSCAD_VERSION is: change BAMBU_STUDIO_VERSION, the release
-# asset's name and the sha256 (the global ARGs at the top) together, and re-measure
+# asset's name, its REST API asset id (BAMBU_STUDIO_ASSET_ID, from
+# `gh api repos/bambulab/BambuStudio/releases/tags/v<version>`, the fallback's URL,
+# #5706) and the sha256 (the global ARGs at the top) together, and re-measure
 # what backend/scadbuddy/slicing/profiles.py says of the profiles. The sha256 was
 # measured with `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
 # lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
@@ -773,7 +775,8 @@ USER root
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
 # above (the release's checksums.txt). ci.yml's `agent` job installs the same version
-# and amd64 digest for the agent's Temporal tests (#1055); bump them together.
+# and amd64 digest for the agent's Temporal tests (#1055); bump them together, with
+# TEMPORAL_CLI_ASSET_ARM64 below.
 # When the GitHub release URL still fails after its retries, a second URL serves the
 # same tarball (#5706); the sha256 check is the same for both. For amd64 it is
 # Temporal's own download site. For arm64 it is the release asset through the REST API
