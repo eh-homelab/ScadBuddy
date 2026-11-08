@@ -1,7 +1,7 @@
-import { useId, useState, type KeyboardEvent } from 'react'
+import { Fragment, useId, useState, type KeyboardEvent } from 'react'
 import { MoreHorizontalIcon } from 'lucide-react'
 import { api } from '../../api/client'
-import type { OrderAttachment, OrderItemDetail, OrderStatus, Shipment } from '../../api/types'
+import type { Order, OrderAttachment, OrderCosts, OrderItemDetail, OrderStatus, Shipment } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -14,24 +14,38 @@ import { byCreated, itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalText } from './refusal'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from './itemLink'
-import { addItem, afterAcceptanceWarning, type AddMode } from './afterAcceptance'
+import { addItem, afterAcceptanceWarning, isCart, type AddMode } from './afterAcceptance'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import type { SliceQuoteRun, SliceQuoteRuns } from './useSliceQuotes'
 import { elapsed, useNow } from './useNow'
 import { When } from './When'
 import { UnfulfilDialog } from './Unfulfil'
-import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from './unfulfilRules'
+import { UNFULFIL_OFF as UNFULFIL_OFF_TEXT, UNFULFIL_SETTING } from './unfulfilRules'
+import { itemActions, itemSource, type ItemAction, type ItemSection } from './itemActions'
+import { MarginBadge } from './OrderCosts'
 import { Link } from 'react-router'
 
 /**
- * An order's line items (§3.3): picture, title, status, quantity, unit price and line
- * total; a row opens the item. While the order is draft or quoted (§3.4) the unit price
- * is typed here, recorded and accepted as the drawer's "Record and accept" does; past
- * `quoted` the accepted prices are pinned, and shown only. A fulfilled item's row menu
- * offers Unfulfil (#4952), with a confirm step.
+ * An order's line items (§3.3), as one card (#4955, spec 2026-11-07 §4.1): its header adds
+ * a product or a custom item; a row is the picture, title with its source chip, status,
+ * quantity, unit price, line total, margin badge and a ⋯ menu; a row opens the item. While
+ * the order is draft or quoted (§3.4) the unit price is typed here, recorded and accepted as
+ * the drawer's "Record and accept" does; past `quoted` the accepted prices are pinned, and
+ * shown only. The ⋯ menu holds the actions allowed now (`itemActions.ts`), a refused one
+ * with its reason; Unfulfil (#4952) confirms first.
  */
 export function OrderItemsTable({
   orderId,
   orderStatus,
+  order,
   items,
   attachments,
   currency,
@@ -41,11 +55,17 @@ export function OrderItemsTable({
   addTo = null,
   selected = null,
   quoting,
-  onHold = false,
   shipments = [],
   unfulfilAllowed = true,
+  onAdd,
+  onSection,
+  onAct,
+  costs,
+  busy = false,
 }: {
   orderId: string
+  /** The order: the ⋯ menu's rules read its status and hold. */
+  order: Order
   /** The order's status: a unit price is typed only while it is draft or quoted. */
   orderStatus: OrderStatus
   items: OrderItemDetail[]
@@ -57,7 +77,7 @@ export function OrderItemsTable({
   onOpen: (item: OrderItemDetail) => void
   /** After a price is recorded: the page reloads the order. */
   onChanged: () => void
-  /** The page offers Add item (`afterAcceptance.ts` `addMode`), on the route `mode` names: the
+  /** The page offers Add product (`afterAcceptance.ts` `addMode`), on the route `mode` names: the
    * empty table points at it, and the custom item row adds on that route. After acceptance
    * (#5541) the row asks the person to confirm first, naming the order by `number`. */
   addTo?: { mode: AddMode; number: string } | null
@@ -65,12 +85,20 @@ export function OrderItemsTable({
   selected?: string | null
   /** The page's slice quotes: a running one shows on its row (#4693). */
   quoting?: SliceQuoteRuns
-  /** The order is on hold: Unfulfil is refused (`order_on_hold`), and says why. */
-  onHold?: boolean
   /** The order's shipments: Unfulfil is refused for an item one carries. */
   shipments?: Shipment[]
   /** #4953 — `orders_allow_unfulfil`: off, Unfulfil is disabled with a link to the setting. */
   unfulfilAllowed?: boolean
+  /** The card header's Add product: the page opens Add item. */
+  onAdd?: () => void
+  /** A ⋯ action that is done in the drawer: the page opens the item at that section. */
+  onSection?: (item: OrderItemDetail, section: ItemSection) => void
+  /** A ⋯ action that writes (delete, cancel, reopen): the page runs it and shows a refusal. */
+  onAct: (action: () => Promise<unknown>) => void
+  /** #5326 — the order's money view: a row shows its item's loss or thin-margin badge. */
+  costs?: OrderCosts
+  /** A page write is running: the header's adds and the ⋯ menu's writes wait for it. */
+  busy?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
   const canAdd = addTo !== null
@@ -103,6 +131,9 @@ export function OrderItemsTable({
             </span>
           )}
           {item.sku && <span className="font-mono text-[11px] text-muted-foreground">SKU {item.sku}</span>}
+          <span className="rounded-sm border px-1 text-[10px] text-muted-foreground" data-testid={`item-source-${item.id}`}>
+            {itemSource(item)}
+          </span>
         </span>
       ),
     },
@@ -157,23 +188,31 @@ export function OrderItemsTable({
       },
     },
   ]
-  if (items.some((item) => offersUnfulfil({ status: orderStatus }, item))) {
+  const margins = new Map((costs?.items ?? []).map((cost) => [cost.item_id, cost.margin_state]))
+  if (margins.size > 0) {
     columns.push({
-      key: 'actions',
-      header: <span className="sr-only">Actions</span>,
-      className: 'w-10 text-right',
-      cell: (item) =>
-        offersUnfulfil({ status: orderStatus }, item) ? (
-          <ItemMenu
-            orderId={orderId}
-            item={item}
-            blocked={unfulfilAllowed ? unfulfilBlock({ on_hold: onHold }, shipments, item) : UNFULFIL_OFF}
-            off={!unfulfilAllowed}
-            onChanged={onChanged}
-          />
-        ) : null,
+      key: 'margin',
+      header: <span className="sr-only">Margin</span>,
+      cell: (item) => <MarginBadge state={margins.get(item.id) ?? null} />,
     })
   }
+  columns.push({
+    key: 'actions',
+    header: <span className="sr-only">Actions</span>,
+    className: 'w-10 text-right',
+    cell: (item) => (
+      <ItemMenu
+        orderId={orderId}
+        item={item}
+        actions={itemActions(order, item, { shipments, unfulfilAllowed })}
+        onOpen={() => onOpen(item)}
+        onSection={(section) => (onSection ? onSection(item, section) : onOpen(item))}
+        onAct={onAct}
+        onChanged={onChanged}
+        busy={busy}
+      />
+    ),
+  })
   return (
     <DataTable
       label="Line items"
@@ -184,7 +223,21 @@ export function OrderItemsTable({
       rowId={(item) => itemAnchor(item.id)}
       selected={selected}
       onOpen={onOpen}
-      empty={canAdd ? 'No items yet. Add one with Add item above, or type a custom item below.' : 'No items.'}
+      heading="Items"
+      toolbar={
+        canAdd && !isCart(order) && (
+          <>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onAdd}>
+              Add product
+            </Button>
+            {/* #4954 — the entry row under the items takes it (#5541: after acceptance too). */}
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
+              Add custom item
+            </Button>
+          </>
+        )
+      }
+      empty={canAdd ? 'No items yet. Add one with Add product above, or type a custom item below.' : 'No items.'}
       footer={
         addTo ? (
           <CustomItemRow
@@ -193,7 +246,7 @@ export function OrderItemsTable({
             mode={addTo.mode}
             currency={currency}
             exponent={exponent}
-            actions={columns.some((column) => column.key === 'actions')}
+            trailing={columns.length - 1 - columns.findIndex((column) => column.key === 'total')}
             onChanged={onChanged}
           />
         ) : undefined
@@ -239,25 +292,53 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
   )
 }
 
+/** The actions that write at once, or after a confirm: off while a page write runs. */
+const WRITES: ReadonlySet<ItemAction['key']> = new Set(['unfulfil', 'reopen', 'delete', 'cancel'])
+
+/** The actions done in the drawer, at the section they open it at. */
+const SECTIONS: Partial<Record<ItemAction['key'], ItemSection>> = { quote: 'quote', print: 'print', fulfil: 'fulfil' }
+
 /**
- * A fulfilled row's menu: Unfulfil, disabled with the reason when the backend would
- * refuse it. Named without the item's title, as the unit price's Accept is.
+ * #4955 — a row's ⋯ menu: the actions allowed on the item now (`itemActions`), each refused
+ * one disabled with its reason under it. Named without the item's title, as the unit price's
+ * Accept is. Unfulfil confirms first; Unfulfil turned off links to its setting.
  */
 function ItemMenu({
   orderId,
   item,
-  blocked,
-  off,
+  actions,
+  onOpen,
+  onSection,
+  onAct,
   onChanged,
+  busy,
 }: {
   orderId: string
   item: OrderItemDetail
-  blocked: string | null
-  /** The setting turned it off: the reason links to it. */
-  off: boolean
+  actions: ItemAction[]
+  onOpen: () => void
+  onSection: (section: ItemSection) => void
+  onAct: (action: () => Promise<unknown>) => void
   onChanged: () => void
+  /** A page write is running: the writes here wait for it. */
+  busy: boolean
 }) {
   const [confirming, setConfirming] = useState(false)
+  // Delete and Cancel ask first: in the menu they sit one slip from Open details.
+  const [removing, setRemoving] = useState<'delete' | 'cancel' | null>(null)
+  function run(action: ItemAction) {
+    const section = SECTIONS[action.key]
+    if (section) return onSection(section)
+    if (action.key === 'open') return onOpen()
+    // The menu closes first: a dialog opened in the same tick would be closed with it.
+    if (action.key === 'unfulfil') return setTimeout(() => setConfirming(true), 0)
+    if (action.key === 'reopen') return onAct(() => api.reopenOrderItem(orderId, item.id))
+    if (action.key === 'delete' || action.key === 'cancel') {
+      const key = action.key
+      return setTimeout(() => setRemoving(key), 0)
+    }
+  }
+  const off = actions.some((action) => action.key === 'unfulfil' && action.blocked === UNFULFIL_OFF_TEXT)
   return (
     <>
       <DropdownMenu modal={false}>
@@ -267,10 +348,18 @@ function ItemMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-auto min-w-44">
-          <DropdownMenuItem variant="destructive" disabled={blocked !== null} onSelect={() => setTimeout(() => setConfirming(true), 0)}>
-            Unfulfil…
-          </DropdownMenuItem>
-          {blocked && <DropdownMenuLabel className="max-w-56 text-xs font-normal whitespace-normal text-muted-foreground">{blocked}</DropdownMenuLabel>}
+          {actions.map((action) => (
+            <Fragment key={action.key}>
+              <DropdownMenuItem
+                variant={action.key === 'delete' || action.key === 'cancel' || action.key === 'unfulfil' ? 'destructive' : 'default'}
+                disabled={action.blocked !== null || (busy && WRITES.has(action.key))}
+                onSelect={() => run(action)}
+              >
+                {action.label}
+              </DropdownMenuItem>
+              {action.blocked && <DropdownMenuLabel className="max-w-56 text-xs font-normal whitespace-normal text-muted-foreground">{action.blocked}</DropdownMenuLabel>}
+            </Fragment>
+          ))}
           {off && (
             <DropdownMenuItem asChild>
               <Link to={UNFULFIL_SETTING}>Open Settings → Orders</Link>
@@ -279,6 +368,32 @@ function ItemMenu({
         </DropdownMenuContent>
       </DropdownMenu>
       <UnfulfilDialog orderId={orderId} item={item} open={confirming} onOpenChange={setConfirming} onChanged={onChanged} />
+      <AlertDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`${removing === 'delete' ? 'Delete' : 'Cancel'} ${item.title}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {removing === 'delete'
+                ? 'The draft item and its quotes are deleted.'
+                : 'The item stays on the order, in no sum, and can be reopened.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={busy}
+              onClick={() => {
+                const what = removing
+                setRemoving(null)
+                onAct(() => (what === 'delete' ? api.deleteOrderItem(orderId, item.id) : api.cancelOrderItem(orderId, item.id)))
+              }}
+            >
+              {removing === 'delete' ? 'Delete item' : 'Cancel item'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
@@ -297,7 +412,7 @@ function CustomItemRow({
   mode,
   currency,
   exponent,
-  actions,
+  trailing,
   onChanged,
 }: {
   orderId: string
@@ -305,7 +420,8 @@ function CustomItemRow({
   mode: AddMode
   currency: string
   exponent: number
-  actions: boolean
+  /** The table's columns after the line total (margin, actions): empty cells. */
+  trailing: number
   onChanged: () => void
 }) {
   const errorId = useId()
@@ -411,7 +527,9 @@ function CustomItemRow({
           {confirming ? 'Confirm' : 'Add'}
         </Button>
       </td>
-      {actions && <td className={CELL} />}
+      {Array.from({ length: trailing }, (_, index) => (
+        <td key={index} className={CELL} />
+      ))}
     </tr>
   )
 }

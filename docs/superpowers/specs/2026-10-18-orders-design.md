@@ -398,7 +398,7 @@ ORD-2026-3).
 - One `item.added_after_acceptance` audit row, in the add's transaction, names the item,
   its title, its quantity and the order's status. The bus hears the item and the order
   after the commit, as for every item write.
-- The order page offers "Add item" and the "Add custom item" entry row on such an order
+- The order page offers "Add item" (since #4955 the items card's "Add product") and the "Add custom item" entry row on such an order
   (#5541), and "Add to order…" lists it. Each asks the person to confirm first that the
   add changes an accepted order (`afterAcceptanceWarning`). A new pick (a customer, an
   order, a quantity, a field of the row) asks again.
