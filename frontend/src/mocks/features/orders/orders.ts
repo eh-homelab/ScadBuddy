@@ -785,6 +785,11 @@ const duplicateItem: Parameters<typeof http.post>[1] = async (info) => {
   const created = (await answer.json()) as OrderItem
   const stored = state.items.find((i) => i.id === created.id)!
   stored.origin_archive_ids = original.origin_archive_ids ?? []
+  if (original.reference && original.kind === 'model') {
+    // The item's own design, which its output's need not be (it may have been revised since).
+    stored.reference = original.reference
+    stored.colours = original.colours
+  }
   event(lock(String(params.id)), 'item.duplicated', { item_id: stored.id, from_item_id: original.id })
   return HttpResponse.json(stored, { status: 201 })
 }

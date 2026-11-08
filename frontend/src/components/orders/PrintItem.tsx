@@ -27,34 +27,55 @@ function offersTestPrint(order: Order, item: OrderItemDetail): boolean {
  */
 export function PrintItem({ order, item, onChanged, testRevision }: { order: Order; item: OrderItemDetail; onChanged: () => void; testRevision?: Revision }) {
   const [open, setOpen] = useState(false)
-  const source = orderItemSource(item)
-  // #5627 — the settings the print sends and slices with: the accepted quote's per colour,
-  // or for a test print the newest slice quote of that revision (`test_print_check`).
-  const quoted = quoteToPrint(item, testRevision?.id)
-  if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !source) return null
+  if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !orderItemSource(item)) return null
   return (
     <>
       <Button variant="outline" onClick={() => setOpen(true)} data-testid={testRevision ? 'test-print-item' : 'print-item'}>
         {testRevision ? 'Test print' : item.status === 'failed' ? 'Print again…' : 'Print…'}
       </Button>
-      {open && (
-        <PrintPicker
-          open
-          source={source}
-          onClose={() => setOpen(false)}
-          onRan={() => undefined}
-          itemPrint={{
-            orderId: order.id,
-            itemId: item.id,
-            quoted: (quoted?.part_settings ?? null) as PartSettingsMap | null,
-            start: async (body) => {
-              if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
-              else await api.printItem(order.id, item.id, body)
-              onChanged()
-            },
-          }}
-        />
-      )}
+      {open && <ItemPrintDialog order={order} item={item} testRevision={testRevision} onClose={() => setOpen(false)} onChanged={onChanged} />}
     </>
+  )
+}
+
+/**
+ * The print dialog of one item, in its item mode: Print's, and the items card's bulk Print
+ * (#4955), which opens one per selected item in turn.
+ */
+export function ItemPrintDialog({
+  order,
+  item,
+  testRevision,
+  onClose,
+  onChanged,
+}: {
+  order: Order
+  item: OrderItemDetail
+  testRevision?: Revision
+  onClose: () => void
+  onChanged: () => void
+}) {
+  const source = orderItemSource(item)
+  // #5627 — the settings the print sends and slices with: the accepted quote's per colour,
+  // or for a test print the newest slice quote of that revision (`test_print_check`).
+  const quoted = quoteToPrint(item, testRevision?.id)
+  if (!source) return null
+  return (
+    <PrintPicker
+      open
+      source={source}
+      onClose={onClose}
+      onRan={() => undefined}
+      itemPrint={{
+        orderId: order.id,
+        itemId: item.id,
+        quoted: (quoted?.part_settings ?? null) as PartSettingsMap | null,
+        start: async (body) => {
+          if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
+          else await api.printItem(order.id, item.id, body)
+          onChanged()
+        },
+      }}
+    />
   )
 }

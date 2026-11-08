@@ -14,7 +14,8 @@ import { byCreated, itemPrice, parseUnitPrice, pricingQuote, UNIT_PRICE_HINT, un
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalText } from './refusal'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from './itemLink'
-import { addItem, afterAcceptanceWarning, isCart, type AddMode } from './afterAcceptance'
+import { addItem, afterAcceptanceWarning, isCart, TAKES_ITEMS, type AddMode } from './afterAcceptance'
+import { ItemsBulk } from './ItemsBulk'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -103,7 +104,35 @@ export function OrderItemsTable({
   busy?: boolean
 }) {
   const canAdd = addTo !== null
-  const columns: Column<OrderItemDetail>[] = [
+  // #4955 step 3 — the rows picked for a bulk action; none on a visitor's cart or an ended order.
+  const selectable = !isCart(order) && order.status !== 'closed' && order.status !== 'cancelled'
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
+  const chosen = items.filter((item) => picked.has(item.id))
+  const pick = (ids: string[], on: boolean) => {
+    const next = new Set(picked)
+    for (const id of ids) {
+      if (on) next.add(id)
+      else next.delete(id)
+    }
+    setPicked(next)
+  }
+  const columns: Column<OrderItemDetail>[] = []
+  if (selectable && items.length > 0) {
+    const all = chosen.length === items.length
+    columns.push({
+      key: 'select',
+      header: (
+        <Checkbox
+          aria-label="Select all items"
+          checked={all ? true : chosen.length > 0 ? 'indeterminate' : false}
+          onCheckedChange={() => pick(items.map((item) => item.id), !all)}
+        />
+      ),
+      className: 'w-8',
+      cell: (item) => <Checkbox aria-label={`Select ${item.title}`} checked={picked.has(item.id)} onCheckedChange={(next) => pick([item.id], next === true)} />,
+    })
+  }
+  columns.push(
     {
       key: 'picture',
       header: <span className="sr-only">Picture</span>,
@@ -202,7 +231,7 @@ export function OrderItemsTable({
         )
       },
     },
-  ]
+  )
   const margins = new Map((costs?.items ?? []).map((cost) => [cost.item_id, cost.margin_state]))
   if (margins.size > 0) {
     columns.push({
@@ -218,6 +247,7 @@ export function OrderItemsTable({
     cell: (item) => (
       <ItemMenu
         orderId={orderId}
+        order={order}
         item={item}
         actions={itemActions(order, item, { shipments, unfulfilAllowed })}
         onOpen={() => onOpen(item)}
@@ -240,7 +270,19 @@ export function OrderItemsTable({
       onOpen={onOpen}
       heading="Items"
       toolbar={
-        canAdd && !isCart(order) && (
+        <>
+          {chosen.length > 0 && (
+            <ItemsBulk
+              order={order}
+              selected={chosen}
+              shipments={shipments}
+              unfulfilAllowed={unfulfilAllowed}
+              busy={busy}
+              onClear={() => setPicked(new Set())}
+              onChanged={onChanged}
+            />
+          )}
+          {canAdd && !isCart(order) && (
           <>
             <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onAdd}>
               Add product
@@ -250,7 +292,8 @@ export function OrderItemsTable({
               Add custom item
             </Button>
           </>
-        )
+          )}
+        </>
       }
       empty={canAdd ? 'No items yet. Add one with Add product above, or type a custom item below.' : 'No items.'}
       footer={
@@ -261,6 +304,7 @@ export function OrderItemsTable({
             mode={addTo.mode}
             currency={currency}
             exponent={exponent}
+            leading={columns.findIndex((column) => column.key === 'picture')}
             trailing={columns.length - 1 - columns.findIndex((column) => column.key === 'total')}
             onChanged={onChanged}
           />
@@ -320,6 +364,7 @@ const SECTIONS: Partial<Record<ItemAction['key'], ItemSection>> = { quote: 'quot
  */
 function ItemMenu({
   orderId,
+  order,
   item,
   actions,
   onOpen,
@@ -329,6 +374,7 @@ function ItemMenu({
   busy,
 }: {
   orderId: string
+  order: Order
   item: OrderItemDetail
   actions: ItemAction[]
   onOpen: () => void
@@ -341,6 +387,7 @@ function ItemMenu({
   const [confirming, setConfirming] = useState(false)
   // Delete and Cancel ask first: in the menu they sit one slip from Open details.
   const [removing, setRemoving] = useState<'delete' | 'cancel' | null>(null)
+  const [duplicating, setDuplicating] = useState(false)
   function run(action: ItemAction) {
     const section = SECTIONS[action.key]
     if (section) return onSection(section)
@@ -351,6 +398,11 @@ function ItemMenu({
     if (action.key === 'delete' || action.key === 'cancel') {
       const key = action.key
       return setTimeout(() => setRemoving(key), 0)
+    }
+    if (action.key === 'duplicate') {
+      // After acceptance a copy changes what the customer gets: asked first, as Add item does.
+      if (TAKES_ITEMS.has(order.status)) return setTimeout(() => setDuplicating(true), 0)
+      return onAct(() => api.duplicateOrderItem(orderId, item.id, {}))
     }
   }
   const off = actions.some((action) => action.key === 'unfulfil' && action.blocked === UNFULFIL_OFF_TEXT)
@@ -409,6 +461,25 @@ function ItemMenu({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <AlertDialog open={duplicating} onOpenChange={setDuplicating}>
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Duplicate ${item.title}?`}</AlertDialogTitle>
+            <AlertDialogDescription>{afterAcceptanceWarning(order)}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              onClick={() => {
+                setDuplicating(false)
+                onAct(() => api.duplicateOrderItem(orderId, item.id, { after_acceptance: true }))
+              }}
+            >
+              Duplicate
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
@@ -427,6 +498,7 @@ function CustomItemRow({
   mode,
   currency,
   exponent,
+  leading,
   trailing,
   onChanged,
 }: {
@@ -435,7 +507,9 @@ function CustomItemRow({
   mode: AddMode
   currency: string
   exponent: number
-  /** The table's columns after the line total (margin, actions): empty cells. */
+  /** The table's columns before the picture (the bulk select), and after the line total
+   * (margin, actions): empty cells. */
+  leading: number
   trailing: number
   onChanged: () => void
 }) {
@@ -494,6 +568,9 @@ function CustomItemRow({
   const described = error ? errorId : undefined
   return (
     <tr className={ROW} data-testid="custom-item-row">
+      {Array.from({ length: leading }, (_, index) => (
+        <td key={index} className={CELL} />
+      ))}
       <td className={CELL}>
         <span className="flex size-12 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">Custom</span>
       </td>
