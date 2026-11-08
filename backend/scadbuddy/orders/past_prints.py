@@ -44,6 +44,7 @@ from scadbuddy.orders.quote import (
     ArchiveQuoteRequest,
     PolicySource,
     QuoteError,
+    check_filaments,
     file_colour,
     price_quote,
     quote_check,
@@ -309,6 +310,7 @@ async def quote_from_archive(
     if request.filament_id is not None:
         used = {slot.slot_id - 1 for a in archives for slot in a.slots if slot.used_g}
         filaments = {slot: request.filament_id for slot in used} | filaments
+    await asyncio.to_thread(check_filaments, store, filaments)
     try:
         if not item.colours:
             colours = archive_colours(archives, filaments)

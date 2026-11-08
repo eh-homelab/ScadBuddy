@@ -223,6 +223,24 @@ def merged_slots(item: OrderItem, filaments: Mapping[int, str]) -> dict[int, str
     return slots
 
 
+def check_filaments(store: OrderStore, slots: Mapping[int, str]) -> list[Filament]:
+    """422 ``filaments`` when a slot names a filament the price book lacks, or one that is
+    archived. Blocking. The filaments, in slot order."""
+    named: list[Filament] = []
+    for slot, filament_id in sorted(slots.items()):
+        record = store.filament(filament_id)
+        if record is None:
+            raise _unprocessable(
+                "filaments", f"colour slot {slot}: no filament {filament_id} in the price book"
+            )
+        if record.archived_at is not None:
+            raise _unprocessable(
+                "filaments", f"colour slot {slot}: filament {filament_id} is archived"
+            )
+        named.append(record)
+    return named
+
+
 def quote_check(
     store: OrderStore,
     policy: PricingPolicy,
@@ -271,19 +289,7 @@ def quote_check(
         raise _unprocessable(
             "filaments", f"colour slot {empty[0]} has no filament to price it with"
         )
-    named: list[Filament] = []
-    for slot, filament_id in sorted(slots.items()):
-        assert filament_id is not None
-        record = store.filament(filament_id)
-        if record is None:
-            raise _unprocessable(
-                "filaments", f"colour slot {slot}: no filament {filament_id} in the price book"
-            )
-        if record.archived_at is not None:
-            raise _unprocessable(
-                "filaments", f"colour slot {slot}: filament {filament_id} is archived"
-            )
-        named.append(record)
+    named = check_filaments(store, {slot: f for slot, f in slots.items() if f is not None})
     if prices_nothing(policy, named):
         raise _unprocessable(
             "price_book",

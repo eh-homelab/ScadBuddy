@@ -362,6 +362,30 @@ async def test_a_library_file_item_takes_its_slots_from_the_archive(shop: QuoteS
     ]
 
 
+async def test_every_filament_written_is_checked_with_filament_id(shop: QuoteShop) -> None:
+    """With ``filament_id``, the ``filaments`` it is merged with are checked too: an
+    archived or unknown one is refused, and nothing is written (security review)."""
+    item: OrderItem = shop.lifecycle.add_library_item(
+        shop.order.id,
+        BY,
+        LibraryFileRef(id=5_000_000_001, filename="bracket.gcode.3mf", library="native"),
+        quantity=1,
+        origin_archive_ids=(71,),
+    )
+    shop.rows.archive_filament(shop.petg)
+    for named in (shop.petg, "no-such-filament"):
+        request = ArchiveQuoteRequest(filament_id=shop.pla, filaments={1: named})
+        with pytest.raises(ApiError) as refused:
+            await quote_from_archive(
+                shop.lifecycle, Seam(plate(71)), Book(), shop.order.id, item.id, request, BY
+            )
+        assert refused.value.status == 422, named
+        assert refused.value.extensions["errors"][0]["loc"] == ["body", "filaments"]
+    after = shop.rows.item(item.id)
+    assert after is not None and after.colours == []
+    assert shop.rows.quotes(item.id) == []
+
+
 def test_archive_colours_take_every_used_slot() -> None:
     slots = [ArchiveSlot(slot_id=1, used_g=2.0, color="#123456"), ArchiveSlot(slot_id=3)]
     plates = [plate(1).model_copy(update={"slots": slots})]
