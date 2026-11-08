@@ -138,9 +138,11 @@ async def create_bank_link(body: BankLinkCreate, payments: PaymentsDep) -> BankS
         "Removes the Item at Plaid, then drops the access token; the keys stay. When"
         " Plaid does not answer, 422 and the link stays. 409 `kek_missing` without"
         " SCADBUDDY_SECRET_KEY_FILE, and the link stays: the file may be mounted again."
-        " When Plaid refuses the keys themselves, or they are sealed under another key"
-        " file, the link is dropped here only: `removed_at_plaid` is false and `note`"
-        " tells the shop to remove the Item in the Plaid Dashboard."
+        " When Plaid refuses the keys themselves, only the link is dropped here and the"
+        " keys stay. When the keys are sealed under another key file, the row is deleted"
+        " with its keys. In both cases `removed_at_plaid` is false and `note` tells the"
+        " shop to remove the Item in the Plaid Dashboard (and, in the second, to save the"
+        " keys again)."
     ),
 )
 async def delete_bank_link(payments: PaymentsDep) -> BankUnlinked:

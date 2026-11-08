@@ -118,7 +118,8 @@ KEYS_UNREADABLE = (
 
 
 class BankUnlinked(BaseModel):
-    #: False when Plaid refused the keys or they would not open: unlinked here only.
+    #: False when Plaid refused the keys (the link is dropped here, the keys stay) or
+    #: they are sealed under another key file (the row is deleted with its keys).
     removed_at_plaid: bool
     #: What the shop must still do, when anything.
     note: str | None
@@ -344,11 +345,12 @@ class BankLinks:
     async def unlink(self) -> BankUnlinked:
         """Remove the Item at Plaid, then drop the token. When Plaid does not answer, the
         token stays so the shop can try again; an Item Plaid no longer has is removed.
-        When Plaid refuses the keys themselves (a rotated secret) or they will not open
-        (another key file), the link is dropped here only and the shop is told to remove
-        the Item in the Plaid Dashboard, as ``PaymentCredentials.disconnect`` never needs
-        the secret either. No key file at all (`KekMissingError`) may be temporary, so
-        it refuses and drops nothing."""
+        When Plaid refuses the keys themselves (a rotated secret), only the link is
+        dropped here and the keys stay (``REMOVE_AT_PLAID``). When the keys are sealed
+        under another key file, the row is deleted with its keys (``KEYS_UNREADABLE``):
+        the shop removes the Item in the Plaid Dashboard, then saves the keys again. Both
+        unlink without the secret, as ``PaymentCredentials.disconnect`` does. No key file
+        at all (`KekMissingError`) may be temporary, so it refuses and drops nothing."""
         if self._kek is None:
             raise KekMissingError()
         try:
