@@ -123,10 +123,27 @@ async def print_request(item):
     return request
 
 
+async def current(order_id, item_id):
+    """The item as it is now, or None when it is gone or no longer printable: a person's
+    fix (a revision, a new quote) gives it a new output (review of #5682)."""
+    detail = data(await tool("order_get", {"order_id": order_id}))
+    for found in detail["items"]:
+        if found["id"] == item_id:
+            return found if found["status"] in PRINTABLE else None
+    return None
+
+
 async def print_item(order, item):
-    """Print `item`, asking a person each time it does not start; whether it started."""
+    """Print `item`, asking a person each time it does not start; whether it started.
+    Each try after the first reads the item again."""
     source = {"order_id": order["id"], "order_item_id": item["id"]}
+    first = True
     while True:
+        if not first:
+            item = await current(order["id"], item["id"])
+            if item is None:
+                return False
+        first = False
         try:
             request = await print_request(item)
         except Exception as error:
@@ -158,16 +175,15 @@ async def print_item(order, item):
         else:
             reason = out["error"] or "no reason given"
             question = f"The print of {item['title']} did not go: {out['status']}, {reason}. "
-            if "no spool chosen" in reason:
-                # The flow sends no spools: off the LAN the check fills each slot from the
-                # item's filaments, but on the native (LAN) path the plan is the request's
-                # (`orders/operations.py`), so the run refuses each slot. Printing again
-                # would refuse the same way; a person chooses the spools on the order's
-                # page (review of #5682).
-                question += (
-                    "This printer needs its spools chosen: print the item from the order's "
-                    "page, then answer skip. "
-                )
+            # The flow sends no spools: off the LAN the check fills each slot from the
+            # item's filaments, but on the native (LAN) path the plan is the request's
+            # (`orders/operations.py`), so the run refuses each slot ("no spool chosen").
+            # Printing again would refuse the same way, so every failure names the way out
+            # (review of #5682); no message text is matched.
+            question += (
+                "If it needs choices this flow does not make (such as its spools, on a LAN "
+                "printer), print the item from the order's page, then answer skip. "
+            )
             if out.get("may_have_queued"):
                 question += (
                     "It may be on the printer's queue anyway: check the queue before you "

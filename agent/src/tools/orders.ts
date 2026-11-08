@@ -68,7 +68,14 @@ export function composeNotice(
   detail: NoticeOrder,
   customer: NoticeCustomer,
   note?: string,
-): { template: NotifyTemplate; to: { kind: string; value: string }[]; subject: string; text: string; sent: false } {
+): {
+  template: NotifyTemplate
+  to: { kind: string; value: string }[]
+  subject: string
+  text: string
+  sent: false
+  warning?: string
+} {
   const { number, currency, minor_exponent } = detail.order
   const total = `${(detail.totals.total_minor / 10 ** minor_exponent).toFixed(minor_exponent)} ${currency}`
   const lines: Record<NotifyTemplate, [string, string]> = {
@@ -81,6 +88,10 @@ export function composeNotice(
   const primary = customer.contacts.filter((c) => c.primary)
   const to = (primary.length > 0 ? primary : customer.contacts).map(({ kind, value }) => ({ kind, value }))
   const text = [`Hello ${customer.display_name},`, '', body, ...(note ? ['', note] : [])].join('\n')
+  // Review of #5682: an unaddressed message says so, so a sender (#5660) never sends it blind.
+  if (to.length === 0) {
+    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no contacts to send it to.` }
+  }
   return { template, to, subject, text, sent: false }
 }
 const itemId = ID.describe('A line item id, as order_get lists them')

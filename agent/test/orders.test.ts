@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { composeNotice } from '../src/tools/orders.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -168,6 +169,13 @@ describe('order tools (#4249)', () => {
       text: 'Hello Ada,\n\nWe have accepted order ORD-2026-7 (42.50 USD) and will start on it.\n\nThanks!',
       sent: false,
     })
+  })
+
+  it('says when a customer has no contacts to send a notice to (review of #5682)', () => {
+    const detail = { order: { number: 'ORD-1', currency: 'USD', minor_exponent: 2 }, totals: { total_minor: 100 } }
+    const notice = composeNotice('ready', detail, { display_name: 'Ada', contacts: [] })
+    expect(notice.to).toEqual([])
+    expect(notice.warning).toBe('Ada has no contacts to send it to.')
   })
 
   it('reads an order’s real cost (#4251 §6.4)', async () => {

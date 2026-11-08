@@ -291,3 +291,22 @@ def test_a_lan_print_with_no_spools_chosen_says_to_print_it_from_the_page() -> N
     host = _Host([_item("a")], [refused], ["skip"])
     host.run()
     assert "print the item from the order's page, then answer skip" in host.questions[0]
+
+
+def test_a_fixed_item_is_read_again_before_it_prints_again() -> None:
+    """Review of #5682: a person's fix gives the item a new output; the retry prints
+    from it, never from the item the run first read."""
+    missing = {**_item("a"), "output_id": None}
+    fixed = {**_item("a"), "output_id": "new"}
+    host = _Host([missing], [_OK], ["print"], later=[([fixed], "in_production")])
+    host.run()
+    assert host.printed == ["a"]
+    assert host.calls[:3] == ["order_get", "get_print_choices", "order_get"]
+
+
+def test_an_item_no_longer_printable_after_the_question_is_passed_over() -> None:
+    held = _refused("order_on_hold")
+    gone = ([_item("a", "cancelled")], "in_production")
+    host = _Host([_item("a")], [held], ["print"], later=[gone])
+    result = host.run()
+    assert host.printed == ["a"] and result["skipped"] == ["a"]
