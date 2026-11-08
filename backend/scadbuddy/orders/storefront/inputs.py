@@ -3,8 +3,10 @@ line item's reference built from the listing's snapshot (plan point 2).
 
 `listing_values` never trusts the edge: it checks each asked value against the
 listing's bound, not only against the schema. A parameter the visitor does not ask for
-takes its schema default, checked the same way. A locked parameter takes the listing's
-value, and asking for it is refused, even with that same value.
+takes its schema default, checked the same way. Every parameter the listing does not
+offer takes the value publish captured in the snapshot (``ListingSnapshot.fixed``: the
+shop's locks and the commit's defaults), and asking for it is refused, even with that
+same value.
 
 `listing_reference` reads no git: publish stored the schema, the template's name and its
 library pins on the listing. It builds the same `Reference` as `orders/reference.py`
@@ -128,20 +130,25 @@ def _reason(
 def listing_values(
     listing: Listing, asked: Mapping[str, ParamValue], filaments: Mapping[str, Filament]
 ) -> dict[str, ParamValue]:
-    """The listing's ``fixed`` values and the asked values of its ``params``, each
-    checked against its bound. A ``// color`` value must be the colour of one of the
-    listing's filaments that ``filaments`` (the price book, by id) still has. Raises
+    """The published snapshot's ``fixed`` values and the asked values of the listing's
+    ``params``, each checked against its bound. A ``// color`` value must be the colour
+    of one of the listing's filaments that ``filaments`` (the price book, by id) still
+    has. Raises
     `InputOutsideListingError` for the first value outside the listing; ``ValueError``
     for a listing that is not published."""
-    schema = _snapshot(listing).schema_
+    snapshot = _snapshot(listing)
+    schema = snapshot.schema_
+    # The values publish captured, never the row's ``fixed``: that holds only the shop's
+    # locks, and is the next publish's input.
+    fixed = snapshot.fixed
     for name in asked:
-        if name in listing.fixed:
+        if name in fixed:
             raise InputOutsideListingError(name, "locked")
         if name not in listing.params:
             raise InputOutsideListingError(name, "unknown")
     by_name = {parameter.name: parameter for parameter in schema.parameters}
     colours = _offered_colours(listing, filaments)
-    values = dict(listing.fixed)
+    values = dict(fixed)
     for name, bound in listing.params.items():
         parameter = by_name.get(name)
         if parameter is None:

@@ -101,6 +101,7 @@ def listing() -> Listing:
                 template_name="Demo",
                 libraries=[],
                 snapshot_key=f"src-demo-{COMMIT}",
+                fixed={"height": 5},
             ),
             "media": [],
             "published_at": NOW,
@@ -217,3 +218,33 @@ def test_every_colour_archived_offers_none(listing: Listing) -> None:
 def test_a_public_param_has_no_help(listing: Listing) -> None:
     """The schema has no help text (`Parameter` has none), so the view shows none."""
     assert "help" not in _public(listing, FILAMENTS).params["width"].model_dump()
+
+
+def test_an_unlocked_default_is_the_published_snapshots(listing: Listing) -> None:
+    """The row's ``fixed`` holds only the shop's locks; publish captured every other
+    value a render uses in the snapshot. A visitor's render reads the snapshot."""
+    assert listing.snapshot is not None
+    unlocked = listing.model_copy(
+        update={
+            "fixed": {},
+            "snapshot": listing.snapshot.model_copy(update={"fixed": {"height": 7}}),
+        }
+    )
+    assert listing_values(unlocked, {}, FILAMENTS)["height"] == 7
+    with pytest.raises(InputOutsideListingError) as refused:
+        listing_values(unlocked, {"height": 7}, FILAMENTS)
+    assert refused.value.reason == "locked"
+
+
+def test_a_listing_republished_at_another_commit_renders_its_values(listing: Listing) -> None:
+    """Published at A (height 5), republished at B (height 9): the snapshot of B
+    decides, whatever the row still says."""
+    assert listing.snapshot is not None
+    at_b = listing.model_copy(
+        update={
+            "commit": "b" * 40,
+            "fixed": {"height": 5},
+            "snapshot": listing.snapshot.model_copy(update={"fixed": {"height": 9}}),
+        }
+    )
+    assert listing_values(at_b, {}, FILAMENTS)["height"] == 9
