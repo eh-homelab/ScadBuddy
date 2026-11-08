@@ -352,7 +352,7 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
 }
 
 /** The actions that write at once, or after a confirm: off while a page write runs. */
-const WRITES: ReadonlySet<ItemAction['key']> = new Set(['unfulfil', 'reopen', 'delete', 'cancel'])
+const WRITES: ReadonlySet<ItemAction['key']> = new Set(['unfulfil', 'reopen', 'duplicate', 'delete', 'cancel'])
 
 /** The actions done in the drawer, at the section they open it at. */
 const SECTIONS: Partial<Record<ItemAction['key'], ItemSection>> = { quote: 'quote', print: 'print', fulfil: 'fulfil' }

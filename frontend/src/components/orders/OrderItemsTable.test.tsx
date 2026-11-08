@@ -533,14 +533,14 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     })
   })
 
-  it("offers an accepted item's print and fulfil, both refused with the reason on hold", async () => {
+  it("offers an accepted item's print, fulfil and duplicate, all refused with the reason on hold", async () => {
     state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
     const { user } = render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
     await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
     expect(await screen.findByRole('menuitem', { name: 'Fulfil…' })).toHaveAttribute('data-disabled')
     expect(screen.getByRole('menuitem', { name: /^Print/ })).toHaveAttribute('data-disabled')
-    expect(screen.getAllByText('The order is on hold. Release it first.')).toHaveLength(2)
+    expect(screen.getAllByText('The order is on hold. Release it first.')).toHaveLength(3)
   })
 
   it('turns the header and menu writes off while a write runs', async () => {
