@@ -387,9 +387,10 @@ export const flowTools: Tool[] = [
       '`inputs` are the run\'s typed inputs, recorded on the run; a Reset replays the same ones. ' +
       '`order_id` names the order the run is for, shown with the run and on the order. Called from a flow ' +
       "run's `tool(...)`, the new run is linked to that run (a child it does not wait on: follow it with " +
-      "get_flow_run), and without `grant` it gets the run's grant narrowed to `order_id` when given (an " +
-      "existing order), each rule with a limit kept with `max_calls` 0 (it matches, and admits nothing), " +
-      'requested for the user to approve unless ScadBuddy itself passes it on.',
+      "get_flow_run), and without `grant`, when that run's grant is in force, it gets that grant narrowed to " +
+      '`order_id` when given (an existing order), requested for the user to approve, its limits as they are; ' +
+      'when ScadBuddy itself passes it on, it is approved, each rule with a limit kept with `max_calls` 0 (it ' +
+      'matches, and admits nothing). A run with no grant in force passes none on.',
     input: z.object({
       definition_id: definitionId,
       approval_timeout: approvalTimeout.optional(),

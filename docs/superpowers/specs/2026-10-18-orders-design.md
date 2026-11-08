@@ -1033,7 +1033,8 @@ What this relies on, and what the design adds for it:
   `may_inherit`). It takes the parent's expiry, kept to the order, a rule with a limit
   gets no calls of its own, it spends only while its whole chain is in force, and it is
   revoked with its parent. Every other start with no `grant` of its own, from a parent
-  whose grant is in force, gives the child a `requested` grant for a person; a parent
+  whose grant is in force, gives the child a `requested` grant for a person, its limits
+  as the parent's are, for that person to see and edit; a parent
   with no grant in force passes none on. `start_flow_run` is not a `flow.host` route, so a script's
   `tool("start_flow_run", …)` reaches it through the agent as the run's starter, and
   today no child grant is approved by inheritance; approved inheritance needs the start route

@@ -276,7 +276,9 @@ interface RunTree {
 function runTree(runs: FlowRun[]): RunTree {
   const parentOf = new Map(runs.map((run) => [run.id, run.parent_run_id ?? null]))
   // A listed parent whose own chain leads back to the run (a cycle) is no parent: the run
-  // is shown as a root, so every listed run is rendered once.
+  // is shown as a root, so every listed run is rendered once. A run whose parent sits in a
+  // cycle it is not part of is a root too. Neither is reachable through the API (a link
+  // names a run that existed first); this only keeps a bad row from hiding runs.
   const inCycle = (id: string) => {
     const seen = new Set<string>()
     for (let at: string | null | undefined = id; at && parentOf.has(at); at = parentOf.get(at)) {

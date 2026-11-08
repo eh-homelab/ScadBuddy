@@ -361,7 +361,7 @@ async def _parent_run(flows: Flows, caller: Caller) -> Run | None:
     if author is None or author.flow_run is None:
         return None
     parent = await flows.store.get_run(author.flow_run)
-    if parent is None or not runs_as(caller, parent.started_by, author.principal, author.session):
+    if parent is None or not runs_as(caller, parent.started_by, author.principal):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             "The calling flow run is not a run started by this principal.",
@@ -369,18 +369,18 @@ async def _parent_run(flows: Flows, caller: Caller) -> Run | None:
     return parent
 
 
-def runs_as(
-    caller: Caller, started_by: dict[str, Any], principal: str | None, session: str | None = None
-) -> bool:
+def runs_as(caller: Caller, started_by: dict[str, Any], principal: str | None) -> bool:
     """Whether a run's calls are made as `principal` (review of #5668). The agent's own
     credential vouches for it: the agent sets the flow-run header only on a call from that
     run's own activity, made as the owner it reads for the run (agent
     `temporal/flowRuns.ts` `startedBy`, a starter session's owner now, handed off or
     archived), so the API reads no `ai_sessions` row for it (#5295). Any other caller
     must be the principal the run records: the browser's signed-in person (else
-    `browser`), or the agent principal or session that started it. (A flow run's own
-    calls carry no session header, agent `toolActivities.ts` `flowCaller`, so a session
-    match alone would not cover a handed-off run.)"""
+    `browser`), or the agent principal that started it. A session match is not enough:
+    a flow run's own calls carry no session header (agent `toolActivities.ts`
+    `flowCaller`), and under `enforce` only the agent and the projects worker (whose
+    principal and session `auth/authorship_rule.py` checks) send author headers at all,
+    so a session match would only let another principal name the run."""
     if principal is None:
         return False
     if isinstance(caller, Service) and caller.caller == "agent":
@@ -390,9 +390,6 @@ def runs_as(
         return author_principal(by if isinstance(by, str) else "browser") == principal
     if started_by.get("kind") != "agent" or not isinstance(by, str):
         return False
-    started_in = started_by.get("session")
-    if session is not None and isinstance(started_in, str) and session == started_in:
-        return True
     return principal in (by, author_principal(by))
 
 

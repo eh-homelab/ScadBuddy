@@ -381,17 +381,22 @@ def narrowed_to_order(spec: GrantSpec, order_id: str) -> GrantSpec:
     return spec.model_copy(update={"rules": rules})
 
 
-def inherited(spec: GrantSpec, order_id: str | None) -> GrantSpec:
+def inherited(spec: GrantSpec, order_id: str | None, *, approved: bool = True) -> GrantSpec:
     """The grant a run started from another run inherits from that run's (#4252, orders
-    spec §7.2): its rules, but a rule with a limit (`max_calls`, `max_prints`,
-    `max_filament_g`) admits nothing (`max_calls` 0), so runs started from a run never
-    spend more than the run's own limits allow; for an order, each `orders` bound narrowed
-    to it (`narrowed_to_order`). No starter session is asked. Every rule keeps its index."""
+    spec §7.2): its rules; for an order, each `orders` bound narrowed to it
+    (`narrowed_to_order`). `approved` (passed on with no person asked), a rule with a limit
+    (`max_calls`, `max_prints`, `max_filament_g`) admits nothing (`max_calls` 0), so runs
+    started from a run never spend more than the run's own limits allow; only requested,
+    the limits stay as they are, for the person who approves it to see and edit (review
+    of #5668). No starter session is asked. Every rule keeps its index."""
     rules = [
         rule.model_copy(update={"max_calls": 0})
-        if rule.max_calls is not None
-        or rule.max_prints is not None
-        or rule.max_filament_g is not None
+        if approved
+        and (
+            rule.max_calls is not None
+            or rule.max_prints is not None
+            or rule.max_filament_g is not None
+        )
         else rule
         for rule in spec.rules
     ]

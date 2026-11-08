@@ -44,6 +44,9 @@ def test_an_inherited_grant_drops_limited_rules_and_narrows_to_the_order() -> No
     ]
     assert child.ask_starter_session is False and child.expires_at == parent.expires_at
     assert inherited(parent, None).rules[0].orders == "any"
+    # Only requested (review of #5668): the limits stay, for the person who approves it.
+    requested = inherited(parent, "o1", approved=False)
+    assert requested.rules[1].max_prints == 4 and requested.rules[1].max_calls is None
 
 
 pg = pytest.mark.requires_postgres
@@ -314,9 +317,6 @@ def test_a_run_s_calls_are_vouched_for_by_the_agent_or_match_its_recorded_princi
     assert runs_as(ANONYMOUS, started, "token:t1")
     assert not runs_as(ANONYMOUS, started, "token:new-owner")
     assert not runs_as(PROJECTS, started, "token:new-owner")
-    # The session that started it, under its owner now.
-    assert runs_as(ANONYMOUS, started, "token:new-owner", started["session"])
-    assert not runs_as(ANONYMOUS, started, "token:new-owner", str(uuid.uuid4()))
     browser = {"kind": "browser", "principal": "user:a"}
     assert runs_as(ANONYMOUS, browser, "user:a")
     assert not runs_as(ANONYMOUS, browser, "user:b")

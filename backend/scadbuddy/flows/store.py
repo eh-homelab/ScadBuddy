@@ -558,7 +558,7 @@ class FlowStore:
             parent = self._locked_grant(conn, parent_run_id)
             if parent is None or not self._chain_in_force(conn, parent):
                 return None
-            spec = inherited(parent.spec, order_id)
+            spec = inherited(parent.spec, order_id, approved=approved)
             row = conn.execute(
                 "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by,"
                 " approved_at, expires_at, parent_grant_id)"
