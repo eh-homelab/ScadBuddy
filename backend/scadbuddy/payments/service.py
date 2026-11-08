@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -222,10 +223,16 @@ class Payments:
         linked = await asyncio.to_thread(
             lambda: self._orders.lifecycle.set_request_link(found.id, hosted=hosted, error=error)
         )
-        if hosted is not None and linked.status != "open" and linked.hosted_url is None:
+        if (
+            hosted is not None
+            and linked.status != "open"
+            and linked.provider_ref == hosted.provider_ref
+            and linked.close_pending_at is not None
+        ):
             # Closed while the provider answered: the new page must not stay payable. The
             # lifecycle kept its reference with the mark (#5700), so a failure here is
-            # tried again by the sweep.
+            # tried again by the sweep. A reference another request holds names that
+            # request's live page: it is not kept, and not closed.
             await self._close_page(found.id, found.provider, hosted.provider_ref)
         return linked
 
@@ -315,8 +322,12 @@ class Payments:
             CredentialUnreadableError,
         ) as failed:
             logger.warning("the page of payment request %s was not closed: %s", request_id, failed)
+            gone = isinstance(failed, ProviderNotFoundError)
             await asyncio.to_thread(
-                self._note_close, request_id, provider_ref, payments.close_failed
+                self._note_close,
+                request_id,
+                provider_ref,
+                partial(payments.close_failed, provider_gone=gone),
             )
             return False
         await asyncio.to_thread(
@@ -342,7 +353,12 @@ class Payments:
         return adapter, credential
 
     async def handle_webhook(
-        self, provider: str, headers: Mapping[str, str], body: bytes
+        self,
+        provider: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        after: Callable[[Callable[[], Awaitable[object]]], None] | None = None,
     ) -> EventOutcome:
         """Check the signature, then record the event. ``BadSignatureError`` leaves
         before any event or money is written (only its category, below);
@@ -354,11 +370,13 @@ class Payments:
         is not a failure, so it keeps no category. Every other failure but an unknown
         provider keeps its category on the credential row, and the next success clears it
         (#5684). The success's start is the database's clock (``PaymentCredentials.now``),
-        as the failure's stamp is.
+        as the failure's stamp is. The pages the event's payment marked are closed by
+        a job handed to ``after`` (the route runs it once the answer is sent, so a slow
+        provider never delays the reply), or awaited here when there is none.
         """
         began = await asyncio.to_thread(self._credentials.now)
         try:
-            outcome = await self._handle_webhook(provider, headers, body)
+            outcome, closes = await self._handle_webhook(provider, headers, body)
         except ProviderNotFoundError:
             raise
         except EventTooEarlyError as early:
@@ -367,6 +385,12 @@ class Payments:
             await self._note_webhook_error(provider, _webhook_error(failed))
             raise
         await asyncio.to_thread(self._credentials.clear_webhook_error, provider, since=began)
+        if closes:
+            job = partial(self._close_pages, closes)
+            if after is None:
+                await job()
+            else:
+                after(job)
         return outcome
 
     async def _note_webhook_error(self, provider: str, error: WebhookError) -> None:
@@ -379,7 +403,7 @@ class Payments:
 
     async def _handle_webhook(
         self, provider: str, headers: Mapping[str, str], body: bytes
-    ) -> EventOutcome:
+    ) -> tuple[EventOutcome, list[PaymentRequestView]]:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
@@ -389,14 +413,12 @@ class Payments:
             self._orders.lifecycle.record_provider_event, provider, event
         )
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
-        if order_id is not None:
-            # #5700: the open balance requests this payment settled (`_close_balance`)
-            # are marked; close their pages after the commit, as a manual payment does.
-            after = await asyncio.to_thread(self._requests, order_id)
-            await self._close_pages(
-                r for r in after if r.close_pending_at is not None and r.id not in before
-            )
-        return outcome
+        if order_id is None:
+            return outcome, []
+        # #5700: the open balance requests this payment settled (`_close_balance`) are
+        # marked; their pages are closed after the reply, as a manual payment's are.
+        now = await asyncio.to_thread(self._requests, order_id)
+        return outcome, [r for r in now if r.close_pending_at is not None and r.id not in before]
 
     def _order_of(self, provider: str, provider_ref: str | None) -> str | None:
         if provider_ref is None:
