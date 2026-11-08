@@ -750,6 +750,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   /orders/{id}/time-entries` and `…/cost-entries`; agent `order_time_add`, `order_cost_add`
   (write); the order page's `components/orders/OrderCosts.tsx` and `CostEntryForms.tsx`.
   Every attempt counts, test prints (#5280) too (`OrderStore.cost_rows`, every purpose).
+  Job cost phase 5 (#5330): the assistant's spend arrives from the agent service on its own
+  CRUD route, `POST /api/v1/internal/crud/agent/orders/{id}/assistant-cost` (`api/crud_agent.py`,
+  class `crud.agent`, area `order-costs`; only the `agent` credential), a session's USD
+  figure that `Lifecycle.add_assistant_cost` converts at `pricing_usd_rate` (`UsdRate`: 1
+  for a USD order, the rate for the shop's currency, else 409 `currency_unconvertible`) into
+  one `assistant` entry, source `ai_session:<id>`, its note keeping the USD figure; under
+  one minor unit it writes nothing (`entry: null`). The backend reads no `ai_*` table for it.
   Job cost phase 2 (#5327): `GET /orders` rows (`OrderRow`) carry `margin_minor`,
   `margin_percent`, `margin_state` and `margin_estimated`, and the list takes `margin_state`
   repeated. `costs.py` `order_margins` and the per-order read are one computation

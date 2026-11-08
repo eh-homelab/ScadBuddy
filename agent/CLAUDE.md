@@ -28,6 +28,15 @@ for a 15-minute credential, renews it at half-life and after a 401, and falls ba
 on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed one from
 `service_credentials_agent`, as before (#5494).
 
+The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
+assistant's spend on an order. A session's successful `order_item_revision_add` (or
+`_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
+`OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
+(`temporal/session/finishActivity.ts`, a retry too) reports the session's `cost_usd` since
+its last report, split equally between its orders still to report, to `POST
+…/crud/agent/orders/{id}/assistant-cost` (5 s timeout). A route's 4xx drops that order's
+report; a 5xx, a transport failure or a non-CRUD answer keeps it for the next turn's end.
+
 ## Commands
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):

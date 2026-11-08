@@ -34,7 +34,10 @@ export function turnEvents(sessionId: string, args: FinishTurnInput, spent: numb
   return events
 }
 
-export function sessionFinishActivities(sql: Sql, events: EventLog) {
+/** What a turn's end reports after it is written (sessions/orderCosts.ts `OrderCosts`); never throws. */
+export type TurnEndReports = { report(sessionId: string): Promise<void> }
+
+export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: TurnEndReports) {
   return {
     [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput): Promise<boolean> => {
       const sessionId = args.sessionId
@@ -57,9 +60,11 @@ export function sessionFinishActivities(sql: Sql, events: EventLog) {
         await tx`UPDATE ai_sessions SET status = ${last.status}, durable_turn_id = NULL, interrupt_requested = false, updated_at = now() WHERE id = ${sessionId}`
         return { tail, seqs: await events.append(sessionId, tail, tx) }
       })
-      if (!written) return false
-      events.committed(sessionId, written.tail, written.seqs)
-      return true
+      if (written) events.committed(sessionId, written.tail, written.seqs)
+      // The session's spend on the orders it revised (#5330), with this turn's in it. Also on a
+      // retry that wrote nothing: a report the first try could not send is sent then.
+      await costs?.report(sessionId)
+      return written !== undefined
     },
   }
 }

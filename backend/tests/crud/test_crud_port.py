@@ -70,7 +70,7 @@ class _Credentials:
 
 
 def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert set(CRUD_AREAS) == {"projects", "render", "print", "storefront"}
+    assert set(CRUD_AREAS) == {"projects", "render", "print", "storefront", "agent"}
     monkeypatch.setitem(CRUD_AREAS, "render", ["blob-index"])
     app = FastAPI(dependencies=[Depends(auth_check)])
     app.state.scadbuddy = SimpleNamespace(settings=SimpleNamespace(auth_mode="off"))
