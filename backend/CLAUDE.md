@@ -607,7 +607,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
   `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,
   `outward` what commits it to the customer: accept, a quote's acceptance, fulfil, ship,
-  close, cancel). Frontend: `pages/OrdersPage.tsx`, `OrderPage.tsx`, `CustomersPage.tsx`,
+  close, cancel, a deposit, shipping without full payment). Frontend: `pages/OrdersPage.tsx`, `OrderPage.tsx`, `CustomersPage.tsx`,
   `CustomerPage.tsx` over `components/records/` (`DataTable`, `FilterBar`, `RecordDrawer`,
   extracted from the Activity components, which wrap them) and `components/orders/`; the
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
@@ -692,6 +692,69 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`orders/totals.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  With the order and its payment requests (`order_totals(..., order=, requests=)`, as `GET
+  /orders/{id}` reads them) it also gives `deposit_due_minor` (the deposit less what is
+  paid, 0 with none or a waived one) and `shipping_held` (`balance_unpaid`'s rule,
+  `totals.balance_due` over `has_standing_balance`); `totals_of`, the lifecycle's read,
+  leaves them at 0 and False.
+  Deposits, the balance, auto tax and shipping options (#5281, storefront spec §8-§9,
+  plan `2026-11-07-storefront-phase-2-payments-deposits.md`, migration
+  `…_order_deposits_tax.sql`): `orders.deposit_minor`, `.deposit_waived_reason` and
+  `.balance_waived_reason`; `order_charges.auto` (the one tax row ScadBuddy computes,
+  `Lifecycle._retax`) and `.shipping_option_id`. `set_deposit` and `apply_deposit_policy`
+  (`PUT /orders/{id}/deposit`, `POST …/deposit/policy`, gap 7; a policy rule skipped
+  for the order's currency is named as `skipped` on the `deposit.set` row, and only such
+  rules is 409 `deposit_policy_currency`) work while `draft` or
+  `quoted`: they cancel the open and failed `deposit` requests and open one for the
+  deposit less what is paid on the default provider (gap 4); a pending one refuses them
+  (`payment_in_flight`). Until the deposit is paid (gap 3) or waived (`POST
+  …/deposit/waive`, a reason of 1 to 500 characters), a revision is not sent and a test
+  print is not claimed (`deposit_unpaid`). `accept_order` leaves an order that asked for
+  money (a deposit, or a request not cancelled) with one open `balance` request for the
+  rest, cancelling its other open or failed requests (gap 1), and is refused
+  `payment_in_flight` while one is pending. While a `balance` request stands, the balance
+  is above zero and no one waived it (`POST …/balance/waive`, once accepted, else
+  `order_not_accepted`), a shipment, or a shipment edit that raises a quantity, is
+  `balance_unpaid` (gap 2). The routes that cancel requests (accept, a deposit set or
+  applied, an order's cancel, gap 5) run through `Payments.run_closing`, which closes each
+  cancelled request's provider page after the commit and never a kept one's; accept and
+  the two deposit calls then call `link_pending` to link the new request (an order's
+  cancel opens none and does not). A storefront cart refuses (`order_not_submitted`) a
+  deposit set or applied, both waivers and accept, and refuses its shipping option and its
+  charges (`PATCH` with `charges`) to anyone but the visitor (`check_visitors_cart`): the
+  back office never acts on a visitor's cart. A cancelled order reopened past `quoted`
+  that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
+  and an accepted order whose deposit paid the whole total opens one once its balance is
+  above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
+  request, and it cancels nothing). Every route whose lifecycle call reaches `_retax`
+  links such a request after the commit, and only the requests that call opened, so an
+  older one whose link failed waits for `POST …/link` (`Payments.run_linking` under
+  `api/orders.py` `_run_linked` and the shipping-option route; `request_ids` and
+  `link_opened` around the archive quote): adding items, an
+  item's edit, delete, cancel and reopen, a revision and its answer, a manual or archive
+  quote and its acceptance, a duplicate, the charges, and the order's reopen. The slice
+  quote's run (an operation) does not: a request it opens is linked by the next linked
+  call or `POST …/payment-requests/{id}/link`. A request's cancel takes an optional
+  `reason` (1 to 500 characters), kept on its `payment_request.cancelled` audit row:
+  cancelling the balance request lifts `balance_unpaid`, so the reason says why. The tax
+  row is `orders_tax_percent` of the items plus, with `orders_tax_shipping`, the shipping
+  charges, rounded half up; a typed `tax` charge removes it (gap 6). A charges replace
+  (`PATCH` and `…/charges/after-acceptance`) writes the typed charges only: the auto row
+  sent back as read (marked by `auto` or its `id`, whatever the amount) is dropped and
+  the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
+  whatever its label, is typed, and a charge's `shipping_option_id` is kept when
+  sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
+  query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
+  `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
+  for none) writes the order's one `shipping` charge from Settings → Orders'
+  `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
+  `option_id`, an option that ships needs the shipping address
+  (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
+  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  that reaches the deposit pays the open `deposit` requests, a provider's as a manual one
+  (`_close_deposit`), and their pages are closed after the commit. Routes in
+  `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
+  `order_deposit_waive` and `order_shipping_option_set` (write).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or
@@ -942,7 +1005,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
   `kek_missing`), `service.py` (`Payments`, what the routes call; `connect` refuses an
   account whose `Verified.currency` is not the shop's `orders_currency`,
-  `CurrencyMismatchError`, 409 `currency_mismatch`, #5666) and
+  `CurrencyMismatchError`, 409 `currency_mismatch`, #5666, and keeps it on the row,
+  `payment_credentials.currency`, given back as `ProviderStatus.currency`; Settings →
+  Payments warns when `orders_currency` moved away from it since, and the settings
+  route does not refuse that move) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus
@@ -987,7 +1053,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   refund told without money is `ignored`; no request's status changes. `parse_webhook` is
   async and may call its provider once the signature holds; a failed call is
   `ProviderUnavailableError`, a 503 that records nothing, so the provider sends it again. Routes: `api/order_payments.py`
-  (`/orders/{id}/payment-requests`), `api/payments.py` (`/payments/providers`; connect,
+  (`/orders/{id}/payment-requests`, and the deposit, waiver and shipping-option routes of
+  #5281 above), `api/payments.py` (`/payments/providers`; connect,
   disconnect and the default are `PERSON_ENDPOINTS`) and `api/payment_webhooks.py`
   (`POST /payments/webhooks/{provider}`, the one public back-office route: raw body at
   most 256 KiB, a bad signature 400 with no event or money written, the actor `provider`

@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Annotated
 
 from psycopg import Connection
@@ -33,12 +34,24 @@ from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.money import OrderRules
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments.registry import providers
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
+
+#: The settings ``OrdersComponent.rules`` reads (#5281).
+ORDER_RULE_SETTINGS = frozenset(
+    {
+        "orders_currency",
+        "orders_tax_percent",
+        "orders_tax_shipping",
+        "orders_deposit_policy",
+        "storefront_shipping_options",
+    }
+)
 
 
 class OrdersComponent:
@@ -85,10 +98,24 @@ class OrdersComponent:
             self.core.settings_store, self.store, spool_import=self.integrations.linked
         )
 
+    def rules(self) -> OrderRules:
+        """The shop's money rules (#5281) as stored now: the lifecycle reads them on each
+        use, so a change applies to the next transition. One query on their five rows
+        (``SettingsStore.read``), never the whole snapshot or a secret; a transition reads
+        them once."""
+        values = self.core.settings_store.read(ORDER_RULE_SETTINGS)
+        return OrderRules(
+            shop_currency=values["orders_currency"],
+            tax_percent=Decimal(values["orders_tax_percent"]),
+            tax_shipping=values["orders_tax_shipping"],
+            deposit_policy=tuple(values["orders_deposit_policy"] or ()),
+            shipping_options=tuple(values["storefront_shipping_options"] or ()),
+        )
+
     @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
-            self._lifecycle = Lifecycle(self.store, self.core.events, self.refs)
+            self._lifecycle = Lifecycle(self.store, self.core.events, self.refs, self.rules)
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
             )

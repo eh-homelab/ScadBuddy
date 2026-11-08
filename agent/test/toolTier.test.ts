@@ -6,6 +6,7 @@ import { BUILTIN_SOURCES, type ToolAccess } from '../src/access/model.js'
 import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { TOOL_TIER_ACTIVITY } from '../src/temporal/toolTier.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
 import { defineTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
 import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
@@ -18,14 +19,14 @@ const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
   defineTool({ name, label: name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
 const TOOLS = [tool('look', 'read'), tool('send', 'outward')]
 
-function rig() {
+function rig(tools: Tool[] = TOOLS) {
   const { access } = memoryAccess()
   const sets = [
     {
       name: 'scadbuddy',
       tool_prefix: 'mcp__scadbuddy__',
       switchable: false,
-      tools: TOOLS.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })),
+      tools: tools.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })),
     },
   ]
   const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
@@ -34,7 +35,7 @@ function rig() {
       BUILTIN_SOURCES.scadbuddy,
       Object.fromEntries(rowsFromOverrides(BUILTIN_SOURCES.scadbuddy, tool_tiers, disabled_tools).map((r) => [r.item, r.access as ToolAccess])),
     )
-  const activity = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[TOOL_TIER_ACTIVITY]!
+  const activity = toolActivities(tools, { services: svc, sessions: { ownerOf: async () => undefined } })[TOOL_TIER_ACTIVITY]!
   return { set, activity }
 }
 
@@ -63,6 +64,22 @@ describe("a durable session's tool tier (#2171)", () => {
     await set({ send: 'write', look: 'outward' }, [])
     expect(await session.run(activity, { tool: 'send' })).toEqual({ tier: 'write', disabled: false })
     expect(await session.run(activity, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false })
+  })
+
+  it("answers the deposit, waiver and shipping-option tools at their own tiers (#5281)", async () => {
+    const names = ['order_deposit_set', 'order_balance_waive', 'order_deposit_waive', 'order_shipping_option_set']
+    const { set, activity } = rig(ALL_TOOLS.filter((t) => names.includes(t.name)))
+    const session = env(`session-${SESSION}`)
+    const tiers = async () => Object.fromEntries(await Promise.all(names.map(async (n) => [n, await session.run(activity, { tool: n })])))
+    expect(await tiers()).toEqual({
+      order_deposit_set: { tier: 'outward', disabled: false },
+      order_balance_waive: { tier: 'outward', disabled: false },
+      order_deposit_waive: { tier: 'write', disabled: false },
+      order_shipping_option_set: { tier: 'write', disabled: false },
+    })
+    await set({ order_deposit_set: 'write' }, ['order_shipping_option_set'])
+    expect(await session.run(activity, { tool: 'order_deposit_set' })).toEqual({ tier: 'write', disabled: false })
+    expect(await session.run(activity, { tool: 'order_shipping_option_set' })).toEqual({ tier: 'write', disabled: true })
   })
 
   it('answers an off tool as disabled', async () => {

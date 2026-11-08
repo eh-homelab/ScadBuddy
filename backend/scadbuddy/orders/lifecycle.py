@@ -26,7 +26,7 @@ was for. The print follow (``follow_print``) records what a printer did, on hold
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -71,6 +71,14 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
+from scadbuddy.orders.money import (
+    NO_RULES,
+    OrderRules,
+    deposit_for,
+    skipped_for_currency,
+    tax_base,
+    tax_minor,
+)
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartRow,
@@ -94,7 +102,7 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.totals import totals_of
+from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
     EventOutcome,
@@ -283,7 +291,8 @@ class ShipmentEdit(BaseModel):
 
 class OrderEdit(BaseModel):
     """`PATCH /orders/{id}`: notes and the due date in any open state; the addresses
-    and the charges, replaced whole, while `draft` or `quoted`."""
+    and the typed charges, replaced whole (the auto tax row stays, ``_typed``), while
+    `draft` or `quoted`."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -481,6 +490,11 @@ def _settle_open(items: Sequence[OrderItem]) -> OrderStatus:
     return "quoted" if open_items and all(i.status == "approved" for i in open_items) else "draft"
 
 
+def _plain(percent: Decimal) -> str:
+    """A percent as a label shows it: no trailing zeros, no exponent (7.50 is 7.5)."""
+    return format(percent.normalize(), "f")
+
+
 def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
     return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
 
@@ -493,12 +507,29 @@ def check_submitted(order: Order) -> None:
         raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
 
 
+def check_visitors_cart(order: Order, by: Actor) -> None:
+    """``order_not_submitted`` when anyone but the visitor sets a cart's shipping option or
+    charges (#5281): the back office never acts on a visitor's cart; the storefront sets
+    them as the visitor."""
+    if order.unsubmitted and by.kind != "visitor":
+        raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
+
+
 class Lifecycle:
-    def __init__(self, store: OrderStore, bus: EventBus | None, refs: BlobRefs | None = None):
+    def __init__(
+        self,
+        store: OrderStore,
+        bus: EventBus | None,
+        refs: BlobRefs | None = None,
+        rules: Callable[[], OrderRules] = lambda: NO_RULES,
+    ):
         self.store = store
         self.bus = bus
         #: The slice quotes' holds (#4250 Ruling 3); None where nothing holds a file.
         self.refs = refs
+        #: The shop's money rules (#5281: tax, deposits, shipping options), read when a
+        #: transition needs them, so a settings change applies to the next one.
+        self.rules = rules
         #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
         self.parts = PartStore(store)
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
@@ -623,6 +654,36 @@ class Lifecycle:
         self._event(conn, order, by, "order.status", from_status=order.status, to=status)
         return moved
 
+    def _retax(self, conn: Conn, order: Order, by: Actor, rules: OrderRules | None = None) -> None:
+        """The order's auto tax row (#5281, storefront spec §9) as its rows now say, on an
+        order `draft` through `ready`: ``orders_tax_percent`` of the items' subtotal, plus
+        the shipping charges with ``orders_tax_shipping``, rounded half up. None at 0
+        percent, at an amount of 0, or while a typed `tax` charge stands. A shipped or
+        ended order's row stays as it was. Each transition that changes the items, their
+        quotes or the charges calls it once, before it rederives (`reopen_item` after,
+        since its rederive can leave `shipped`); ``rules`` is the
+        transition's one read of them, when it has one. At 0 percent with no auto row
+        there is nothing to do. Past acceptance, a total that grew past a deposit that paid
+        it whole opens the balance request (``_regate_balance``)."""
+        if order.status not in OPEN_FOR_EDITS | TAKES_ITEMS:
+            return
+        rules = self.rules() if rules is None else rules
+        charges = self.store.charges(order.id, conn=conn)
+        typed = [charge for charge in charges if not charge.auto]
+        if rules.tax_percent > 0 or len(typed) < len(charges):
+            amount = 0
+            if rules.tax_percent > 0 and not any(charge.kind == "tax" for charge in typed):
+                items = totals_of(self.store, conn, order.id).subtotal_minor
+                base = tax_base(items, typed, tax_shipping=rules.tax_shipping)
+                amount = tax_minor(base, rules.tax_percent)
+            self.store.set_auto_tax(
+                conn,
+                order.id,
+                label=f"Tax {_plain(rules.tax_percent)}%",
+                amount_minor=amount or None,
+            )
+        self._regate_balance(conn, order, by)
+
     # -- orders (§3.2) --------------------------------------------------------------------
 
     def create_order(
@@ -689,9 +750,13 @@ class Lifecycle:
 
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
-        customer's) and charges while `draft` or `quoted`."""
+        customer's) and charges while `draft` or `quoted`. A cart's charges are the
+        visitor's alone (`order_not_submitted`, ``check_visitors_cart``). The shipping
+        address is not cleared while an option that ships stays (`_no_option_ships`)."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            if edit.charges is not None:
+                check_visitors_cart(order, by)
             self._not_ended(order)
             structural = (
                 edit.charges is not None
@@ -719,6 +784,8 @@ class Lifecycle:
                             "address_not_found",
                             f"{name}: no address {wanted} of the order's customer",
                         )
+            if edit.shipping_address_id is None:
+                self._no_option_ships(conn, order, edit.charges)
             order = self.store.update_order_fields(
                 conn,
                 order.id,
@@ -740,16 +807,54 @@ class Lifecycle:
             if edited:
                 self._event(conn, order, by, "order.edited", fields=edited)
             if edit.charges is not None:
-                self.store.replace_charges(conn, order.id, edit.charges)
-                self._event(conn, order, by, "charges.replaced", count=len(edit.charges))
+                typed = self._typed(conn, order, edit.charges)
+                self.store.replace_charges(conn, order.id, typed)
+                self._event(conn, order, by, "charges.replaced", count=len(typed))
+                self._retax(conn, order, by)
         self._told(_Change(order))
         return order
+
+    def _no_option_ships(
+        self, conn: Conn, order: Order, charges: Sequence[ChargeInput] | None
+    ) -> None:
+        """Refuses (`shipping_address_required`) clearing the shipping address while a
+        shipping option that ships stays on the order (#5281): ``charges`` the edit writes,
+        else the order's own. Choose a pickup, or remove the option, first."""
+        kept = self.store.charges(order.id, conn=conn) if charges is None else charges
+        named = {c.shipping_option_id for c in kept if c.shipping_option_id is not None}
+        if not named:
+            return
+        ships = [o for o in self.rules().shipping_options if o.id in named and o.ships]
+        if ships:
+            raise LifecycleError(
+                "shipping_address_required",
+                f"order {order.label} ships by {ships[0].label}: it keeps its shipping address;"
+                " choose an option that does not ship, or remove the option, first",
+            )
+
+    def _typed(self, conn: Conn, order: Order, charges: Sequence[ChargeInput]) -> list[ChargeInput]:
+        """The charges a replace writes: ``charges`` less the auto tax row sent back as it
+        was read, marked by ``auto`` or its ``id`` (whatever its amount: a read from
+        before the items changed is stale), which the order keeps and ``_retax``
+        recomputes. Any other `tax` charge, whatever its label, is typed and replaces the
+        auto row."""
+        auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
+
+        def is_auto(charge: ChargeInput) -> bool:
+            if charge.auto:
+                return True
+            if auto is None:
+                return False
+            return charge.id == auto.id
+
+        return [charge for charge in charges if not is_auto(charge)]
 
     def replace_charges_after_acceptance(
         self, order_id: str, by: Actor, charges: Sequence[ChargeInput]
     ) -> Order:
-        """The charges, replaced whole, on an order past `quoted` (#5351): a fee or a
-        discount that keeps an agreed total when an item is added after acceptance. It
+        """The typed charges, replaced whole (the auto tax row stays, ``_typed``), on an
+        order past `quoted` (#5351): a fee or a discount that keeps an agreed total when an
+        item is added after acceptance. It
         changes what the customer pays, so it is its own route and the agent's `outward`
         tier. Only an `accepted`, `in_production` or `ready` order (`TAKES_ITEMS`) that is
         not on hold takes it: `order_not_accepted` before that (use ``edit_order``),
@@ -772,7 +877,9 @@ class Lifecycle:
                 )
             self._not_on_hold(order)
             before = self.store.charges(order.id, conn=conn)
-            after = self.store.replace_charges(conn, order.id, charges)
+            self.store.replace_charges(conn, order.id, self._typed(conn, order, charges))
+            self._retax(conn, order, by)
+            after = self.store.charges(order.id, conn=conn)
             self._event(
                 conn,
                 order,
@@ -782,6 +889,67 @@ class Lifecycle:
                 before=[_charge_line(charge) for charge in before],
                 after=[_charge_line(charge) for charge in after],
             )
+            order = self.store.order(order.id, conn=conn) or order
+        self._told(_Change(order))
+        return order
+
+    def set_shipping_option(self, order_id: str, by: Actor, option_id: str | None) -> Order:
+        """The shipping option (#5281, storefront spec §8) as the order's one `shipping`
+        charge: every `shipping` charge replaced by the option's label and price, naming
+        it; None removes them. The other charges keep their order. Only while `draft` or
+        `quoted`, as ``edit_order``'s charges (`order_not_editable` past it, naming the
+        route after acceptance). An id not in ``storefront_shipping_options`` is a 422
+        on ``option_id``; an option that ships needs the order's shipping address
+        (`shipping_address_required`), a pickup does not. The audit row is
+        ``shipping.option_set``. A cart's option is the visitor's alone
+        (`order_not_submitted`, ``check_visitors_cart``)."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_visitors_cart(order, by)
+            self._not_ended(order)
+            if order.status not in OPEN_FOR_EDITS:
+                route = (
+                    f"; change the charges with PUT /orders/{order.id}/charges/after-acceptance"
+                    if order.status in TAKES_ITEMS
+                    else ""
+                )
+                raise LifecycleError(
+                    "order_not_editable",
+                    f"order {order.label} is {order.status}: its shipping option is"
+                    f" set while draft or quoted{route}",
+                )
+            rules = self.rules()
+            charges: list[ChargeInput] = [
+                charge
+                for charge in self.store.charges(order.id, conn=conn)
+                if not charge.auto and charge.kind != "shipping"
+            ]
+            if option_id is not None:
+                option = next((o for o in rules.shipping_options if o.id == option_id), None)
+                if option is None:
+                    raise LifecycleError(
+                        "option_id",
+                        f"option_id: no shipping option {option_id} (shipping_option_not_found)",
+                        unprocessable=True,
+                    )
+                if option.ships and order.shipping_address_id is None:
+                    raise LifecycleError(
+                        "shipping_address_required",
+                        f"order {order.label} has no shipping address: {option.label} ships"
+                        " it; set the address first, or choose an option that does not ship",
+                    )
+                charges.append(
+                    ChargeInput(
+                        kind="shipping",
+                        label=option.label,
+                        amount_minor=option.amount_minor,
+                        shipping_option_id=option.id,
+                    )
+                )
+            self.store.replace_charges(conn, order.id, charges)
+            self._event(conn, order, by, "shipping.option_set", option_id=option_id)
+            self._retax(conn, order, by, rules)
+            order = self._rederive(conn, order, by)
             order = self.store.order(order.id, conn=conn) or order
         self._told(_Change(order))
         return order
@@ -831,6 +999,7 @@ class Lifecycle:
                 payments.set_request_status(conn, named.id, "paid", payment_id=payment.id)
             if payment.amount_minor > 0:
                 self._close_balance(conn, order, payment)
+                self._close_deposit(conn, order, payment)
             self._event(
                 conn,
                 order,
@@ -938,15 +1107,320 @@ class Lifecycle:
         return opened
 
     def cancel_payment_request(
-        self, order_id: str, request_id: str, by: Actor
+        self, order_id: str, request_id: str, by: Actor, reason: str | None = None
     ) -> PaymentRequestView:
+        """An open request cancelled, with the person's ``reason`` on the audit row when
+        given. Cancelling the `balance` request lifts `balance_unpaid` (gap 2), so the
+        reason says why the order may ship unpaid."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._cancellable_request(conn, order, request_id)
             cancelled = payments.set_request_status(conn, request_id, "cancelled")
-            self._event(conn, order, by, "payment_request.cancelled", request_id=request_id)
+            why = {} if reason is None else {"reason": reason}
+            self._event(conn, order, by, "payment_request.cancelled", request_id=request_id, **why)
         self._told(_Change(order))
         return cancelled
+
+    # -- deposits (#5281, storefront spec §9) ---------------------------------------------
+    # A deposit is set while the order is `draft` or `quoted`. Until it is paid or waived,
+    # a revision is not sent and a test print is not claimed (`deposit_unpaid`). A deposit
+    # request a change cancels is `payment_request.cancelled` on the audit line, as a
+    # request's own cancel is; the payments service closes its provider's page after the
+    # commit, as it does for an order's cancel (`Payments.run_closing`).
+
+    def _deposit_editable(self, order: Order) -> None:
+        check_submitted(order)
+        self._not_ended(order)
+        if order.status not in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "order_not_editable",
+                f"order {order.label} is {order.status}: its deposit is set while draft or quoted",
+            )
+
+    def _set_deposit(
+        self, conn: Conn, order: Order, by: Actor, amount: Money | None, **audit: Any
+    ) -> Order | None:
+        """Cancels the open and failed deposit requests, sets the deposit, clears its
+        waiver, and asks for what of it is not paid yet, on the default provider. A pending
+        deposit request refuses it (`payment_in_flight`). The same deposit, not waived, whose
+        open request already asks for the rest (or none, with nothing due) and no failed one
+        writes nothing and is None, so the caller tells no one."""
+        deposits = [
+            found
+            for found in payments.requests_for_order(conn, order.id)
+            if found.kind == "deposit"
+        ]
+        self._no_payment_in_flight(conn, order, kind="deposit")
+        due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
+        asking = [found for found in deposits if found.status == "open"]
+        failed = [found for found in deposits if found.status == "failed"]
+        if (
+            amount == order.deposit_minor
+            and order.deposit_waived_reason is None
+            and not failed
+            and [r.amount_minor for r in asking] == ([due] if due > 0 else [])
+        ):
+            return None
+        for found in asking + failed:
+            payments.set_request_status(conn, found.id, "cancelled")
+            self._event(conn, order, by, "payment_request.cancelled", request_id=found.id)
+        updated = self.store.set_deposit_fields(
+            conn, order.id, deposit_minor=amount, deposit_waived_reason=None
+        )
+        self._event(conn, order, by, "deposit.set", amount_minor=amount, **audit)
+        if due > 0:
+            opened = payments.insert_request(
+                conn,
+                order_id=order.id,
+                kind="deposit",
+                provider=payments.default_provider(conn, self.offered_providers),
+                amount_minor=due,
+                currency=order.currency,
+                created_by=by,
+            )
+            self.store.insert_event(
+                conn,
+                order.id,
+                by,
+                "payment_request.opened",
+                {"request_id": opened.id, "kind": "deposit", "amount_minor": due},
+            )
+        return updated
+
+    def set_deposit(self, order_id: str, by: Actor, amount_minor: Money | None) -> Order:
+        """The order's deposit, or None for none, while `draft` or `quoted`
+        (`order_not_editable` past it; `order_not_submitted` on a cart). It cancels the
+        open and failed `deposit` requests and clears a waiver; a deposit above what is
+        paid opens a `deposit` request for the rest. A pending `deposit` request refuses it
+        (`payment_in_flight`). The same deposit, not waived, with no failed deposit request
+        and an open one that already asks for the rest, writes nothing."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._deposit_editable(order)
+            if amount_minor is not None and amount_minor < 1:
+                raise LifecycleError("amount_minor", "a deposit is above zero", unprocessable=True)
+            updated = self._set_deposit(conn, order, by, amount_minor)
+            if updated is None:
+                return order
+            order = updated
+        self._told(_Change(order))
+        return order
+
+    def apply_deposit_policy(self, order_id: str, by: Actor) -> Order:
+        """``set_deposit`` with the deposit the shop's policy asks of the order now. A rule
+        skipped only because the order is not in the shop's currency (a fixed amount or a
+        ``total_above`` threshold) is named on the `deposit.set` audit row as ``skipped``
+        (its index in the policy). When such rules are all that would apply, nothing is
+        written: `deposit_policy_currency` says to set the deposit by hand."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._deposit_editable(order)
+            rules = self.rules()
+            items = self.store.items(order.id, conn=conn)
+            context: dict[str, Any] = {
+                "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
+                "first_order": order.customer_id is None
+                or not self.store.accepted_before(conn, order.customer_id, order.id),
+                "currency": order.currency,
+                "shop_currency": rules.shop_currency,
+            }
+            amount = deposit_for(
+                rules.deposit_policy,
+                total_minor=totals_of(self.store, conn, order.id).total_minor,
+                **context,
+            )
+            skipped = skipped_for_currency(rules.deposit_policy, **context)
+            if amount is None and skipped:
+                raise LifecycleError(
+                    "deposit_policy_currency",
+                    f"order {order.label} is in {order.currency}: the deposit policy's rules"
+                    f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
+                    " by hand",
+                )
+            audit: dict[str, Any] = {"policy": True}
+            if skipped:
+                audit["skipped"] = skipped
+            updated = self._set_deposit(conn, order, by, amount, **audit)
+            if updated is None:
+                return order
+            order = updated
+        self._told(_Change(order))
+        return order
+
+    def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
+        """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
+        1 to 500 characters). The open deposit request stays open. A cart is
+        `order_not_submitted`. An order with no deposit has nothing to waive, and the same
+        reason again changes nothing: it is returned as it is, nothing written."""
+        reason = reason.strip()
+        if not 1 <= len(reason) <= 500:
+            raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            if order.deposit_minor is None or order.deposit_waived_reason == reason:
+                return order
+            order = self.store.set_deposit_fields(conn, order.id, deposit_waived_reason=reason)
+            self._event(conn, order, by, "deposit.waived", reason=reason)
+        self._told(_Change(order))
+        return order
+
+    def _deposit_paid(self, conn: Conn, order: Order) -> None:
+        """Refuses (`deposit_unpaid`) while a deposit is set, not waived, and not paid."""
+        if order.deposit_minor is None or order.deposit_waived_reason is not None:
+            return
+        paid = totals_of(self.store, conn, order.id).paid_minor
+        if paid < order.deposit_minor:
+            raise LifecycleError(
+                "deposit_unpaid",
+                f"order {order.label}'s deposit is not paid: {paid} of"
+                f" {order.deposit_minor} received; record the payment or proceed without it",
+            )
+
+    def _close_deposit(self, conn: Conn, order: Order, payment: Payment) -> None:
+        """Once the payments reach the deposit, ``payment`` closes the open deposit
+        requests (status `open` only)."""
+        if order.deposit_minor is None:
+            return
+        if totals_of(self.store, conn, order.id).paid_minor < order.deposit_minor:
+            return
+        for found in payments.requests_for_order(conn, order.id):
+            if found.kind == "deposit" and found.status == "open":
+                payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
+
+    # -- the balance (#5281, storefront spec §9) ------------------------------------------
+    # An order that asked for money (a deposit, or a payment request not cancelled) is
+    # left at acceptance with one open `balance` request for the rest: its other open or
+    # failed requests are cancelled, and the payments service closes their pages after the
+    # commit (`Payments.run_closing`). While a balance request stands (not `cancelled`), the
+    # balance is above zero and no one waived it, the order does not ship, and a shipment
+    # edit does not raise a quantity (`balance_unpaid`). A back-office order with no
+    # request ships as it always did.
+
+    def _open_balance(self, conn: Conn, order: Order, by: Actor, *, reopened: bool = False) -> None:
+        """At acceptance, when the order has a deposit or a payment request that is not
+        cancelled, leaves one open request asking for what is not paid yet. A lone open
+        `balance` request that already asks for it is kept. Otherwise every open or failed
+        request is cancelled and a `balance` request for the rest opens on the default
+        provider. ``reopened``: a cancelled order back past `quoted`, whose cancel ended
+        every request, so any request at all says it asked for money."""
+        found = payments.requests_for_order(conn, order.id)
+        asked = bool(found) if reopened else any(r.status != "cancelled" for r in found)
+        if order.deposit_minor is None and not asked:
+            return
+        due = totals_of(self.store, conn, order.id).balance_minor
+        live = [r for r in found if r.status in ("open", "failed")]
+        if (
+            len(live) == 1
+            and live[0].status == "open"
+            and live[0].kind == "balance"
+            and live[0].amount_minor == due
+        ):
+            return
+        for request in live:
+            payments.set_request_status(conn, request.id, "cancelled")
+            self._event(conn, order, by, "payment_request.cancelled", request_id=request.id)
+        if due <= 0:
+            return
+        opened = payments.insert_request(
+            conn,
+            order_id=order.id,
+            kind="balance",
+            provider=payments.default_provider(conn, self.offered_providers),
+            amount_minor=due,
+            currency=order.currency,
+            created_by=by,
+        )
+        self.store.insert_event(
+            conn,
+            order.id,
+            by,
+            "payment_request.opened",
+            {"request_id": opened.id, "kind": "balance", "amount_minor": due},
+        )
+
+    def _balance_due(self, conn: Conn, order: Order) -> int:
+        """The balance a `balance` request that is not cancelled asks of the order, or 0
+        when it has no such request or nothing is due (``totals.balance_due``)."""
+        found = payments.requests_for_order(conn, order.id)
+        if not has_standing_balance(found):
+            return 0
+        return balance_due(found, totals_of(self.store, conn, order.id).balance_minor)
+
+    def _regate_balance(self, conn: Conn, order: Order, by: Actor) -> None:
+        """Gap 2's case with no balance request yet: an order past acceptance that asked
+        for money (a deposit, or a request not cancelled) but opened no balance request,
+        because the deposit paid the whole total at accept. Once its balance is above zero
+        again, a `balance` request for it opens on the default provider. It cancels no
+        request; one the shop cancelled, or one still open, pending or failed, leaves it
+        alone."""
+        if order.status not in TAKES_ITEMS:
+            return
+        found = payments.requests_for_order(conn, order.id)
+        if any(r.kind == "balance" for r in found) or any(
+            r.status in ("open", "pending", "failed") for r in found
+        ):
+            return
+        if order.deposit_minor is None and all(r.status == "cancelled" for r in found):
+            return
+        due = totals_of(self.store, conn, order.id).balance_minor
+        if due <= 0:
+            return
+        opened = payments.insert_request(
+            conn,
+            order_id=order.id,
+            kind="balance",
+            provider=payments.default_provider(conn, self.offered_providers),
+            amount_minor=due,
+            currency=order.currency,
+            created_by=by,
+        )
+        self.store.insert_event(
+            conn,
+            order.id,
+            by,
+            "payment_request.opened",
+            {"request_id": opened.id, "kind": "balance", "amount_minor": due},
+        )
+
+    def _balance_paid(self, conn: Conn, order: Order) -> None:
+        """Refuses (`balance_unpaid`) while the order has a `balance` request not
+        cancelled, no one waived the balance, and the balance is above zero. A paid
+        request does not free a balance that grew after it."""
+        if order.balance_waived_reason is not None:
+            return
+        balance = self._balance_due(conn, order)
+        if balance > 0:
+            raise LifecycleError(
+                "balance_unpaid",
+                f"order {order.label}'s balance is not paid: {balance} due;"
+                " record the payment or ship without full payment",
+            )
+
+    def waive_balance(self, order_id: str, by: Actor, reason: str) -> Order:
+        """ "Ship without full payment": the order ships unpaid, for ``reason`` (trimmed,
+        1 to 500 characters), once accepted (`order_not_accepted` before;
+        `order_not_submitted` on a cart). The open balance request stays open. The same
+        reason again, or nothing to waive (no balance request that is not cancelled, or no
+        balance due), writes nothing."""
+        reason = reason.strip()
+        if not 1 <= len(reason) <= 500:
+            raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            if order.status not in DERIVED:
+                raise LifecycleError(
+                    "order_not_accepted", f"order {order.label} is {order.status}, not accepted"
+                )
+            if order.balance_waived_reason == reason or not self._balance_due(conn, order):
+                return order
+            order = self.store.set_deposit_fields(conn, order.id, balance_waived_reason=reason)
+            self._event(conn, order, by, "balance.waived", reason=reason)
+        self._told(_Change(order))
+        return order
 
     def set_request_link(
         self, request_id: str, *, hosted: HostedRequest | None, error: str | None
@@ -1182,6 +1656,7 @@ class Lifecycle:
         if found.status != "paid":
             payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
         self._close_balance(conn, order, payment)
+        self._close_deposit(conn, order, payment)
         if event.fee_minor:
             # Job cost spec §4.4: the provider's fee, in the payment's own transaction.
             self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
@@ -1493,6 +1968,7 @@ class Lifecycle:
                     "order_not_acceptable", f"order {order.label} is {order.status}"
                 )
             self._not_on_hold(order)
+            self._no_payment_in_flight(conn, order)
             items = self.store.items(order.id, conn=conn)
             open_items = [item for item in items if item.status != "cancelled"]
             if not open_items:
@@ -1521,6 +1997,7 @@ class Lifecycle:
             )
             accepted = self.store.set_order_status(conn, order.id, "accepted")
             self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
+            self._open_balance(conn, order, by)
         self._told(_Change(accepted))
         return accepted
 
@@ -1656,7 +2133,11 @@ class Lifecycle:
         `reopen_item` brings one back (an item with no accepted quote too, as `draft` or
         `quoted`: an order cancelled from `accepted`, `in_production` or `ready` takes
         such an item, #5349); then its status follows from its rows. Either way `closed_at`
-        and `cancelled_at` are cleared and the quotes' sliced files are held again."""
+        and `cancelled_at` are cleared and the quotes' sliced files are held again. A
+        cancelled order back in `accepted`, `in_production` or `ready` that had asked for
+        money (a deposit, or any request: its cancel ended them all) gets one open `balance`
+        request for what is not paid (#5281, ``_open_balance``), even when the shop had
+        cancelled the balance request before; the route links it after the commit."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             if order.status not in ENDED:
@@ -1707,6 +2188,10 @@ class Lifecycle:
                     attempted,
                 )
             reopened = self.store.reopen_order_row(conn, order.id, target)
+            self._retax(conn, reopened, by)
+            if order.status == "cancelled" and target in TAKES_ITEMS:
+                # The cancel ended the balance request: the gate comes back with the order.
+                self._open_balance(conn, reopened, by, reopened=True)
             self._event(
                 conn,
                 order,
@@ -1756,7 +2241,10 @@ class Lifecycle:
                 )
             item = self.store.update_item(conn, item.id, status=status)
             self._event(conn, order, by, "item.reopened", item_id=item.id, to=status)
+            # After the rederive: an item reopened on a `shipped` order moves it back to
+            # one `_retax` writes for, which the locked row is not.
             order = self._rederive(conn, order, by)
+            self._retax(conn, order, by)
             self._hold(conn, self._standing(conn, item.id))
         self._told(_Change(order, [(item, None)]))
         return item
@@ -2056,6 +2544,7 @@ class Lifecycle:
                 output_id=output_id,
                 after_acceptance=after_acceptance,
             )
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return revision
@@ -2238,6 +2727,8 @@ class Lifecycle:
             items = [
                 self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
             ]
+            # Once for the whole add, not once per item.
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None) for item in items]))
         return items
@@ -2314,6 +2805,7 @@ class Lifecycle:
                     conn, order, by, "item.parts_set", item_id=copy.id, parts=_parts_detail(parts)
                 )
             self._event(conn, order, by, "item.duplicated", item_id=copy.id, from_item_id=item.id)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(copy, None)]))
         return copy
@@ -2646,6 +3138,7 @@ class Lifecycle:
             if price is not None:
                 item = self._custom_price(conn, order, item, price, by, accept=accept)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -2738,6 +3231,7 @@ class Lifecycle:
                     items=[item.id],
                 )
             self._event(conn, order, by, "item.deleted", item_id=item.id)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
 
@@ -2751,6 +3245,7 @@ class Lifecycle:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             item = self.store.update_item(conn, item.id, status="cancelled")
             self._event(conn, order, by, "item.cancelled", item_id=item.id)
+            self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
             # §3.4: cancelling the item releases every quote's sliced file.
             released = self._quote_ids(conn, [item.id])
@@ -2863,6 +3358,7 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="quoted")
             changed.append((item, None))
         self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+        self._retax(conn, order, by)
         order = self._rederive(conn, order, by)
         released = [
             other.id
@@ -3022,6 +3518,7 @@ class Lifecycle:
             conn, item.id, status="approved", revised_after_acceptance=False
         )
         self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+        self._retax(conn, order, by)
         order = self._rederive(conn, order, by)
         released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
         return order, item, released
@@ -3069,6 +3566,7 @@ class Lifecycle:
                 )
             if revision.sent_at is not None:
                 return revision
+            self._deposit_paid(conn, order)
             if not self.store.subject_attachments(revision_subject(revision.id), conn=conn):
                 raise LifecycleError(
                     "revision_empty", f"revision {revision.number} has no file to send"
@@ -3807,6 +4305,7 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._test_printable(conn, order, item_id, revision_id)
+            self._deposit_paid(conn, order)
             attempt = self.store.insert_fulfilment(
                 conn,
                 item.id,
@@ -4143,6 +4642,7 @@ class Lifecycle:
                     "order_not_accepted", f"order {order.label} is {order.status}, not accepted"
                 )
             self._not_on_hold(order)
+            self._balance_paid(conn, order)
             self._shippable(conn, order, body.items)
             shipment = self.store.insert_shipment(
                 conn,
@@ -4181,6 +4681,9 @@ class Lifecycle:
             sent = edit.model_fields_set
             if edit.items is not None:
                 self._shippable(conn, order, edit.items, replacing=shipment.id)
+                before = {line.order_item_id: line.quantity for line in shipment.items}
+                if any(line.quantity > before.get(line.order_item_id, 0) for line in edit.items):
+                    self._balance_paid(conn, order)
 
             def given(name: str) -> Any:
                 return getattr(edit, name) if name in sent else UNSET

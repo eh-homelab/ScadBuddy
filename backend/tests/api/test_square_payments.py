@@ -85,6 +85,7 @@ def square_request(client: TestClient) -> tuple[str, dict[str, Any]]:
     assert connected.status_code == 200, connected.text
     # The settings page shows this as "Connected as …": sandbox or production.
     assert connected.json()["account_label"] == "Square location Print shop (sandbox)"
+    assert connected.json()["currency"] == "USD"
     assert TOKEN not in connected.text and SIGNATURE_KEY not in connected.text
     order = payable_order(client, 700)
     req = request_payment(client, order["id"], provider="square")

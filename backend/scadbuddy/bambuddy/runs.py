@@ -196,6 +196,15 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
 
 
+class LanPending(BaseModel):
+    """A run subject with LAN starts that no archive names yet (#5724): when the first
+    and the last of them started."""
+
+    subject: str
+    first: datetime
+    last: datetime
+
+
 class TransactionalEvents(Protocol):
     """Publishes an event inside a caller's transaction (`PgNotifyEventBus`)."""
 
@@ -289,6 +298,12 @@ class PrintRunStore:
         if not subtask_names:
             return []
         return await asyncio.to_thread(self._lan_started, run_subject, subtask_names)
+
+    async def lan_unnamed(self, since: datetime, limit: int) -> list[LanPending]:
+        """The run subjects with a LAN start since ``since`` that no archive names yet
+        (``lan_print_archives``, #5724), newest start first, at most ``limit``: what the
+        prints list looks for in Bambuddy's archives (`linking.link_lan_starts`)."""
+        return await asyncio.to_thread(self._lan_unnamed, since, limit)
 
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         """The output's newest run, for as long as retention keeps it (#1049): the one
@@ -450,6 +465,23 @@ class PrintRunStore:
                 (run_subject, subtask_names),
             ).fetchall()
         return [PrintRun.model_validate(row) for row in rows]
+
+    def _lan_unnamed(self, since: datetime, limit: int) -> list[LanPending]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT r.output_id AS subject, min(s.at) AS first, max(s.at) AS last"
+                " FROM print_runs r CROSS JOIN LATERAL (SELECT e->>'subtask_name' AS name,"
+                "  (e->>'started_at')::timestamptz AS at"
+                # A result with no start list (a queued run's, or none yet) gives no rows.
+                "  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
+                "   THEN r.result->'lan' END) AS e) AS s"
+                " WHERE s.at >= %s"
+                " AND NOT EXISTS (SELECT 1 FROM lan_print_archives a"
+                "  WHERE a.run_id = r.id AND a.subtask_name = s.name)"
+                " GROUP BY r.output_id ORDER BY max(s.at) DESC LIMIT %s",
+                (since, limit),
+            ).fetchall()
+        return [LanPending.model_validate(dict(row)) for row in rows]
 
     def _latest_for_output(self, output_id: str) -> PrintRun | None:
         with self._pool.connection() as conn:

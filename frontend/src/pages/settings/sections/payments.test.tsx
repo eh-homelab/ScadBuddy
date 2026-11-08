@@ -77,6 +77,25 @@ describe('Settings → Payments (#4957)', () => {
     expect(within(region('Payments')).getByLabelText('Account')).toBeInTheDocument()
   })
 
+  it('warns when the account takes another currency than the orders (#5666)', async () => {
+    mockConnectProvider('a', 'CAD')
+    renderSettingsSection(<Payments />, { route })
+    const fake = within(await screen.findByRole('region', { name: 'Fake' }))
+    expect(await fake.findByText('Connected in CAD; orders are in USD. New payment links will fail.')).toBeInTheDocument()
+  })
+
+  it('says nothing when the account takes the orders currency, or any', async () => {
+    mockConnectProvider('a', 'USD')
+    const first = renderSettingsSection(<Payments />, { route })
+    expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
+    expect(screen.queryByText(/New payment links will fail/)).not.toBeInTheDocument()
+    first.unmount()
+    mockConnectProvider('a')
+    renderSettingsSection(<Payments />, { route })
+    expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
+    expect(screen.queryByText(/New payment links will fail/)).not.toBeInTheDocument()
+  })
+
   it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {
     setMockKek(false)
     resetMockState()

@@ -166,7 +166,16 @@ def test_an_account_in_another_currency_is_409_and_not_connected(
         return Verified(account_label="Fake account a", currency="USD")
 
     monkeypatch.setattr(FAKE, "verify", in_dollars)
+    connected = client.put(PROVIDER, json=FAKE_CONNECT)
+    assert connected.status_code == 200
+    # Kept, so Settings can warn when orders_currency moves away from it.
+    assert connected.json()["currency"] == "USD"
+    assert fake_status(client)["currency"] == "USD"
+
+
+def test_an_account_that_takes_any_currency_has_none(client: TestClient) -> None:
     assert client.put(PROVIDER, json=FAKE_CONNECT).status_code == 200
+    assert fake_status(client)["currency"] is None
 
 
 def test_connecting_without_a_kek_is_409(settings: Settings) -> None:
