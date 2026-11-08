@@ -138,6 +138,8 @@ export function OrderPage() {
   // #5281 — the charges editor's unsaved rows hold the shipping option picker, which writes
   // the same list: a save of stale rows would undo the option.
   const [chargesDirty, setChargesDirty] = useState(false)
+  // …and a shipping option write in flight, until its reload lands, locks the editor's rows.
+  const [pickerBusy, setPickerBusy] = useState(false)
 
   function reload() {
     view.refresh()
@@ -379,8 +381,8 @@ export function OrderPage() {
               {/* #4955 step 4 — the summary: subtotal, each charge, total, paid and balance. */}
               <h2 className="text-sm font-medium">Summary</h2>
               {/* #5281 — the shipping option writes the order's one shipping charge. */}
-              <ShippingOptionPicker order={order} charges={charges} options={shippingOptions} disabled={chargesDirty} onChanged={reload} />
-              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} onDirtyChange={setChargesDirty} />
+              <ShippingOptionPicker order={order} charges={charges} options={shippingOptions} disabled={chargesDirty} onBusyChange={setPickerBusy} onChanged={reload} />
+              <ChargesEditor order={order} charges={charges} mode={adds} onChanged={reload} onDirtyChange={setChargesDirty} locked={pickerBusy} />
               <OrderSummary
                 currency={order.currency}
                 exponent={order.minor_exponent}

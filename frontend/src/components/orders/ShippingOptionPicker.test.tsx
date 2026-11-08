@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { ShippingOption } from '../../api/types'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
@@ -68,6 +68,18 @@ describe('ShippingOptionPicker (#5281)', () => {
     renderPage(<ShippingOptionPicker order={{ id: ORDER_DRAFT, status: 'draft', currency: 'USD', minor_exponent: 2, source: 'back_office', submitted_at: null }} charges={[]} options={OPTIONS} onChanged={() => {}} disabled />)
     expect(await screen.findByRole('combobox', { name: 'Shipping option' })).toBeDisabled()
     expect(screen.getByText('Save or discard the charges first')).toBeInTheDocument()
+  })
+
+  // Review fix round 2: busy from the write until the reload brings the new charges.
+  it('reports itself busy from the write until the new charges arrive', async () => {
+    const busy = vi.fn()
+    const o = { id: ORDER_DRAFT, status: 'draft' as const, currency: 'USD', minor_exponent: 2, source: 'back_office' as const, submitted_at: null }
+    const view = renderPage(<ShippingOptionPicker order={o} charges={[]} options={OPTIONS} onChanged={() => {}} onBusyChange={busy} />)
+    await choose(view.user, screen.getByRole('combobox', { name: 'Shipping option' }), 'Tracked post · $6.50')
+    await waitFor(() => expect(shipping(ORDER_DRAFT)).toHaveLength(1))
+    expect(busy).toHaveBeenLastCalledWith(true)
+    view.rerender(<ShippingOptionPicker order={o} charges={state.charges.filter((c) => c.order_id === ORDER_DRAFT)} options={OPTIONS} onChanged={() => {}} onBusyChange={busy} />)
+    await waitFor(() => expect(busy).toHaveBeenLastCalledWith(false))
   })
 })
 

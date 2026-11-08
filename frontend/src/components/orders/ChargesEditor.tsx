@@ -23,6 +23,7 @@ export function ChargesEditor({
   mode,
   onChanged,
   onDirtyChange,
+  locked = false,
 }: {
   order: Pick<Order, 'id' | 'number' | 'status' | 'currency' | 'minor_exponent'>
   charges: OrderCharge[]
@@ -33,6 +34,8 @@ export function ChargesEditor({
   /** Told when the editor gets unsaved rows and when it loses them (#5281: the shipping
    * option picker writes the same list, so it waits while they stand). */
   onDirtyChange?: (dirty: boolean) => void
+  /** While the shipping option is being written: no edit starts on rows it will replace. */
+  locked?: boolean
 }) {
   const { currency, minor_exponent: exponent } = order
   const editable = mode !== null
@@ -46,6 +49,19 @@ export function ChargesEditor({
   useEffect(() => {
     if (!dirty) setRows(charges.filter((c) => !c.auto).map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent), shipping_option_id: c.shipping_option_id ?? null })))
   }, [charges, exponent, dirty])
+  // A save answered: the charges it was made over, until the reload brings new ones. The
+  // editor stays unsaved till then, so its rows do not flash back and the picker stays off.
+  const savedOver = useRef<OrderCharge[] | null>(null)
+  const [awaiting, setAwaiting] = useState(false)
+  useEffect(() => {
+    if (savedOver.current !== null && charges !== savedOver.current) {
+      savedOver.current = null
+      setAwaiting(false)
+      setDirty(false)
+    }
+  }, [charges])
+  // No edit starts while the rows are about to be replaced, by the picker or by the reload.
+  const frozen = locked || awaiting
   const told = useRef(onDirtyChange)
   useEffect(() => {
     told.current = onDirtyChange
@@ -123,7 +139,8 @@ export function ChargesEditor({
           setError(null)
           saveCharges(order.id, body, mode)
             .then(() => {
-              setDirty(false)
+              savedOver.current = charges
+              setAwaiting(true)
               setConfirming(false)
               onChanged()
             })
@@ -136,7 +153,7 @@ export function ChargesEditor({
       >
         {rows.map((row, index) => (
           <div key={index} className="flex flex-wrap items-center gap-2">
-            <Select value={row.kind} onValueChange={(kind) => edit(index, { kind: kind as OrderCharge['kind'] })}>
+            <Select value={row.kind} disabled={frozen} onValueChange={(kind) => edit(index, { kind: kind as OrderCharge['kind'] })}>
               <SelectTrigger aria-label={`Charge ${index + 1} kind`} className="w-28">
                 <SelectValue />
               </SelectTrigger>
@@ -148,13 +165,14 @@ export function ChargesEditor({
                 ))}
               </SelectContent>
             </Select>
-            <Input aria-label={`Charge ${index + 1} label`} className="w-40" value={row.label} onChange={(e) => edit(index, { label: e.target.value })} />
-            <Input aria-label={`Charge ${index + 1} amount`} inputMode="decimal" className="w-24" value={row.amount} onChange={(e) => edit(index, { amount: e.target.value })} />
+            <Input aria-label={`Charge ${index + 1} label`} disabled={frozen} className="w-40" value={row.label} onChange={(e) => edit(index, { label: e.target.value })} />
+            <Input aria-label={`Charge ${index + 1} amount`} disabled={frozen} inputMode="decimal" className="w-24" value={row.amount} onChange={(e) => edit(index, { amount: e.target.value })} />
             <Button
               type="button"
               size="xs"
               variant="ghost"
               aria-label={`Remove charge ${index + 1}`}
+              disabled={frozen}
               onClick={() => {
                 setDirty(true)
                 setConfirming(false)
@@ -176,6 +194,7 @@ export function ChargesEditor({
             type="button"
             size="sm"
             variant="outline"
+            disabled={frozen}
             onClick={() => {
               setDirty(true)
               setConfirming(false)
@@ -189,7 +208,7 @@ export function ChargesEditor({
               Back
             </Button>
           )}
-          {dirty && !confirming && (
+          {dirty && !confirming && !awaiting && (
             <Button
               type="button"
               size="sm"
@@ -203,7 +222,7 @@ export function ChargesEditor({
               Discard
             </Button>
           )}
-          <Button type="submit" size="sm" disabled={busy || !dirty || clash}>
+          <Button type="submit" size="sm" disabled={busy || !dirty || clash || frozen}>
             {confirming ? 'Change the accepted order' : 'Save charges'}
           </Button>
         </div>

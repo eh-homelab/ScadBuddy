@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { Order, OrderCharge, ShippingOption } from '../../api/types'
 import { formatMoney } from '../../lib/money'
@@ -21,6 +21,7 @@ export function ShippingOptionPicker({
   options,
   onChanged,
   disabled = false,
+  onBusyChange,
 }: {
   order: Pick<Order, 'id' | 'status' | 'currency' | 'minor_exponent' | 'source' | 'submitted_at'>
   charges: OrderCharge[]
@@ -28,9 +29,27 @@ export function ShippingOptionPicker({
   onChanged: () => void
   /** While the charges editor has unsaved rows: a save of them would undo the option. */
   disabled?: boolean
+  /** Told when a write starts and once its reload has brought the new charges, so the
+   * charges editor starts no edit on rows the write replaces. */
+  onBusyChange?: (busy: boolean) => void
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A write answered: the charges it was made over, until the reload brings new ones.
+  const writtenOver = useRef<OrderCharge[] | null>(null)
+  useEffect(() => {
+    if (writtenOver.current !== null && charges !== writtenOver.current) {
+      writtenOver.current = null
+      setBusy(false)
+    }
+  }, [charges])
+  const told = useRef(onBusyChange)
+  useEffect(() => {
+    told.current = onBusyChange
+  })
+  useEffect(() => {
+    told.current?.(busy)
+  }, [busy])
   const chosen = charges.find((c) => c.kind === 'shipping' && c.shipping_option_id)?.shipping_option_id ?? null
   const editable = OPEN_FOR_EDITS.has(order.status) && !isCart(order)
   if (options.length === 0 && chosen === null) return null
@@ -57,9 +76,14 @@ export function ShippingOptionPicker({
           setError(null)
           api
             .setShippingOption(order.id, value === NONE ? null : value)
-            .then(() => onChanged())
-            .catch((err: unknown) => setError(refusalText(err)))
-            .finally(() => setBusy(false))
+            .then(() => {
+              writtenOver.current = charges
+              onChanged()
+            })
+            .catch((err: unknown) => {
+              setError(refusalText(err))
+              setBusy(false)
+            })
         }}
       >
         <SelectTrigger aria-label="Shipping option" className="w-full">

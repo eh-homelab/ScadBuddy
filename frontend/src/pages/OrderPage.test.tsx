@@ -424,7 +424,27 @@ describe('OrderPage, the shipping option and the charges (#5281)', () => {
         ['fee', 'Rush', 300, null],
       ]),
     )
-    expect(screen.getByRole('combobox', { name: 'Shipping option' })).toBeEnabled()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Shipping option' })).toBeEnabled())
+  })
+
+  // Review fix round 2: no edit starts on the charges while the option is being written.
+  it('locks Add charge while the shipping option is being written', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.put('/api/v1/orders/:id/shipping-option', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const charges = screen.getByRole('region', { name: 'Charges' })
+    await choose(user, screen.getByRole('combobox', { name: 'Shipping option' }), 'Tracked post · $6.50')
+    await waitFor(() => expect(within(charges).getByRole('button', { name: 'Add charge' })).toBeDisabled())
+    release()
+    await waitFor(() => expect(within(charges).getByLabelText('Charge 1 label')).toHaveValue('Tracked post'))
+    expect(within(charges).getByRole('button', { name: 'Add charge' })).toBeEnabled()
   })
 })
 

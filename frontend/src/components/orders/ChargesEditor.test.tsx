@@ -209,6 +209,39 @@ describe('ChargesEditor', () => {
       expect(within(region).queryByLabelText('Charge 1 label')).toBeNull()
       expect(dirty).toHaveBeenLastCalledWith(false)
     })
+
+    // Review fix round 2: the editor stays unsaved until the save's reload lands, so the
+    // picker stays off and the rows do not flash back to the old charges.
+    it('stays unsaved after the save answers, until the reload brings the new charges', async () => {
+      const dirty = vi.fn()
+      const o = { ...order(ORDER_DRAFT, 'draft') }
+      const view = renderPage(<ChargesEditor order={o} charges={[]} mode={addMode(o)} onChanged={() => {}} onDirtyChange={dirty} />)
+      const region = screen.getByRole('region', { name: 'Charges' })
+      await view.user.click(within(region).getByRole('button', { name: 'Add charge' }))
+      await view.user.type(within(region).getByLabelText('Charge 1 label'), 'Post')
+      await view.user.type(within(region).getByLabelText('Charge 1 amount'), '5')
+      await view.user.click(within(region).getByRole('button', { name: 'Save charges' }))
+      await waitFor(() => expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT)).toHaveLength(1))
+      // Answered, not reloaded: the row and the unsaved state stay.
+      await waitFor(() => expect(within(region).getByRole('button', { name: 'Save charges' })).toBeDisabled())
+      expect(within(region).getByLabelText('Charge 1 label')).toHaveValue('Post')
+      expect(dirty).toHaveBeenLastCalledWith(true)
+      const saved = state.charges.filter((c) => c.order_id === ORDER_DRAFT)
+      view.rerender(<ChargesEditor order={o} charges={saved} mode={addMode(o)} onChanged={() => {}} onDirtyChange={dirty} />)
+      await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false))
+      expect(within(region).getByLabelText('Charge 1 label')).toHaveValue('Post')
+    })
+
+    it('locks its edit controls while the shipping option is being written', () => {
+      const o = { ...order(ORDER_DRAFT, 'draft') }
+      renderPage(<ChargesEditor order={o} charges={[POST]} mode={addMode(o)} onChanged={() => {}} locked />)
+      const region = screen.getByRole('region', { name: 'Charges' })
+      expect(within(region).getByRole('button', { name: 'Add charge' })).toBeDisabled()
+      expect(within(region).getByLabelText('Charge 1 label')).toBeDisabled()
+      expect(within(region).getByLabelText('Charge 1 amount')).toBeDisabled()
+      expect(within(region).getByRole('combobox', { name: 'Charge 1 kind' })).toBeDisabled()
+      expect(within(region).getByRole('button', { name: 'Remove charge 1' })).toBeDisabled()
+    })
   })
 })
 
