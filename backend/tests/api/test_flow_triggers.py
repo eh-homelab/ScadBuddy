@@ -348,9 +348,11 @@ def test_an_edit_returns_the_standing_grant_to_requested(
     assert body["schedule"]["interval_s"] == 7200
     assert body["updated_by"] == {"kind": "browser"}
     assert (body["grant"]["status"], body["grant"]["in_force"]) == ("requested", False)
-    # A run already started keeps its run grant's row (it spends only under the approval
-    # that seeded it, which the edit ended).
-    assert run_view(client, fired["run_id"])["grant"]["in_force"] is True
+    # A run already started keeps its run grant's row, which spends only under the
+    # approval that seeded it; the edit ended that, so the view says it is not in force
+    # (review of #5668: the view checks the chain, as a call does).
+    fired_grant = run_view(client, fired["run_id"])["grant"]
+    assert (fired_grant["status"], fired_grant["in_force"]) == ("approved", False)
     # The next fire gets none until a person approves it again.
     later = fire(workflow_reaper, client, trigger["id"])
     assert run_view(client, later["run_id"])["grant"] is None

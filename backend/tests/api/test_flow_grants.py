@@ -18,6 +18,7 @@ from tests.api.conftest import FakeAgentTools
 from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, start, until
 from tests.api.test_orders import create_order
+from tests.flows.flows_support import parent_session
 
 __all__ = ["settings"]
 
@@ -336,6 +337,37 @@ def test_a_browser_started_runs_call_starts_a_linked_run(client: TestClient) -> 
         headers={
             "Idempotency-Key": "bc-other",
             "X-ScadBuddy-Agent-Author": "token:t9",
+            "X-ScadBuddy-Flow-Run": parent,
+        },
+        json={},
+    )
+    assert refused.status_code == 409, refused.text
+
+
+def test_a_run_from_a_handed_off_archived_session_calls_as_its_owner_now(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """Review of #5668: a run an agent started from a session makes its calls as that
+    session's owner now, archived or not (the agent's `startedBy`). The session was handed
+    off to another token and archived: that token's call starts a linked run, `token:t1`'s
+    (the run's recorded principal) is refused."""
+    session = str(uuid.uuid4())
+    new_owner = f"token:{uuid.uuid4()}"
+    starter = {"X-ScadBuddy-Agent-Author": "token:t1", "X-ScadBuddy-Agent-Author-Session": session}
+    parent = started(client, "hp", {}, **starter)
+    with psycopg.connect(pg_conninfo) as conn:
+        parent_session(conn, session, new_owner)
+        conn.execute("UPDATE ai_sessions SET archived_at = now() WHERE id = %s", (session,))
+    owner = {"X-ScadBuddy-Agent-Author": new_owner, "X-ScadBuddy-Flow-Run": parent}
+    child = started(client, "hc", {}, **owner)
+    view = client.get(f"/api/v1/workflow-runs/{child}").json()
+    assert view["run"]["parent_run_id"] == parent
+    definition = register(client, WAITS)
+    refused = client.post(
+        f"/api/v1/workflows/{definition['id']}/runs",
+        headers={
+            "Idempotency-Key": "hc-recorded",
+            "X-ScadBuddy-Agent-Author": "token:t1",
             "X-ScadBuddy-Flow-Run": parent,
         },
         json={},

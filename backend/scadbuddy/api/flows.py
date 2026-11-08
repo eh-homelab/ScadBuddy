@@ -300,10 +300,11 @@ class GrantView(BaseModel):
     released: list[str] = []
 
 
-def _grant_view(grant: Grant, uses: list[GrantUse]) -> GrantView:
+def _grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantView:
     return GrantView(
         **grant.model_dump(exclude={"run_id"}),
-        in_force=grant.in_force(datetime.now(UTC)),
+        # The whole chain's (`FlowStore.grant_in_force`), as each call is checked.
+        in_force=in_force,
         uses=[GrantUseView.model_validate(u.model_dump()) for u in uses],
     )
 
@@ -368,8 +369,9 @@ async def _parent_run(flows: Flows) -> Run | None:
 async def _runs_as(flows: Flows, started_by: dict[str, Any], principal: str | None) -> bool:
     """Whether a run's calls are made as `principal`, as the agent derives it from the
     run's `started_by` (agent `temporal/flowRuns.ts` `startedBy`, review of #5668): the
-    browser's signed-in person, else `browser`; an agent's starter session's owner (the
-    read `parent_tiers` already makes), else its own principal."""
+    browser's signed-in person, else `browser`; an agent's starter session's owner now,
+    archived or handed off (`session_owner`), else, with no such session, its own
+    principal."""
     if principal is None:
         return False
     by = started_by.get("principal")
@@ -378,9 +380,13 @@ async def _runs_as(flows: Flows, started_by: dict[str, Any], principal: str | No
     if started_by.get("kind") != "agent" or not isinstance(by, str):
         return False
     session = started_by.get("session")
-    if isinstance(session, str) and await flows.store.parent_tiers(session, principal):
-        return True
-    return by == principal
+    if isinstance(session, str):
+        # Its owner now, archived or handed off (as the agent reads it); its own
+        # principal only when the session row is gone.
+        owner = await flows.store.session_owner(session)
+        if owner is not None:
+            return author_principal(owner) == principal
+    return principal in (by, author_principal(by))
 
 
 def _started_by() -> dict[str, Any]:
@@ -934,7 +940,7 @@ async def _run_view(
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
         view.display_name = (await flows.definitions.display_names({view.name})).get(view.name)
         if (grant := await flows.store.get_grant(run_id)) is not None:
-            view.grant = _grant_view(grant, [])
+            view.grant = _grant_view(grant, [], await flows.store.grant_in_force(grant))
         return view
     display_name = (await flows.definitions.display_names({run.name})).get(run.name)
     run = run.model_copy(update={"display_name": display_name})
@@ -949,7 +955,9 @@ async def _run_view(
         images=await run_images(flows.connect, run.id) if flows.connect is not None else [],
     )
     if (grant := await flows.store.get_grant(run.id)) is not None:
-        view.grant = _grant_view(grant, await flows.store.grant_uses(run.id))
+        view.grant = _grant_view(
+            grant, await flows.store.grant_uses(run.id), await flows.store.grant_in_force(grant)
+        )
     if run.status in TERMINAL:
         return view
     if flows.client is None:
@@ -1355,7 +1363,11 @@ def _grant_state(err: GrantStateError) -> ApiError:
 async def _grant_answer(flows: Flows, grant: Grant | None) -> GrantView:
     if grant is None:
         raise _no_grant()
-    return _grant_view(grant, await flows.store.grant_uses(grant.run_id))
+    return _grant_view(
+        grant,
+        await flows.store.grant_uses(grant.run_id),
+        await flows.store.grant_in_force(grant),
+    )
 
 
 class ApproveGrant(BaseModel):

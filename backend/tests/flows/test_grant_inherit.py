@@ -14,7 +14,7 @@ from scadbuddy.auth.models import Service
 from scadbuddy.auth.run_tokens import mint_run_token
 from scadbuddy.auth.service_credentials import SCOPES
 from scadbuddy.flows.grants import CallFacts, GrantSpec, Inside, Outside, inherited, match_grant
-from scadbuddy.flows.models import Run
+from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from tests.flows.test_grant_store import hash_of, run_row, spec
@@ -170,6 +170,53 @@ async def test_a_child_stops_when_its_parents_grant_ends_however_it_ends(
             (granted.id,),
         )
     assert isinstance(await match(store, child, "o1"), Outside)
+
+
+@pg
+async def test_an_ended_chain_shows_out_of_force_and_records_no_decision(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    """Review of #5668: the run view's `in_force` and a grant decision's record check the
+    whole chain, as a call does: a use recorded while the parent's grant stood records no
+    approval once that grant has expired."""
+    parent = await run_row(store)
+    granted = await store.insert_grant(
+        parent, spec({"fn": "queue_print"}), status="approved", requested_by={"kind": "browser"}
+    )
+    child = await run_row(store)
+    grant = await store.inherit_grant(child, parent, None, requested_by={}, approved=True)
+    assert grant is not None and await store.grant_in_force(grant)
+    request_id = f"flow:{child}:w:c"
+    inside = await match_grant(
+        store,
+        order_facts("o1"),
+        hash_of,
+        run_id=child,
+        request_id=request_id,
+        fn="queue_print",
+        tool=None,
+        args={"source": {"order_id": "o1", "order_item_id": "i1"}, "request": {}},
+        now=datetime.now(UTC),
+    )
+    assert isinstance(inside, Inside)
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE flow_grants SET expires_at = now() - interval '1 second' WHERE id = %s",
+            (granted.id,),
+        )
+    assert not await store.grant_in_force(grant)
+    decision = Decision(
+        request_id=request_id,
+        run_id=child,
+        workflow_run_id="w",
+        call_id="c",
+        kind="approval",
+        outcome="approved",
+        response={},
+        responder=f"grant:{inside.grant_id}",
+        input_hash=inside.input_hash,
+    )
+    assert await store.record_grant_decision(decision) is False
 
 
 @pg

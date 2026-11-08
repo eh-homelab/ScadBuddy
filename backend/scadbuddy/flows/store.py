@@ -390,6 +390,35 @@ class FlowStore:
         """A parent's narrowed input for the call, its hash, and who proposed it."""
         return await asyncio.to_thread(self._get_proposal, request_id)
 
+    async def session_owner(self, session: str) -> str | None:
+        """The assistant session's owner now, archived or not, as the agent reads it for a
+        run's `started_by` (agent `temporal/flowRuns.ts` `startedBy`); None when there is
+        no such session. A read of `ai_sessions` from the API, as `parent_tiers` makes,
+        until #5299's CRUD route replaces both."""
+        return await asyncio.to_thread(self._session_owner, session)
+
+    def _session_owner(self, session: str) -> str | None:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT owner_id FROM ai_sessions WHERE id::text = %s", (session,)
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                return None  # no agent service has migrated this database
+        return None if row is None else str(row["owner_id"])
+
+    async def grant_in_force(self, grant: Grant) -> bool:
+        """Whether calls inside `grant` run without asking now: it is in force, and so is
+        every grant it inherits from and the standing grant it was seeded from
+        (`_chain_in_force`, #4252), as a call is checked."""
+        if not grant.in_force(datetime.now(UTC)):
+            return False
+        return await asyncio.to_thread(self._grant_in_force, grant)
+
+    def _grant_in_force(self, grant: Grant) -> bool:
+        with self._pool.connection() as conn:
+            return self._chain_in_force(conn, grant)
+
     async def parent_tiers(self, session: str, principal: str) -> list[str] | None:
         """The tiers the starter session acts with now (#2482, spec §4.4): the browser
         user's all of them, a token's its live tier (the tiers the agent sends the
@@ -865,6 +894,13 @@ class FlowStore:
                 (grant_id, decision.run_id, decision.request_id, decision.input_hash),
             ).fetchone()
             if held is None:
+                return False
+            granted = conn.execute(
+                f"SELECT {_GRANT} FROM flow_grants WHERE id = %s", (grant_id,)
+            ).fetchone()
+            # Inherited, or seeded from a standing grant (#4252): only while its whole
+            # chain is in force, as the check that recorded the use required.
+            if granted is None or not self._chain_in_force(conn, Grant.model_validate(granted)):
                 return False
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
