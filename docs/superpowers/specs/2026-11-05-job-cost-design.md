@@ -146,8 +146,9 @@ replayed webhook, a retried flow) write once.
   `currency_unconvertible`). Each report carries the session's spend since its last report,
   split equally between the orders it revised since then; an order already reported in the
   session gets nothing more. An item deleted before the report lands puts the entry on the
-  order. A share the backend refuses for good (the order gone, a currency no rate reaches)
-  is left unattributed, by design: no other order's entry takes it.
+  order. A share the backend refuses for good (the order gone, a currency no rate reaches,
+  a visitor's unsubmitted cart, `order_not_submitted`) is left unattributed, by design: no
+  other order's entry takes it. So is a share under one minor unit once its session is over.
 - **Payment fees.** When the payments seam (#4957) learns a provider's fee for a payment,
   it writes one `payment_fee` entry on the order, `source` `payment:<payment id>`, in the
   transaction that records the payment (agreed with the storefront spec's author). A

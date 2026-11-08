@@ -16,21 +16,23 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // The spend since the last report is split equally between the orders still to report; an
 // order with one revised item gets the entry on that item, one with several on the order.
 // The backend writes one entry per order and session, so an order already reported in this
-// session records nothing more. A report the route refuses for good (404 the order gone, since
-// an item gone falls back to the order; 409 a currency no rate reaches, or a visitor's cart
-// not yet submitted, `order_not_submitted`; 422 a body it cannot take) is dropped, and its share is counted as carried: no other order's entry takes it, so
-// it is in no entry. Any other failure (no credential yet or a
-// dead one, 401 and 403; 429; a 5xx; the backend out of reach) keeps it, with the share it
-// sent (`attempted_usd`), and the next report sends that same share again: an answer lost
-// after the backend wrote the entry loses no spend. A share the backend found under one minor
-// unit of the order's currency (it answers no entry) stays to report, with the next turn's
-// spend. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it leaves waits
-// for the next turn's end. The finish activity does not wait for `report`. A session runs one
-// report at a time across replicas (a session-level advisory lock on a connection of the lock
-// client, never one of the stores', freed with it if the process dies). `record` waits at
-// most RECORD_WAIT_MS for its row, so a revision call never waits on it. `sweep` (at start
-// and hourly, main.ts) reports what a session's last turn left, for a session no turn is
-// running, SWEEP_LIMIT sessions at most.
+// session records nothing more. A report the route refuses for good (404 the order gone,
+// since an item gone falls back to the order; 409 a currency no rate reaches, or a visitor's
+// cart not yet submitted, `order_not_submitted`; 400 or 422 a path or body it cannot take) is
+// dropped, and its share is counted as carried: no other order's entry takes it, so it is in
+// no entry. Any other failure (no credential yet or a dead one, 401 and 403; 429; a 5xx; the
+// backend out of reach) keeps it, with the share it sent (`attempted_usd`), and the next
+// report sends that same share again: an answer lost after the backend wrote the entry loses
+// no spend. A share the backend found under one minor unit of the order's currency (it
+// answers no entry) stays to report, with the next turn's spend; once the session is `done`
+// or `failed`, such a share is closed out, reported with nothing carried. One turn's reports
+// share one deadline (REPORT_DEADLINE_MS); what it leaves waits for the next turn's end. The
+// finish activity does not wait for `report`. A session runs one report at a time across
+// replicas (a session-level advisory lock on a connection of the lock client, never one of
+// the stores', freed with it if the process dies). `record` waits at most RECORD_WAIT_MS for
+// its row, so a revision call never waits on it. `sweep` (at start and hourly, main.ts)
+// reports what a session's last turn left, for a session no turn is running, SWEEP_LIMIT
+// sessions at most, the ones tried longest ago (`tried_at`) first.
 // Neither `record` nor `report` ever throws: a cost report never fails a call or a turn.
 
 export const REVISION_TOOLS: ReadonlySet<string> = new Set(['order_item_revision_add', 'order_item_revision_add_after_acceptance'])
@@ -47,7 +49,7 @@ export type AssistantCostReport = {
 }
 
 /**
- * `recorded` (written now or before), `refused` (404, 409 or 422 from the route: never sent
+ * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route: never sent
  * again), `deferred` (under one minor unit: nothing written, sent again with more spend),
  * `failed` (anything else: the same share sent again at the next report).
  */
@@ -59,8 +61,8 @@ export const ASSISTANT_COST_PATH = (orderId: string) => `/api/v1/internal/crud/a
 export const REPORT_TIMEOUT_MS = 5_000
 /** How long all of one turn's reports may take. */
 export const REPORT_DEADLINE_MS = 15_000
-/** The route's refusals that no later try mends: the order gone (an item gone falls back to the order), its currency or an unsubmitted cart, the body. */
-const FINAL_REFUSALS: ReadonlySet<number> = new Set([404, 409, 422])
+/** The route's refusals that no later try mends: the order gone (an item gone falls back to the order), its currency or an unsubmitted cart, the body or path. */
+const FINAL_REFUSALS: ReadonlySet<number> = new Set([400, 404, 409, 422])
 /** The advisory lock a session's report holds, by `hashtextextended` of this plus the session id. */
 const LOCK_PREFIX = 'ai_session_order_costs:'
 /** How long a row waits before the sweep reports it: past any turn that could still report it. */
@@ -91,7 +93,7 @@ export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch): Pos
         return answer.entry === null ? 'deferred' : 'recorded'
       }
       await response.body?.cancel()
-      // Only the route's own (its CRUD header) 404, 409 or 422 is final. A 401 or 403 (no
+      // Only the route's own (its CRUD header) 400, 404, 409 or 422 is final. A 401 or 403 (no
       // credential yet, a dead one), a 429, a 5xx, a proxy's answer or a missing route on an
       // older API is tried again.
       return FINAL_REFUSALS.has(response.status) && response.headers.get('x-scadbuddy-crud') === '1' ? 'refused' : 'failed'
@@ -203,7 +205,8 @@ export class OrderCosts implements TouchedSink {
 
   /**
    * Reports the sessions no turn is running that have had orders left to report for
-   * SWEEP_AFTER, oldest first, at most `sweepLimit` of them. Never throws.
+   * SWEEP_AFTER, at most `sweepLimit` of them: those never tried first, then those tried
+   * longest ago (`tried_at`), so sessions it cannot report never take every place. Never throws.
    */
   async sweep(): Promise<void> {
     try {
@@ -211,7 +214,7 @@ export class OrderCosts implements TouchedSink {
         SELECT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
         WHERE c.reported_at IS NULL AND c.at < now() - ${SWEEP_AFTER}::interval
           AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')
-        GROUP BY c.session_id ORDER BY min(c.at) LIMIT ${this.sweepLimit}`
+        GROUP BY c.session_id ORDER BY max(c.tried_at) NULLS FIRST, min(c.at) LIMIT ${this.sweepLimit}`
       for (const { session_id } of sessions) await this.report(session_id)
     } catch (err) {
       this.onError?.(err)
@@ -225,8 +228,9 @@ export class OrderCosts implements TouchedSink {
       SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs
       WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
     if (pending.length === 0) return
-    const [row] = await sql<{ cost: number; carried: number; principal: string }[]>`
-      SELECT s.cost_usd AS cost, s.owner_id AS principal,
+    await sql`UPDATE ai_session_order_costs SET tried_at = now() WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL`
+    const [row] = await sql<{ cost: number; carried: number; principal: string; status: string }[]>`
+      SELECT s.cost_usd AS cost, s.owner_id AS principal, s.status,
              (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
               FROM ai_session_order_costs WHERE session_id = s.id) AS carried
       FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
@@ -244,6 +248,12 @@ export class OrderCosts implements TouchedSink {
     // Under a hundredth of a cent no new share is sent: those orders stay to report, with the
     // next turn's spend. A larger share still under one minor unit of the order's currency is
     // sent, and the backend answers it with no entry (`deferred`), which keeps it the same way.
+    // Once the session is over (`done`, `failed`) no more spend comes: such a share is closed
+    // out, reported with nothing carried, so it leaves the sweep for good.
+    const over = row.status === 'done' || row.status === 'failed'
+    if (over && share < 1e-4) {
+      for (const order of fresh) await this.closeOut(sessionId, order.id)
+    }
     // The rows are read whole and updated by the items read: a revision recorded while the
     // report runs is no part of this share, and is marked reported with nothing carried.
     const due = share < 1e-4 ? orders.filter((o) => o.attempted !== null) : orders
@@ -269,9 +279,12 @@ export class OrderCosts implements TouchedSink {
       )
       if (answer === 'failed') continue
       if (answer === 'deferred') {
-        await sql`
-          UPDATE ai_session_order_costs SET attempted_usd = NULL
-          WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
+        if (over) await this.closeOut(sessionId, order.id)
+        else {
+          await sql`
+            UPDATE ai_session_order_costs SET attempted_usd = NULL
+            WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
+        }
         continue
       }
       await sql`
@@ -279,6 +292,13 @@ export class OrderCosts implements TouchedSink {
         SET reported_at = now(), reported_usd = COALESCE(attempted_usd, 0), attempted_usd = NULL
         WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
     }
+  }
+
+  /** An order's share that can never be written: reported, nothing carried, out of the sweep. */
+  private async closeOut(sessionId: string, orderId: string): Promise<void> {
+    await this.sql`
+      UPDATE ai_session_order_costs SET reported_at = now(), reported_usd = 0, attempted_usd = NULL
+      WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NULL`
   }
 }
 

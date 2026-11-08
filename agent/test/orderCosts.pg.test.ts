@@ -274,6 +274,39 @@ describe.skipIf(!TEST_DATABASE_URL)(`order costs in Postgres${TEST_DATABASE_URL 
     expect(posted).toHaveLength(1)
   })
 
+  it('sweeps a session not yet tried before the ones it tried and could not report', async () => {
+    const stuck = [await session(0.00005), await session(0.00005), await session(0.00005)]
+    for (const [n, id] of stuck.entries()) await revise(id, `s${n}`, `s${n}i`)
+    await db.sql`UPDATE ai_session_order_costs SET at = now() - interval '2 hours'`
+    const capped = new OrderCosts({ sql: db.sql, locks: db.locks, post: async (r) => (posted.push(r), 'recorded'), sweepLimit: 2 })
+    await capped.sweep()
+    await capped.sweep()
+    expect(posted).toEqual([])
+    const fresh = await session(1)
+    await revise(fresh, 'f', 'f1')
+    await db.sql`UPDATE ai_session_order_costs SET at = now() - interval '1 hour' WHERE session_id = ${fresh}`
+    await capped.sweep()
+    expect(posted.map((p) => p.orderId)).toEqual(['f'])
+  })
+
+  it('closes out a share that can never be written once the session is over', async () => {
+    const tiny = await session(0.00005)
+    const subUnit = await session(0.003)
+    await revise(tiny, 't', 't1')
+    await revise(subUnit, 'u', 'u1')
+    await db.sql`UPDATE ai_sessions SET status = 'done' WHERE id IN (${tiny}, ${subUnit})`
+    answer = 'deferred'
+    await costs.report(tiny)
+    await costs.report(subUnit)
+    expect(posted.map((p) => p.orderId)).toEqual(['u'])
+    const rows = await db.sql<{ order_id: string; reported: boolean; reported_usd: number }[]>`
+      SELECT order_id, reported_at IS NOT NULL AS reported, reported_usd FROM ai_session_order_costs ORDER BY order_id`
+    expect(rows.map((r) => [r.order_id, r.reported, Number(r.reported_usd)])).toEqual([
+      ['t', true, 0],
+      ['u', true, 0],
+    ])
+  })
+
   it('reports nothing for a session with no spend since', async () => {
     const id = await session(0)
     await revise(id, 'a', 'a1')

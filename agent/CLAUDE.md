@@ -38,9 +38,10 @@ orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s
 for the turn's reports in all, one report per session at a time across replicas, by an
 advisory lock on a `database.locks` connection, never the stores' pool, and none while every
 lock connection is out; `sweep` at start and hourly reports what a session's last turn left,
-20 sessions at most). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
-route's own 404 (the order gone: an item gone falls back to the order), 409 (a currency no
-rate reaches, a visitor's unsubmitted cart) or 422 drops
+20 sessions at most, the ones tried longest ago, `tried_at`, first; a share under one minor
+unit is closed out with nothing carried once its session is `done` or `failed`). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
+route's own 400 or 422 (a path or body it cannot take), 404 (the order gone: an item gone
+falls back to the order) or 409 (a currency no rate reaches, a visitor's unsubmitted cart) drops
 that order's report, its share in no entry. Anything else (401 or 403 while there
 is no live credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the
 share it sent (`attempted_usd`), sent again as it was at the next turn's end, so a lost

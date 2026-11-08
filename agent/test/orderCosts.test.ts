@@ -44,8 +44,10 @@ describe('crudCostPoster', () => {
     const cart = answering(409, true, [], '{"type": "https://scadbuddy.dev/problems/orders/order_not_submitted", "status": 409}')
     expect(await crudCostPoster('http://api', cart)(REPORT, 1_000)).toBe('refused')
     expect(await crudCostPoster('http://api', answering(422, true))(REPORT, 1_000)).toBe('refused')
+    // The route's own 400 (a NUL in the order id) is no better the next time.
+    expect(await crudCostPoster('http://api', answering(400, true))(REPORT, 1_000)).toBe('refused')
     // No credential yet, a dead one, another caller's or a busy API: sent again later.
-    for (const status of [400, 401, 403, 429]) {
+    for (const status of [401, 403, 429]) {
       expect(await crudCostPoster('http://api', answering(status, true))(REPORT, 1_000)).toBe('failed')
     }
     expect(await crudCostPoster('http://api', answering(404, false))(REPORT, 1_000)).toBe('failed')
