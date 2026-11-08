@@ -2341,7 +2341,9 @@ async def print_item(
     quantity: accept them), ``print_in_flight`` (a test print of the item is still
     open), ``print_request_conflict`` (the key's print is another item's, or the key's
     test print), and ``requote_needed`` (no accepted quote, its output gone,
-    or a slice quote whose sliced file is gone or no longer the file it priced); and the
+    or a slice quote whose sliced file is gone or no longer the file it priced, or a
+    ``part_settings``, ``prime_tower``, ``supports`` or ``print_sequence`` sent that the
+    quote was not sliced with; each one omitted is the quote's, #5571, #4673); and the
     print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id)
     result = await run_operation(
@@ -2394,7 +2396,9 @@ async def test_print_item(
     ``print_in_flight`` (a print of the item, of either purpose, is still open),
     ``print_request_conflict`` (the key's print is another item's or a production
     print), and ``requote_needed`` (no slice quote of the revision,
-    its sliced file gone or no longer the file it priced, or the output gone); and the
+    its sliced file gone or no longer the file it priced, the output gone, or a
+    ``part_settings``, ``prime_tower``, ``supports`` or ``print_sequence`` sent that the
+    quote was not sliced with; each one omitted is the quote's, #5571, #4673); and the
     print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id, revision_id)
     result = await run_operation(

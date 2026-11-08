@@ -66,7 +66,7 @@ export function itemEdits(order: Order, item: OrderItemDetail): ItemEdits {
 /** The drawer's sections an action opens it at. */
 export type ItemSection = 'quote' | 'print' | 'fulfil'
 
-export type ItemActionKey = 'open' | 'quote' | 'print' | 'fulfil' | 'unfulfil' | 'reopen' | 'delete' | 'cancel'
+export type ItemActionKey = 'open' | 'quote' | 'print' | 'fulfil' | 'unfulfil' | 'reopen' | 'duplicate' | 'delete' | 'cancel'
 
 export interface ItemAction {
   key: ItemActionKey
@@ -110,6 +110,13 @@ export function itemActions(
       // `item_not_priced`: a shipped order takes back a priced item only (#5349).
       blocked: takesBack ? null : "This item had no accepted price, so it can't come back into a shipped order.",
     })
+  }
+  // A copy is added as an add is (`_takes_item`): on an open order, or after acceptance while
+  // the order takes items and is not on hold (#5349). On an open order a custom item's copy
+  // has its price accepted as it is made, which a hold refuses too (`duplicate_item`).
+  if (OPEN_FOR_EDITS.has(order.status) || TAKES_ITEMS.has(order.status)) {
+    const held = order.on_hold && (TAKES_ITEMS.has(order.status) || item.kind === 'custom')
+    actions.push({ key: 'duplicate', label: 'Duplicate', blocked: held ? ON_HOLD : null })
   }
   if (!settled) {
     actions.push(item.status === 'draft' ? { key: 'delete', label: 'Delete item', blocked: null } : { key: 'cancel', label: 'Cancel item', blocked: null })

@@ -510,6 +510,13 @@ class Quote(BaseModel):
     #: `{"<slot>": {"<key>": value}}`. Null for none. An item's print that sends none
     #: prints with these (`orders/operations.py` `print_body`).
     part_settings: dict[str, dict[str, Any]] | None = None
+    #: A slice quote's print setup (#4673, order operations spec §5.1), as it sliced:
+    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports` and
+    #: `print_sequence`, each in `PrintRunRequest`'s shape (`orders/quote.py`
+    #: `print_setup`). Null for a manual or archive quote, and one recorded before.
+    choices: dict[str, Any] | None = None
+    #: The spool per slot a slice quote sliced with (`PrintRunRequest.filament_plan`).
+    filament_plan: dict[str, Any] | None = None
 
 
 # -- fulfilment (§6.1 by hand) and shipments (§6.3) ------------------------------------

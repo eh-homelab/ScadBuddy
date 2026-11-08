@@ -756,6 +756,122 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
   }
 }
 
+/** `lifecycle.py` `check_submitted` (#5282): a visitor's cart takes no quote, money or work. */
+function checkSubmitted(order: Order) {
+  if (order.source === 'storefront' && order.submitted_at == null) throw new Refused('order_not_submitted', `${order.number ?? 'The cart'} is a visitor's cart, not submitted`)
+}
+
+/**
+ * #4955 — `Lifecycle.duplicate_item`: the item's kind, design, past print archives, quantity,
+ * title, notes and SKU, added on the route `after_acceptance` names; no quote, except a custom
+ * item's price, which is its own field.
+ */
+const duplicateItem: Parameters<typeof http.post>[1] = async (info) => {
+  const { request, params } = info
+  const body = (await request.json()) as { after_acceptance?: boolean } & Record<string, unknown>
+  const extra = unknownKeys(request, body, ['after_acceptance'])
+  if (extra) return extra
+  const afterAcceptance = body.after_acceptance === true
+  let add: OrderItemCreate & Record<string, unknown>
+  let original: OrderItem
+  try {
+    const order = lock(String(params.id))
+    checkSubmitted(order)
+    original = itemOf(order, String(params.item))
+    const common = { quantity: original.quantity, title: original.title, notes: original.notes, ...(original.sku ? { sku: original.sku } : {}) }
+    if (original.kind === 'custom') {
+      const quotes = quotesOf(original.id)
+      const price = (quotes.find((q) => q.accepted) ?? [...quotes].sort(byCreated).at(-1))?.unit_price_minor ?? 0
+      add = { ...common, kind: 'custom', unit_price_minor: price, requires_printing: original.requires_printing, ...(afterAcceptance ? {} : { accept: true }) }
+    } else if (original.kind === 'request') {
+      add = { ...common, kind: 'request' }
+    } else if (original.library_file) {
+      add = { ...common, library_file_id: original.library_file.id }
+    } else {
+      const reference = original.reference!
+      add = { ...common, ...(original.output_id ? { output_id: original.output_id } : { slug: reference.slug, commit: reference.commit, inputs: reference.inputs }) }
+    }
+  } catch (error) {
+    return refused(request, error)
+  }
+  const one = new Request(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify(add) })
+  const answer = (await addItem(afterAcceptance)({ ...info, request: one } as never)) as Response
+  if (answer.status !== 201) return answer
+  const created = (await answer.json()) as OrderItem
+  const stored = state.items.find((i) => i.id === created.id)!
+  stored.origin_archive_ids = original.origin_archive_ids ?? []
+  if (original.reference && original.kind === 'model') {
+    // The item's own design, which its output's need not be (it may have been revised since).
+    stored.reference = original.reference
+    stored.colours = original.colours
+  }
+  event(lock(String(params.id)), 'item.duplicated', { item_id: stored.id, from_item_id: original.id })
+  return HttpResponse.json(stored, { status: 201 })
+}
+
+/**
+ * #4955 — `Lifecycle.fulfil_items`: for each line an accepted attempt by hand of its quantity,
+ * all checked before any is written; an item is fulfilled once its accepted attempts reach
+ * its quantity.
+ */
+const fulfilItems: Parameters<typeof http.post>[1] = async ({ request, params }) => {
+  const body = (await request.json()) as { items?: unknown } & Record<string, unknown>
+  const extra = unknownKeys(request, body, ['items'])
+  if (extra) return extra
+  const lines = body.items
+  if (!Array.isArray(lines) || lines.length < 1 || lines.length > MAX_BATCH_ITEMS) {
+    return fieldProblem(request, 'items', `List should have at least 1 and at most ${MAX_BATCH_ITEMS} items`)
+  }
+  const typed = lines as { item_id: string; quantity: number }[]
+  if (typed.some((line) => !Number.isInteger(line.quantity) || line.quantity < 1)) return fieldProblem(request, 'items', 'quantity: Input should be greater than or equal to 1')
+  if (new Set(typed.map((line) => line.item_id)).size !== typed.length) return fieldProblem(request, 'items', 'items: an item is named twice')
+  try {
+    const order = lock(String(params.id))
+    notEnded(order)
+    checkSubmitted(order)
+    if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
+    notOnHold(order)
+    const items = typed.map((line) => itemOf(order, line.item_id))
+    for (const found of items) {
+      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`, [found.id])
+      if (!FULFILLABLE.has(found.status)) throw new Refused('item_not_approved', `item ${found.id} is ${found.status}, not approved`, [found.id])
+    }
+    const made = typed.map((line, index) => {
+      const found = items[index]!
+      const at = now()
+      const attempt: Fulfilment = {
+        id: newId('f'),
+        order_item_id: found.id,
+        attempt: attemptsOf(found.id).length + 1,
+        quantity: line.quantity,
+        outcome: 'succeeded',
+        failure_reason: null,
+        started_at: null,
+        finished_at: null,
+        notes: '',
+        accepted_at: at,
+        created_by: BROWSER,
+        created_at: at,
+        purpose: 'production',
+        archive_ids: [],
+      }
+      state.fulfilments.push(attempt)
+      const total = attemptsOf(found.id).filter((f) => f.accepted_at).reduce((sum, f) => sum + f.quantity, 0)
+      if (total >= found.quantity) {
+        found.status = 'fulfilled'
+        useParts(order, found)
+      } else found.status = 'approved'
+      event(order, 'fulfilment.recorded', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, outcome: 'succeeded' })
+      event(order, 'fulfilment.accepted', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, made: total })
+      return attempt
+    })
+    rederive(order)
+    return HttpResponse.json(made, { status: 201 })
+  } catch (error) {
+    return refused(request, error)
+  }
+}
+
 export const handlers = [
   http.get('/api/v1/orders', ({ request }) => {
     const sp = new URL(request.url).searchParams
@@ -1123,6 +1239,8 @@ export const handlers = [
         link_error: null,
         payment_id: null,
         created_by: BROWSER,
+        // #5700: the mock's provider always confirms a close at once.
+        close_pending_at: null,
       }
       state.paymentRequests.push(opened)
       event(order, 'payment_request.opened', { request_id: id, kind: opened.kind, amount_minor: amount })
@@ -1323,6 +1441,8 @@ export const handlers = [
       return found
     }),
   ),
+  http.post('/api/v1/orders/:id/items/:item/duplicate', duplicateItem),
+  http.post('/api/v1/orders/:id/fulfil', fulfilItems),
 
   http.post('/api/v1/orders/:id/items/:item/quotes', async ({ request, params }) => {
     const body = (await request.json()) as ManualQuoteInput & Record<string, unknown>

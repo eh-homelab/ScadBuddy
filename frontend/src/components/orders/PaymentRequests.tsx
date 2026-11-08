@@ -161,6 +161,8 @@ export function PaymentRequests({
                 <span className="sb-num">{money(r.amount_minor)}</span>
               </div>
               {r.status === 'pending' && <span className="text-xs text-muted-foreground">The bank payment is on its way</span>}
+              {/* #5700: the provider's page may still take money until the provider confirms the close. */}
+              {r.close_pending_at && <span className="text-xs text-warn">{`Close not yet confirmed by ${label(r.provider)}; ScadBuddy tries again`}</span>}
               {r.status === 'open' && (
                 <div className="flex flex-wrap items-center gap-2">
                   {r.hosted_url ? (

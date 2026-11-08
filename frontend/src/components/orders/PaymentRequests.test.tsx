@@ -112,6 +112,25 @@ describe('PaymentRequests (#4957)', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument())
   })
 
+  it('says when the provider has not yet confirmed a cancelled page closed (#5700)', async () => {
+    await setup((id) => {
+      const found = state.paymentRequests.find((r) => r.id === id)
+      if (!found) throw new Error('no request')
+      found.status = 'cancelled'
+      found.close_pending_at = '2026-11-08T12:00:00Z'
+    })
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    // The provider's label arrives with the providers list, which can land after the requests.
+    expect(await screen.findByText('Close not yet confirmed by Fake; ScadBuddy tries again')).toBeInTheDocument()
+  })
+
+  it('says nothing of the close once the provider confirmed it', async () => {
+    const { user } = await setup((id) => void id)
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    expect(screen.queryByText(/Close not yet confirmed/)).not.toBeInTheDocument()
+  })
+
   it('offers no new request on a closed order', async () => {
     mockConnectProvider()
     renderPage(<Host id={ORDER_CLOSED} />)
