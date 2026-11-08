@@ -1031,10 +1031,11 @@ What this relies on, and what the design adds for it:
   `X-ScadBuddy-Flow-Run` header, and the parent run is still open (`api/flows.py`
   `may_inherit`). It takes the parent's expiry, kept to the order, a rule with a limit
   gets no calls of its own, it spends only while its whole chain is in force, and it is
-  revoked with its parent. Every other start gives the child a `requested` grant for a
-  person. `start_flow_run` is not a `flow.host` route, so a script's
+  revoked with its parent. Every other start with no `grant` of its own, from a parent
+  whose grant is in force, gives the child a `requested` grant for a person; a parent
+  with no grant in force passes none on. `start_flow_run` is not a `flow.host` route, so a script's
   `tool("start_flow_run", …)` reaches it through the agent as the run's starter, and
-  today every child grant is `requested`; approved inheritance needs the start route
+  today no child grant is approved by inheritance; approved inheritance needs the start route
   among the projects worker's own, a widening left out for now.
 - `on_hold` on the order makes every tool that advances it (accepting, a quote's
   acceptance, an attempt, a shipment, closing) answer 409 `order_on_hold`, from the

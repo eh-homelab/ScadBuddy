@@ -293,7 +293,9 @@ class GrantView(BaseModel):
     #: The grant of the run this run was started from, which it inherits approved
     #: (#4252): its calls run without asking only while that one is in force too.
     parent_grant_id: str | None = None
-    #: Approved, not revoked and not expired: calls inside it run without asking.
+    #: Approved, not revoked and not expired, and so is every grant it inherits from and
+    #: the standing grant it was seeded from (`FlowStore.grant_in_force`): calls inside
+    #: it run without asking.
     in_force: bool
     uses: list[GrantUseView] = []
     #: On approval: the parked calls it let through.

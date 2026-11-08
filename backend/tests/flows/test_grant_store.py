@@ -394,6 +394,18 @@ async def test_orphan_grants_are_swept(store: FlowStore) -> None:
     assert await store.get_grant(orphan) is None
 
 
+async def test_orphan_run_links_are_swept(store: FlowStore) -> None:
+    """Review of #5668: a start that failed after its link was written leaves one with no
+    run row; the sweep drops it."""
+    orphan = str(uuid.uuid4())
+    await store.link_run(orphan, order_id="ord-1")
+    kept = await run_row(store)
+    await store.link_run(kept, order_id="ord-1")
+    assert await store.orphan_grants(timedelta(0)) == [orphan]
+    await store.delete_grant(orphan)
+    assert await store.orphan_grants(timedelta(0)) == []
+
+
 async def test_a_line_items_prints_count_the_accepted_quotes_plates(store: FlowStore) -> None:
     """Review of #5645: the accepted slice quote's plates are what the print prints, not
     the item's output's (a revision after acceptance may have made a new one)."""

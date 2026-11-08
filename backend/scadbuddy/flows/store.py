@@ -511,8 +511,9 @@ class FlowStore:
         return await self.consume_grant(run_id, request.request_id, pick)
 
     async def orphan_grants(self, older_than: timedelta) -> list[str]:
-        """The run ids of grants older than `older_than` whose run has no row: a start
-        that failed after inserting its grant (the sweep checks the execution too)."""
+        """The run ids of grants and run links (`workflow_run_links`, #4252) older than
+        `older_than` whose run has no row: a start that failed after inserting them (the
+        sweep checks the execution too)."""
         return await asyncio.to_thread(self._orphan_grants, older_than)
 
     async def run_talking_to(self, session_id: str, call_id: str) -> Run | None:
@@ -521,6 +522,8 @@ class FlowStore:
         return await asyncio.to_thread(self._run_talking_to, session_id, call_id)
 
     async def delete_grant(self, run_id: str) -> None:
+        """Delete run `run_id`'s grant and its run link: what a start that never ran
+        left."""
         await asyncio.to_thread(self._delete_grant, run_id)
 
     # -- implementation -----------------------------------------------------------
@@ -811,10 +814,11 @@ class FlowStore:
     def _orphan_grants(self, older_than: timedelta) -> list[str]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT g.run_id FROM flow_grants g"
-                " WHERE g.created_at <= now() - %s"
-                " AND NOT EXISTS (SELECT 1 FROM workflow_runs r WHERE r.id = g.run_id)"
-                " ORDER BY g.created_at",
+                "SELECT o.run_id FROM (SELECT run_id, created_at FROM flow_grants"
+                " UNION ALL SELECT run_id, created_at FROM workflow_run_links) o"
+                " WHERE o.created_at <= now() - %s"
+                " AND NOT EXISTS (SELECT 1 FROM workflow_runs r WHERE r.id = o.run_id)"
+                " GROUP BY o.run_id ORDER BY min(o.created_at)",
                 (older_than,),
             ).fetchall()
         return [row["run_id"] for row in rows]
@@ -829,8 +833,9 @@ class FlowStore:
         return Run.model_validate(rows[0]) if len(rows) == 1 else None
 
     def _delete_grant(self, run_id: str) -> None:
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
+            conn.execute("DELETE FROM workflow_run_links WHERE run_id = %s", (run_id,))
 
     def _record_decision(self, decision: Decision, at_hop: Hop | None = None) -> bool:
         with self._pool.connection() as conn, conn.transaction():
