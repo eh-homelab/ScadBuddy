@@ -95,6 +95,9 @@ describe('OrderPage (#4249)', () => {
     await user.click(within(screen.getByTestId('order-item-cart-item')).getByRole('button', { name: 'Row actions' }))
     expect((await screen.findAllByRole('menuitem')).map((m) => m.textContent)).toEqual(['Open details'])
     await user.keyboard('{Escape}')
+    // Nor does the row edit the visitor's quantity, price or title.
+    expect(within(screen.getByTestId('order-item-cart-item')).queryByRole('textbox')).toBeNull()
+    expect(within(screen.getByTestId('order-item-cart-item')).queryByRole('button', { name: 'Edit title' })).toBeNull()
     await user.click(within(screen.getByTestId('order-item-cart-item')).getByRole('button', { name: 'Name Keychain' }))
     const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
     expect(within(drawer).queryByTestId('item-section-quote')).toBeNull()
