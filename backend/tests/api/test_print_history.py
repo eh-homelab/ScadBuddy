@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME
 from scadbuddy.printers.lan_models import LanStarted
 from tests.api.test_send import API, BASE, configure, make_output
@@ -1106,6 +1107,13 @@ def lan_run(
     asyncio.run(runs.succeed(run_id, slug, result))
 
 
+def set_run_status(pg_conninfo: str, run_id: str, status: str) -> None:
+    """Set a run's status by hand, on the test's own schema (#5739): no store path gives a
+    run a result and then another status."""
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("UPDATE print_runs SET status = %s WHERE id = %s", (status, run_id))
+
+
 def hash_link(client: TestClient, output_id: str, archive_id: int) -> None:
     """A link found by content hash, as a LAN print's is: it names no queue item."""
     asyncio.run(
@@ -1277,7 +1285,7 @@ def test_a_recorded_lan_start_whose_run_was_pruned_has_no_part_settings(
 
 @respx.mock
 def test_a_lan_start_of_a_run_that_is_not_succeeded_is_matched(
-    client: TestClient, model: str
+    client: TestClient, model: str, pg_conninfo: str
 ) -> None:
     """#5733: the match is on the start the run's result holds, whatever the run's
     status. Today only a succeeded run holds a result; the status is set by hand here."""
@@ -1291,12 +1299,52 @@ def test_a_lan_start_of_a_run_that_is_not_succeeded_is_matched(
         model,
         subtask_names=("scadbuddy-5661abcd-p1",),
     )
-    runs = state(client).print_runs.store
-    with runs._pool.connection() as conn:
-        conn.execute("UPDATE print_runs SET status = 'failed' WHERE id = %s", (LAN_RUN,))
+    set_run_status(pg_conninfo, LAN_RUN, "failed")
     mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
 
     assert client.get("/api/v1/prints/40").json()["part_settings"] == {"2": {"top_shell_layers": 8}}
+
+
+@respx.mock
+def test_a_failed_archive_fetch_cancels_the_part_settings_read(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5739: the request's database read never outlives the request. The caller sees
+    the archive fetch's own error, not a group of them."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 40, printer_id=1, queue_item_id=7)
+    mock_bambuddy_lists()
+    links = state(client).print_links
+    started: list[int] = []
+    cancelled: list[int] = []
+
+    async def stuck(queue_item_id: int) -> PrintSend | None:
+        started.append(queue_item_id)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(queue_item_id)
+            raise
+        return None
+
+    monkeypatch.setattr(links, "send", stuck)
+    cache = state(client).components.get(ARCHIVE_CACHE)
+
+    async def broken(client: Any, archive_id: int) -> ArchiveDetail | None:
+        for _ in range(100):
+            if started:
+                break
+            await asyncio.sleep(0.01)
+        raise ApiError(502, "Bambuddy did not answer")
+
+    monkeypatch.setattr(cache, "archive", broken)
+
+    response = client.get("/api/v1/prints/40")
+
+    assert response.status_code == 502, response.text
+    assert started == [7]
+    assert cancelled == [7]
 
 
 @respx.mock
