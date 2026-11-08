@@ -2504,10 +2504,13 @@ class Lifecycle:
         """An `archive` quote (#4777, order operations spec §3.2): ``plates`` read from a
         past print's archives, priced at the book in force, with no sliced file. As a
         manual quote: the order open for the item's price, the item not settled, not
-        custom, with a design; it names the item's current revision."""
+        custom, with a design; it names the item's current revision. Never on a cart
+        (#5282, ``order_not_submitted``)."""
+        self._not_a_cart(order_id)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")

@@ -53,3 +53,14 @@ def test_reading_a_draft_never_fails(client: TestClient, draft_with_item: str) -
 
 def test_the_list_refuses_an_unknown_source(client: TestClient) -> None:
     assert client.get("/api/v1/orders", params={"source": "shop"}).status_code == 422
+
+
+def test_a_past_prints_quote_is_refused_on_a_cart(client: TestClient, draft_with_item: str) -> None:
+    item = client.get(f"/api/v1/orders/{draft_with_item}").json()["items"][0]
+    refused = client.post(
+        f"/api/v1/orders/{draft_with_item}/items/{item['id']}/quotes/archive",
+        json={"archive_id": 1},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/orders/order_not_submitted"
+    assert refused.json()["detail"] == f"cart {draft_with_item} is not yet submitted"

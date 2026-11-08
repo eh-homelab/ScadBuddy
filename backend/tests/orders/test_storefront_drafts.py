@@ -248,6 +248,9 @@ ACTS: dict[str, Callable[[Shop, Order], object]] = {
         by=BY,
         revision_id=None,
     ),
+    "archive_quote": lambda shop, order: shop.lifecycle.record_archive_quote(
+        order.id, _only_item(shop, order), cast(Any, None), [], BY
+    ),
     "claim_print": lambda shop, order: shop.lifecycle.claim_print(
         order.id,
         _only_item(shop, order),

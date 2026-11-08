@@ -186,7 +186,7 @@ class Payments:
                 found,
                 return_url=self._return_url(found.order_id),
                 idempotency_key=found.id,
-                order_number=order.number,
+                order_number=order.label,
             )
         except (
             ProviderNotFoundError,
