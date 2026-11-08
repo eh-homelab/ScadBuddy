@@ -33,7 +33,8 @@ describe('PaymentRequests (#4957)', () => {
     await user.click(screen.getByRole('button', { name: 'Request' }))
     const list = await screen.findByRole('list', { name: 'Payment requests' })
     expect(within(list).getByText('$25.00')).toBeInTheDocument()
-    expect(within(list).getByText('Fake')).toBeInTheDocument()
+    // The provider's label arrives with the providers list, which can land after the requests.
+    expect(await within(list).findByText('Fake')).toBeInTheDocument()
     expect(within(list).getByRole('button', { name: 'Copy link' })).toBeEnabled()
     expect(within(list).getByRole('link', { name: 'Email' })).toHaveAttribute('href', expect.stringMatching(/^mailto:/))
     expect(within(list).getByRole('button', { name: 'Cancel' })).toBeEnabled()
