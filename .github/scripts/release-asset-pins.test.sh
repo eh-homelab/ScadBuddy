@@ -77,6 +77,7 @@ if RELEASE_ASSET_CURL="$work/curl" "$script" "$work/temporal" >"$work/out"; then
 fi
 grep -q 'Temporal CLI amd64 (temporal.download): https://temporal.download/.* serves sha256' "$work/out" ||
   fail "names the temporal.download drift: $(cat "$work/out")"
+[[ "$(grep -c '^ok:' "$work/out")" == 5 ]] || fail "the other five pins still pass: $(cat "$work/out")"
 
 make_root "$work/gone" 404 "$(sha 404)"
 if RELEASE_ASSET_CURL="$work/curl" "$script" "$work/gone" >"$work/out"; then
