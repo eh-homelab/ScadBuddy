@@ -477,11 +477,16 @@ The assistant panel, MCP access **Tokens** and plugins show only once a credenti
 2. Choose the kind: **Anthropic API** (an `sk-ant-api03-…` key), **Claude Code OAuth
    token** (run `claude setup-token` on a machine signed in to your Claude subscription
    and paste the `sk-ant-oat01-…` token it prints), or **Gateway (base URL and token)**.
-3. Press **Save**. **Test** sends one short prompt and shows "Works (…)" or the failure.
+3. Optionally, type a **Name (optional)**, for example "Personal Max", so you can tell
+   two of one kind apart. It can have up to 60 characters.
+4. Press **Save**. **Test** sends one short prompt and shows "Works (…)" or the failure.
 
 You can **Add** more than one. They are tried in the order listed (**Up** and **Down**
-move them), and one that is rate limited is skipped until its limit resets. The key is
-encrypted on the server and never sent back to the browser.
+move them), and one that is rate limited is skipped until its limit resets. **Rename**
+sets or clears a credential's name without its key; an empty name clears it. A named
+credential shows its name as the row's title, with the kind beside it, and the assistant
+panel names it when it moves a reply to another credential or says one was refused. The
+key is encrypted on the server and never sent back to the browser.
 
 The same section sets **Assistant chat limits** (each new chat's budget in USD and its
 turns per reply) and **Assistant images**. The assistant's HTTP request tool is the
