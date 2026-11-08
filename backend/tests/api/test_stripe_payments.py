@@ -220,3 +220,55 @@ def test_a_forged_event_records_nothing(client: TestClient, stripe: respx.MockRo
     refused = client.post(HOOK, content=body, headers=signed(body, secret="whsec_forged"))
     assert refused.status_code == 400
     assert client.get(f"/api/v1/orders/{order_id}").json()["payments"] == []
+
+
+def send_refund(client: TestClient, kind: str, **refund: Any) -> httpx.Response:
+    """``refund.failed.json`` as ``kind``, made just now, its Refund's fields replaced."""
+    event = payload("refund.failed.json")
+    event["type"] = kind
+    event["created"] = int(time.time())
+    event["data"]["object"] |= refund
+    body = json.dumps(event).encode()
+    answer: httpx.Response = client.post(HOOK, content=body, headers=signed(body))
+    return answer
+
+
+def test_a_refund_that_failed_after_it_succeeded_is_reversed(
+    client: TestClient, stripe: respx.MockRouter
+) -> None:
+    """#5681: the money went back to the balance (``failure_balance_transaction``), so a
+    payment cancels the refund and the balance is paid again."""
+    order_id, _ = stripe_request(client)
+    send(client, "checkout.session.completed.card.json")
+    assert send(client, "refund.updated.succeeded.json").json() == {"outcome": "recorded"}
+    assert send_refund(client, "refund.failed").json() == {"outcome": "recorded"}
+    detail = client.get(f"/api/v1/orders/{order_id}").json()
+    assert [p["amount_minor"] for p in detail["payments"]] == [700, -700, 700]
+    assert detail["totals"]["balance_minor"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "failure_txn"),
+    [
+        ("refund.failed", "failed", None),
+        ("refund.updated", "failed", None),
+        ("refund.updated", "canceled", "txn_3refundfail"),
+        ("refund.updated", "canceled", None),
+    ],
+)
+def test_a_refund_that_failed_while_pending_answers_200_and_writes_nothing(
+    client: TestClient, stripe: respx.MockRouter, kind: str, status: str, failure_txn: str | None
+) -> None:
+    """A refund that never took money (pending, then failed or cancelled) reverses
+    nothing; the webhook answers 200 at once, not a 503 for a day."""
+    order_id, _ = stripe_request(client)
+    send(client, "checkout.session.completed.card.json")
+    assert send(client, "refund.created.pending.json").status_code == 200
+    answer = send_refund(client, kind, status=status, failure_balance_transaction=failure_txn)
+    assert answer.status_code == 200, answer.text
+    payments = client.get(f"/api/v1/orders/{order_id}").json()["payments"]
+    assert [p["amount_minor"] for p in payments] == [700]
+    provider = next(
+        s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "stripe"
+    )
+    assert provider["last_webhook_error"] is None

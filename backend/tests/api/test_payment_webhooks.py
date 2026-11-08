@@ -266,8 +266,8 @@ def test_a_provider_that_does_not_answer_is_provider_unavailable(
     assert _webhook_error(client) == ("provider_unavailable", True)
 
 
-def test_a_fee_before_its_payment_is_provider_unavailable(client: TestClient) -> None:
-    """The event is sent back for a retry (``EventTooEarlyError``), as a provider outage."""
+def test_a_fee_before_its_payment_is_out_of_order(client: TestClient) -> None:
+    """The event is sent back for a retry (``EventTooEarlyError``): the provider answered."""
     _, req = linked_request(client)
     fee = {
         "id": "f1", "type": "fee", "provider_ref": req["provider_ref"], "fee_minor": 31,
@@ -275,7 +275,7 @@ def test_a_fee_before_its_payment_is_provider_unavailable(client: TestClient) ->
     }  # fmt: skip
     body, headers = signed_event("s3cret", fee)
     assert client.post(HOOK, content=body, headers=headers).status_code == 503
-    assert _webhook_error(client) == ("provider_unavailable", True)
+    assert _webhook_error(client) == ("out_of_order", True)
 
 
 # -- enforce ------------------------------------------------------------------------------

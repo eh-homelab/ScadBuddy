@@ -1024,16 +1024,16 @@ class Lifecycle:
         by: Actor,
     ) -> tuple[EventOutcome, Payment | None]:
         """#5681: a refund the provider recorded and then could not pay out. A positive
-        payment cancels the refund's negative one, with its provider, request and reference,
-        so the customer's page can pair them. A refund closes no request, so this opens or
-        closes none, and the balance follows from the payments sum. A refund told without
-        money (still pending when it failed, or no amount) has nothing to reverse. Events
-        come in any order, so a failure whose refund was not told yet is
-        `EventTooEarlyError`, as `_late_fee`'s: nothing is written and the provider sends
-        it again, while the request is open, pending or paid and the event is younger than
-        `FEE_RETRY_WINDOW`; after that it is recorded as ignored."""
-        if event.currency != order.currency:
-            return "currency_mismatch", None
+        payment cancels the refund's negative one, with its amount, provider, request and
+        reference taken from the refund's own row (in the order's currency), never from the
+        event, so the customer's page can pair them. A refund closes no request, so this
+        opens or closes none, and the balance follows from the payments sum. The provider
+        sends this only for a refund that took money (Stripe: ``failed`` with a
+        ``failure_balance_transaction``); a refund told without money (no amount) has
+        nothing to reverse and is ignored. Events come in any order, so a failure whose
+        refund was not told yet is `EventTooEarlyError`, as `_late_fee`'s: nothing is
+        written and the provider sends it again, while the request is open, pending or
+        paid and the event is younger than `FEE_RETRY_WINDOW`; after that it is ignored."""
         if event.reverses is None:
             return "ignored", None
         told, refund_id = payments.told_event(conn, provider, event.reverses)

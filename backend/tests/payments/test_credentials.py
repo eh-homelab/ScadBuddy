@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
 
@@ -129,6 +130,20 @@ def test_touch_webhook_stamps_the_row(rows: OrderStore) -> None:
     assert creds.rows()[0].last_webhook_at is None
     creds.touch_webhook("fake")
     assert creds.rows()[0].last_webhook_at is not None
+
+
+def test_a_success_clears_only_a_failure_older_than_its_start(rows: OrderStore) -> None:
+    """#5684: two webhooks at once. A success that began before a failure was written
+    leaves it standing; one that began after clears it."""
+    creds = PaymentCredentials(rows, KEK)
+    _connect(creds)
+    began = datetime.now(UTC)
+    creds.set_webhook_error("fake", "out_of_order")
+    creds.clear_webhook_error("fake", since=began)
+    assert creds.rows()[0].last_webhook_error == "out_of_order"
+    creds.clear_webhook_error("fake", since=datetime.now(UTC))
+    row = creds.rows()[0]
+    assert (row.last_webhook_error, row.last_webhook_error_at) == (None, None)
 
 
 def test_disconnect_is_refused_while_a_request_is_open(rows: OrderStore) -> None:

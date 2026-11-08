@@ -336,8 +336,12 @@ def test_a_failed_refund_on_an_ended_request_is_ignored(shop: PayShop) -> None:
     assert shop.lifecycle.record_provider_event("fake", REFUND_FAILED) == "ignored"
 
 
-def test_a_failed_refund_in_another_currency_is_refused(shop: PayShop) -> None:
+def test_a_failed_refund_takes_its_amount_and_currency_from_the_refund(
+    shop: PayShop,
+) -> None:
+    """The refund's own row decides: an event that names another currency, or an amount,
+    still reverses exactly the refund."""
     order, _ = _refunded(shop)
-    other = REFUND_FAILED.model_copy(update={"currency": "EUR"})
-    assert shop.lifecycle.record_provider_event("fake", other) == "currency_mismatch"
-    assert _provider_payments(shop, order) == [700, -200]
+    other = REFUND_FAILED.model_copy(update={"currency": "EUR", "amount_minor": 999})
+    assert shop.lifecycle.record_provider_event("fake", other) == "recorded"
+    assert _provider_payments(shop, order) == [700, -200, 200]

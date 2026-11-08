@@ -399,12 +399,12 @@ async def test_a_pending_refund_is_recorded_when_it_succeeds() -> None:
 
 
 @respx.mock
-@pytest.mark.parametrize("status", ["failed", "canceled"])
-async def test_a_failed_refund_reverses_the_refund(status: str) -> None:
-    """#5681: a Refund's status moves to ``failed`` (or ``canceled``, a kind of failure)
-    and Stripe sends ``refund.failed`` (https://docs.stripe.com/refunds#failed-refunds).
+async def test_a_refund_that_took_money_and_failed_reverses_the_refund() -> None:
+    """#5681: a Refund that took money and then failed is ``failed`` with a
+    ``failure_balance_transaction``, the adjustment that gives the money back
+    (https://docs.stripe.com/api/refunds/object#refund_object-failure_balance_transaction).
     Its ``refund.failed`` and ``refund.updated`` share one event id, so it reverses once,
-    and it names the refund's own event id, so only a recorded refund is reversed."""
+    and it names the refund's own event id."""
     respx.get(f"{API}/v1/checkout/sessions").mock(
         return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.json"))
     )
@@ -414,12 +414,31 @@ async def test_a_failed_refund_reverses_the_refund(status: str) -> None:
         created_at=MADE + timedelta(seconds=200),
     )  # fmt: skip
     failed = payload("refund.failed.json")
-    failed["data"]["object"]["status"] = status
     body = json.dumps(failed).encode()
     assert await STRIPE.parse_webhook(CRED, signed(body), body) == want
     failed["type"] = "refund.updated"
     body = json.dumps(failed).encode()
     assert await STRIPE.parse_webhook(CRED, signed(body), body) == want
+
+
+@pytest.mark.parametrize(
+    ("status", "failure_txn"),
+    [("failed", None), ("canceled", None), ("canceled", "txn_3refundfail")],
+)
+async def test_a_refund_that_never_took_money_is_other(
+    status: str, failure_txn: str | None
+) -> None:
+    """A Refund that failed with no ``failure_balance_transaction`` took no money, and a
+    ``canceled`` one never reached the customer (https://docs.stripe.com/refunds#cancel-refund):
+    nothing to reverse, so no ``refund_failed`` and no wait for a refund that never comes."""
+    failed = payload("refund.failed.json")
+    failed["data"]["object"] |= {"status": status, "failure_balance_transaction": failure_txn}
+    for kind in ("refund.failed", "refund.updated"):
+        failed["type"] = kind
+        body = json.dumps(failed).encode()
+        with respx.mock:
+            event = await STRIPE.parse_webhook(CRED, signed(body), body)
+        assert (event.event_id, event.kind) == ("evt_5reffail", "other")
 
 
 @respx.mock

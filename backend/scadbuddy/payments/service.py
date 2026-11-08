@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -302,19 +302,25 @@ class Payments:
         """Check the signature, then record the event. ``BadSignatureError`` leaves
         before anything is written; ``ProviderError`` is a signed body it cannot read;
         ``ProviderUnavailableError`` is a provider call the reading needed that failed,
-        and also leaves before anything is written. Each failure but an unknown provider
-        keeps its category on the credential row, and the next success clears it (#5684).
+        and also leaves before anything is written. An event that came before one it
+        depends on (``EventTooEarlyError``) writes nothing and answers the same 503, so the
+        provider sends it again. Each failure but an unknown provider keeps its category on
+        the credential row, and the next success clears it (#5684).
         """
+        began = datetime.now(UTC)
         try:
             outcome = await self._handle_webhook(provider, headers, body)
         except ProviderNotFoundError:
             raise
+        except EventTooEarlyError as early:
+            await asyncio.to_thread(self._credentials.set_webhook_error, provider, "out_of_order")
+            raise ProviderUnavailableError(str(early)) from None
         except Exception as failed:
             await asyncio.to_thread(
                 self._credentials.set_webhook_error, provider, _webhook_error(failed)
             )
             raise
-        await asyncio.to_thread(self._credentials.set_webhook_error, provider, None)
+        await asyncio.to_thread(self._credentials.clear_webhook_error, provider, since=began)
         return outcome
 
     async def _handle_webhook(
@@ -323,13 +329,9 @@ class Payments:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
-        try:
-            outcome = await asyncio.to_thread(
-                self._orders.lifecycle.record_provider_event, provider, event
-            )
-        except EventTooEarlyError as early:
-            # Nothing was written: a 503 makes the provider send the event again.
-            raise ProviderUnavailableError(str(early)) from None
+        outcome = await asyncio.to_thread(
+            self._orders.lifecycle.record_provider_event, provider, event
+        )
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
         return outcome
 

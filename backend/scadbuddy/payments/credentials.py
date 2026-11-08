@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -27,7 +27,7 @@ _ROW = (
 )
 
 #: Why the last webhook failed (#5684): a fixed category, never a provider's text.
-WebhookError = Literal["signature", "provider_unavailable", "handler_error"]
+WebhookError = Literal["signature", "provider_unavailable", "out_of_order", "handler_error"]
 
 
 def credential_aad(credential_id: str, provider: str) -> str:
@@ -208,12 +208,23 @@ class PaymentCredentials:
                 (provider,),
             )
 
-    def set_webhook_error(self, provider: str, error: WebhookError | None) -> None:
-        """Keep why the last webhook failed, or clear it once one succeeds (#5684)."""
+    def set_webhook_error(self, provider: str, error: WebhookError) -> None:
+        """Keep why the last webhook failed (#5684), timed by this process's clock, as
+        ``clear_webhook_error``'s ``since`` is."""
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE payment_credentials SET last_webhook_error = %s,"
-                " last_webhook_error_at = CASE WHEN %s::text IS NULL THEN NULL"
-                " ELSE clock_timestamp() END WHERE provider = %s",
-                (error, error, provider),
+                " last_webhook_error_at = %s WHERE provider = %s",
+                (error, datetime.now(UTC), provider),
+            )
+
+    def clear_webhook_error(self, provider: str, *, since: datetime) -> None:
+        """Clear the last failure once a webhook that began at ``since`` succeeded; a
+        failure written after it began (a webhook handled at the same time) stands."""
+        with self._store.transaction() as conn:
+            conn.execute(
+                "UPDATE payment_credentials SET last_webhook_error = NULL,"
+                " last_webhook_error_at = NULL WHERE provider = %s"
+                " AND last_webhook_error_at < %s",
+                (provider, since),
             )

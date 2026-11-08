@@ -50,7 +50,7 @@ describe('Settings → Payments (#4957)', () => {
     mockConnectProvider()
     setMockWebhookError('signature')
     const first = renderSettingsSection(<Payments />, { route })
-    expect(await screen.findByRole('status')).toHaveTextContent(/signature did not match/)
+    expect(await screen.findByRole('status')).toHaveTextContent(/bad signature arrived/)
     first.unmount()
     await api.addPayment(ORDER_ACCEPTED, { amount_minor: 100 })
     const opened = await api.requestPayment(ORDER_ACCEPTED, {})
