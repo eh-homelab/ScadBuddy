@@ -568,7 +568,9 @@ over that URL and the body, so a URL that differs by one character refuses every
 The access token needs `ORDERS_READ`, `ORDERS_WRITE`, `PAYMENTS_READ`, `PAYMENTS_WRITE`
 and `MERCHANT_PROFILE_READ`
 ([permissions](https://developer.squareup.com/docs/oauth-api/square-permissions)).
-ScadBuddy checks that the location is active. The page then shows
+ScadBuddy checks that the location is active and that it takes payments in the shop's
+order currency ([Location](https://developer.squareup.com/reference/square/objects/Location)):
+a location in another currency is refused. The page then shows
 "Connected as Square location … (sandbox)" or "(production)". Each payment request is a
 Square payment link for the request's amount, named for the order, with the request in
 its payment note ([CreatePaymentLink](https://developer.squareup.com/reference/square/checkout-api/create-payment-link)).

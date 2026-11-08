@@ -16,7 +16,7 @@ from scadbuddy.auth.service_credentials import TokenReader
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.payments.fake import FAKE
-from scadbuddy.payments.provider import ProviderError
+from scadbuddy.payments.provider import ProviderError, Verified
 from tests.api.test_auth_enforce import HEADER, _sign_in
 from tests.api.test_order_payments import (
     FAKE_CONNECT,
@@ -142,6 +142,31 @@ def test_a_failed_verify_is_422_with_its_text(
     assert refused.status_code == 422
     assert refused.json()["detail"] == "the account is closed"
     assert fake_status(client)["connected"] is False
+
+
+def test_an_account_in_another_currency_is_409_and_not_connected(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5666: an account that takes one currency (a Square location's) must take the
+    shop's ``orders_currency`` (USD by default); a provider that names none is not
+    compared."""
+
+    async def in_euros(*args: object) -> Verified:
+        return Verified(account_label="Fake account a", currency="EUR")
+
+    monkeypatch.setattr(FAKE, "verify", in_euros)
+    refused = client.put(PROVIDER, json=FAKE_CONNECT)
+    assert refused.status_code == 409
+    problem = refused.json()
+    assert problem["type"] == PROBLEMS + "currency_mismatch"
+    assert problem["detail"] == ("fake takes payments in EUR, but the shop's orders are in USD")
+    assert fake_status(client)["connected"] is False
+
+    async def in_dollars(*args: object) -> Verified:
+        return Verified(account_label="Fake account a", currency="USD")
+
+    monkeypatch.setattr(FAKE, "verify", in_dollars)
+    assert client.put(PROVIDER, json=FAKE_CONNECT).status_code == 200
 
 
 def test_connecting_without_a_kek_is_409(settings: Settings) -> None:

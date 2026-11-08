@@ -27,6 +27,7 @@ from scadbuddy.payments.provider import (
     Credential,
     ProviderError,
     ProviderUnavailableError,
+    Verified,
 )
 from scadbuddy.payments.registry import providers
 from scadbuddy.payments.square import API, SQUARE, SQUARE_VERSION, SquareProvider, sign
@@ -113,7 +114,10 @@ def test_the_secrets_never_show_in_the_adapter() -> None:
 
 async def test_verify_reads_the_location_and_names_it_and_the_environment(sq: Any) -> None:
     location = sq.get(f"/v2/locations/{LOCATION}").respond(json=payload("api.location.json"))
-    assert await SQUARE.verify(CRED) == "Square location Print shop (sandbox)"
+    # The location's currency goes back, so the service can compare it with the shop's.
+    assert await SQUARE.verify(CRED) == Verified(
+        account_label="Square location Print shop (sandbox)", currency="USD"
+    )
     sent = location.calls.last.request
     assert sent.headers["authorization"] == f"Bearer {TOKEN}"
     assert sent.headers["square-version"] == SQUARE_VERSION
@@ -123,7 +127,8 @@ async def test_production_uses_the_production_api() -> None:
     live = Credential(settings=SETTINGS | {"environment": "production"}, secrets=CRED.secrets)
     with respx.mock(base_url=API["production"]) as router:
         router.get(f"/v2/locations/{LOCATION}").respond(json=payload("api.location.json"))
-        assert await SQUARE.verify(live) == "Square location Print shop (production)"
+        verified = await SQUARE.verify(live)
+        assert verified.account_label == "Square location Print shop (production)"
 
 
 @pytest.mark.parametrize(
@@ -459,3 +464,59 @@ async def test_another_event_type_is_other() -> None:
     headers = {"x-square-hmacsha256-signature": sign(SIGNATURE_KEY, NOTIFY, body)}
     found = await SQUARE.parse_webhook(CRED, headers, body)
     assert (found.kind, found.event_id) == ("other", event["event_id"])
+
+
+async def parse_changed(name: str, change: Any) -> ProviderEvent:
+    """``name``'s event with ``change`` applied to its object, signed again."""
+    event = payload(name)
+    change(event["data"]["object"])
+    body = json.dumps(event).encode()
+    headers = {"x-square-hmacsha256-signature": sign(SIGNATURE_KEY, NOTIFY, body)}
+    return await SQUARE.parse_webhook(CRED, headers, body)
+
+
+async def test_a_card_payment_pending_is_other() -> None:
+    """Only an ACH payment's ``PENDING`` is ``pending``, as only its ``FAILED`` is
+    ``failed``: a card left ``pending`` would never be settled by a later ``failed``."""
+
+    def card_pending(obj: dict[str, Any]) -> None:
+        obj["payment"]["status"] = "PENDING"
+
+    found = await parse_changed("payment.updated.completed.json", card_pending)
+    assert found.kind == "other"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "payment.updated.completed.json",
+        "payment.created.pending.json",
+        "payment.updated.failed.json",
+    ],
+)
+async def test_a_payment_with_no_order_is_not_scadbuddy_s(name: str) -> None:
+    """A sale with no order is not one of ScadBuddy's links: ``other``, not a malformed
+    event that Square would send again for a day."""
+
+    def no_order(obj: dict[str, Any]) -> None:
+        del obj["payment"]["order_id"]
+
+    found = await parse_changed(name, no_order)
+    assert (found.kind, found.provider_ref) == ("other", None)
+
+
+async def test_a_refund_whose_payment_has_no_order_is_not_scadbuddy_s(sq: Any) -> None:
+    answer = payload("api.payment.json")
+    del answer["payment"]["order_id"]
+    sq["payment"].respond(json=answer)
+    found = await parse("refund.updated.completed.json")
+    assert (found.kind, found.provider_ref) == ("other", None)
+
+
+async def test_a_refund_with_no_payment_reads_nothing(sq: Any) -> None:
+    def no_payment(obj: dict[str, Any]) -> None:
+        del obj["refund"]["payment_id"]
+
+    found = await parse_changed("refund.updated.completed.json", no_payment)
+    assert found.kind == "other"
+    assert not sq["payment"].called

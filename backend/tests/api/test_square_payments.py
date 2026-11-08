@@ -182,6 +182,24 @@ def test_cancelling_a_request_deletes_its_payment_link(
     assert square["delete"].called
 
 
+def test_a_location_in_another_currency_is_refused(
+    client: TestClient, square: respx.MockRouter
+) -> None:
+    """A Square location takes one currency (the Location object's ``currency``); a
+    location that is not in the shop's ``orders_currency`` could take none of its links."""
+    location = payload("api.location.json")
+    location["location"]["currency"] = "CAD"
+    square.get(f"/v2/locations/{LOCATION}").respond(json=location)
+    refused = client.put("/api/v1/payments/providers/square", json=CONNECT)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/payments/currency_mismatch"
+    assert TOKEN not in refused.text
+    [square_row] = [
+        s for s in client.get("/api/v1/payments/providers").json() if s["id"] == "square"
+    ]
+    assert square_row["connected"] is False
+
+
 def test_a_forged_event_records_nothing(
     client: TestClient, square: respx.MockRouter, pg_conninfo: str
 ) -> None:

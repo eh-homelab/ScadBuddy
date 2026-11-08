@@ -909,7 +909,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   hand with no provider. `models.py` (`PaymentRequest`, the storefront's shape with no
   `provider_ref`; `PaymentRequestView`, the back office's; `ProviderEvent`), `store.py`
   (SQL in the caller's transaction; `open_requests_for_order`), `provider.py` (the
-  `PaymentProvider` protocol, `BadSignatureError`, `ProviderError`), `registry.py` (the
+  `PaymentProvider` protocol, `Verified`: `verify`'s account label and, when the account
+  takes one currency, that currency, `BadSignatureError`, `ProviderError`), `registry.py` (the
   offered providers; the fake one only with the bootstrap
   `SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), `fake.py` (`signed_event` for tests and dev),
   `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
@@ -926,13 +927,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Square order id, which each payment carries; `x-square-hmacsha256-signature` checked by our
   own code over the notification URL setting and the raw body; a cancel finds the order's
   link by listing the links and deletes it; a payment is `paid` under Square's event id each
-  time it is told, and its fee comes from `processing_fee`; only an ACH payment's `FAILED`
-  fails the request, a declined card leaves it open; the facts, each with its Square
+  time it is told, and its fee comes from `processing_fee`; only an ACH payment's `PENDING`
+  and `FAILED` move the request, a declined card leaves it open, and a payment or refund
+  with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
   link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
-  `kek_missing`), `service.py` (`Payments`, what the routes call) and
+  `kek_missing`), `service.py` (`Payments`, what the routes call; `connect` refuses an
+  account whose `Verified.currency` is not the shop's `orders_currency`,
+  `CurrencyMismatchError`, 409 `currency_mismatch`, #5666) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus

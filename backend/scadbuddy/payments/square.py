@@ -29,6 +29,10 @@ Square's documented behaviour this relies on:
   of a link by its order: ``GET /v2/online-checkout/payment-links`` lists them all, a
   page at a time with ``cursor``, at most 1000 a page
   (https://developer.squareup.com/reference/square/checkout-api/list-payment-links).
+- A location takes payments in one currency, its ``currency``
+  (https://developer.squareup.com/reference/square/objects/Location), and a quick-pay
+  price is in the location's currency; ``verify`` gives it back, so the service refuses a
+  location that is not in the shop's ``orders_currency``.
 - A Payment carries its ``order_id``, its ``status`` (``APPROVED``, ``PENDING``,
   ``COMPLETED``, ``CANCELED`` or ``FAILED``), its ``source_type`` (``CARD``,
   ``BANK_ACCOUNT`` and others), ``total_money`` (``amount_money`` plus a tip, so a payment
@@ -46,8 +50,11 @@ Square's documented behaviour this relies on:
 - An ACH payment has ``source_type`` ``BANK_ACCOUNT``; it is created ``PENDING`` and moves
   to ``COMPLETED`` or ``FAILED`` once the transfer resolves
   (https://developer.squareup.com/docs/payments-api/take-payments/ach-payments). Only that
-  ``FAILED`` fails the request. A card that is declined or voided (``FAILED``,
-  ``CANCELED``) leaves the payment link open for another try, so the request stays open.
+  ``PENDING`` makes the request pending, and only that ``FAILED`` fails it, so a pending
+  request is always one a later ``FAILED`` or ``COMPLETED`` settles. A card that is
+  declined or voided (``FAILED``, ``CANCELED``) leaves the payment link open for another
+  try, so the request stays open. A payment or refund with no order is not one of
+  ScadBuddy's links: it is ``other``, never a malformed event.
 - A refund (``refund.created``, ``refund.updated``) has its own ``id``, ``amount_money``,
   ``payment_id`` and ``status`` (``PENDING``, ``COMPLETED``, ``REJECTED``, ``FAILED``)
   (https://developer.squareup.com/reference/square/objects/PaymentRefund,
@@ -93,6 +100,7 @@ from scadbuddy.payments.provider import (
     ProviderError,
     ProviderField,
     ProviderUnavailableError,
+    Verified,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,9 +116,13 @@ SIGNATURE_HEADER: Final = "x-square-hmacsha256-signature"
 TIMEOUT: Final = httpx.Timeout(20.0)
 #: The largest page ``ListPaymentLinks`` gives.
 LINKS_PAGE: Final = "1000"
-_PAYMENT_KINDS: Final[Mapping[str, ProviderEventKind]] = {
-    "COMPLETED": "paid",
+#: ``COMPLETED`` is paid whatever the method; ``PENDING`` and ``FAILED`` are read only
+#: for an ACH payment (``source_type`` ``BANK_ACCOUNT``), which is the one that settles
+#: later. Anything else is ``other``.
+_BANK_ACCOUNT: Final = "BANK_ACCOUNT"
+_BANK_KINDS: Final[Mapping[str, ProviderEventKind]] = {
     "PENDING": "pending",
+    "FAILED": "failed",
 }
 _PAYMENT_EVENTS: Final = frozenset({"payment.created", "payment.updated"})
 _REFUND_EVENTS: Final = frozenset({"refund.created", "refund.updated"})
@@ -240,7 +252,7 @@ class SquareProvider:
 
     # -- the seam ---------------------------------------------------------------------
 
-    async def verify(self, credential: Credential) -> str:
+    async def verify(self, credential: Credential) -> Verified:
         environment = credential.settings.get("environment", "")
         self._base(credential)
         location = credential.settings.get("location_id", "")
@@ -257,7 +269,11 @@ class SquareProvider:
         place = found.get("location")
         if not isinstance(place, dict) or place.get("status") != "ACTIVE":
             raise ProviderError(f"the Square location {location} is not active")
-        return f"Square location {place.get('name') or location} ({environment})"
+        currency = place.get("currency")
+        return Verified(
+            account_label=f"Square location {place.get('name') or location} ({environment})",
+            currency=str(currency).upper() if isinstance(currency, str) else None,
+        )
 
     async def create_request(
         self,
@@ -374,10 +390,15 @@ class SquareProvider:
     ) -> ProviderEvent:
         status = refund.get("status")
         refund_key = f"refund:{_path_id(refund['id'])}"
-        if status not in ("COMPLETED", "REJECTED", "FAILED"):
+        payment_id = refund.get("payment_id")
+        if status not in ("COMPLETED", "REJECTED", "FAILED") or payment_id is None:
             return ProviderEvent(event_id=event_id, kind="other")
-        found = await self._read(credential, f"/v2/payments/{_path_id(refund['payment_id'])}")
-        order_id = _path_id(found["payment"]["order_id"])
+        found = await self._read(credential, f"/v2/payments/{_path_id(payment_id)}")
+        order_id = found["payment"].get("order_id")
+        if order_id is None:
+            # The refund of a sale with no order: not one of ScadBuddy's payment links.
+            return ProviderEvent(event_id=event_id, kind="other")
+        order_id = _path_id(order_id)
         amount, currency = _money(refund["amount_money"])
         if status != "COMPLETED":
             return ProviderEvent(
@@ -418,15 +439,21 @@ def _money(money: Mapping[str, Any]) -> tuple[int, str]:
 
 
 def _payment_event(event_id: str, payment: dict[str, Any]) -> ProviderEvent:
-    status = payment.get("status")
-    if status == "FAILED" and payment.get("source_type") == "BANK_ACCOUNT":
-        return ProviderEvent(
-            event_id=event_id, kind="failed", provider_ref=_path_id(payment["order_id"])
-        )
-    kind = _PAYMENT_KINDS.get(str(status))
-    if kind is None:
+    status = str(payment.get("status"))
+    kind: ProviderEventKind | None = (
+        "paid"
+        if status == "COMPLETED"
+        else _BANK_KINDS.get(status)
+        if payment.get("source_type") == _BANK_ACCOUNT
+        else None
+    )
+    order_id = payment.get("order_id")
+    if kind is None or order_id is None:
+        # A sale with no order is not one of ScadBuddy's payment links.
         return ProviderEvent(event_id=event_id, kind="other")
-    order_id = _path_id(payment["order_id"])
+    order_id = _path_id(order_id)
+    if kind == "failed":
+        return ProviderEvent(event_id=event_id, kind=kind, provider_ref=order_id)
     # ``total_money`` includes any tip, so the recorded payment can exceed the request.
     amount, currency = _money(payment["total_money"])
     return ProviderEvent(

@@ -73,6 +73,15 @@ class ProviderNotFoundError(LookupError):
         self.provider = provider
 
 
+class CurrencyMismatchError(Exception):
+    """The account takes payments in one currency, and it is not the shop's (#5666)."""
+
+    def __init__(self, provider: str, account: str, shop: str) -> None:
+        super().__init__(
+            f"{provider} takes payments in {account}, but the shop's orders are in {shop}"
+        )
+
+
 class FieldError(ValueError):
     """A connect body that names a field the provider does not declare, or leaves one
     out. ``loc`` is the field's place in the body."""
@@ -401,9 +410,12 @@ class Payments:
 
     # -- the shop's accounts ----------------------------------------------------------
 
-    async def connect(self, provider: str, body: ProviderConnect) -> ProviderStatus:
+    async def connect(
+        self, provider: str, body: ProviderConnect, *, shop_currency: str
+    ) -> ProviderStatus:
         """Check the fields, refuse without a KEK, let the provider verify the account,
-        then seal and store it."""
+        refuse an account in another currency than ``shop_currency`` (the shop's
+        ``orders_currency``, #5666), then seal and store it."""
         adapter = self._registry.get(provider)
         if adapter is None:
             raise ProviderNotFoundError(provider)
@@ -417,9 +429,12 @@ class Payments:
                 )
         if not self._credentials.can_seal:
             raise KekMissingError()
-        account_label = await adapter.verify(
+        verified = await adapter.verify(
             Credential(settings=dict(body.settings), secrets=dict(body.secrets))
         )
+        if verified.currency is not None and verified.currency != shop_currency:
+            raise CurrencyMismatchError(provider, verified.currency, shop_currency)
+        account_label = verified.account_label
         await asyncio.to_thread(
             lambda: self._credentials.connect(
                 provider,
