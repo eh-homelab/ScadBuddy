@@ -926,6 +926,8 @@ export function PrintPicker({
   const handing = quoting || itemPrint !== undefined
   const priceBook = useAsync(() => (open && quoting ? api.priceBook() : Promise.resolve(null)), [open, quoting])
   const [priced, setPriced] = useState<Record<string, string>>({})
+  // #4625 §6.3 — each support slot's price-book filament, keyed as `priced` is.
+  const [support, setSupport] = useState<Record<string, string>>({})
   // The quote and item-print modes (`handing`): the one request the dialog hands the page.
   const [handingBusy, setHandingBusy] = useState(false)
   const [handingError, setHandingError] = useState<string | null>(null)
@@ -1464,6 +1466,8 @@ export function PrintPicker({
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         filaments: priced,
+        // A support slot with no filament chosen yet prices nothing.
+        support_filaments: Object.fromEntries(Object.entries(support).filter(([, filament]) => filament)),
         // #5627: what the quote slices with, so its print can send the same.
         ...(sentParts === null ? {} : { part_settings: sentParts }),
       })
@@ -1907,6 +1911,8 @@ export function PrintPicker({
                       filaments={priceBook.data?.filaments ?? []}
                       value={priced}
                       onChange={setPriced}
+                      support={support}
+                      onSupportChange={setSupport}
                     />
                   )}
                   {!sliced && (

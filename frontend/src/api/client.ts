@@ -221,6 +221,8 @@ import type {
   OrderAttachment,
   OrderAttachmentPatch,
   OrderAttachmentRole,
+  MachineRateInputs,
+  MachineRateView,
   ManualQuoteInput,
   Order,
   OrderCreate,
@@ -2656,6 +2658,13 @@ export const api = {
   updateFilament: (id: string, body: FilamentPatch) =>
     request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
+  // -- a registry printer's machine rate (#4625, order operations spec 2026-11-07 §6) ----------
+  machineRate: (printerId: string) => request<MachineRateView>(`/printers/${seg(printerId)}/machine-rate`),
+  /** Replaces the printer's inputs whole; the answer is the rate they give now. */
+  setMachineRate: (printerId: string, body: MachineRateInputs) =>
+    request<MachineRateView>(`/printers/${seg(printerId)}/machine-rate`, { method: 'PUT', body: JSON.stringify(body) }),
+  /** The printer is priced at the price book's machine rate again. */
+  deleteMachineRate: (printerId: string) => request<void>(`/printers/${seg(printerId)}/machine-rate`, { method: 'DELETE' }),
   // -- the storefront's listings (#5282, spec 2026-11-02 §5.3) ---------------------------------
   storefrontListings: () => request<StorefrontListing[]>('/storefront/listings'),
   createStorefrontListing: (body: StorefrontListingInput) =>

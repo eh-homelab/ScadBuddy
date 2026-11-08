@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { NO_SLICE_SOURCE } from './itemActions'
 import { api } from '../../api/client'
-import type { OrderItem, PartSettingsMap, Quote, SliceQuoteRequest } from '../../api/types'
+import type { MachineRateBreakdown, OrderItem, PartSettingsMap, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
 import { orderItemSource } from '../../lib/printSource'
@@ -31,6 +31,44 @@ const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
   markup: 'Markup',
   rounding: 'Rounding',
   manual: 'Price',
+}
+
+/** How a slice quote's machine rate was read (#4625): the intervals' source, as the quote says it. */
+const INTERVALS: Record<MachineRateBreakdown['intervals'], string> = {
+  bambuddy: "with Bambuddy's maintenance intervals",
+  stored: "with the intervals last read: Bambuddy did not answer",
+  typed: 'with the typed maintenance intervals',
+  none: '',
+}
+
+/**
+ * #4625 (order operations spec §6.2) — the machine rate a slice quote was priced at, kept
+ * with the quote so its machine time line can be explained: the printer, the rate and each
+ * part of the sum.
+ */
+function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
+  const printer = rate.printer_name ?? 'the default printer'
+  if (rate.source === 'price_book') {
+    return (
+      <p className="ml-3 text-xs text-muted-foreground" data-testid="quote-machine-rate">
+        Machine rate {rate.rate_per_hour} per hour for {printer}: the price book&rsquo;s, as the printer has no machine rate inputs.
+      </p>
+    )
+  }
+  return (
+    <details className="ml-3 text-xs text-muted-foreground" data-testid="quote-machine-rate">
+      <summary className="cursor-pointer">
+        Machine rate {rate.rate_per_hour} per hour for {printer}
+        {INTERVALS[rate.intervals] ? `, ${INTERVALS[rate.intervals]}` : ''}
+      </summary>
+      <ul className="ml-3" aria-label="Machine rate parts">
+        <li>Depreciation {rate.depreciation_per_hour} per hour</li>
+        <li>Power {rate.power_per_hour} per hour</li>
+        <li>Wear parts {rate.wear_per_hour} per hour</li>
+        <li>Maintenance {rate.maintenance_per_hour} per hour</li>
+      </ul>
+    </details>
+  )
 }
 
 /**
@@ -178,6 +216,7 @@ export function QuoteEditor({
                   ))}
                 </ul>
               )}
+              {quote.machine_rate_breakdown && <QuoteMachineRate rate={quote.machine_rate_breakdown} />}
             </li>
           ))}
         </ul>
