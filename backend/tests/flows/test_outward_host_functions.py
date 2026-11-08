@@ -137,6 +137,22 @@ async def test_an_unnamed_refusal_answered_in_time_may_have_queued(
     assert run.result == "result: ['failed', True, 'failed', True]", run.result
 
 
+async def test_a_line_items_run_that_cannot_be_read_may_have_queued(
+    outward: Outward, api: FakeApi
+) -> None:
+    """Review of #5645: the run started and its follow is refused: `failed` with
+    `may_have_queued` and the run's id, the shape an operation follow's failure has."""
+    run_id = await outward.run(
+        script(
+            f"a = await queue_print({{'order_id': 'ord1', 'order_item_id': 'lost'}}, {PLAN!r})",
+            "return [a['status'], a['may_have_queued'], a['run_id']]",
+        )
+    )
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['failed', True, 'run-lost']", run.result
+
+
 async def test_a_line_items_print_that_failed_unnamed_may_have_queued(
     outward: Outward, api: FakeApi
 ) -> None:

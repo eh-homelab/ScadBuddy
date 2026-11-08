@@ -48,6 +48,7 @@ RUN_TOKEN_HEADER = "X-ScadBuddy-Run-Token"
 #: `core/authorship.py`'s, which the API reads.
 AUTHOR_HEADER = "X-ScadBuddy-Agent-Author"
 AUTHOR_SESSION_HEADER = "X-ScadBuddy-Agent-Author-Session"
+FLOW_RUN_HEADER = "X-ScadBuddy-Flow-Run"
 _PRINCIPAL = re.compile(r"[\x21-\x7e]{1,300}")
 _SESSION = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
@@ -65,6 +66,9 @@ class RouteAuthor(BaseModel):
         return {
             RUN_TOKEN_HEADER: self.run_token,
             AUTHOR_HEADER: self.principal,
+            # The run the token was minted for (`<run id>.<mac>`), which the API
+            # checks against the token (#4252): the audit line's run.
+            FLOW_RUN_HEADER: self.run_token.partition(".")[0],
             **({AUTHOR_SESSION_HEADER: self.session} if self.session else {}),
         }
 

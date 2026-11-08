@@ -15,7 +15,9 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.flows import FLOW_NAMESPACE
 from tests.api.conftest import FakeAgentTools
+from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, start, until
+from tests.api.test_orders import create_order
 
 __all__ = ["settings"]
 
@@ -315,3 +317,69 @@ def test_a_start_that_failed_leaves_no_grant_for_its_retry(
     assert start(client, other["id"], "k2").status_code == 202
     until(client, bare, lambda v: v["status"] == "waiting")
     assert view_grant(client, bare) is None
+
+
+def test_a_browser_started_runs_call_starts_a_linked_run(client: TestClient) -> None:
+    """Review of #5668: a run the anonymous browser user started (`started_by` with no
+    principal) makes its calls as `browser`, as the agent derives it; its
+    `start_flow_run` starts a linked child, never a 409."""
+    parent = started(client, "bp", {"grant": grant({"fn": "queue_print"})})
+    from_parent = {"X-ScadBuddy-Agent-Author": "browser", "X-ScadBuddy-Flow-Run": parent}
+    child = started(client, "bc", {}, **from_parent)
+    view = client.get(f"/api/v1/workflow-runs/{child}").json()
+    assert view["run"]["parent_run_id"] == parent
+    assert view["grant"]["status"] == "requested"
+    # Another principal still cannot name it.
+    definition = register(client, WAITS)
+    refused = client.post(
+        f"/api/v1/workflows/{definition['id']}/runs",
+        headers={
+            "Idempotency-Key": "bc-other",
+            "X-ScadBuddy-Agent-Author": "token:t9",
+            "X-ScadBuddy-Flow-Run": parent,
+        },
+        json={},
+    )
+    assert refused.status_code == 409, refused.text
+
+
+def test_an_agents_run_from_a_run_is_linked_and_only_requests_its_grant(
+    client: TestClient,
+) -> None:
+    """#4252 (orders spec §7.2, §7.4): the run an agent's call names
+    (`X-ScadBuddy-Flow-Run`) is the new run's parent, and the parent's grant, narrowed to
+    the order, is only requested: an agent credential (or no credential, in any auth mode)
+    never inherits an approval (security review). A name that is no run of the caller's
+    is refused."""
+    body = {"grant": grant({"fn": "queue_print", "orders": "any"})}
+    parent = started(client, "p", body, **AGENT)
+    approved = client.post(f"/api/v1/workflow-runs/{parent}/grant/approve")
+    assert approved.status_code == 200, approved.text
+    from_parent = {**AGENT, "X-ScadBuddy-Flow-Run": parent}
+    order = create_order(client, create_customer(client)["id"])["id"]
+    child = started(client, "c", {"order_id": order}, **from_parent)
+    view = client.get(f"/api/v1/workflow-runs/{child}").json()
+    assert (view["run"]["parent_run_id"], view["run"]["order_id"]) == (parent, order)
+    assert (view["grant"]["status"], view["grant"]["approved_by"]) == ("requested", None)
+    assert view["grant"]["in_force"] is False and view["grant"]["parent_grant_id"] is not None
+    assert view["grant"]["spec"]["rules"][0]["orders"] == [order]
+    listed = client.get("/api/v1/workflow-runs", params={"order_id": order}).json()
+    assert [r["id"] for r in listed] == [child]
+    definition = register(client, WAITS)
+    # Review of #5668: a run is never linked to an order that does not exist.
+    missing = client.post(
+        f"/api/v1/workflows/{definition['id']}/runs",
+        headers={"Idempotency-Key": "no-order", **from_parent},
+        json={"order_id": "no-such-order"},
+    )
+    assert missing.status_code == 422, missing.text
+    for named, headers in (
+        (str(uuid.uuid4()), AGENT),  # no such run
+        (parent, {**AGENT, "X-ScadBuddy-Agent-Author": "token:p2"}),  # another principal's
+    ):
+        refused = client.post(
+            f"/api/v1/workflows/{definition['id']}/runs",
+            headers={"Idempotency-Key": f"bad-{named}", **headers, "X-ScadBuddy-Flow-Run": named},
+            json={},
+        )
+        assert refused.status_code == 409, refused.text

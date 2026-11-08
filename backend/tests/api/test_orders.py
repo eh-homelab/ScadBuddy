@@ -42,7 +42,12 @@ def test_an_order_is_numbered_and_copies_the_currency_setting(client: TestClient
     assert order["number"].startswith("ORD-")
     assert order["number"].endswith("-1")
     assert (order["status"], order["currency"], order["notes"]) == ("draft", "EUR", "rush")
-    assert order["created_by"] == {"kind": "browser", "principal": None, "session": None}
+    assert order["created_by"] == {
+        "kind": "browser",
+        "principal": None,
+        "session": None,
+        "run_id": None,
+    }
     assert order["shipping_address_id"] == customer["addresses"][0]["id"]
     assert order["shipping_address"] is None
     # The setting applies to the next order; this one keeps its own.
@@ -50,7 +55,12 @@ def test_an_order_is_numbered_and_copies_the_currency_setting(client: TestClient
     other = client.post("/api/v1/orders", json={"customer_id": customer["id"]}, headers=AGENT)
     assert other.status_code == 201
     assert other.json()["currency"] == "USD"
-    assert other.json()["created_by"] == {"kind": "agent", "principal": "token:t1", "session": "s1"}
+    assert other.json()["created_by"] == {
+        "kind": "agent",
+        "principal": "token:t1",
+        "session": "s1",
+        "run_id": None,
+    }
     assert other.json()["number"].endswith("-2")
     assert client.get(f"/api/v1/orders/{order['id']}").json()["order"]["currency"] == "EUR"
 
@@ -198,7 +208,12 @@ def test_payments_hold_and_the_audit_line(client: TestClient) -> None:
         "order.hold",
         "order.release",
     ]
-    assert events[0]["by"] == {"kind": "browser", "principal": None, "session": None}
+    assert events[0]["by"] == {
+        "kind": "browser",
+        "principal": None,
+        "session": None,
+        "run_id": None,
+    }
     assert client.get("/api/v1/orders/nope").status_code == 404
     assert client.get("/api/v1/orders/nope/events").status_code == 404
     assert (

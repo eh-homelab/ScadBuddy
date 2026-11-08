@@ -159,6 +159,13 @@ def test_the_projects_worker_names_only_the_run_s_starter() -> None:
     reads = rule.reads
     assert client.get("/seen", headers=forged).json()["refusal"] == "wrong_author"
     assert rule.reads == reads
+    # The run it names is the token's, never another (#4252): a run's parent is read
+    # from it.
+    assert (
+        client.get("/seen", headers={**own, "X-ScadBuddy-Flow-Run": RUN}).json()["refusal"] is None
+    )
+    elsewhere = {**own, "X-ScadBuddy-Flow-Run": "another-run"}
+    assert client.get("/seen", headers=elsewhere).json()["refusal"] == "wrong_author"
 
 
 def test_enforce_refuses() -> None:
@@ -190,12 +197,14 @@ def test_the_run_token() -> None:
 
 def test_a_host_call_names_the_starter_only_with_a_token() -> None:
     agent = {"kind": "agent", "principal": "token:abc", "session": "s1"}
-    author = route_author_of(agent, "t")
+    author = route_author_of(agent, f"{RUN}.mac")
     assert author is not None
     assert author.headers() == {
-        "X-ScadBuddy-Run-Token": "t",
+        "X-ScadBuddy-Run-Token": f"{RUN}.mac",
         "X-ScadBuddy-Agent-Author": "token:abc",
         "X-ScadBuddy-Agent-Author-Session": "s1",
+        # The run the call is made from (#4252): the token's own.
+        "X-ScadBuddy-Flow-Run": RUN,
     }
     # A run from before the token, or one the anonymous browser user started, names none.
     assert route_author_of(agent, "") is None

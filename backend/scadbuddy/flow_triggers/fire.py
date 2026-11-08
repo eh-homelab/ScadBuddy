@@ -187,6 +187,8 @@ class TriggerFires:
         except TriggerChangedError:
             # Edited since it was admitted: nothing starts on its old settings.
             return "skipped", "changed"
+        # A run an order's event started is that order's (#4252, §7.4).
+        await flows.store.link_run(run_id, order_id=order_of(event))
         await start_execution(
             flows,
             flows.client,

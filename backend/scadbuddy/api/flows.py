@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
-from fastapi import APIRouter, Body, Path, Query, Response, status
+from fastapi import APIRouter, Body, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from temporal_agent_harness.harness.agent_client import AgentClient, MidTurnRejectedError
@@ -36,6 +36,9 @@ from scadbuddy.api.operations import (
     run_operation,
     still_accepting,
 )
+from scadbuddy.auth.component import AuthDep, CallerDep
+from scadbuddy.auth.models import Caller, Service
+from scadbuddy.auth.run_tokens import RUN_TOKEN_HEADER, run_of_token
 from scadbuddy.bambuddy.print_run import lan_printers
 from scadbuddy.core.authorship import by_a_person, current_author, requester_record
 from scadbuddy.core.gitrepo import (
@@ -95,10 +98,11 @@ from scadbuddy.flows.operations import (
     seal_answer,
 )
 from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
-from scadbuddy.flows.store import GrantStateError
+from scadbuddy.flows.store import GrantStateError, author_principal
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.orders.component import OrdersDep
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
@@ -209,6 +213,10 @@ class RunCreate(BaseModel):
     #: The run's inputs (#2483), by name, checked against the flow's inputs schema; an
     #: input left out takes its default. A flow with no inputs schema takes none.
     inputs: dict[str, Any] | None = None
+    #: The order the run is for (#4252, orders spec §7.4), shown with the run and the
+    #: order. Started from a run, it is also the order the grant the run inherits is
+    #: narrowed to.
+    order_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
     @field_validator("approval_timeout")
     @classmethod
@@ -282,17 +290,24 @@ class GrantView(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
-    #: Approved, not revoked and not expired: calls inside it run without asking.
+    #: The grant of the run this run was started from, which it was seeded from (#4252),
+    #: approved by inheritance or requested: its calls run without asking only while
+    #: that one is in force too.
+    parent_grant_id: str | None = None
+    #: Approved, not revoked and not expired, and so is every grant it inherits from and
+    #: the standing grant it was seeded from (`FlowStore.grant_in_force`): calls inside
+    #: it run without asking.
     in_force: bool
     uses: list[GrantUseView] = []
     #: On approval: the parked calls it let through.
     released: list[str] = []
 
 
-def _grant_view(grant: Grant, uses: list[GrantUse]) -> GrantView:
+def _grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantView:
     return GrantView(
         **grant.model_dump(exclude={"run_id"}),
-        in_force=grant.in_force(datetime.now(UTC)),
+        # The whole chain's (`FlowStore.grant_in_force`), as each call is checked.
+        in_force=in_force,
         uses=[GrantUseView.model_validate(u.model_dump()) for u in uses],
     )
 
@@ -319,6 +334,63 @@ class RunView(BaseModel):
     grant: GrantView | None = None
     #: The trigger that started it (#2484); None for a run a request started.
     trigger: RunTrigger | None = None
+
+
+def may_inherit(
+    caller: Caller, token: str | None, key: bytes | None, flow_run: str | None, parent: Run
+) -> bool:
+    """Whether a start from run `parent` inherits its grant approved (#4252, security
+    review): only the projects worker's own call from that run, with a run token for it
+    (`token`, checked under `key`) that names it as the flow run (`flow_run`), while the
+    parent is open. Read here, never from the auth mode: in every other case (an agent's
+    credential, a person, no credential, a closed parent) the grant is only requested."""
+    if not isinstance(caller, Service) or caller.caller != "projects":
+        return False
+    if token is None or key is None or run_of_token(key, token) != parent.id:
+        return False
+    return flow_run == parent.id and parent.status not in TERMINAL
+
+
+async def _parent_run(flows: Flows, caller: Caller) -> Run | None:
+    """The run a start comes from (#4252, orders spec §7.2): the flow run the call names
+    (``X-ScadBuddy-Flow-Run``), which must be a run whose calls are made as the call's
+    author (`runs_as`). None for a start that is no run's. A name that is no such run is
+    refused (409), never taken as no parent: it would start the run with no link. Whether
+    its grant passes on approved is `may_inherit`'s."""
+    author = current_author()
+    if author is None or author.flow_run is None:
+        return None
+    parent = await flows.store.get_run(author.flow_run)
+    if parent is None or not runs_as(caller, parent.started_by, author.principal):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "The calling flow run is not a run started by this principal.",
+        )
+    return parent
+
+
+def runs_as(caller: Caller, started_by: dict[str, Any], principal: str | None) -> bool:
+    """Whether a run's calls are made as `principal` (review of #5668). The agent's own
+    credential vouches for it: the agent sets the flow-run header only on a call from that
+    run's own activity, made as the owner it reads for the run (agent
+    `temporal/flowRuns.ts` `startedBy`, a starter session's owner now, handed off or
+    archived), so the API reads no `ai_sessions` row for it (#5295). Any other caller
+    must be the principal the run records: the browser's signed-in person (else
+    `browser`), or the agent principal that started it. A session match is not enough:
+    a flow run's own calls carry no session header (agent `toolActivities.ts`
+    `flowCaller`), and under `enforce` only the agent and the projects worker (whose
+    principal and session `auth/authorship_rule.py` checks) send author headers at all,
+    so a session match would only let another principal name the run."""
+    if principal is None:
+        return False
+    if isinstance(caller, Service) and caller.caller == "agent":
+        return True
+    by = started_by.get("principal")
+    if started_by.get("kind") == "browser":
+        return author_principal(by if isinstance(by, str) else "browser") == principal
+    if started_by.get("kind") != "agent" or not isinstance(by, str):
+        return False
+    return principal in (by, author_principal(by))
 
 
 def _started_by() -> dict[str, Any]:
@@ -619,8 +691,12 @@ def _refuse_hidden(definition: Definition) -> None:
 )
 async def start_flow_run(
     definition_id: str,
+    request: Request,
     response: Response,
     flows: FlowsDep,
+    caller: CallerDep,
+    auth: AuthDep,
+    orders: OrdersDep,
     key: IdempotencyKey = None,
     body: Annotated[RunCreate | None, Body()] = None,
 ) -> RunAnswer:
@@ -642,6 +718,16 @@ async def start_flow_run(
     if problems := await check_script(definition.script, definition.inputs_schema, stored=True):
         raise _script_problems(problems, "The flow no longer type-checks.")
     options = body or RunCreate()
+    if (
+        options.order_id is not None
+        and not await flows.store.is_linked(run_id)
+        and (await asyncio.to_thread(orders.store.order, options.order_id)) is None
+    ):
+        # A typo would link the run to an order no page shows (review of #5668). A repeat
+        # of a start that already linked its run is not asked again: the order may have
+        # gone since, and the repeat answers the run the first start made.
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"No order {options.order_id!r}.")
+    parent = await _parent_run(flows, caller)
     try:
         # Off the event loop: its patterns may take PATTERNS_BUDGET_S, and every other
         # request would wait that long behind them (#3417).
@@ -682,6 +768,31 @@ async def start_flow_run(
                     status="approved" if by_a_person() else "requested",
                     requested_by=_started_by(),
                 )
+            elif parent is not None:
+                # Started from a run with no grant of its own: the run's (#4252, orders
+                # spec §7.2), narrowed to the order when it names one. Approved only for
+                # the projects worker's own call from the open parent; else requested.
+                author = current_author()
+                approved = may_inherit(
+                    caller,
+                    request.headers.get(RUN_TOKEN_HEADER),
+                    auth.run_token_key(),
+                    author.flow_run if author is not None else None,
+                    parent,
+                )
+                await flows.store.inherit_grant(
+                    run_id,
+                    parent.id,
+                    options.order_id,
+                    requested_by=_started_by(),
+                    approved=approved,
+                )
+            # Before the run starts, so its row reads them from the first (#4252).
+            await flows.store.link_run(
+                run_id,
+                parent_run_id=parent.id if parent is not None else None,
+                order_id=options.order_id,
+            )
             await start_execution(
                 flows,
                 client,
@@ -716,9 +827,12 @@ async def list_flow_runs(
     flows: FlowsDep,
     definition_id: str | None = None,
     session: Annotated[str | None, Query(description="The agent session that started it.")] = None,
+    order_id: Annotated[str | None, Query(description="The order it is for (#4252).")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[Run]:
-    runs = await flows.store.list_runs(definition_id=definition_id, session=session, limit=limit)
+    runs = await flows.store.list_runs(
+        definition_id=definition_id, session=session, order_id=order_id, limit=limit
+    )
     names = await flows.definitions.display_names({run.name for run in runs})
     return [run.model_copy(update={"display_name": names.get(run.name)}) for run in runs]
 
@@ -833,7 +947,7 @@ async def _run_view(
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
         view.display_name = (await flows.definitions.display_names({view.name})).get(view.name)
         if (grant := await flows.store.get_grant(run_id)) is not None:
-            view.grant = _grant_view(grant, [])
+            view.grant = _grant_view(grant, [], await flows.store.grant_in_force(grant))
         return view
     display_name = (await flows.definitions.display_names({run.name})).get(run.name)
     run = run.model_copy(update={"display_name": display_name})
@@ -848,7 +962,9 @@ async def _run_view(
         images=await run_images(flows.connect, run.id) if flows.connect is not None else [],
     )
     if (grant := await flows.store.get_grant(run.id)) is not None:
-        view.grant = _grant_view(grant, await flows.store.grant_uses(run.id))
+        view.grant = _grant_view(
+            grant, await flows.store.grant_uses(run.id), await flows.store.grant_in_force(grant)
+        )
     if run.status in TERMINAL:
         return view
     if flows.client is None:
@@ -1254,7 +1370,11 @@ def _grant_state(err: GrantStateError) -> ApiError:
 async def _grant_answer(flows: Flows, grant: Grant | None) -> GrantView:
     if grant is None:
         raise _no_grant()
-    return _grant_view(grant, await flows.store.grant_uses(grant.run_id))
+    return _grant_view(
+        grant,
+        await flows.store.grant_uses(grant.run_id),
+        await flows.store.grant_in_force(grant),
+    )
 
 
 class ApproveGrant(BaseModel):

@@ -121,7 +121,12 @@ def test_any_file_is_kept_typed_by_its_bytes(client: TestClient) -> None:
     )
     assert body["caption"] == "stringing on the left wall"
     assert (body["size_bytes"], body["sha256"]) == (len(photo), hashlib.sha256(photo).hexdigest())
-    assert body["created_by"] == {"kind": "agent", "principal": "token:t1", "session": "s1"}
+    assert body["created_by"] == {
+        "kind": "agent",
+        "principal": "token:t1",
+        "session": "s1",
+        "run_id": None,
+    }
 
     pdf = attach(client, order["id"], PDF, "invoice.pdf", role="reference").json()
     assert (pdf["kind"], pdf["media_type"], pdf["item_id"]) == ("document", "application/pdf", None)

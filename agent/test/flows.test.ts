@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { MAX_ORDERS, ORDER_ID } from '../src/tools/flows.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -370,5 +372,18 @@ describe('typed flow inputs (#2483)', () => {
     expect(refused.isError).toBe(true)
     expect(JSON.stringify(refused.content)).toContain('required property')
     expect(bodies).toEqual([{ inputs: { slug: 'box' } }, { inputs: {} }])
+  })
+})
+
+describe('the orders bound (#4252)', () => {
+  it("checks order ids as the backend's spec does (review of #5645)", () => {
+    // The spec `pnpm gen:api` exported, as in coverage.test.ts.
+    type Orders = { anyOf?: { type?: string; maxItems?: number; items?: { pattern?: string } }[] }
+    const spec = JSON.parse(readFileSync(new URL('../../backend/openapi.json', import.meta.url), 'utf8')) as {
+      components: { schemas: Record<string, { properties: { orders?: Orders } }> }
+    }
+    const list = spec.components.schemas.GrantRule?.properties.orders?.anyOf?.find((o) => o.type === 'array')
+    expect(ORDER_ID.source).toBe(list?.items?.pattern)
+    expect(MAX_ORDERS).toBe(list?.maxItems)
   })
 })

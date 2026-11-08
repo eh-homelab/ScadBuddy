@@ -21,7 +21,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
-    field_validator,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +50,9 @@ _BOUNDS: dict[str, frozenset[str]] = {
 #: An order id in an `orders` bound (text uuids).
 _ORDER_ID = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 OrderId = Annotated[str, StringConstraints(pattern=_ORDER_ID)]
+#: As a list, bounded in the schema (`maxItems`), which the browser and the agent check
+#: their own copies against.
+OrderIds = Annotated[list[OrderId], Field(min_length=1, max_length=MAX_ORDERS)]
 
 
 class ArgBound(BaseModel):
@@ -80,14 +82,7 @@ class GrantRule(BaseModel):
     #: The orders a print of a line item, or an order tool's call (its `order_id`), may
     #: name (#4252, orders spec §7.2); "any" admits a call that names some order. A run
     #: grant seeded for one order narrows "any" to it (`narrowed_to_order`).
-    orders: list[OrderId] | Literal["any"] | None = Field(default=None)
-
-    @field_validator("orders")
-    @classmethod
-    def _orders(cls, value: list[str] | str | None) -> list[str] | str | None:
-        if isinstance(value, list) and not 1 <= len(value) <= MAX_ORDERS:
-            raise ValueError(f'orders lists 1 to {MAX_ORDERS} order ids, or is "any"')
-        return value
+    orders: OrderIds | Literal["any"] | None = Field(default=None)
 
 
 class GrantSpec(BaseModel):
@@ -180,6 +175,9 @@ class Grant(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
+    #: The grant of the run this run was started from, which it was seeded from (#4252),
+    #: approved or requested: in force only while that one is.
+    parent_grant_id: str | None = None
 
     def in_force(self, now: datetime) -> bool:
         return (
@@ -381,6 +379,29 @@ def narrowed_to_order(spec: GrantSpec, order_id: str) -> GrantSpec:
         else:
             rules.append(rule.model_copy(update={"orders": [order_id], "max_calls": 0}))
     return spec.model_copy(update={"rules": rules})
+
+
+def inherited(spec: GrantSpec, order_id: str | None, *, approved: bool = True) -> GrantSpec:
+    """The grant a run started from another run inherits from that run's (#4252, orders
+    spec §7.2): its rules; for an order, each `orders` bound narrowed to it
+    (`narrowed_to_order`). `approved` (passed on with no person asked), a rule with a limit
+    (`max_calls`, `max_prints`, `max_filament_g`) admits nothing (`max_calls` 0), so runs
+    started from a run never spend more than the run's own limits allow; only requested,
+    the limits stay as they are, for the person who approves it to see and edit (review
+    of #5668). No starter session is asked. Every rule keeps its index."""
+    rules = [
+        rule.model_copy(update={"max_calls": 0})
+        if approved
+        and (
+            rule.max_calls is not None
+            or rule.max_prints is not None
+            or rule.max_filament_g is not None
+        )
+        else rule
+        for rule in spec.rules
+    ]
+    child = spec.model_copy(update={"rules": rules, "ask_starter_session": False})
+    return child if order_id is None else narrowed_to_order(child, order_id)
 
 
 def apply_pins(args: dict[str, Any], pins: Mapping[str, JsonScalar]) -> dict[str, Any]:

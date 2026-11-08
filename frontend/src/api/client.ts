@@ -1077,10 +1077,12 @@ export const api = {
   // Flows (#1057): runs, and a person's answers and approvals for them. An answer or
   // a decision is an operation, keyed per call (`command`); a stale one is a 409
   // `stale-entry`.
-  listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
+  listFlowRuns: (query: { session?: string; definition_id?: string; order_id?: string; limit?: number } = {}) => {
     const params = new URLSearchParams()
     if (query.session) params.set('session', query.session)
     if (query.definition_id) params.set('definition_id', query.definition_id)
+    if (query.order_id) params.set('order_id', query.order_id)
+    if (query.limit) params.set('limit', String(query.limit))
     const search = params.toString()
     return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
   },
