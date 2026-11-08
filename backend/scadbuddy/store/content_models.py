@@ -30,9 +30,10 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-#: Kinds whose life the sweep decides: pieces, slices and the agent's sealed workspace
-#: files (#4789, held `(ai_session_file, <workspace>/<path>)`) by `blob_refs` and grace,
-#: snapshots (a cache of git) by grace alone. Assets have `AssetStore.sweep`; fonts and
+#: Kinds whose life the sweep decides: pieces, slices, the agent's sealed workspace
+#: files (#4789, held `(ai_session_file, <workspace>/<path>)`), listing media and
+#: snapshots (a cache of git, held only by a published storefront listing, #5282) by
+#: `blob_refs` and grace. Assets have `AssetStore.sweep`; fonts and
 #: library files are skipped here: `print_library/sweep.py` `sweep_library` purges their
 #: trash and collects the blobs no row names.
 SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot", "slice", "workspace", "media")
