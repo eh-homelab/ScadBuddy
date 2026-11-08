@@ -534,10 +534,13 @@ call before ScadBuddy reads it
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. PayPal has no call
 that voids an order. A cancel therefore marks the order so that ScadBuddy will not
-capture a later approval of it. A capture that completed, or was already under way,
-before the cancel is still recorded as a payment on the cancelled request. ScadBuddy
-captures only orders it made (a request id in `custom_id`), but use a REST app of its
-own all the same.
+capture a later approval of it. The mark is set once, right after the cancel. When
+PayPal cannot be reached then, the failure is logged and the order stays unmarked, so a
+later approval is captured. That capture, and one that completed or was already under
+way before the cancel, is recorded as a payment on the cancelled request: refund it in
+PayPal if it is not wanted. ScadBuddy captures only orders it made (a request id in
+`custom_id`), but use a REST app of its own all the same. A chargeback or reversal
+(`PAYMENT.CAPTURE.REVERSED`) is not tracked: the request stays paid.
 
 ### Authentication on the deployment (#4975)
 

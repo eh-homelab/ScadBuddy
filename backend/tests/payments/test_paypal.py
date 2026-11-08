@@ -538,7 +538,9 @@ async def test_an_approved_order_is_captured_and_records_nothing_itself(
         created_at=datetime(2026, 11, 7, 10, 0, tzinfo=UTC),
     )  # fmt: skip
     request = captured.calls.last.request
-    assert request.headers["paypal-request-id"] == f"capture-{ORDER}"
+    # Keyed on the approval event: a retry of it captures once, and a new approval after a
+    # decline is a new capture (ORDER_ALREADY_CAPTURED still stops a second one).
+    assert request.headers["paypal-request-id"] == "capture-WH-1AP12345AB678901C-2BC34567DE890123F"
     assert request.headers["content-type"] == "application/json"
 
 

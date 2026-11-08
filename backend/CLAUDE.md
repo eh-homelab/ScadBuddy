@@ -878,8 +878,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
   captures it from the webhook path and the capture's events record it; each webhook is
   checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
-  cached in memory, never stored; a cancel marks the order's `custom_id` so a later
-  approval is not captured (one already captured is still recorded); the facts, each with its PayPal link, are its docstring),
+  cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
+  approval is not captured (a failed mark is logged, not retried, and such a capture, like one
+  made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409

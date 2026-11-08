@@ -31,6 +31,8 @@ PayPal's documented behaviour this relies on:
   ``PAYMENT.CAPTURE.REFUNDED`` (a merchant refunds a capture) and
   ``PAYMENT.CAPTURE.REVERSED`` (https://developer.paypal.com/api/rest/webhooks/event-names/).
   Older PayPal material calls the declined event ``PAYMENT.CAPTURE.DENIED``; both are read.
+  ``PAYMENT.CAPTURE.REVERSED`` (a chargeback or reversal) is not read: it is ``other``, and
+  the request stays ``paid``.
 - A capture event's resource is the capture: ``amount``,
   ``seller_receivable_breakdown.paypal_fee`` and ``supplementary_data.related_ids.order_id``
   (the sample event in https://developer.paypal.com/api/rest/webhooks/rest/,
@@ -90,8 +92,10 @@ TIMEOUT: Final = httpx.Timeout(20.0)
 #: A token is fetched again this long before PayPal says it expires.
 TOKEN_MARGIN_SECONDS: Final = 60
 #: The ``custom_id`` a cancelled request's order carries: ScadBuddy will not capture a
-#: later approval of it. A capture already completed, or under way, before the mark landed
-#: is still recorded as a payment on the cancelled request.
+#: later approval of it. The mark is set once, after the cancel commits, and a failed PATCH
+#: is logged, not retried: that order stays unmarked, and a later approval of it is
+#: captured. Such a capture, and one completed or under way before the mark, is recorded as
+#: a payment on the cancelled request.
 CANCELLED: Final = "scadbuddy-cancelled"
 #: Currencies PayPal takes in whole units only.
 NO_DECIMALS: Final = frozenset({"HUF", "JPY", "TWD"})
@@ -389,8 +393,10 @@ class PayPalProvider:
 
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
         """Mark the order so ScadBuddy will not capture a later approval of it. An order
-        already completed, voided or gone is no error; a capture that completed, or was
-        already under way, before the mark is still recorded as a payment."""
+        already completed, voided or gone is no error. A failure here leaves the order
+        unmarked (the service logs it and does not retry), so a later approval is still
+        captured; that capture, and one completed or under way before the mark, is recorded
+        as a payment on the cancelled request."""
         path = f"/v2/checkout/orders/{_path_id(provider_ref)}"
         patch = [
             {
@@ -514,7 +520,9 @@ class PayPalProvider:
             return other
         path = f"/v2/checkout/orders/{order_id}/capture"
         try:
-            await self._call(credential, "POST", path, request_id=f"capture-{order_id}")
+            # Keyed on the approval: its retry captures once, and a new approval after a
+            # decline is a new capture; ORDER_ALREADY_CAPTURED still stops a second one.
+            await self._call(credential, "POST", path, request_id=f"capture-{event_id}")
         except _RefusedError as refused:
             if refused.status != 422:
                 logger.warning("PayPal answered %s to POST %s", refused.status, path)
