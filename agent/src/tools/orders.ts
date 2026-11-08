@@ -1365,6 +1365,62 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_item_duplicate',
+    label: 'Duplicate a line item',
+    description:
+      "Duplicate a line item (#4955): a new item with the item's kind, current design (template reference, colours and " +
+      'output, or library file), past print archives, quantity, title, notes and SKU. No quote is copied: price the copy ' +
+      "with order_item_quote. A custom item's price is its own, so the copy keeps it. On an accepted, in-production or " +
+      'ready order set `after_acceptance`: the copy then changes what the customer gets, as ' +
+      'order_item_add_after_acceptance does. Refused as an add is: `item_locked` (past `quoted` without ' +
+      '`after_acceptance`), `order_not_accepted`, `order_on_hold`. Outward, as an add after acceptance is.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      after_acceptance: z.boolean().optional().describe('The order is accepted, in production or ready: add the copy after acceptance'),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/duplicate'],
+    summarize: ({ order_id, item_id }) => `Duplicate item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, after_acceptance }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/duplicate', {
+            params: { path: { order_id, item_id } },
+            body: { after_acceptance: after_acceptance ?? false },
+          }),
+          `duplicate item ${item_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_fulfil',
+    label: 'Fulfil several line items',
+    description:
+      'Fulfil several line items of an accepted order at once (#4955): for each, `quantity` made by hand, recorded as ' +
+      'an attempt that succeeded and accepted, all in one transaction. An item is fulfilled once its accepted attempts ' +
+      'reach its quantity. Only `approved` or `failed` items. A printed item\'s print attempt is accepted with ' +
+      'order_item_fulfil. One refused item fulfils nothing: `order_not_accepted`, `order_on_hold`, `item_not_open`, ' +
+      '`item_not_approved` (its `items` names it), `items` for an item named twice. Outward, as order_item_fulfil is.',
+    input: z.object({
+      order_id: orderId,
+      items: z
+        .array(z.object({ item_id: itemId, quantity: z.number().int().min(1).describe('How many of it were made') }))
+        .min(1)
+        .max(50),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/fulfil'],
+    summarize: ({ order_id, items }) => `Fulfil ${items.length} item${items.length === 1 ? '' : 's'} of order ${order_id}`,
+    handler: async ({ order_id, items }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/fulfil', { params: { path: { order_id } }, body: { items } }),
+          `fulfil ${items.length} items of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_ship',
     label: 'Record a shipment',
     description:

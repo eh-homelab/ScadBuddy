@@ -62,6 +62,8 @@ describe('order tools (#4249)', () => {
       'order_item_print',
       'order_item_fulfil',
       'order_item_unfulfil',
+      'order_item_duplicate',
+      'order_fulfil',
       'order_ship',
       'order_close',
       'order_cancel',
@@ -89,6 +91,8 @@ describe('order tools (#4249)', () => {
       order_item_print: 'outward',
       order_item_fulfil: 'outward',
       order_item_unfulfil: 'outward',
+      order_item_duplicate: 'outward',
+      order_fulfil: 'outward',
       order_ship: 'outward',
       order_close: 'outward',
       order_cancel: 'outward',
@@ -611,6 +615,37 @@ describe('order tools (#4249)', () => {
     await expect(unfulfil.execute({ order_id: ORDER, item_id: ITEM }, ctx())).rejects.toMatchObject({ status: 409 })
     expect(calls).toEqual(['UNFULFIL', 'UNFULFIL'])
     expect(unfulfil.summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+  })
+
+  it('duplicates an item, after acceptance when asked (#4955)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/duplicate`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ id: 'copy', status: 'draft' }, { status: 201 })
+      }),
+    )
+    const duplicate = tool('order_item_duplicate')
+    expect(firstText(await duplicate.execute({ order_id: ORDER, item_id: ITEM }, ctx()))).toEqual({ id: 'copy', status: 'draft' })
+    await duplicate.execute({ order_id: ORDER, item_id: ITEM, after_acceptance: true }, ctx())
+    expect(sent).toEqual([{ after_acceptance: false }, { after_acceptance: true }])
+    expect(duplicate.summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+  })
+
+  it('fulfils several items in one call (#4955)', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/fulfil`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json([{ id: 'f1', order_item_id: ITEM, quantity: 2 }], { status: 201 })
+      }),
+    )
+    const fulfil = tool('order_fulfil')
+    const items = [{ item_id: ITEM, quantity: 2 }]
+    expect(firstText(await fulfil.execute({ order_id: ORDER, items }, ctx()))).toEqual([{ id: 'f1', order_item_id: ITEM, quantity: 2 }])
+    expect(sent).toEqual([{ items }])
+    expect(fulfil.summarize({ order_id: ORDER, items })).toContain('1 item')
+    expect(z.object(fulfil.shape).safeParse({ order_id: ORDER, items: [] }).success).toBe(false)
   })
 
   it('passes the setting refusal on (#4953)', async () => {

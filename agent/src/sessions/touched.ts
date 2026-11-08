@@ -317,6 +317,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attempt_copy: () => [],
   order_item_fulfil: () => [],
   order_item_unfulfil: () => [],
+  order_item_duplicate: () => [],
+  order_fulfil: () => [],
   order_time_add: () => [],
   order_cost_add: () => [],
   // Parts (#5543): a part's stock line and the order's audit line record them.
