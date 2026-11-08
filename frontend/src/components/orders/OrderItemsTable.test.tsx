@@ -9,6 +9,8 @@ import { seedOperation } from '../../mocks/features/operations'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
+import { LOCKED_TEXT, REVISED_TEXT } from './itemActions'
+import { QUANTITY_HINT } from './quantity'
 
 function render(id: string) {
   return renderPage(
@@ -581,6 +583,88 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     const confirm = await screen.findByRole('alertdialog', { name: /^Cancel .*\?$/ })
     await user.click(within(confirm).getByRole('button', { name: 'Cancel item' }))
     await waitFor(() => expect(cancelled).toHaveBeenCalledWith(ORDER_ACCEPTED, ITEM_APPROVED))
+  })
+})
+
+// #4955 step 2, spec 2026-11-07 §4.1 — inline edit of quantity, price and title: Enter saves,
+// Escape cancels, Tab moves along the row. Past `quoted` the quantity and price are read-only
+// with the reason shown; the title stays editable while the item is open.
+describe('OrderItemsTable · inline edit (#4955)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
+  const draftItem = () => state.items.find((i) => i.id === ITEM_DRAFT)!
+
+  it('saves a typed quantity on Enter', async () => {
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    expect(input).toHaveValue('2')
+    await user.clear(input)
+    await user.type(input, '5{Enter}')
+    await waitFor(() => expect(draftItem().quantity).toBe(5))
+    expect(updated).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, { quantity: 5 })
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })).toHaveValue('5'))
+  })
+
+  it('puts the quantity back on Escape, and refuses one that is not a whole number', async () => {
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Quantity for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '2.5{Enter}')
+    expect(within(row(ITEM_DRAFT)).getByRole('alert')).toHaveTextContent(QUANTITY_HINT)
+    await user.keyboard('{Escape}')
+    expect(input).toHaveValue('2')
+    expect(within(row(ITEM_DRAFT)).queryByRole('alert')).toBeNull()
+    expect(updated).not.toHaveBeenCalled()
+  })
+
+  it('moves from the quantity to the unit price with Tab', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(screen.getByRole('textbox', { name: 'Quantity for Name Keychain' }))
+    await user.tab()
+    expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveFocus()
+  })
+
+  it('renames an item on Enter, and keeps its title on Escape', async () => {
+    const updated = vi.spyOn(api, 'updateOrderItem')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Edit title' }))
+    const title = screen.getByRole('textbox', { name: 'Title for Name Keychain' })
+    expect(title).toHaveFocus()
+    await user.clear(title)
+    await user.type(title, 'Ignored{Escape}')
+    expect(screen.queryByRole('textbox', { name: /^Title for/ })).toBeNull()
+    expect(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' })).toBeInTheDocument()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Edit title' }))
+    const again = screen.getByRole('textbox', { name: 'Title for Name Keychain' })
+    await user.clear(again)
+    await user.type(again, 'Tag for Sam{Enter}')
+    await waitFor(() => expect(draftItem().title).toBe('Tag for Sam'))
+    expect(updated).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, { title: 'Tag for Sam' })
+    expect(await within(row(ITEM_DRAFT)).findByRole('button', { name: 'Tag for Sam' })).toBeInTheDocument()
+  })
+
+  it("locks an accepted item's quantity and price with the reason, and keeps its title editable", async () => {
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByRole('textbox', { name: /^Quantity for/ })).toBeNull()
+    expect(screen.queryByRole('textbox', { name: /^Unit price for/ })).toBeNull()
+    expect(screen.getByTestId(`item-locked-${ITEM_APPROVED}`)).toHaveTextContent(LOCKED_TEXT)
+    expect(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Edit title' })).toBeInTheDocument()
+  })
+
+  it('re-quotes an item revised after acceptance, its quantity still locked (#5350)', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.revised_after_acceptance = true
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByRole('textbox', { name: /^Quantity for/ })).toBeNull()
+    expect(within(row(ITEM_APPROVED)).getByRole('textbox', { name: /^Unit price for/ })).toBeInTheDocument()
+    expect(screen.getByTestId(`item-locked-${ITEM_APPROVED}`)).toHaveTextContent(REVISED_TEXT)
   })
 })
 

@@ -1,5 +1,5 @@
 import type { Order, OrderItemDetail, Shipment } from '../../api/types'
-import { isCart, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from './afterAcceptance'
+import { isCart, itemOpen, OPEN_FOR_EDITS, priceOpen, TAKES_ITEMS } from './afterAcceptance'
 import { orderItemSource } from '../../lib/printSource'
 import { offersUnfulfil, UNFULFIL_OFF, unfulfilBlock } from './unfulfilRules'
 
@@ -20,6 +20,34 @@ export function offersPrint(order: Order, item: OrderItemDetail): boolean {
     (item.status === 'approved' || item.status === 'failed') &&
     item.quotes.some((quote) => quote.accepted)
   )
+}
+
+/** Why an accepted item's quantity and price are read-only (`item_locked`). */
+export const LOCKED_TEXT = 'Locked: the customer accepted this price. To change what they get, revise the design or add an item.'
+/** Why a revised item's quantity is read-only while its price is open (#5350). */
+export const REVISED_TEXT = 'Revised after acceptance: the new design takes a new price. The quantity stays as accepted.'
+
+export interface ItemEdits {
+  title: boolean
+  quantity: boolean
+  price: boolean
+  /** Why the quantity (and the price, when it is read-only too) can't change; null when it can,
+   * and when nothing changes on the row (a settled item, an ended order, a cart). */
+  locked: string | null
+}
+
+/**
+ * #4955 step 2, spec 2026-11-07 §4.1 — what the row edits in place. The title while the item
+ * is open; the quantity while `itemOpen` (`lifecycle.py` `item_open`); the price while
+ * `priceOpen` (`requote_open`, #5350), and a custom item's own price while `itemOpen`, as
+ * its update takes it. A visitor's cart (#5282) is the visitor's: the row edits nothing.
+ */
+export function itemEdits(order: Order, item: OrderItemDetail): ItemEdits {
+  const settled = item.status === 'fulfilled' || item.status === 'cancelled'
+  if (settled || ENDED.has(order.status) || isCart(order)) return { title: false, quantity: false, price: false, locked: null }
+  const quantity = itemOpen(order, item.quotes)
+  const price = item.kind === 'custom' ? quantity : priceOpen(order, item, item.quotes)
+  return { title: true, quantity, price, locked: quantity ? null : price ? REVISED_TEXT : LOCKED_TEXT }
 }
 
 /** The drawer's sections an action opens it at. */

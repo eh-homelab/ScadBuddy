@@ -76,7 +76,9 @@ test.describe('orders', () => {
     await expect(page.getByTestId('order-totals')).toContainText('25.00')
     await page.getByRole('button', { name: 'Accept order' }).click()
     await expect(unit).toHaveCount(0)
-    await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
+    await expect(items.getByText('$12.50', { exact: true })).toBeVisible()
+    // #4955: the accepted price is pinned, and the row says why.
+    await expect(items.getByText(/^Locked: the customer accepted this price/)).toBeVisible()
   })
 
   // #4954 — a custom item, typed in the row under the items: priced and accepted on Enter.
