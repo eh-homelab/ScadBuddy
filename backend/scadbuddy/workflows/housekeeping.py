@@ -176,8 +176,9 @@ AUTH_SESSIONS_PATCH = "housekeeping-sweep-auth-sessions"
 #: failed (`payments.service.Payments.retry_closes`), with a backoff per page. Last,
 #: behind its own patch; on the prune Schedule too, so it runs with the sweeps off as well.
 #: While the provider answers, a page stays payable for at most its backoff. A provider
-#: that is not connected fails every try; the sweep gives such a page up after
-#: `payments.store.CLOSE_GIVE_UP_ATTEMPTS` tries, and the order page asks the shop to
+#: that is not connected fails every try; the sweep gives such a page up on the first
+#: try, at or after the `payments.store.CLOSE_GIVE_UP_ATTEMPTS`th, that finds it not
+#: connected, and the order page asks the shop to
 #: close it at the provider. Any other failure is tried again at most a day apart.
 PAYMENT_CLOSES_SWEEP = "housekeeping_retry_payment_closes"
 PAYMENT_CLOSES_PATCH = "housekeeping-retry-payment-closes"

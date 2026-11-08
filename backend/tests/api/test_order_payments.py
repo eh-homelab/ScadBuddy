@@ -404,7 +404,8 @@ def test_the_sweep_gives_up_on_a_page_whose_provider_is_disconnected(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#5718 review: a provider no longer connected fails every try. The sweep stops
-    after `CLOSE_GIVE_UP_ATTEMPTS`, and the request says to close the page there."""
+    on the first not-connected try at or after the `CLOSE_GIVE_UP_ATTEMPTS`th, and the
+    request says to close the page there."""
     connect_fake(client)
     order = payable_order(client)
     req = request_payment(client, order["id"])

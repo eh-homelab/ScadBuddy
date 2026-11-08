@@ -31,9 +31,9 @@ _VIEW = (
 CLOSE_RETRY_FIRST_MINUTES = 5
 #: The most marked pages one sweep tries.
 CLOSE_RETRY_BATCH = 8
-#: A page whose provider is not connected on this try, once it has failed this many
-#: tries (the close after the commit counts), is given up (`close_abandoned_at`). With
-#: the backoff the last of those tries comes about 66.5 hours (2.8 days) after the cancel
+#: A page is given up (`close_abandoned_at`) on the first try, at or after this many
+#: failed tries (the close after the commit counts), that finds its provider not
+#: connected. With the backoff the tenth try comes about 66.5 hours (2.8 days) after the cancel
 #: (10 + 20 + ... + 1280 minutes, then a day): long enough for a shop to reconnect, and
 #: a reconnect starts the tries over (`resume_closes`).
 CLOSE_GIVE_UP_ATTEMPTS = 10
@@ -140,7 +140,10 @@ def closes_due(conn: Conn, limit: int = CLOSE_RETRY_BATCH) -> list[PaymentReques
     mark or the last try, doubled for each failed try, at most a day; never a page given
     up. Oldest mark first. The sweep runs from both Schedules, so the rows are taken with
     ``FOR UPDATE SKIP LOCKED`` and their ``close_tried_at`` is stamped as they are taken:
-    an overlapping run finds them not due, and a page is never tried twice at once."""
+    an overlapping run finds them not due, and a page is never tried twice at once.
+    A sweep that dies after the claim and before `close_failed` leaves the stamp but no
+    counted try, so the page waits one full backoff at its current count. That is
+    intended: the claim is what keeps a second sweep off the page."""
     rows = conn.execute(
         "UPDATE payment_requests SET close_tried_at = clock_timestamp()"
         " WHERE id IN (SELECT id FROM payment_requests WHERE close_pending_at IS NOT NULL"
@@ -171,8 +174,8 @@ def close_failed(
 ) -> None:
     """One more failed try of the marked page ``provider_ref``; a request with no mark,
     or with another reference, is left as it is. ``provider_gone``: the provider is not
-    connected; that try, once the page has `CLOSE_GIVE_UP_ATTEMPTS` failed tries, gives
-    the page up (`close_abandoned_at`)."""
+    connected; the first such try at or after the `CLOSE_GIVE_UP_ATTEMPTS`th (this try
+    counted) gives the page up (`close_abandoned_at`)."""
     conn.execute(
         "UPDATE payment_requests SET close_attempts = close_attempts + 1,"
         " close_tried_at = clock_timestamp(),"

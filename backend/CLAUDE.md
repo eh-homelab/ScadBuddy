@@ -993,10 +993,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   wait is over (`closes_due`: `CLOSE_RETRY_FIRST_MINUTES` after the mark or the last try,
   doubled per failed try, at most a day), claimed `FOR UPDATE SKIP LOCKED` with
   `close_tried_at` stamped as they are taken, so the two Schedules' runs never try one
-  page at once. A try that finds the provider not connected, once the page has
-  `CLOSE_GIVE_UP_ATTEMPTS` (10; the tenth comes about 66.5 hours, 2.8 days, after the
-  cancel) failed tries, gives it up (`close_abandoned_at`); any other failure is tried
-  again at most a day apart. Connecting the provider again (`PaymentCredentials.connect`,
+  page at once (a sweep that dies between the claim and `close_failed` leaves the page
+  waiting one full backoff with no try counted, on purpose). The first try, at or after
+  the `CLOSE_GIVE_UP_ATTEMPTS`th (10; the tenth comes about 66.5 hours, 2.8 days, after
+  the cancel), that finds the provider not connected gives the page up
+  (`close_abandoned_at`); any other failure is tried again at most a day apart. Connecting the provider again (`PaymentCredentials.connect`,
   `resume_closes`) starts its marked pages' tries over, given up or not, and a new or
   cleared mark (`set_request_status`) clears the give-up and the tries. It never runs the
   lifecycle again. The order page says "Close not yet confirmed" while the mark stands,

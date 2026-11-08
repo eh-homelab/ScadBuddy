@@ -267,8 +267,9 @@ def test_a_due_page_is_handed_to_one_sweep_only(rows: OrderStore, order: Order) 
 def test_a_page_whose_provider_is_gone_is_given_up_after_its_tries(
     rows: OrderStore, order: Order
 ) -> None:
-    """#5718 review: the sweep stops at the `CLOSE_GIVE_UP_ATTEMPTS`th try that finds the
-    provider not connected, and the request says so; any other failure keeps trying."""
+    """#5718 review: the sweep stops at the first try, at or after the
+    `CLOSE_GIVE_UP_ATTEMPTS`th, that finds the provider not connected, and the request
+    says so; any other failure keeps trying."""
     with rows.transaction() as conn:
         req = _linked(conn, order)
         set_request_status(conn, req.id, "cancelled")
