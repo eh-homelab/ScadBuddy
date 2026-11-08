@@ -512,7 +512,7 @@ class Payments:
         before its capture); the event id keys the provider's capture, so one that did
         land is not made twice. A capture the provider refused or declined puts the
         request back to ``failed``. One whose outcome is unknown (no answer, a timeout)
-        leaves it ``pending``, so a cancel or a manual payment is refused until the
+        leaves it ``pending``, so a cancel or a manual payment on it is refused until the
         provider's capture event or its retried approval settles it. Only the approval
         that moved the request to ``pending`` last (its event recorded, not ``ignored``, and
         named on that audit row) captures, and never on an order that has ended or is a

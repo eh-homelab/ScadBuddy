@@ -549,7 +549,7 @@ then reads pending, and PayPal says whether the capture completed, is pending, o
 declined. A method PayPal declines at capture leaves the request failed, and the customer
 can approve the same page again with another method. A capture PayPal does not answer
 (an error, or no reply in time) may still have landed, so the request stays pending, and
-a cancel or a manual payment is refused, until PayPal's capture event or its retry of the
+a cancel or a manual payment on it is refused, until PayPal's capture event or its retry of the
 approval settles it. Every webhook is checked with
 PayPal's verify-webhook-signature call before ScadBuddy reads it
 ([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
