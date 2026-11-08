@@ -931,7 +931,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   webhook's own), never a
   provider's text; the same category stamped within `WEBHOOK_ERROR_QUIET` (60 s) is not
   written again (one conditional UPDATE), so a flood of unsigned POSTs writes once a
-  minute. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
+  minute. The trade-off: a same-category failure skipped inside the window after a
+  success began keeps the older stamp, so that success clears it; the next failure after
+  the clear is written at once. An `EventTooEarlyError` (a late fee within `FEE_RETRY_WINDOW`) is a
   bounded wait, not a failure, and keeps none. The next success clears it only when the
   failure is older than that success's start; both times are the database's
   `clock_timestamp()` (`PaymentCredentials.now`), never a replica's clock. A reconnect
