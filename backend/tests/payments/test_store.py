@@ -226,7 +226,7 @@ def test_closes_due_back_off_and_a_confirm_clears_the_mark(rows: OrderStore, ord
             (CLOSE_RETRY_FIRST_MINUTES, req.id),
         )
         assert [r.id for r in closes_due(conn)] == [req.id]
-        close_failed(conn, req.id)
+        close_failed(conn, req.id, "fake_1")
         assert closes_due(conn) == []
         conn.execute(
             "UPDATE payment_requests SET close_tried_at = close_tried_at - %s * interval"
@@ -234,10 +234,26 @@ def test_closes_due_back_off_and_a_confirm_clears_the_mark(rows: OrderStore, ord
             (2 * CLOSE_RETRY_FIRST_MINUTES, req.id),
         )
         assert [r.id for r in closes_due(conn)] == [req.id]
-        close_confirmed(conn, req.id)
+        close_confirmed(conn, req.id, "fake_1")
         assert closes_due(conn) == []
         found = request(conn, req.id)
     assert found is not None and found.close_pending_at is None
+
+
+def test_a_close_of_another_page_leaves_the_mark(rows: OrderStore, order: Order) -> None:
+    """The answer is about the page the try closed: a reference the request no longer
+    holds neither clears its mark nor counts as its try."""
+    with rows.transaction() as conn:
+        req = _linked(conn, order)
+        set_request_status(conn, req.id, "cancelled")
+        close_failed(conn, req.id, "fake_other")
+        close_confirmed(conn, req.id, "fake_other")
+        row = conn.execute(
+            "SELECT close_pending_at, close_attempts FROM payment_requests WHERE id = %s",
+            (req.id,),
+        ).fetchone()
+    assert row is not None
+    assert row["close_pending_at"] is not None and row["close_attempts"] == 0
 
 
 def test_the_backoff_stops_at_a_day(rows: OrderStore, order: Order) -> None:

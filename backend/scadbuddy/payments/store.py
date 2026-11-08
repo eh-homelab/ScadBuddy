@@ -27,7 +27,7 @@ _VIEW = f"{_PUBLIC}, provider_ref, link_error, payment_id, created_by, close_pen
 #: the commit time to finish; each failed try doubles the wait, up to a day.
 CLOSE_RETRY_FIRST_MINUTES = 5
 #: The most marked pages one sweep tries.
-CLOSE_RETRY_BATCH = 10
+CLOSE_RETRY_BATCH = 8
 
 
 def insert_request(
@@ -133,18 +133,23 @@ def closes_due(conn: Conn, limit: int = CLOSE_RETRY_BATCH) -> list[PaymentReques
     return [PaymentRequestView.model_validate(r) for r in rows]
 
 
-def close_confirmed(conn: Conn, request_id: str) -> None:
-    """The provider closed the page, or says it was closed already."""
-    conn.execute("UPDATE payment_requests SET close_pending_at = NULL WHERE id = %s", (request_id,))
+def close_confirmed(conn: Conn, request_id: str, provider_ref: str) -> None:
+    """The provider closed the page ``provider_ref``, or says it was closed already. A
+    request that no longer holds that reference keeps its mark."""
+    conn.execute(
+        "UPDATE payment_requests SET close_pending_at = NULL WHERE id = %s AND provider_ref = %s",
+        (request_id, provider_ref),
+    )
 
 
-def close_failed(conn: Conn, request_id: str) -> None:
-    """One more failed try of a marked page; a request with no mark is left as it is."""
+def close_failed(conn: Conn, request_id: str, provider_ref: str) -> None:
+    """One more failed try of the marked page ``provider_ref``; a request with no mark,
+    or with another reference, is left as it is."""
     conn.execute(
         "UPDATE payment_requests SET close_attempts = close_attempts + 1,"
         " close_tried_at = clock_timestamp()"
-        " WHERE id = %s AND close_pending_at IS NOT NULL",
-        (request_id,),
+        " WHERE id = %s AND provider_ref = %s AND close_pending_at IS NOT NULL",
+        (request_id, provider_ref),
     )
 
 

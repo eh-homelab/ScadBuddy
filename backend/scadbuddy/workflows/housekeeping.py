@@ -291,9 +291,9 @@ NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
 GIT_REMOTE_TIMEOUT = timedelta(minutes=5)
 #: One delete.
 AUTH_SESSIONS_TIMEOUT = timedelta(minutes=2)
-#: Up to `payments.store.CLOSE_RETRY_BATCH` (10) pages, one after another, each up to
+#: Up to `payments.store.CLOSE_RETRY_BATCH` (8) pages, one after another, each up to
 #: three provider calls (a token, the close, a read) of at most 20 s (`stripe.TIMEOUT`,
-#: `paypal.TIMEOUT`).
+#: `paypal.TIMEOUT`): 8 minutes, and a margin.
 PAYMENT_CLOSES_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)

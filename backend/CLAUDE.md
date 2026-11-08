@@ -880,9 +880,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
   captures it from the webhook path and the capture's events record it; each webhook is
   checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
-  cached in memory, never stored; a cancel marks the order's `custom_id` once so a later
-  approval is not captured (a failed mark is logged and retried by the sweep below, and such a capture, like one
-  made before the mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  cached in memory, never stored; a cancel marks the order's `custom_id` so a later
+  approval is not captured (a failed mark is logged and the housekeeping sweep below tries
+  it again with a backoff: 5 minutes first, the wait doubling, at most a day; until a try
+  lands, a later approval is still captured, and such a capture, like one made before the
+  mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -941,9 +943,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   marks it, setting `payment_requests.close_pending_at` when a request with a
   `provider_ref` is cancelled, or paid by a payment that is not its own provider's (by
   hand, or another request's payment that cleared the balance); its own provider's
-  payment clears the mark. `Payments._close_page` clears it once the provider confirms
-  (`close_confirmed`) and counts a failed try (`close_failed`: `close_attempts`,
-  `close_tried_at`). The `housekeeping_retry_payment_closes` sweep (both Schedules, behind
+  payment clears the mark. After the commit, a cancel, a manual payment and a webhook's
+  payment close the pages they marked (`Payments.cancel_request`, `cancel_order`,
+  `add_payment`, `_handle_webhook`). `Payments._close_page` clears the mark once the
+  provider confirms (`close_confirmed`) and counts a failed try (`close_failed`:
+  `close_attempts`, `close_tried_at`), each only while the request still holds the
+  reference it tried. The `housekeeping_retry_payment_closes` sweep (both Schedules, behind
   its patch) calls `Payments.retry_closes`: up to `CLOSE_RETRY_BATCH` marked pages whose
   wait is over (`closes_due`: `CLOSE_RETRY_FIRST_MINUTES` after the mark or the last try,
   doubled per failed try, at most a day). It never runs the lifecycle again. The order

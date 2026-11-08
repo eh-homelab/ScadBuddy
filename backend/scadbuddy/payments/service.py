@@ -306,14 +306,20 @@ class Payments:
             CredentialUnreadableError,
         ) as failed:
             logger.warning("the page of payment request %s was not closed: %s", request_id, failed)
-            await asyncio.to_thread(self._note_close, request_id, payments.close_failed)
+            await asyncio.to_thread(
+                self._note_close, request_id, provider_ref, payments.close_failed
+            )
             return False
-        await asyncio.to_thread(self._note_close, request_id, payments.close_confirmed)
+        await asyncio.to_thread(
+            self._note_close, request_id, provider_ref, payments.close_confirmed
+        )
         return True
 
-    def _note_close(self, request_id: str, note: Callable[[Conn, str], None]) -> None:
+    def _note_close(
+        self, request_id: str, provider_ref: str, note: Callable[[Conn, str, str], None]
+    ) -> None:
         with self._orders.store.transaction() as conn:
-            note(conn, request_id)
+            note(conn, request_id, provider_ref)
 
     # -- webhooks ---------------------------------------------------------------------
 
@@ -368,11 +374,30 @@ class Payments:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
+        order_id = await asyncio.to_thread(self._order_of, provider, event.provider_ref)
+        before = set() if order_id is None else await asyncio.to_thread(self._marked, order_id)
         outcome = await asyncio.to_thread(
             self._orders.lifecycle.record_provider_event, provider, event
         )
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
+        if order_id is not None:
+            # #5700: the open balance requests this payment settled (`_close_balance`)
+            # are marked; close their pages after the commit, as a manual payment does.
+            after = await asyncio.to_thread(self._requests, order_id)
+            await self._close_pages(
+                r for r in after if r.close_pending_at is not None and r.id not in before
+            )
         return outcome
+
+    def _order_of(self, provider: str, provider_ref: str | None) -> str | None:
+        if provider_ref is None:
+            return None
+        with self._orders.store.transaction() as conn:
+            found = payments.request_by_ref(conn, provider, provider_ref)
+        return None if found is None else found.order_id
+
+    def _marked(self, order_id: str) -> set[str]:
+        return {r.id for r in self._requests(order_id) if r.close_pending_at is not None}
 
     # -- the shop's accounts ----------------------------------------------------------
 
