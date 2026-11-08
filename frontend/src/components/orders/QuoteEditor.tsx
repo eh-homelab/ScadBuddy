@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { NO_SLICE_SOURCE } from './itemActions'
 import { api } from '../../api/client'
 import type { OrderItem, PartSettingsMap, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
@@ -237,7 +238,7 @@ export function QuoteEditor({
             </Button>
           )}
           {!item.output_id && !item.library_file && (
-            <span className="text-xs text-muted-foreground">Render the item first: a slice quote slices its output.</span>
+            <span className="text-xs text-muted-foreground">{NO_SLICE_SOURCE}</span>
           )}
         </div>
       )}

@@ -6,6 +6,8 @@ import { offersUnfulfil, UNFULFIL_OFF, unfulfilBlock } from './unfulfilRules'
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const ON_HOLD = 'The order is on hold. Release it first.'
+/** Why a slice quote is refused for an item with no output or library file: the drawer's words. */
+export const NO_SLICE_SOURCE = 'Render the item first: a slice quote slices its output.'
 
 /** Whether the item can be printed now: a model or library file item of an accepted order
  * not on hold, `approved` (or `failed`, for a reprint), with the output (or the library
@@ -47,7 +49,7 @@ export function itemActions(
   if (ENDED.has(order.status) || isCart(order)) return actions
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   if (item.kind !== 'custom' && !settled && priceOpen(order, item, item.quotes)) {
-    actions.push({ key: 'quote', label: 'Quote from a slice…', blocked: null })
+    actions.push({ key: 'quote', label: 'Quote from a slice…', blocked: item.output_id || item.library_file ? null : NO_SLICE_SOURCE })
   }
   // Print's own rule, with the hold left out: on hold it shows, refused, with the reason.
   if (offersPrint({ ...order, on_hold: false }, item)) {

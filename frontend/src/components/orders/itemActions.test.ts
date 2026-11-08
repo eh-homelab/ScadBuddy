@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Order, OrderItemDetail, Quote, Shipment } from '../../api/types'
-import { itemActions, itemSource } from './itemActions'
+import { itemActions, itemSource, NO_SLICE_SOURCE } from './itemActions'
 
 // #4955, order operations spec 2026-11-07 §4.1: the row's ⋯ menu shows an action only when
 // it is allowed now, and a refused one says why in words.
@@ -29,6 +29,14 @@ const keys = (o: Order, i: OrderItemDetail, shipments: Shipment[] = [], unfulfil
 describe('itemActions (#4955)', () => {
   it('offers a draft item details, a slice quote and its delete', () => {
     expect(keys(order(), item())).toEqual(['open', 'quote', 'delete'])
+  })
+
+  it("refuses a slice quote, with the drawer's reason, for an item with nothing rendered to slice", () => {
+    const blocked = (i: OrderItemDetail) => itemActions(order(), i, { shipments: [], unfulfilAllowed: true }).find((a) => a.key === 'quote')?.blocked
+    expect(blocked(item({ kind: 'request', reference: null, output_id: null }))).toBe(NO_SLICE_SOURCE)
+    expect(blocked(item({ output_id: null }))).toBe(NO_SLICE_SOURCE)
+    expect(blocked(item())).toBeNull()
+    expect(blocked(item({ kind: 'library_file', reference: null, output_id: null, library_file: { id: 1, filename: 'a.3mf', library: 'native' } }))).toBeNull()
   })
 
   it('offers no slice quote for a custom item', () => {
